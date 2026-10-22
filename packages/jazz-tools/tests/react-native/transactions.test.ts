@@ -150,11 +150,11 @@ it("waits for native upstream authority before accepting a serializable commit",
         appId: server.appId,
         session: {
           issuer: issuer.issuer,
-          user_id: "rn-exclusive-writer",
+          user_id: "rn-serializable-writer",
           claims: { role: "user" },
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-exclusive-writer") },
+        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-serializable-writer") },
       },
     );
   } finally {

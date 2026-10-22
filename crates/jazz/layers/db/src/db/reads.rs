@@ -648,9 +648,9 @@ where
                 (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             };
         }
-        // A partial node holds no node-wide history below its exclusive
+        // A partial node holds no node-wide history below its serializable
         // snapshot's `global_base`: that cut advances with any authority
-        // receipt. Its exclusive reads therefore hydrate through the
+        // receipt. Its serializable reads therefore hydrate through the
         // authority at the frozen snapshot and wait for that binding's receipt
         // (INV-TX-13), whatever tier the caller asked for. Otherwise a missing
         // or already-deleted row is read from whatever the replica happens to
@@ -661,9 +661,9 @@ where
         // reads fresh: the authority validates the rows the read actually
         // returned (its row proofs), so a stale offline read conflicts at
         // commit instead of being accepted.
-        let exclusive_snapshot_read = match open_tx {
+        let serializable_snapshot_read = match open_tx {
             Some(open_tx) if self.node.receives_commits_as_local() => {
-                self.transaction_is_exclusive(open_tx).await? && opts.tier != ReadTier::LocalOnly
+                self.transaction_is_serializable(open_tx).await? && opts.tier != ReadTier::LocalOnly
             }
             _ => false,
         };
@@ -673,14 +673,14 @@ where
         // the read conflict. A source with no narrowed read fails the read
         // here, before anything is hydrated.
         let source_queries = match open_tx {
-            Some(open_tx) if exclusive_snapshot_read => {
-                self.exclusive_source_hydration_queries(open_tx, &prepared, opts.include_deleted)
+            Some(open_tx) if serializable_snapshot_read => {
+                self.serializable_source_hydration_queries(open_tx, &prepared, opts.include_deleted)
                     .await?
             }
             _ => Vec::new(),
         };
         let mut coverage = None;
-        let hydrate = exclusive_snapshot_read && coverage_tier < DurabilityTier::Global;
+        let hydrate = serializable_snapshot_read && coverage_tier < DurabilityTier::Global;
         if hydrate && let Some(epoch) = self.node.remote_link.arm_until_loss() {
             let hydration = attach_coverage(&prepared, DurabilityTier::Global, open_tx).await?;
             let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
@@ -701,7 +701,7 @@ where
             coverage = Some(required);
         }
         let mut table_coverage = Vec::new();
-        if exclusive_snapshot_read
+        if serializable_snapshot_read
             && coverage.is_some()
             && let Some(open_tx) = open_tx
         {

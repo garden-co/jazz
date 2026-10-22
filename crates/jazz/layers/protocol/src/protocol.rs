@@ -885,7 +885,7 @@ impl RowVersionRef {
 pub struct PeerPayloadInventory {
     /// Transactions whose full version payload has already been shipped to the
     /// peer and can be referenced by tx id. Partial mergeable or view-scoped
-    /// exclusive coverage must remain explicit `VersionBundle` payloads until
+    /// serializable coverage must remain explicit `VersionBundle` payloads until
     /// the wire protocol grows finer-grained inventory refs.
     pub complete_tx_payloads: Vec<TxId>,
     /// Server-stamped authorization generation for the binding view carried by
@@ -4260,8 +4260,8 @@ pub enum ProgramFactEntry {
     ReadFrontierSettled(ReadFrontierSettledEntry),
     /// Complete transaction payload coverage fact.
     CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry),
-    /// View-complete exclusive transaction coverage fact.
-    ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry),
+    /// View-complete serializable transaction coverage fact.
+    ViewCompleteSerializableCoverage(ViewCompleteSerializableCoverageEntry),
     /// Policy decision fact.
     PolicyDecision(PolicyDecisionEntry),
     /// Content/deletion/replacement version witness.
@@ -4627,9 +4627,9 @@ pub struct CompleteTxPayloadCoverageEntry {
     pub payload_digest: Vec<u8>,
 }
 
-/// View-complete exclusive transaction coverage fact.
+/// View-complete serializable transaction coverage fact.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct ViewCompleteExclusiveCoverageEntry {
+pub struct ViewCompleteSerializableCoverageEntry {
     /// Covered transaction/batch.
     pub tx: TxId,
     /// View/source scope.
@@ -6419,19 +6419,19 @@ pub enum LocalEvent {
         /// Mutated table.
         table: String,
     },
-    /// Open an exclusive transaction.
+    /// Open a serializable transaction.
     OpenTx,
-    /// Write inside an exclusive transaction.
+    /// Write inside a serializable transaction.
     WriteInTx {
         /// Transaction id.
         tx: TxId,
     },
-    /// Commit an exclusive transaction.
+    /// Commit a serializable transaction.
     CommitTx {
         /// Transaction id.
         tx: TxId,
     },
-    /// Abandon an exclusive transaction.
+    /// Abandon a serializable transaction.
     AbandonTx {
         /// Transaction id.
         tx: TxId,

@@ -1176,7 +1176,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
 const CASCADE_ANCESTOR = "4f6c0b6f3a1e9d2c8b7a6f5e4d3c2b1a";
 it.each([
   [
-    "ExclusiveConflict (reason: Serializable transaction conflicted with another write)",
+    "SerializationConflict (reason: Serializable transaction conflicted with another write)",
     "serialization_conflict",
     "Serializable transaction conflicted with another write",
   ],
@@ -1197,7 +1197,7 @@ it.each([
   ],
   // Older native bindings without the appended readable reason.
   [
-    "ExclusiveConflict",
+    "SerializationConflict",
     "serialization_conflict",
     "Serializable transaction conflicted with another write",
   ],

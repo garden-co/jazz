@@ -8,7 +8,7 @@ pub type RequestedReadSet = QueryReadSet<RequestedSourceStage>;
 pub struct QueryReadSet<R: SourceResolution> {
     /// Primary read view used by ordinary row-set semantics.
     pub primary: ReadView<R>,
-    /// Fact-specific comparison/read views, such as exclusive validation base
+    /// Fact-specific comparison/read views, such as serializable validation base
     /// and now predicate output sets.
     pub fact_reads: BTreeMap<FactReadRole, ReadView<R>>,
 }
@@ -26,7 +26,7 @@ impl<R: SourceResolution> QueryReadSet<R> {
 /// Role for a non-primary read view inside one program request.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactReadRole {
-    /// Predicate output set at the exclusive transaction base snapshot.
+    /// Predicate output set at the serializable transaction base snapshot.
     PredicateOutputBase,
     /// Predicate output set at validation/comparison time.
     PredicateOutputNow,

@@ -57,7 +57,7 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 
 - **mergeable transaction** (`TxKind::Mergeable`) — an eventually-consistent
   column-LWW write; the high-level facade spelling is _batch_ (ch. 13).
-- **serializable transaction** (`TxKind::Exclusive`) — serializable compare-and-set;
+- **serializable transaction** (`TxKind::Serializable`) — serializable compare-and-set;
   the facade spelling is _transaction_. **open serializable transaction** — its
   pre-commit local state.
 - **commit unit** — the atomic `CommitUnit { tx, versions }` shipped at commit.

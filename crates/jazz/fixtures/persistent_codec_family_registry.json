@@ -413,25 +413,25 @@
         "anchor": "The pending record's four evidence slots hold serializable read evidence"
       },
       "semantic_fixture": {
-        "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
-        "anchor": "fn exclusive_read_evidence_v2_bytes_are_pinned"
+        "path": "crates/jazz/layers/node/src/node/serializable_read_evidence.rs",
+        "anchor": "fn serializable_read_evidence_v2_bytes_are_pinned"
       },
       "rejection_receipt": {
-        "path": "crates/jazz/layers/node/src/node/exclusive_read_evidence.rs",
-        "anchor": "fn exclusive_read_evidence_rejects_malformed_noncanonical_and_unknown_versions"
+        "path": "crates/jazz/layers/node/src/node/serializable_read_evidence.rs",
+        "anchor": "fn serializable_read_evidence_rejects_malformed_noncanonical_and_unknown_versions"
       },
       "evidence": [
         {
-          "path": "crates/jazz/layers/node/src/node/tests/exclusive_read_evidence.rs",
-          "anchor": "fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement"
+          "path": "crates/jazz/layers/node/src/node/tests/serializable_read_evidence.rs",
+          "anchor": "fn serializable_evidence_is_stored_while_pending_and_cleared_at_settlement"
         },
         {
-          "path": "crates/jazz/layers/node/src/node/tests/exclusive_read_evidence.rs",
-          "anchor": "fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart"
+          "path": "crates/jazz/layers/node/src/node/tests/serializable_read_evidence.rs",
+          "anchor": "fn relay_stores_only_decodable_serializable_evidence_and_replays_after_restart"
         },
         {
           "path": "crates/jazz/layers/db/src/db/tests/node_runtime.rs",
-          "anchor": "fn exclusive_transaction_in_flight_at_restart_replays_without_false_conflict"
+          "anchor": "fn serializable_transaction_in_flight_at_restart_replays_without_false_conflict"
         },
         {
           "path": "dev/proofs/exclusive-read-evidence-storage-compatibility.md",
@@ -498,8 +498,8 @@
       },
       "evidence": [
         {
-          "path": "crates/jazz/layers/node/src/node/query_eval/tests/exclusive_aggregates.rs",
-          "anchor": "fn exclusive_count_commit_payload_is_independent_of_the_counted_rows"
+          "path": "crates/jazz/layers/node/src/node/query_eval/tests/serializable_aggregates.rs",
+          "anchor": "fn serializable_count_commit_payload_is_independent_of_the_counted_rows"
         },
         {
           "path": "dev/proofs/tx-record-v2-storage-compatibility.md",

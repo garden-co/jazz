@@ -1016,7 +1016,7 @@ where
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let exclusive = self.transaction_is_exclusive(tx_id).await?;
+        let serializable = self.transaction_is_serializable(tx_id).await?;
         let target = self
             .transaction_target_for_write(tx_id, table, row, "UPDATE", false)
             .await?
@@ -1064,7 +1064,7 @@ where
             if authored.is_empty() {
                 return Ok(());
             }
-            if exclusive {
+            if serializable {
                 let mut cells = target.clone();
                 cells.extend(authored);
                 self.lock_for_transaction_operation(tx_id)
@@ -3047,9 +3047,9 @@ where
     }
 
     /// Hand a published transaction to deferred local persistence, or settle
-    /// its publication now and queue its upload (`unit` is an exclusive
+    /// its publication now and queue its upload (`unit` is a serializable
     /// commit's bound sync unit). Returns the authored commit's local tier;
-    /// `None` while deferred and for exclusive commits, which report only ids.
+    /// `None` while deferred and for serializable commits, which report only ids.
     pub(super) async fn settle_local_publication(
         &self,
         published: PublishedTransaction,

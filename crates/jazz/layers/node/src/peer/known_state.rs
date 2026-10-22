@@ -172,13 +172,13 @@ impl PeerState {
         BTreeSet::new()
     }
 
-    /// Configure a trusted writer relay to receive complete accepted exclusive
-    /// transaction payloads, so it can safely author later exclusive
+    /// Configure a trusted writer relay to receive complete accepted serializable
+    /// transaction payloads, so it can safely author later serializable
     /// transactions from refreshed state. Ordinary readers intentionally keep
     /// view-scoped delivery; publication also ignores this preference for
     /// identity-scoped client links.
-    pub fn set_ship_complete_exclusive_payloads(&mut self, enabled: bool) {
-        self.ship_complete_exclusive_payloads = enabled;
+    pub fn set_ship_complete_serializable_payloads(&mut self, enabled: bool) {
+        self.ship_complete_serializable_payloads = enabled;
     }
 
     /// Forget complete-tx payload dedup markers for transactions whose local

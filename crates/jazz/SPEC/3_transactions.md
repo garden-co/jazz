@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-TX-15`: Reads inside a serializable transaction MUST observe that transaction's own pending writes.
 - `INV-TX-16`: Serializable authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
 - `INV-TX-17`: Serializable authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Serializable authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. An aggregate predicate read MUST carry the canonical `jazz.aggregate-read-result.v1` result it observed and no row proofs for the rows it consumed; the authority MUST re-run the aggregate as the transaction's permission subject and conflict iff the result's bytes differ, and MUST reject an aggregate read with a missing or non-canonical result, or a result on a non-aggregate read, as `MalformedCommit`. A serializable aggregate read after the transaction's first write MUST fail with `UnsupportedExclusiveRead`, because the authority's re-run does not include the transaction's own writes. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
+- `INV-TX-18`: Serializable authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. An aggregate predicate read MUST carry the canonical `jazz.aggregate-read-result.v1` result it observed and no row proofs for the rows it consumed; the authority MUST re-run the aggregate as the transaction's permission subject and conflict iff the result's bytes differ, and MUST reject an aggregate read with a missing or non-canonical result, or a result on a non-aggregate read, as `MalformedCommit`. A serializable aggregate read after the transaction's first write MUST fail with `UnsupportedSerializableRead`, because the authority's re-run does not include the transaction's own writes. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
 - `INV-TX-19`: Serializable predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
 - `INV-TX-20`: Serializable write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
@@ -50,7 +50,7 @@ Transactions are named, classified, judged, and tracked for durability with the
 following terms:
 
 - `TxId { time: TxTime, node: NodeUuid }` (ch. 2) names a transaction.
-- `TxKind` is `Mergeable` or `Exclusive` (the serializable kind keeps its internal name for now).
+- `TxKind` is `Mergeable` or `Serializable` (the serializable kind keeps its internal name for now).
 - `Fate` is `Pending`, `Accepted`, or `Rejected(RejectionReason)`.
 - `DurabilityTier` is `None`, `Local`, or `Global` — separate from fate.
 - `OpenTransactionId` is a caller-generated UUIDv7 naming runtime-local mutable work. It
@@ -250,7 +250,7 @@ the same authoritative point read as `upsert` (recording the `RowRead` or
 already-staged target (ch. 13, `INV-API-36`).
 
 Commit closes the serializable transaction and makes its writes syncable.
-`commit_exclusive` mints the `TxId`, stores the writes locally as
+`commit_serializable` mints the `TxId`, stores the writes locally as
 `Pending`/`Local`, and emits one commit unit. Until that point, the writes remain
 invisible outside the transaction (`INV-TX-2`).
 
@@ -303,11 +303,11 @@ transaction's read set. For a serializable unit, the authority re-checks the
 recorded reads against current global state:
 
 - a recorded **row read** must still be the globally-current visible
-  content/deletion version, or the unit is rejected as `ExclusiveConflict`
+  content/deletion version, or the unit is rejected as `SerializationConflict`
   (`INV-TX-16`): reading visible content `C` conflicts if a later deletion
   `D` hides `C`, even though `C` remains the content-register winner. This is
   separate from a write's own-layer CAS below and is covered by
-  `exclusive_row_read_conflicts_when_a_later_delete_hides_the_content`;
+  `serializable_row_read_conflicts_when_a_later_delete_hides_the_content`;
 - an **absent read** must still be absent (`INV-TX-17`);
 - a **predicate read** must not have gained or lost rows relative to what the
   transaction actually read (`INV-TX-18`). A transaction proves each row a
@@ -375,9 +375,9 @@ recorded reads against current global state:
   Deletion visibility does not erase `C`: an atomic content replacement plus
   restore from that deleted snapshot parents content `C` and deletion `D`
   independently.
-  `exclusive_delete_compares_the_deletion_register_not_content` proves this
+  `serializable_delete_compares_the_deletion_register_not_content` proves this
   first-delete path,
-  `exclusive_replacement_and_restore_parent_their_own_registers` proves the
+  `serializable_replacement_and_restore_parent_their_own_registers` proves the
   two-register atomic restore path, while
   `known_parent_must_match_exact_row_coordinate_and_layer` proves cross-row
   and cross-layer parent encodings are rejected.
@@ -411,7 +411,7 @@ Point-read and absent-read records carry a table name but no schema ID.
 Authority validation accepts that name only when all retained mappings for it
 identify the same physical table. This supports unambiguous renames.
 An unknown name, or a name reused for a different physical table, rejects the
-transaction as `ExclusiveConflict`; neither case may be treated as evidence
+transaction as `SerializationConflict`; neither case may be treated as evidence
 that a row is absent. Supporting ambiguous name reuse would require additional
 read-set identity information.
 

@@ -229,7 +229,7 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
     let owned_row = row(1);
     let other_row = row(2);
     let deleted_row = row(3);
-    let exclusive_row = row(4);
+    let serializable_row = row(4);
     let skewed_row = row(5);
 
     let mut units = Vec::new();
@@ -245,8 +245,15 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
     units.push((delete_tx, unit, u64::MAX - SKEW_TOLERANCE_MS));
     let (restore_tx, unit) = deletion(&mut ui, deleted_row, 15, DeletionEvent::Restored);
     units.push((restore_tx, unit, u64::MAX - SKEW_TOLERANCE_MS));
-    let (exclusive_seed, unit) = commit(&mut ui, exclusive_row, 16, "exclusive base", ui_owner, []);
-    units.push((exclusive_seed, unit, u64::MAX - SKEW_TOLERANCE_MS));
+    let (serializable_seed, unit) = commit(
+        &mut ui,
+        serializable_row,
+        16,
+        "serializable base",
+        ui_owner,
+        [],
+    );
+    units.push((serializable_seed, unit, u64::MAX - SKEW_TOLERANCE_MS));
 
     let mut fates = BTreeMap::new();
     for (idx, (tx_id, unit, now)) in units.iter().enumerate() {
@@ -277,21 +284,21 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
     refresh(&mut core, &mut ui, &mut core_to_ui);
 
     let tx_id = OpenTransactionId::new();
-    block_on(ui.open_exclusive_for_test(tx_id, ui_author)).unwrap();
+    block_on(ui.open_serializable_for_test(tx_id, ui_author)).unwrap();
     assert_eq!(
-        block_on(ui.tx_read(tx_id, "todos", exclusive_row)).unwrap(),
-        Some(cells("exclusive base", ui_owner))
+        block_on(ui.tx_read(tx_id, "todos", serializable_row)).unwrap(),
+        Some(cells("serializable base", ui_owner))
     );
     block_on(ui.tx_write(
         tx_id,
         "todos",
-        exclusive_row,
-        cells("exclusive committed", ui_owner),
+        serializable_row,
+        cells("serializable committed", ui_owner),
         None,
     ))
     .unwrap();
-    let (serializable_tx, exclusive_unit) = block_on(async {
-        let (published, unit) = ui.commit_exclusive(tx_id, ui_author, 17).await.unwrap();
+    let (serializable_tx, serializable_unit) = block_on(async {
+        let (published, unit) = ui.commit_serializable(tx_id, ui_author, 17).await.unwrap();
         let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();
         (tx_id, unit)
     });
@@ -300,7 +307,7 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
     let tail = [
         (
             serializable_tx,
-            exclusive_unit,
+            serializable_unit,
             u64::MAX - SKEW_TOLERANCE_MS,
         ),
         (skewed_tx, skewed_unit, 0),
@@ -321,16 +328,16 @@ fn local_persistence_forwards_pending_writes_and_core_fates() {
         (other_row, Value::String("other".to_owned())),
         (deleted_row, Value::String("delete me".to_owned())),
         (
-            exclusive_row,
-            Value::String("exclusive committed".to_owned()),
+            serializable_row,
+            Value::String("serializable committed".to_owned()),
         ),
     ];
     let expected_ui = vec![
         (owned_row, Value::String("owned v2".to_owned())),
         (deleted_row, Value::String("delete me".to_owned())),
         (
-            exclusive_row,
-            Value::String("exclusive committed".to_owned()),
+            serializable_row,
+            Value::String("serializable committed".to_owned()),
         ),
     ];
     assert_eq!(rows(&mut core), expected_all);

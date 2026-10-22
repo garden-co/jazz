@@ -1188,7 +1188,7 @@ fn add_commit_unit_versions_to_oracle(
         oracle.add_version(model);
     }
 }
-fn assert_exclusive_serialization_matches_oracle(
+fn assert_serializable_serialization_matches_oracle(
     seed: u64,
     oracle: &Oracle,
     txs: &[Transaction],
@@ -1197,14 +1197,14 @@ fn assert_exclusive_serialization_matches_oracle(
 ) {
     for tx in txs {
         let Some(state) = oracle.tx_state(tx.tx_id) else {
-            panic!("seed {seed}: exclusive {:?} has no fate", tx.tx_id);
+            panic!("seed {seed}: serializable {:?} has no fate", tx.tx_id);
         };
         if !matches!(state.fate, Fate::Accepted) {
             continue;
         }
         let Some(global_time) = state.global_time else {
             panic!(
-                "seed {seed}: accepted exclusive {:?} has no global seq",
+                "seed {seed}: accepted serializable {:?} has no global seq",
                 tx.tx_id
             );
         };
@@ -1214,12 +1214,12 @@ fn assert_exclusive_serialization_matches_oracle(
         let base_snapshot = tx
             .base_snapshot
             .as_ref()
-            .expect("accepted exclusive must carry a base snapshot");
+            .expect("accepted serializable must carry a base snapshot");
         let base = base_snapshot.global_base;
         for read in tx.row_read_set.as_deref().unwrap_or(&[]) {
             assert!(
-                oracle.exclusive_row_read_matches_at(read, serialization_base),
-                "seed {seed}: accepted exclusive {:?} row read {:?} was not visible winner at {:?}",
+                oracle.serializable_row_read_matches_at(read, serialization_base),
+                "seed {seed}: accepted serializable {:?} row read {:?} was not visible winner at {:?}",
                 tx.tx_id,
                 read,
                 serialization_base
@@ -1227,8 +1227,8 @@ fn assert_exclusive_serialization_matches_oracle(
         }
         for absent in tx.absent_read_set.as_deref().unwrap_or(&[]) {
             assert!(
-                oracle.exclusive_absent_read_matches_at(absent, serialization_base),
-                "seed {seed}: accepted exclusive {:?} absent read {:?} was present at {:?}",
+                oracle.serializable_absent_read_matches_at(absent, serialization_base),
+                "seed {seed}: accepted serializable {:?} absent read {:?} was present at {:?}",
                 tx.tx_id,
                 absent,
                 serialization_base
@@ -1238,7 +1238,7 @@ fn assert_exclusive_serialization_matches_oracle(
             let (at_base, at_serialization) = if predicate.shape_id == owner_shape_id {
                 let Some(owner) = owner_bindings.get(&predicate.binding_id) else {
                     panic!(
-                        "seed {seed}: accepted exclusive {:?} used unknown owner binding {:?}",
+                        "seed {seed}: accepted serializable {:?} used unknown owner binding {:?}",
                         tx.tx_id, predicate.binding_id
                     );
                 };
@@ -1254,7 +1254,7 @@ fn assert_exclusive_serialization_matches_oracle(
             };
             assert_eq!(
                 at_base, at_serialization,
-                "seed {seed}: accepted exclusive {:?} predicate {:?} changed between {:?} and {:?}",
+                "seed {seed}: accepted serializable {:?} predicate {:?} changed between {:?} and {:?}",
                 tx.tx_id, predicate, base, serialization_base
             );
         }
@@ -1588,7 +1588,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
     let mut writer_known_b = PerNodeKnowledge::default();
     let mut oracle = Oracle::new();
     let mut oracle_txs = BTreeSet::new();
-    let mut exclusive_txs = Vec::new();
+    let mut serializable_txs = Vec::new();
     // Parents the harness delivers after their chained child, against the
     // per-writer order the transport keeps (`INV-HIST-23`).
     let mut late_parents = BTreeMap::new();
@@ -1687,7 +1687,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let (made_by, owner) =
                     seeded_author_and_owner(&mut rng, default_author, author_a, author_b);
                 let tx_id = OpenTransactionId::new();
-                writer.open_exclusive_for_identity(tx_id, made_by).unwrap();
+                writer.open_serializable_for_identity(tx_id, made_by).unwrap();
                 writer
                     .tx_read(tx_id, "todos", rows[rng.choose(rows.len())])
                     .unwrap();
@@ -1717,14 +1717,14 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                             row_uuid,
                             owner_cells_with_author(
                                 owner,
-                                format!("exclusive-{commits_started}-{}", rng.next_u64() % 1_000),
+                                format!("serializable-{commits_started}-{}", rng.next_u64() % 1_000),
                             ),
                             None,
                         )
                         .unwrap();
                 }
                 let (published, message) = writer
-                    .commit_exclusive(tx_id, made_by, 1_100 + rng.choose(12) as u64)
+                    .commit_serializable(tx_id, made_by, 1_100 + rng.choose(12) as u64)
                     .unwrap();
                 let tx_id = settle_published(writer, published).unwrap();
                 if tx_id.node == node(1) {
@@ -1735,9 +1735,9 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 commits_started += 1;
                 oracle_txs.insert(tx_id);
                 let SyncMessage::CommitUnit { tx, versions } = &message else {
-                    panic!("expected exclusive commit unit");
+                    panic!("expected serializable commit unit");
                 };
-                exclusive_txs.push(tx.clone());
+                serializable_txs.push(tx.clone());
                 add_commit_unit_versions_to_oracle(
                     tx,
                     versions,
@@ -1813,7 +1813,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let (made_by, owner) =
                     seeded_author_and_owner(&mut rng, default_author, author_a, author_b);
                 let tx_id = OpenTransactionId::new();
-                writer.open_exclusive_for_identity(tx_id, made_by).unwrap();
+                writer.open_serializable_for_identity(tx_id, made_by).unwrap();
                 writer
                     .tx_read(tx_id, "todos", rows[rng.choose(rows.len())])
                     .unwrap();
@@ -1831,7 +1831,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     )
                     .unwrap();
                 let (parent_publication, parent_message) = writer
-                    .commit_exclusive(tx_id, made_by, 1_200 + rng.choose(12) as u64)
+                    .commit_serializable(tx_id, made_by, 1_200 + rng.choose(12) as u64)
                     .unwrap();
                 let parent_ref = settle_published(writer, parent_publication).unwrap();
                 let child_commit =
@@ -1858,7 +1858,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let SyncMessage::CommitUnit { tx, versions } = &parent_message else {
                     panic!("expected parent commit unit");
                 };
-                exclusive_txs.push(tx.clone());
+                serializable_txs.push(tx.clone());
                 add_commit_unit_versions_to_oracle(
                     tx,
                     versions,
@@ -2105,10 +2105,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
             "seed {seed}: {name} parked commit units should drain before index checks"
         );
     }
-    assert_exclusive_serialization_matches_oracle(
+    assert_serializable_serialization_matches_oracle(
         seed,
         &oracle,
-        &exclusive_txs,
+        &serializable_txs,
         owner_shape.shape_id(),
         &owner_bindings,
     );

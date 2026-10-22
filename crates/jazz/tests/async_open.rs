@@ -243,7 +243,7 @@ fn reproduces_sync_query_preparation_reentering_a_cold_read() {
 /// relation reads. A cold storage operation must suspend the caller rather
 /// than falling back to a synchronous owner view.
 #[test]
-fn exclusive_transaction_relation_snapshot_suspends_on_cold_storage() {
+fn serializable_transaction_relation_snapshot_suspends_on_cold_storage() {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families

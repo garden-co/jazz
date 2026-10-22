@@ -67,7 +67,7 @@ pub(super) fn mutation_error_details(reason: &RejectionReason) -> (String, Strin
             "permission_denied".to_owned(),
             "Write rejected by server authorization".to_owned(),
         ),
-        RejectionReason::ExclusiveConflict => (
+        RejectionReason::SerializationConflict => (
             "serialization_conflict".to_owned(),
             "Serializable transaction conflicted with another write".to_owned(),
         ),

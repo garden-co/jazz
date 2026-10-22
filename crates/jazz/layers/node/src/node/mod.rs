@@ -414,11 +414,11 @@ mod currency;
 mod database_slot;
 mod descriptor_roles;
 mod eviction;
-mod exclusive_read_evidence;
 mod global_state;
 mod ingest;
 mod layer_stack;
 mod node_aliases;
+mod serializable_read_evidence;
 pub use node_aliases::NodeAliases;
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
@@ -960,7 +960,7 @@ struct Clock {
     committed_global_time: GlobalTime,
     /// Global transactions held by a partial node outside its core frontier.
     applied_global_times_after_frontier: BTreeSet<GlobalTime>,
-    /// The transactions accepted at each of those times: an exclusive
+    /// The transactions accepted at each of those times: a serializable
     /// transaction's base names them without an index scan per time.
     frontier_dots: BTreeMap<GlobalTime, Vec<TxId>>,
 }
@@ -3303,12 +3303,12 @@ pub enum Error {
     /// Exact branch selector is missing, malformed, or inconsistent with row cells.
     #[error("invalid branch key: {0}")]
     InvalidBranchKey(String),
-    /// An exclusive transaction read a pattern whose read set it cannot
+    /// A serializable transaction read a pattern whose read set it cannot
     /// record precisely. It is rejected rather than recorded as a read of
     /// whole tables (garden-co/jazz#3694).
     #[error("Reading {0} is not supported in serializable transactions yet")]
-    UnsupportedExclusiveRead(String),
-    /// An exclusive transaction no longer matches its fixed local snapshot.
+    UnsupportedSerializableRead(String),
+    /// A serializable transaction no longer matches its fixed local snapshot.
     #[error("row visible parent changed since transaction write was staged")]
     TransactionConflict,
     /// Stored value failed validation.

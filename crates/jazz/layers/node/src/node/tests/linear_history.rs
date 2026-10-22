@@ -1747,13 +1747,13 @@ fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_mergeable_comm
     assert_bob_keeps_likes(&mut core, &mut bob, target, "core");
 }
 
-/// The same merge for Core's own exclusive commit under the older schema.
+/// The same merge for Core's own serializable commit under the older schema.
 #[test]
-fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_exclusive_commit() {
+fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_serializable_commit() {
     let target = row(0x7a);
     let (_core_dir, mut core, _bob_dir, mut bob) = core_with_accepted_likes(target);
     let open = OpenTransactionId::new();
-    core.open_exclusive(open).unwrap();
+    core.open_serializable(open).unwrap();
     core.tx_write(
         open,
         "counters",
@@ -1763,13 +1763,13 @@ fn older_schema_write_without_a_merge_column_keeps_it_for_a_local_exclusive_comm
     )
     .unwrap();
     let (_, unit) = core
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 20)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 20)
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("an exclusive commit yields a commit unit");
+        panic!("a serializable commit yields a commit unit");
     };
     let outcome =
-        crate::local_executor::block_on(core.finalize_local_exclusive_commit(tx, versions))
+        crate::local_executor::block_on(core.finalize_local_serializable_commit(tx, versions))
             .unwrap();
     let fate = crate::local_executor::block_on(core.persist_and_settle_outcome(outcome)).unwrap();
     assert_eq!(fate, Fate::Accepted);

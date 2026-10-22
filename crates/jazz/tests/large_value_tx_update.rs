@@ -253,14 +253,14 @@ fn transaction_upsert_of_existing_row_keeps_large_values() {
 /// Contract: the serializable transaction path keeps untouched large values
 /// when one small column is updated.
 #[test]
-fn exclusive_transaction_update_keeps_large_values() {
+fn serializable_transaction_update_keeps_large_values() {
     let db = open_db();
     let row = seed(&db);
 
     let tx = block_on(db.serializable_tx()).expect("open serializable tx");
     block_on(tx.update("docs", row, rank_patch(2), UpdateOptions::default()))
-        .expect("stage exclusive update");
-    block_on(tx.commit()).expect("exclusive update commits");
+        .expect("stage serializable update");
+    block_on(tx.commit()).expect("serializable update commits");
 
     let after = committed(&db, row);
     assert_eq!(after["rank"], Value::I32(2));

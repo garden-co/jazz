@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: Persisted system authors MUST use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node UUID subject; this provenance MUST NOT grant the internal SYSTEM policy-bypass capability, and external admission MUST reject the reserved account and issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
-- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one exclusive `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
+- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one serializable `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
 - `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
@@ -101,7 +101,7 @@ The browser's durable SharedWorker owns the foreground-lease pool for its
 physical IndexedDB replica and gives each attached tab a separate lease over a
 dedicated port. A persistent Node foreground owner keeps its pool under the
 current working directory, namespaced by app, environment, and auth scope;
-exclusive state as a per-node O_EXCL active claim plus a separate durable
+serializable state as a per-node O_EXCL active claim plus a separate durable
 per-node reusable high-water receipt. A claimant creates its active claim
 before reading a reusable receipt; it never deletes or reclaims an unknown
 active claim. A clean handoff fsyncs the replacement receipt, fsyncs its
@@ -436,10 +436,10 @@ interned into `authors`, fate,
 global_time: Nullable<U64>, durability, user_metadata: Nullable<String>,
 rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorSubject>)`, keyed
 `(time, node_id)` with the `by_global_time` index.
-`TxKind` is `Mergeable=0`, `Exclusive=1`; fate is `Pending=0`, `Accepted=1`,
+`TxKind` is `Mergeable=0`, `Serializable=1`; fate is `Pending=0`, `Accepted=1`,
 `Rejected=2`; durability is `None=0`, `Local=1`, `Global=2` in
 `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
-`ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
+`ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `SerializationConflict=2`,
 `CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`.
 
 - `flags` bit 0 says the stored `n_total_writes` is view-redacted; it is
@@ -544,7 +544,7 @@ The pending record's four evidence slots hold serializable read evidence in the
 `jazz.exclusive-read-evidence.v2` family, and only while it can still be
 retransmitted. Serializable snapshot/read/CAS evidence belongs to the immutable
 `Transaction` commit-unit payload and authority validation seam. A node that
-authored or relays an `Exclusive` transaction whose fate is still `Pending`
+authored or relays an `Serializable` transaction whose fate is still `Pending`
 stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
 `predicate_read_set` in these slots, so a unit rebuilt from storage after a
 restart (outbox or relay recovery) is byte-for-byte the unit that was
@@ -584,7 +584,7 @@ slots do not make their semantics interchangeable:
   row, and source content version for a first inherited head overlay. That is
   authority-checked operation provenance, never a parent, history dependency,
   or serializability read.
-- An `Exclusive` transaction carries its table-bound compare-and-swap evidence:
+- An `Serializable` transaction carries its table-bound compare-and-swap evidence:
   `base_snapshot`, point reads `(table, row_uuid, observed TxId)`, absent reads
   `(table, row_uuid)`, and predicate reads `(table, shape_id, canonical query,
 binding_id, binding values)`. The authority compares those dependencies and

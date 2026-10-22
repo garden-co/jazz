@@ -5143,7 +5143,7 @@ fn probe_3378_opening_snapshot_serve_cost() {
 
 /// How a serializable transaction that was in flight at a restart is replayed.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum InFlightExclusiveReplay {
+enum InFlightSerializableReplay {
     /// Nothing changes while alice is offline; Core must accept the replay.
     Unchanged,
     /// bob changes the row alice read; Core must reject the replay.
@@ -5153,7 +5153,7 @@ enum InFlightExclusiveReplay {
     WithoutPersistedEvidence,
 }
 
-/// alice commits an exclusive read-modify-write while offline, then the
+/// alice commits a serializable read-modify-write while offline, then the
 /// process restarts before the unit reaches Core. The reopened outbox rebuilds
 /// the unit from storage and replays it:
 ///
@@ -5167,7 +5167,7 @@ enum InFlightExclusiveReplay {
 ///
 /// Only the evidence-free rewrite is internal: no current API writes the
 /// pre-evidence row format.
-fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveReplay) {
+fn assert_in_flight_serializable_replays_after_restart(case: InFlightSerializableReplay) {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
     let identity = DbIdentity {
@@ -5225,12 +5225,12 @@ fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveRepla
         assert_eq!(settle(&client, seeded).unwrap(), seeded);
     }
 
-    // Offline: the exclusive commit stays pending in the outbox.
-    let exclusive = client.serializable_tx().unwrap();
-    let seen = exclusive.read("todos", todo).unwrap().unwrap();
+    // Offline: the serializable commit stays pending in the outbox.
+    let serializable = client.serializable_tx().unwrap();
+    let seen = serializable.read("todos", todo).unwrap().unwrap();
     assert_eq!(seen.get("title"), Some(&Value::String("draft".to_owned())));
-    assert_eq!(exclusive.all("todos").unwrap().len(), 1);
-    exclusive
+    assert_eq!(serializable.all("todos").unwrap().len(), 1);
+    serializable
         .update(
             "todos",
             todo,
@@ -5238,21 +5238,21 @@ fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveRepla
             UpdateOptions::default(),
         )
         .unwrap();
-    let tx_id = exclusive.commit().unwrap();
+    let tx_id = serializable.commit().unwrap();
     assert_eq!(client.write_state(tx_id).unwrap().fate, Fate::Pending);
-    if case == InFlightExclusiveReplay::WithoutPersistedEvidence {
+    if case == InFlightSerializableReplay::WithoutPersistedEvidence {
         block_on(
             client
                 .node
                 .node
                 .borrow_mut()
-                .persist_without_exclusive_read_evidence_for_test(tx_id),
+                .persist_without_serializable_read_evidence_for_test(tx_id),
         );
     }
     block_on(client.close()).unwrap();
     drop(client);
 
-    if case == InFlightExclusiveReplay::ConcurrentUpdate {
+    if case == InFlightSerializableReplay::ConcurrentUpdate {
         core.update(
             "todos",
             todo,
@@ -5269,7 +5269,7 @@ fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveRepla
     let outcome = settle(&client, tx_id);
     let title = |rows: Vec<CurrentRow>| rows[0].cell(&schema.tables[0], "title");
     match case {
-        InFlightExclusiveReplay::Unchanged => {
+        InFlightSerializableReplay::Unchanged => {
             assert_eq!(outcome.unwrap(), tx_id);
             assert_eq!(client.write_state(tx_id).unwrap().fate, Fate::Accepted);
             assert_eq!(
@@ -5277,14 +5277,14 @@ fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveRepla
                 Some(Value::String("final".to_owned()))
             );
         }
-        InFlightExclusiveReplay::ConcurrentUpdate
-        | InFlightExclusiveReplay::WithoutPersistedEvidence => {
+        InFlightSerializableReplay::ConcurrentUpdate
+        | InFlightSerializableReplay::WithoutPersistedEvidence => {
             assert_eq!(outcome.unwrap_err().code, ErrorCode::WriteRejected);
             assert_eq!(
                 client.write_state(tx_id).unwrap().fate,
-                Fate::Rejected(RejectionReason::ExclusiveConflict)
+                Fate::Rejected(RejectionReason::SerializationConflict)
             );
-            let expected = if case == InFlightExclusiveReplay::ConcurrentUpdate {
+            let expected = if case == InFlightSerializableReplay::ConcurrentUpdate {
                 "bob"
             } else {
                 "draft"
@@ -5302,22 +5302,24 @@ fn assert_in_flight_exclusive_replays_after_restart(case: InFlightExclusiveRepla
 /// replays with its persisted read evidence and is accepted, not rejected as
 /// a false `serialization_conflict`.
 #[test]
-fn exclusive_transaction_in_flight_at_restart_replays_without_false_conflict() {
-    assert_in_flight_exclusive_replays_after_restart(InFlightExclusiveReplay::Unchanged);
+fn serializable_transaction_in_flight_at_restart_replays_without_false_conflict() {
+    assert_in_flight_serializable_replays_after_restart(InFlightSerializableReplay::Unchanged);
 }
 
 /// Persisted evidence is the original read proof, so a row that changed
 /// while alice was offline still makes the replayed transaction conflict.
 #[test]
-fn exclusive_transaction_replayed_after_restart_still_rejects_a_real_conflict() {
-    assert_in_flight_exclusive_replays_after_restart(InFlightExclusiveReplay::ConcurrentUpdate);
+fn serializable_transaction_replayed_after_restart_still_rejects_a_real_conflict() {
+    assert_in_flight_serializable_replays_after_restart(
+        InFlightSerializableReplay::ConcurrentUpdate,
+    );
 }
 
 /// Rows written before `jazz.exclusive-read-evidence.v1` hold no evidence;
 /// Core cannot validate them and keeps rejecting them rather than guessing.
 #[test]
-fn exclusive_transaction_without_persisted_evidence_is_still_rejected_on_replay() {
-    assert_in_flight_exclusive_replays_after_restart(
-        InFlightExclusiveReplay::WithoutPersistedEvidence,
+fn serializable_transaction_without_persisted_evidence_is_still_rejected_on_replay() {
+    assert_in_flight_serializable_replays_after_restart(
+        InFlightSerializableReplay::WithoutPersistedEvidence,
     );
 }

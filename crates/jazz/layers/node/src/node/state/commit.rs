@@ -196,7 +196,7 @@ where
         }
         // Bindings send a present optional-JSON value wrapped as nullable.
         // Lower it to the bare stored scalar before anything validates or
-        // stores the cells, exactly as positional exclusive writes do.
+        // stores the cells, exactly as positional serializable writes do.
         for (schema_version, commit) in &mut commits {
             let table = self.table_in_schema_ref(&commit.table, *schema_version)?;
             for (name, value) in &mut commit.cells {
@@ -577,7 +577,7 @@ where
     }
 
     /// Lower one top-level scalar cell, preserving its nullable wrapper. This
-    /// is shared by mergeable and exclusive publication so neither write path
+    /// is shared by mergeable and serializable publication so neither write path
     /// can leak an oversized inline scalar onto the wire.
     pub async fn prepare_and_stage_large_scalar(
         &mut self,
@@ -738,7 +738,7 @@ where
         Ok(SyncMessage::CommitUnit { tx, versions })
     }
 
-    /// Open an exclusive transaction over the current snapshot.
+    /// Open a serializable transaction over the current snapshot.
     pub fn visible_current_cells(
         &mut self,
         table: &str,

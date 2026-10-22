@@ -124,8 +124,8 @@ pub enum ProgramFactSchema {
     ReadFrontierSettled(ReadFrontierSettledSchema),
     /// Full transaction payload coverage.
     CompleteTxPayloadCoverage(CompleteTxPayloadCoverageSchema),
-    /// View-complete exclusive transaction coverage.
-    ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageSchema),
+    /// View-complete serializable transaction coverage.
+    ViewCompleteSerializableCoverage(ViewCompleteSerializableCoverageSchema),
     /// Content/deletion/replacement version witnesses needed for payload
     /// shipping and removal/change replacement.
     VersionWitnesses(VersionWitnessSchemas),
@@ -137,11 +137,11 @@ pub enum ProgramFactSchema {
     PolicyWitnesses(PolicyWitnessSchema),
     /// Internal contributing member/batch provenance for derived outputs.
     ContributingMembers(ContributingMembersSchema),
-    /// Predicate-read facts for exclusive transaction validation.
+    /// Predicate-read facts for serializable transaction validation.
     PredicateReads(PredicateReadFactSchema),
-    /// Concrete predicate output rows compared during exclusive validation.
+    /// Concrete predicate output rows compared during serializable validation.
     PredicateOutputSet(PredicateOutputSetSchema),
-    /// Point row-read facts for exclusive transaction validation.
+    /// Point row-read facts for serializable transaction validation.
     PointReads(PointReadFactSchema),
 }
 
@@ -406,9 +406,9 @@ pub struct CompleteTxPayloadCoverageSchema {
     pub fate_field: String,
 }
 
-/// View-complete exclusive transaction coverage fact schema.
+/// View-complete serializable transaction coverage fact schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ViewCompleteExclusiveCoverageSchema {
+pub struct ViewCompleteSerializableCoverageSchema {
     /// Batch/transaction identity fields.
     pub batch: BatchIdentityFields,
     /// View/source scope field.
@@ -533,7 +533,7 @@ pub struct PredicateReadFactSchema {
     pub source_visibility_field: String,
 }
 
-/// Concrete predicate output row/version set used by exclusive validation.
+/// Concrete predicate output row/version set used by serializable validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PredicateOutputSetSchema {
     /// Whether this terminal emits the base or comparison set.
@@ -550,7 +550,7 @@ pub struct PredicateOutputSetSchema {
     pub binding_id_field: String,
 }
 
-/// Which side of an exclusive predicate comparison a terminal emits.
+/// Which side of a serializable predicate comparison a terminal emits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PredicateOutputSetRole {
     /// Output set observed at the transaction base snapshot.

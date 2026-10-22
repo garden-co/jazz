@@ -135,7 +135,7 @@ impl CoreDb {
     fn serializable_tx(&self) -> Result<CoreSerializableTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
         let node = self.server.node();
-        block_on(async { node.lock().await.open_exclusive(tx_id).await })?;
+        block_on(async { node.lock().await.open_serializable(tx_id).await })?;
         Ok(CoreSerializableTx {
             core: self,
             tx_id,
@@ -181,33 +181,33 @@ impl CoreSerializableTx<'_> {
             let mut node = node.lock().await;
             if self.has_reads.get()
                 && node
-                    .open_exclusive_snapshot_moved(self.tx_id)
-                    .expect("exclusive snapshot check succeeds")
+                    .open_serializable_snapshot_moved(self.tx_id)
+                    .expect("serializable snapshot check succeeds")
             {
                 node.abandon_tx(self.tx_id)
                     .expect("abandoning conflicting transaction succeeds");
-                return Err(write_rejected(RejectionReason::ExclusiveConflict));
+                return Err(write_rejected(RejectionReason::SerializationConflict));
             }
 
             let (published, unit) = node
-                .commit_exclusive(self.tx_id, self.core.author, self.core.next_now_ms())
+                .commit_serializable(self.tx_id, self.core.author, self.core.next_now_ms())
                 .await
-                .expect("core exclusive commit succeeds");
+                .expect("core serializable commit succeeds");
             let tx_id = node
                 .persist_and_settle_transaction(published)
                 .await
-                .expect("core exclusive persistence succeeds");
+                .expect("core serializable persistence succeeds");
             let SyncMessage::CommitUnit { tx, versions } = unit else {
-                panic!("commit_exclusive must yield a CommitUnit");
+                panic!("commit_serializable must yield a CommitUnit");
             };
             let outcome = node
-                .finalize_local_exclusive_commit(tx, versions)
+                .finalize_local_serializable_commit(tx, versions)
                 .await
-                .expect("core exclusive finalize succeeds");
+                .expect("core serializable finalize succeeds");
             let fate = node
                 .persist_and_settle_outcome(outcome)
                 .await
-                .expect("core exclusive finalization persistence succeeds");
+                .expect("core serializable finalization persistence succeeds");
             if let Fate::Rejected(reason) = fate {
                 return Err(write_rejected(reason));
             }
@@ -259,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     second_tx.update("todos", row, title_patch("stale writer"))?;
     let rejected = second_tx.commit().expect_err("stale read must conflict");
-    assert_eq!(rejected, RejectionReason::ExclusiveConflict);
+    assert_eq!(rejected, RejectionReason::SerializationConflict);
 
     let current = core
         .one(&core.table("todos"))?

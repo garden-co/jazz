@@ -593,7 +593,7 @@ fn apply_transition(
         .outbound
         .borrow_mut()
         .pop_front()
-        .expect("db exclusive transition should upload a commit unit");
+        .expect("db serializable transition should upload a commit unit");
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
         unreachable!();
     };
@@ -1127,7 +1127,9 @@ fn open_worker(node_uuid: NodeUuid, relay_uuid: NodeUuid, schema: JazzSchema) ->
         inbound,
         _upstream: upstream,
     };
-    worker.relay_peer.set_ship_complete_exclusive_payloads(true);
+    worker
+        .relay_peer
+        .set_ship_complete_serializable_payloads(true);
     for table in [WORKFLOWS, INSTANCES, STEPS, EVENTS] {
         bind_worker_table_query(&mut worker.relay_peer, &schema, table, &worker.author);
         let prepared = worker.db.prepare_query(&Query::from(table)).unwrap();

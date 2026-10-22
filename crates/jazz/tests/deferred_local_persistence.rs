@@ -1206,7 +1206,7 @@ fn queued_mergeable_commit_retains_cold_parent_refresh_and_exact_identity() {
 }
 
 #[test]
-fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
+fn queued_serializable_commit_retains_cold_serializability_and_exact_identity() {
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1262,7 +1262,7 @@ fn queued_exclusive_commit_retains_cold_serializability_and_exact_identity() {
     }
     assert!(
         reached_cold_stage,
-        "bounded owner turns must reach the planted cold exclusive staging read",
+        "bounded owner turns must reach the planted cold serializable staging read",
     );
     assert_eq!(queued.mergeable_tx_id(), reserved);
     assert_eq!(
@@ -1351,7 +1351,7 @@ fn queued_transaction_stage_failure_poison_prevents_partial_commit() {
 
 #[test]
 fn queued_commit_uses_host_clock_before_staging_runs() {
-    for exclusive in [false, true] {
+    for serializable in [false, true] {
         let schema = schema();
         let families = schema.column_families();
         let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -1366,7 +1366,7 @@ fn queued_commit_uses_host_clock_before_staging_runs() {
         )))
         .unwrap();
         let open_tx = OpenTransactionId::new();
-        if exclusive {
+        if serializable {
             db.enqueue_begin_serializable(open_tx, None, None).unwrap();
         } else {
             db.enqueue_begin_mergeable(open_tx, None, None).unwrap();
@@ -1382,7 +1382,7 @@ fn queued_commit_uses_host_clock_before_staging_runs() {
         )
         .unwrap();
         let host_now = 1_800_000_000_000;
-        let write = if exclusive {
+        let write = if serializable {
             db.enqueue_commit_serializable_handle_at_ms(open_tx, host_now)
         } else {
             db.enqueue_commit_mergeable_handle_at_ms(open_tx, host_now)

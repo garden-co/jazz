@@ -267,7 +267,7 @@ use normalization::*;
 
 mod narrowed_reads;
 
-pub(in crate::node) use narrowed_reads::{ExclusiveSourceReads, NarrowedSourceRead};
+pub(in crate::node) use narrowed_reads::{NarrowedSourceRead, SerializableSourceReads};
 
 mod subscriptions;
 
@@ -3566,7 +3566,7 @@ where
         self.apply_projection_in_schema(query, self.catalogue.active_schema.schema, rows)
     }
 
-    /// Evaluate a validated query inside an open exclusive transaction.
+    /// Evaluate a validated query inside an open serializable transaction.
     pub async fn tx_query(
         &mut self,
         tx_id: OpenTransactionId,
@@ -3597,7 +3597,7 @@ where
         .await
     }
 
-    /// Evaluate a validated query inside an open exclusive transaction as `identity`.
+    /// Evaluate a validated query inside an open serializable transaction as `identity`.
     pub async fn tx_query_for_identity(
         &mut self,
         tx_id: OpenTransactionId,
@@ -3831,7 +3831,7 @@ where
         Ok(())
     }
 
-    /// Fail an exclusive aggregate read that would observe the transaction's
+    /// Fail a serializable aggregate read that would observe the transaction's
     /// own staged writes. The authority re-runs the aggregate over committed
     /// state only, which does not include this transaction's writes, so a
     /// result that saw them cannot be compared soundly: a `max` that a staged
@@ -3843,10 +3843,10 @@ where
         shape: &ValidatedQuery,
     ) -> Result<(), Error> {
         if shape.query().aggregate.is_some()
-            && self.transaction_is_exclusive(tx_id)?
+            && self.transaction_is_serializable(tx_id)?
             && self.open_tx(tx_id)?.writes.len() != 0
         {
-            return Err(Error::UnsupportedExclusiveRead(format!(
+            return Err(Error::UnsupportedSerializableRead(format!(
                 "an aggregate of `{}` after a write in the same transaction",
                 shape.query().table
             )));
@@ -3854,15 +3854,15 @@ where
         Ok(())
     }
 
-    /// The queries a partial node hydrates before an exclusive read of
+    /// The queries a partial node hydrates before a serializable read of
     /// `shape`: for each source it reads beyond its root (joined, included,
     /// correlated and relation sources), the narrowed read the transaction
     /// records for that source (garden-co/jazz#3694). Rows the replica never
     /// received there then do not make the read conflict. Fails with
-    /// [`Error::UnsupportedExclusiveRead`] before anything is hydrated when a
+    /// [`Error::UnsupportedSerializableRead`] before anything is hydrated when a
     /// source has no narrowed read.
     #[doc(hidden)]
-    pub fn exclusive_source_hydration_queries(
+    pub fn serializable_source_hydration_queries(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -3870,7 +3870,7 @@ where
     ) -> Result<Vec<JazzQuery>, Error> {
         let mut queries = Vec::new();
         for read in self
-            .exclusive_source_reads(shape, binding, include_deleted)?
+            .serializable_source_reads(shape, binding, include_deleted)?
             .reads
             .into_values()
         {
@@ -3883,9 +3883,9 @@ where
     }
 
     /// Offer the narrowed reads of `shape`'s non-root sources to the sources
-    /// of an exclusive transaction query about to be compiled. Returns the
+    /// of a serializable transaction query about to be compiled. Returns the
     /// narrowing to restore once it is compiled. Fails with
-    /// [`Error::UnsupportedExclusiveRead`] when a source has none.
+    /// [`Error::UnsupportedSerializableRead`] when a source has none.
     fn offer_tx_query_narrowed_reads(
         &mut self,
         tx_id: OpenTransactionId,
@@ -3893,12 +3893,12 @@ where
         binding: &Binding,
         include_deleted: bool,
     ) -> Result<SourceNarrowing, Error> {
-        let reads = if self.transaction_is_exclusive(tx_id)?
+        let reads = if self.transaction_is_serializable(tx_id)?
             && !self.open_tx(tx_id)?.source_narrowing.recording
         {
-            self.exclusive_source_reads(shape, binding, include_deleted)?
+            self.serializable_source_reads(shape, binding, include_deleted)?
         } else {
-            ExclusiveSourceReads::default()
+            SerializableSourceReads::default()
         };
         self.offer_tx_narrowed_source_reads(tx_id, reads)
     }
@@ -3915,7 +3915,7 @@ where
         identity: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<(), Error> {
-        if reads.is_empty() || !self.transaction_is_exclusive(tx_id)? {
+        if reads.is_empty() || !self.transaction_is_serializable(tx_id)? {
             return Ok(());
         }
         for read in reads {
@@ -3949,7 +3949,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<AuthorSubject, Error> {
         Ok(match self.open_tx(tx_id)?.kind {
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 permission_subject: bound_identity,
                 ..
             } => {
@@ -3958,7 +3958,7 @@ where
                 {
                     return Err(Error::OpenTransactionIdentityMismatch);
                 }
-                // Explicitly bound exclusive transactions are identity capabilities:
+                // Explicitly bound serializable transactions are identity capabilities:
                 // ordinary and serving reads use the identity fixed at begin.
                 bound_identity
             }

@@ -257,7 +257,7 @@ where
             versions
         };
         // Fate belongs to the whole transaction. A new fragment may settle
-        // versions received earlier, including history-only exclusive fragments.
+        // versions received earlier, including history-only serializable fragments.
         // Assemble them before publishing either fate or derived current state.
         let mut update_current_indexes = update_current_indexes;
         // Already-settled view fragments only add their incoming versions.

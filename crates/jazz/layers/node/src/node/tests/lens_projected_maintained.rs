@@ -204,7 +204,7 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
 }
 
 /// A projected result name may also have belonged to a different old physical
-/// table. Even when both rows share an exclusive transaction and row UUID, the
+/// table. Even when both rows share a serializable transaction and row UUID, the
 /// maintained wire witness must fail closed rather than selecting by name/key.
 #[test]
 fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
@@ -222,7 +222,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
     let shared_row = row(0x60);
 
     let open = OpenTransactionId::new();
-    core.open_exclusive(open).unwrap();
+    core.open_serializable(open).unwrap();
     core.tx_write(
         open,
         "tasks",
@@ -240,7 +240,7 @@ fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
     )
     .unwrap();
     let (collision_tx, _) = core
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 10)
         .unwrap();
     core.accept_global_for_test(collision_tx).unwrap();
 

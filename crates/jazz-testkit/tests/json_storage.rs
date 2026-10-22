@@ -340,7 +340,7 @@ async fn json_column_valid_default_is_inserted_when_omitted() {
         .await;
 }
 
-/// Alice exercises ordinary and exclusive insert, upsert, and update paths
+/// Alice exercises ordinary and serializable insert, upsert, and update paths
 /// with an ARRAY<JSON>; malformed or schema-invalid nested elements must be
 /// rejected before either path can create or alter a document.
 #[tokio::test(flavor = "current_thread")]
@@ -366,7 +366,7 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
                 .expect("open serializable transaction");
             let error = tx
                 .insert("documents", row_input!("payloads" => invalid.clone()))
-                .expect_err("exclusive insert rejects schema-invalid nested JSON");
+                .expect_err("serializable insert rejects schema-invalid nested JSON");
             assert!(
                 error
                     .to_string()
@@ -404,11 +404,11 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
                     *id.uuid(),
                     row_input!("payloads" => malformed.clone()),
                 )
-                .expect_err("exclusive upsert rejects malformed nested JSON");
+                .expect_err("serializable upsert rejects malformed nested JSON");
             assert!(error.to_string().contains("payloads[0]"));
             let error = tx
                 .update("documents", id, vec![("payloads".to_owned(), invalid)])
-                .expect_err("exclusive update rejects schema-invalid nested JSON");
+                .expect_err("serializable update rejects schema-invalid nested JSON");
             assert!(error.to_string().contains("payloads[0]"));
             tx.rollback()
                 .expect("roll back rejected serializable transaction");

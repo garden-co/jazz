@@ -234,7 +234,7 @@ where
     }
 
     /// Return the transaction whose row state is currently observed by an
-    /// exclusive read: the transaction of the current row image, deleted or not.
+    /// serializable read: the transaction of the current row image, deleted or not.
     pub(super) async fn visible_global_row_tx_id_now(
         &mut self,
         schema_version: SchemaVersionId,

@@ -826,7 +826,7 @@ Binding payloads use core types directly:
 
 `WriteState` is not a parallel binding shape. Rejection detail is represented by
 the core `Fate::Rejected(RejectionReason)` variant, preserving
-`ExclusiveConflict`, `AuthorizationDenied`, `Cascade { root }`, clock-skew,
+`SerializationConflict`, `AuthorizationDenied`, `Cascade { root }`, clock-skew,
 causality, and malformed-commit detail without a second field that can drift
 from the transaction fate.
 

@@ -448,7 +448,7 @@ where
 }
 
 /// Commit, persist, and settle one serializable transaction.
-pub fn commit_exclusive_settled<S>(
+pub fn commit_serializable_settled<S>(
     node: &mut NodeState<S>,
     open_tx: OpenTransactionId,
     made_by: AuthorSubject,
@@ -457,7 +457,7 @@ pub fn commit_exclusive_settled<S>(
 where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    let (published, unit) = jazz::db::block_on(node.commit_exclusive(open_tx, made_by, now_ms))?;
+    let (published, unit) = jazz::db::block_on(node.commit_serializable(open_tx, made_by, now_ms))?;
     let tx_id = jazz::db::block_on(node.persist_and_settle_transaction(published))?;
     Ok((tx_id, unit))
 }

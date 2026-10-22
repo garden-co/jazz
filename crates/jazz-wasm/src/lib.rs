@@ -1017,7 +1017,7 @@ impl WasmDbInner {
         Ok(())
     }
 
-    fn commit_exclusive(&self, open_tx_id: OpenTransactionId) -> Result<WasmWrite, JsValue> {
+    fn commit_serializable(&self, open_tx_id: OpenTransactionId) -> Result<WasmWrite, JsValue> {
         let write = self
             .db
             .enqueue_commit_serializable_handle_at_ms(open_tx_id, current_timestamp())
@@ -1581,7 +1581,7 @@ impl WasmDb {
         let inner = self.open_inner()?;
         match kind.as_deref().unwrap_or("mergeable") {
             "mergeable" => inner.commit_mergeable(open_transaction_id),
-            "serializable" => inner.commit_exclusive(open_transaction_id),
+            "serializable" => inner.commit_serializable(open_transaction_id),
             kind => Err(JsValue::from_str(&unknown_transaction_kind_message(kind))),
         }
     }
@@ -4480,13 +4480,13 @@ mod dynamic_schema_view_tests {
         assert_eq!(rows.len(), 1, "the attached view reads staged rows");
         block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
-        let exclusive = OpenTransactionId::new();
-        block_on(owner.begin_serializable(exclusive)).unwrap();
-        block_on(view.serializable_tx_ref(exclusive).insert(
+        let serializable = OpenTransactionId::new();
+        block_on(owner.begin_serializable(serializable)).unwrap();
+        block_on(view.serializable_tx_ref(serializable).insert(
             "items",
             BTreeMap::from([(
                 "label".to_owned(),
-                Value::String("exclusive-kept".to_owned()),
+                Value::String("serializable-kept".to_owned()),
             )]),
             jazz::db::InsertOptions {
                 row_id: Some(RowUuid::from_bytes([2; 16])),
@@ -4494,7 +4494,7 @@ mod dynamic_schema_view_tests {
             },
         ))
         .unwrap();
-        block_on(owner.commit_serializable_handle(exclusive)).unwrap();
+        block_on(owner.commit_serializable_handle(serializable)).unwrap();
     }
 
     /// Transaction reads cross the WASM boundary as promises: a valid
@@ -4583,17 +4583,17 @@ mod dynamic_schema_view_tests {
             .await
             .expect("commit attached schema transaction");
 
-        let attached_exclusive = OpenTransactionId::new();
+        let attached_serializable = OpenTransactionId::new();
         owner
-            .begin_serializable(attached_exclusive)
+            .begin_serializable(attached_serializable)
             .await
             .expect("begin attached serializable transaction");
-        view.serializable_tx_ref(attached_exclusive)
+        view.serializable_tx_ref(attached_serializable)
             .insert(
                 "items",
                 BTreeMap::from([(
                     "label".to_owned(),
-                    Value::String("exclusive-kept".to_owned()),
+                    Value::String("serializable-kept".to_owned()),
                 )]),
                 jazz::db::InsertOptions {
                     row_id: Some(RowUuid::from_bytes([2; 16])),
@@ -4601,9 +4601,9 @@ mod dynamic_schema_view_tests {
                 },
             )
             .await
-            .expect("attached facade preserves the exclusive owner batch");
+            .expect("attached facade preserves the serializable owner batch");
         owner
-            .commit_serializable_handle(attached_exclusive)
+            .commit_serializable_handle(attached_serializable)
             .await
             .expect("commit attached serializable transaction");
 

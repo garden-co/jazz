@@ -70,7 +70,7 @@ where
             // accepted metadata, including versions an earlier view-scoped
             // fragment stored before the completing ingest. Replaying the same
             // receipt therefore has no durable work after monotonicity/conflict
-            // validation. Exclusive fragments deliberately defer current
+            // validation. Serializable fragments deliberately defer current
             // installation and must still run the ordinary repair path below,
             // even when their fate metadata is unchanged.
             *terminal_fate_persisted = true;
@@ -201,7 +201,7 @@ where
     }
 
     /// Return locally visible current cells for one row.
-    pub(super) async fn validate_exclusive_commit_unit(
+    pub(super) async fn validate_serializable_commit_unit(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -370,7 +370,7 @@ where
         Ok(predicate.shape_id == shape.shape_id() && predicate.binding_id == binding.binding_id())
     }
 
-    /// Whether an exclusive predicate read no longer returns what the
+    /// Whether a serializable predicate read no longer returns what the
     /// transaction read. Every row the predicate returns now, evaluated as the
     /// transaction's permission subject, must be one the transaction proved
     /// it read; otherwise a row appeared or changed into the result since. A
@@ -415,7 +415,7 @@ where
             .any(|(row, _)| proven.contains(&row) && !now.contains(&row)))
     }
 
-    /// Whether an exclusive aggregate read no longer returns the result the
+    /// Whether a serializable aggregate read no longer returns the result the
     /// transaction recorded (garden-co/jazz#3768). The authority re-runs the
     /// aggregate as the transaction's permission subject over its current
     /// global state and compares the canonical `jazz.aggregate-read-result.v1`

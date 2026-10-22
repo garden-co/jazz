@@ -2302,45 +2302,45 @@ fn worker_relay_preserves_branch_witnesses_for_strict_reads() {
 /// main thread asks its durable worker relay for each sibling as a Global read.
 ///
 /// ```text
-/// alice ──exclusive org/todo/check/note──► core
+/// alice ──serializable org/todo/check/note──► core
 /// browser main ──Global sibling query──► worker ──► core
 /// ```
 ///
-/// The core must accept and persist the whole exclusive bundle before the
+/// The core must accept and persist the whole serializable bundle before the
 /// relay extends its projection for each sibling. Besides the view-scoped
 /// cardinality contract, this keeps the deep authoritative-ingest path on a
 /// normal host thread rather than relying on an enlarged test stack. The
 /// ordinary `Db::tick` boundary must therefore remain stack-safe when this
 /// receipt runs on libtest's default 2 MiB worker stack.
-fn view_scoped_exclusive_sibling_global_reads_extend_relay_projection() {
-    exclusive_sibling_global_reads_extend_relay_projection(false, false);
+fn view_scoped_serializable_sibling_global_reads_extend_relay_projection() {
+    serializable_sibling_global_reads_extend_relay_projection(false, false);
 }
 
-/// Alice's exclusive multi-row write traverses the same scope-isolated worker
-/// as her reads. Core must prove the delegated writer's policies for exclusive
-/// transactions too, before validating their exclusive read sets.
+/// Alice's serializable multi-row write traverses the same scope-isolated worker
+/// as her reads. Core must prove the delegated writer's policies for serializable
+/// transactions too, before validating their serializable read sets.
 ///
 /// ```text
-/// alice foreground ──exclusive rows──► worker ──delegated upload──► core
+/// alice foreground ──serializable rows──► worker ──delegated upload──► core
 /// alice foreground ◄────────────── authoritative settlement ──────────┘
 /// ```
 #[test]
-fn worker_relay_admits_exclusive_sibling_write_before_global_reads() {
-    exclusive_sibling_global_reads_extend_relay_projection(true, false);
+fn worker_relay_admits_serializable_sibling_write_before_global_reads() {
+    serializable_sibling_global_reads_extend_relay_projection(true, false);
 }
 
-/// Alice can insert todos and checks but not notes. Relaying the exclusive
+/// Alice can insert todos and checks but not notes. Relaying the serializable
 /// bundle must not bypass the note policy or admit its allowed siblings.
 ///
 /// ```text
-/// alice ──exclusive todo/check/note──► worker ──► core ──whole bundle rejected
+/// alice ──serializable todo/check/note──► worker ──► core ──whole bundle rejected
 /// ```
 #[test]
-fn worker_relay_rejects_exclusive_bundle_when_one_sibling_is_forbidden() {
-    exclusive_sibling_global_reads_extend_relay_projection(true, true);
+fn worker_relay_rejects_serializable_bundle_when_one_sibling_is_forbidden() {
+    serializable_sibling_global_reads_extend_relay_projection(true, true);
 }
 
-fn exclusive_sibling_global_reads_extend_relay_projection(
+fn serializable_sibling_global_reads_extend_relay_projection(
     write_through_worker: bool,
     deny_note: bool,
 ) {
@@ -2395,7 +2395,7 @@ fn exclusive_sibling_global_reads_extend_relay_projection(
     };
     let tx = writer
         .serializable_tx()
-        .expect("open exclusive seed transaction");
+        .expect("open serializable seed transaction");
     let org = tx
         .insert(
             "orgs",
@@ -2430,7 +2430,7 @@ fn exclusive_sibling_global_reads_extend_relay_projection(
             Default::default(),
         )
         .expect("seed note");
-    let tx_id = tx.commit().expect("commit exclusive sibling rows");
+    let tx_id = tx.commit().expect("commit serializable sibling rows");
     let settled = Rc::new(Cell::new(None));
     let observed = Rc::clone(&settled);
     writer.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
@@ -2446,7 +2446,7 @@ fn exclusive_sibling_global_reads_extend_relay_projection(
     assert_eq!(
         settled.get(),
         Some(!deny_note),
-        "exclusive settlement must honor every sibling's policy"
+        "serializable settlement must honor every sibling's policy"
     );
     if deny_note {
         for table in ["orgs", "todos", "checks", "notes"] {
@@ -2455,7 +2455,7 @@ fn exclusive_sibling_global_reads_extend_relay_projection(
                 .expect("prepare authority rows");
             assert!(
                 core.read(&query).expect("read authority rows").is_empty(),
-                "rejected exclusive bundle must not expose {table} siblings"
+                "rejected serializable bundle must not expose {table} siblings"
             );
         }
         return;
@@ -2497,7 +2497,7 @@ fn exclusive_sibling_global_reads_extend_relay_projection(
     }
 
     // Control: the same relay lifecycle already works when every row has its
-    // own mergeable transaction identity. Keep it beside the exclusive case
+    // own mergeable transaction identity. Keep it beside the serializable case
     // so the receipt specifically protects fragment extension, rather than a
     // broader change to strict-Global attachment semantics.
     let merge_org = seeder

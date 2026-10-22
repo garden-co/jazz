@@ -1,7 +1,7 @@
-//! Narrowed exclusive reads of the sources a query reads beyond its root
+//! Narrowed serializable reads of the sources a query reads beyond its root
 //! (garden-co/jazz#3694).
 //!
-//! An exclusive transaction records every table a query reads beyond its root
+//! A serializable transaction records every table a query reads beyond its root
 //! so the authority can re-check it. A whole-table read is always safe, but it
 //! downloads and proves every row the reader can see there, and any write to
 //! that table conflicts the transaction. Joined, included and correlated
@@ -25,7 +25,7 @@
 //! Implicit root references are sync payload that never decides a query's
 //! result, so they record no read. Any other source with no narrowed read is
 //! not read at all: the query fails with
-//! [`Error::UnsupportedExclusiveRead`] naming the read pattern, rather than
+//! [`Error::UnsupportedSerializableRead`] naming the read pattern, rather than
 //! falling back to a read of the whole table, which does not scale.
 
 use super::*;
@@ -39,9 +39,9 @@ pub(in crate::node) struct NarrowedSourceRead {
     pub(in crate::node) binding: Binding,
 }
 
-/// How an exclusive transaction query reads the sources beyond its root.
+/// How a serializable transaction query reads the sources beyond its root.
 #[derive(Clone, Default)]
-pub(in crate::node) struct ExclusiveSourceReads {
+pub(in crate::node) struct SerializableSourceReads {
     /// The narrowed read of each source that decides the result.
     pub(in crate::node) reads: BTreeMap<SourceId, NarrowedSourceRead>,
     /// Implicit root reference sources: sync payload that never decides the
@@ -262,18 +262,18 @@ where
     S: OrderedKvStorage,
 {
     /// The narrowed read of every source of `shape` beyond its root that
-    /// decides its result, keyed by source, for an exclusive transaction
+    /// decides its result, keyed by source, for a serializable transaction
     /// query, and the implicit root reference sources, which are sync payload
-    /// and need no read. Fails with [`Error::UnsupportedExclusiveRead`]
+    /// and need no read. Fails with [`Error::UnsupportedSerializableRead`]
     /// naming the read pattern of the first source that has no narrowed
     /// read. `include_deleted` reads narrow nothing: a narrowed read
     /// correlates only with the root rows that are visible.
-    pub(in crate::node) fn exclusive_source_reads(
+    pub(in crate::node) fn serializable_source_reads(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
         include_deleted: bool,
-    ) -> Result<ExclusiveSourceReads, Error> {
+    ) -> Result<SerializableSourceReads, Error> {
         use crate::node::query_engine::{ClosurePath, RowSetExpr, SourceRole};
         let normalized = self.normalized_row_set_shape(shape, binding)?;
         let payload = normalized
@@ -297,7 +297,7 @@ where
             })
             .collect::<BTreeSet<_>>();
         let Some(first) = sources.first() else {
-            return Ok(ExclusiveSourceReads {
+            return Ok(SerializableSourceReads {
                 reads: BTreeMap::new(),
                 payload,
             });
@@ -315,11 +315,11 @@ where
             .iter()
             .find(|source| !narrowed.reads.contains_key(source))
         {
-            return Err(Error::UnsupportedExclusiveRead(
+            return Err(Error::UnsupportedSerializableRead(
                 narrowed.unsupported_pattern(source, root),
             ));
         }
-        Ok(ExclusiveSourceReads {
+        Ok(SerializableSourceReads {
             reads: narrowed.reads,
             payload,
         })
@@ -414,7 +414,7 @@ where
 
         // Implicit root references are sync payload: they never decide
         // which rows a query returns, so they need no read
-        // (`Self::exclusive_source_reads`).
+        // (`Self::serializable_source_reads`).
         for (include_index, include) in query.includes.iter().enumerate() {
             let mut parent = root.clone();
             for (segment_index, segment) in include.path.split('.').enumerate() {

@@ -5084,7 +5084,7 @@ function contextualError(context: string, error: unknown): Error {
 
 function rejectionCode(message: string): string {
   if (message.includes("AuthorizationDenied")) return "permission_denied";
-  if (message.includes("ExclusiveConflict")) return "serialization_conflict";
+  if (message.includes("SerializationConflict")) return "serialization_conflict";
   if (message.includes("CausalityViolation")) return "causality_violation";
   if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
   if (message.includes("Cascade")) return "cascade_rejected";

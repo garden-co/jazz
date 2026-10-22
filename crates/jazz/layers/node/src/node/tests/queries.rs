@@ -1453,7 +1453,7 @@ fn local_current_from_ahead_index_matches_pending_fold_for_seeded_commits() {
                 1 | 6 => {
                     node.apply_fate_update(
                         tx_id,
-                        Fate::Rejected(RejectionReason::ExclusiveConflict),
+                        Fate::Rejected(RejectionReason::SerializationConflict),
                         None,
                         None,
                     )
@@ -1468,7 +1468,7 @@ fn local_current_from_ahead_index_matches_pending_fold_for_seeded_commits() {
             {
                 node.apply_fate_update(
                     tx_id,
-                    Fate::Rejected(RejectionReason::ExclusiveConflict),
+                    Fate::Rejected(RejectionReason::SerializationConflict),
                     None,
                     None,
                 )
@@ -1593,7 +1593,7 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
     register_shape_binding(&mut core, &shape, &binding);
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -1604,7 +1604,7 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
@@ -1630,7 +1630,7 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 #[test]
 fn view_update_result_set_matches_groove_current_rows_for_seeded_commits() {

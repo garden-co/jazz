@@ -44,20 +44,20 @@ where
         }
     }
 
-    pub(super) async fn transaction_is_exclusive(
+    pub(super) async fn transaction_is_serializable(
         &self,
         id: OpenTransactionId,
     ) -> Result<bool, Error> {
         self.lock_for_transaction_operation(id)
             .await?
-            .transaction_is_exclusive(id)
+            .transaction_is_serializable(id)
             .map_err(Into::into)
     }
 
-    /// The queries an exclusive read of `prepared` in `id` hydrates for the
+    /// The queries a serializable read of `prepared` in `id` hydrates for the
     /// sources it reads beyond its root: each source's narrowed read. Fails
     /// when a source has none.
-    pub(super) async fn exclusive_source_hydration_queries(
+    pub(super) async fn serializable_source_hydration_queries(
         &self,
         id: OpenTransactionId,
         prepared: &PreparedQuery,
@@ -65,7 +65,7 @@ where
     ) -> Result<Vec<Query>, Error> {
         self.lock_for_transaction_operation(id)
             .await?
-            .exclusive_source_hydration_queries(
+            .serializable_source_hydration_queries(
                 prepared.shape(),
                 prepared.binding(),
                 include_deleted,
@@ -834,7 +834,7 @@ where
         } = self.resolve_write_identity(identity)?;
         self.lock_for_transaction_open(id)
             .await?
-            .open_exclusive_with_identity(id, made_by, permission_subject.unwrap_or(made_by))
+            .open_serializable_with_identity(id, made_by, permission_subject.unwrap_or(made_by))
             .await
             .map_err(Into::into)
     }
@@ -882,13 +882,13 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
-                let exclusive = db.transaction_is_exclusive(id).await?;
-                if exclusive {
+                let serializable = db.transaction_is_serializable(id).await?;
+                if serializable {
                     // The id is fixed here so it can be returned synchronously;
                     // only a caller-supplied id gets the create-only check.
                     ensure_transaction_identity(options.identity)?;
-                    ensure_exclusive_target(&options.target)?;
-                    db.stage_exclusive_insert(
+                    ensure_serializable_target(&options.target)?;
+                    db.stage_serializable_insert(
                         id,
                         &table,
                         row,
@@ -921,8 +921,8 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
-                let exclusive = db.transaction_is_exclusive(id).await?;
-                if exclusive {
+                let serializable = db.transaction_is_serializable(id).await?;
+                if serializable {
                     db.serializable_tx_ref(id)
                         .update(&table, row, patch, options)
                         .await
@@ -979,7 +979,7 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
-                let exclusive = db.transaction_is_exclusive(id).await?;
+                let serializable = db.transaction_is_serializable(id).await?;
                 // Typed bindings submit patches without a synchronous preflight.
                 // Preserve complete-insert validation once the owner has resolved
                 // the transaction's staged overlay (raw Rust APIs allow sparse rows).
@@ -989,11 +989,18 @@ where
                     db.validate_complete_insert(&table, &cells)?;
                 }
 
-                if exclusive {
+                if serializable {
                     ensure_transaction_identity(options.identity)?;
-                    ensure_exclusive_view_target(&options.target)?;
-                    db.stage_exclusive_upsert(id, &table, row, cells, options.updated_at_ms, true)
-                        .await
+                    ensure_serializable_view_target(&options.target)?;
+                    db.stage_serializable_upsert(
+                        id,
+                        &table,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                        true,
+                    )
+                    .await
                 } else {
                     db.stage_mergeable_upsert(id, &table, row, cells, options, true)
                         .await
@@ -1014,8 +1021,8 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
-                let exclusive = db.transaction_is_exclusive(id).await?;
-                if exclusive {
+                let serializable = db.transaction_is_serializable(id).await?;
+                if serializable {
                     db.serializable_tx_ref(id)
                         .delete(&table, row, options)
                         .await
@@ -1039,8 +1046,8 @@ where
         self.node.enqueue_transaction_operation(
             id,
             Box::pin(async move {
-                let exclusive = db.transaction_is_exclusive(id).await?;
-                if exclusive {
+                let serializable = db.transaction_is_serializable(id).await?;
+                if serializable {
                     db.serializable_tx_ref(id)
                         .restore(&table, row, cells, options)
                         .await
@@ -1279,7 +1286,7 @@ where
         Ok(rows)
     }
 
-    pub(super) async fn stage_exclusive_insert(
+    pub(super) async fn stage_serializable_insert(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1296,7 +1303,7 @@ where
             // does: a row hidden by read policy is rejected with UPSERT's
             // error, never disclosed as an existing row.
             if self
-                .exclusive_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
+                .serializable_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
                 .await?
                 .is_some()
             {
@@ -1325,7 +1332,7 @@ where
         .map_err(Into::into)
     }
 
-    pub(super) async fn stage_exclusive_update(
+    pub(super) async fn stage_serializable_update(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1335,9 +1342,9 @@ where
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let mut cells = self
-            .exclusive_transaction_target_for_write(tx_id, table, row, "UPDATE", false)
+            .serializable_transaction_target_for_write(tx_id, table, row, "UPDATE", false)
             .await?
-            .expect("exclusive UPDATE requires a visible target");
+            .expect("serializable UPDATE requires a visible target");
         cells.extend(patch);
         self.lock_for_transaction_operation(tx_id)
             .await?
@@ -1354,7 +1361,7 @@ where
         Ok(())
     }
 
-    pub(super) async fn stage_exclusive_upsert(
+    pub(super) async fn stage_serializable_upsert(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1365,7 +1372,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let existing = self
-            .exclusive_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
+            .serializable_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
             .await?;
         if require_complete_insert && existing.is_none() {
             self.validate_complete_insert(table, &patch)?;
@@ -1388,10 +1395,10 @@ where
         Ok(())
     }
 
-    /// Resolve an exclusive mutation target through the identity fixed when
+    /// Resolve a serializable mutation target through the identity fixed when
     /// the transaction opened, then record the corresponding snapshot row or
     /// absence read used by optimistic conflict validation.
-    async fn exclusive_transaction_target_for_write(
+    async fn serializable_transaction_target_for_write(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1403,7 +1410,7 @@ where
         // check: the subject lookup rejects a mergeable id.
         self.lock_for_transaction_operation(tx_id)
             .await?
-            .exclusive_transaction_permission_subject(tx_id)?;
+            .serializable_transaction_permission_subject(tx_id)?;
         self.transaction_target_for_write(tx_id, table, row, operation, allow_absent)
             .await
     }
@@ -1452,7 +1459,7 @@ where
         Ok(target)
     }
 
-    pub(super) async fn stage_exclusive_delete(
+    pub(super) async fn stage_serializable_delete(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1475,7 +1482,7 @@ where
             .map_err(Into::into)
     }
 
-    pub(super) async fn stage_exclusive_restore(
+    pub(super) async fn stage_serializable_restore(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1521,9 +1528,9 @@ where
         let (published, unit) = self
             .lock_for_transaction_commit(open_tx_id)
             .await?
-            .commit_exclusive_bound(open_tx_id, self.next_now_ms())
+            .commit_serializable_bound(open_tx_id, self.next_now_ms())
             .await?;
-        self.finish_exclusive_publication(published, unit).await
+        self.finish_serializable_publication(published, unit).await
     }
 
     /// Reserve the final identity and retain serializable validation,
@@ -1548,15 +1555,15 @@ where
         let status = self.node.enqueue_transaction_commit(
             open_tx_id,
             tx_id,
-            TxKind::Exclusive,
+            TxKind::Serializable,
             Box::pin(async move {
                 let (published, unit) = db
                     .lock_for_transaction_commit(open_tx_id)
                     .await?
-                    .commit_exclusive_bound_at(open_tx_id, tx_id)
+                    .commit_serializable_bound_at(open_tx_id, tx_id)
                     .await?;
                 debug_assert_eq!(published.tx_id, tx_id);
-                let committed = db.finish_exclusive_publication(published, unit).await?;
+                let committed = db.finish_serializable_publication(published, unit).await?;
                 debug_assert_eq!(committed, tx_id);
                 Ok(())
             }),
@@ -1578,12 +1585,12 @@ where
         let (published, unit) = self
             .lock_for_transaction_commit(open_tx_id)
             .await?
-            .commit_exclusive(open_tx_id, author, self.next_now_ms())
+            .commit_serializable(open_tx_id, author, self.next_now_ms())
             .await?;
-        self.finish_exclusive_publication(published, unit).await
+        self.finish_serializable_publication(published, unit).await
     }
 
-    async fn finish_exclusive_publication(
+    async fn finish_serializable_publication(
         &self,
         published: PublishedTransaction,
         unit: SyncMessage,
@@ -1600,18 +1607,18 @@ where
 
     #[doc(hidden)]
     pub async fn open_serializable_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.open_exclusive_handle_for_identity(id, self.identity.author)
+        self.open_serializable_handle_for_identity(id, self.identity.author)
             .await
     }
 
-    async fn open_exclusive_handle_for_identity(
+    async fn open_serializable_handle_for_identity(
         &self,
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
         self.lock_for_transaction_open(id)
             .await?
-            .open_exclusive_for_identity(id, author)
+            .open_serializable_for_identity(id, author)
             .await
             .map_err(Into::into)
     }

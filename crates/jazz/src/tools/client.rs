@@ -811,7 +811,7 @@ impl Backend {
         )
     }
 
-    fn exclusive_write(
+    fn serializable_write(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -829,7 +829,7 @@ impl Backend {
         .map(|_| ())
     }
 
-    fn exclusive_upsert(
+    fn serializable_upsert(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -844,7 +844,7 @@ impl Backend {
         ))
     }
 
-    fn exclusive_update(
+    fn serializable_update(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -859,7 +859,7 @@ impl Backend {
         ))
     }
 
-    fn exclusive_delete(
+    fn serializable_delete(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -1245,7 +1245,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_write(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .serializable_write(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -1286,7 +1286,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_upsert(tx_id, &table, CoreRowUuid(row_id), cells.clone())
+            .serializable_upsert(tx_id, &table, CoreRowUuid(row_id), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -1339,7 +1339,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_update(tx_id, table, CoreRowUuid(*row_id.uuid()), cells.clone())
+            .serializable_update(tx_id, table, CoreRowUuid(*row_id.uuid()), cells.clone())
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -1377,7 +1377,7 @@ impl ClientDb {
         let tx_id = transaction_id;
         inner
             .backend()?
-            .exclusive_delete(tx_id, table, CoreRowUuid(*row_id.uuid()))
+            .serializable_delete(tx_id, table, CoreRowUuid(*row_id.uuid()))
             .map_err(|error| JazzError::Write(error.to_string()))?;
         let tx = inner
             .transactions
@@ -3219,7 +3219,7 @@ fn core_rejection_reason_label(reason: &CoreRejectionReason) -> String {
     match reason {
         CoreRejectionReason::ClientClockTooFarAhead => "client_clock_too_far_ahead".to_owned(),
         CoreRejectionReason::AuthorizationDenied => "authorization_denied".to_owned(),
-        CoreRejectionReason::ExclusiveConflict => "transaction_conflict".to_owned(),
+        CoreRejectionReason::SerializationConflict => "transaction_conflict".to_owned(),
         CoreRejectionReason::CausalityViolation => "causality_violation".to_owned(),
         CoreRejectionReason::Cascade { root } => format!("cascade:{root:?}"),
         CoreRejectionReason::MalformedCommit(reason) => format!("malformed_commit:{reason}"),

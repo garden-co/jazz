@@ -7478,13 +7478,13 @@ mod tests {
         .unwrap();
         core_block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
-        let exclusive = CoreOpenTransactionId::new();
-        core_block_on(owner.begin_serializable(exclusive)).unwrap();
-        core_block_on(view.serializable_tx_ref(exclusive).insert(
+        let serializable = CoreOpenTransactionId::new();
+        core_block_on(owner.begin_serializable(serializable)).unwrap();
+        core_block_on(view.serializable_tx_ref(serializable).insert(
             "items",
             BTreeMap::from([(
                 "label".to_owned(),
-                CoreValue::String("exclusive-kept".to_owned()),
+                CoreValue::String("serializable-kept".to_owned()),
             )]),
             jazz::db::InsertOptions {
                 row_id: Some(CoreRowUuid::from_bytes([2; 16])),
@@ -7492,7 +7492,7 @@ mod tests {
             },
         ))
         .unwrap();
-        core_block_on(owner.commit_serializable_handle(exclusive)).unwrap();
+        core_block_on(owner.commit_serializable_handle(serializable)).unwrap();
 
         // The public NAPI transaction surface binds Alice at begin and addresses
         // subsequent reads through the owner-wide open transaction id.

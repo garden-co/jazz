@@ -2273,8 +2273,8 @@ pub(super) struct StoredTransaction {
 /// Whether a transaction with this status no longer needs its
 /// `jazz_tx_touched_rows` list: a complete mergeable transaction that is
 /// accepted at a seq. Nothing re-sequences, rejects or completes it any more,
-/// so nothing enumerates its versions. An exclusive transaction keeps its list
-/// for complete exclusive payloads, and a view-scoped one keeps it so later
+/// so nothing enumerates its versions. A serializable transaction keeps its list
+/// for complete serializable payloads, and a view-scoped one keeps it so later
 /// fragments can extend and settle the rows it already holds.
 pub(super) fn releases_touched_rows(
     kind: TxKind,
@@ -3751,7 +3751,7 @@ pub(super) enum TransactionRecordWrite {
 /// Stage one transaction's `jazz.tx-record.v2` records: its
 /// `jazz_transactions` record, its `jazz_pending_transactions` record while it
 /// is unsettled and has one, and on insert its `jazz_tx_provenance` record.
-/// The batch that settles an exclusive transaction deletes its pending
+/// The batch that settles a serializable transaction deletes its pending
 /// record.
 pub(super) fn stage_transaction_record(
     authors: &AuthorCodes,
@@ -3792,9 +3792,9 @@ pub(super) fn stage_transaction_record(
     }
     match pending_transaction_values(node_alias, tx, status)? {
         Some(values) => batch.update(PENDING_TRANSACTIONS_TABLE, values),
-        // Only exclusive transactions keep read evidence, so a mergeable
+        // Only serializable transactions keep read evidence, so a mergeable
         // one never has a pending record to delete.
-        None if updating && tx.kind == TxKind::Exclusive => {
+        None if updating && tx.kind == TxKind::Serializable => {
             batch.delete(PENDING_TRANSACTIONS_TABLE, key());
         }
         None => {}
@@ -3828,7 +3828,8 @@ pub(super) fn transaction_record_values(
         Value::U64(node_alias.0),
         Value::String(match tx.kind {
             TxKind::Mergeable => "mergeable".to_owned(),
-            TxKind::Exclusive => "exclusive".to_owned(),
+            // Stored spelling kept from before the rename for format compatibility.
+            TxKind::Serializable => "exclusive".to_owned(),
         }),
         Value::U8(flags),
         Value::U32(tx.n_total_writes),
@@ -3875,7 +3876,7 @@ pub(super) fn transaction_permission_subject(
 
 /// Values of the `jazz_pending_transactions` record of an unsettled
 /// transaction, or `None` when it is settled or has nothing to keep there.
-/// Exclusive read evidence is kept only while the fate is pending
+/// Serializable read evidence is kept only while the fate is pending
 /// (`jazz.exclusive-read-evidence.v1`).
 pub(super) fn pending_transaction_values(
     node_alias: NodeAlias,
@@ -3885,7 +3886,7 @@ pub(super) fn pending_transaction_values(
     if !status.is_unsettled() {
         return Ok(None);
     }
-    let evidence = super::exclusive_read_evidence::evidence_slot_values(
+    let evidence = super::serializable_read_evidence::evidence_slot_values(
         tx,
         matches!(status.fate, Fate::Pending),
     )?;
@@ -3922,7 +3923,8 @@ pub(super) fn rejected_transaction_values(
         Value::U64(node_alias.0),
         Value::String(match tx.kind {
             TxKind::Mergeable => "mergeable".to_owned(),
-            TxKind::Exclusive => "exclusive".to_owned(),
+            // Stored spelling kept from before the rename for format compatibility.
+            TxKind::Serializable => "exclusive".to_owned(),
         }),
         authors.value(tx.made_by)?,
         reason.to_storage_value()?,
@@ -3985,7 +3987,7 @@ pub(super) fn next_fate(current: &Fate, incoming: Fate) -> Result<Fate, Error> {
 }
 
 /// Compare a stored transaction with a redelivered one. The store drops a
-/// transaction's exclusive read evidence once it settles, so a stored copy
+/// transaction's serializable read evidence once it settles, so a stored copy
 /// without it still matches a redelivery that carries it.
 pub(super) fn known_transaction_payload_matches(
     existing: &Transaction,
@@ -4841,7 +4843,7 @@ pub(super) fn validate_canonical_version_parts(branch_key: &BranchKey) -> Result
 pub(super) fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, Error> {
     match value {
         0 => Ok(TxKind::Mergeable),
-        1 => Ok(TxKind::Exclusive),
+        1 => Ok(TxKind::Serializable),
         _ => Err(Error::InvalidStoredValue("unknown tx kind")),
     }
 }

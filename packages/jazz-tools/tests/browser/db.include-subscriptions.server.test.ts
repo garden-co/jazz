@@ -100,12 +100,12 @@ describe("websocket include subscriptions", () => {
    * authority has accepted a serializable transaction. Each attachment
    * needs its own current authority receipt; one must not strand the others.
    *
-   * owner ──exclusive todo──► server
+   * owner ──serializable todo──► server
    * observer ──three Global attachments──► server ──current receipts──► observer
    */
   it("covers concurrent global queries attached after a serializable commit", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("exclusive-then-global-coverage"),
+      uniqueDbName("serializable-then-global-coverage"),
     );
     await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
 
@@ -114,14 +114,14 @@ describe("websocket include subscriptions", () => {
       appId,
       serverUrl,
       adminSecret,
-      "exclusive-then-global-owner",
+      "serializable-then-global-owner",
       sharedSecret,
     );
     const observer = await openDb(
       appId,
       serverUrl,
       adminSecret,
-      "exclusive-then-global-observer",
+      "serializable-then-global-observer",
       sharedSecret,
     );
     await ensureNativeRuntimeAdapterReady(owner);

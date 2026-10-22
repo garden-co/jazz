@@ -47,7 +47,7 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// source, access path, and metadata sidecars of one compiled program.
     pub(super) current_projection_targets: BTreeMap<SourceId, String>,
     /// Whether these sources feed a policy-authorization subplan, which an
-    /// exclusive transaction records no read for (garden-co/jazz#3694).
+    /// serializable transaction records no read for (garden-co/jazz#3694).
     pub(super) policy_subplan: bool,
     /// The candidate transaction's own writes, overlaid on the committed
     /// evidence a write-policy subplan reads (`INV-RLS-9`). Empty for every

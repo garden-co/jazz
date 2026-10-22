@@ -110,7 +110,7 @@ the per-milestone benchmarks that gate individual features.
 | 1   | SaaS app           | query-driven partial sync scales with _relevance_, not data | cold-load bytes vs. naive baseline; core cost vs. subscriber count                                                                        |
 | 2   | Canvas             | realtime mergeable collaboration converges fast and cheap   | cross-participant p95 at tier `none` vs. link-latency floor; history bytes vs. zstd-JSON event log _paired with_ time-travel read latency |
 | 3   | Permissions        | recursive RLS over partial replicas is correct and fast     | revocation-to-disappearance p95 at scale                                                                                                  |
-| 4   | Order processing   | jazz is competitive as a classical serializable database    | max sustained scale factor; exclusive-counters vs. mergeable-counters variant                                                             |
+| 4   | Order processing   | jazz is competitive as a classical serializable database    | max sustained scale factor; serializable-counters vs. mergeable-counters variant                                                          |
 | 5   | Durable stream     | append-heavy streams with tail/resume are trivial on jazz   | history+metadata bytes per appended token vs. log-file floor; append→tail p99                                                             |
 | 6   | Collaborative text | jazz competes with CRDT libraries on real editing traces    | storage ratio vs. durable CRDTs _paired with_ cold-load and time-travel latency                                                           |
 
@@ -714,7 +714,7 @@ Core's behalf.
 ### 4. Globally consistent order processing (TPC-C derived)
 
 _Motivation: jazz used deliberately against its grain — no partial
-replication, no offline, all writes `exclusive`, clients wait for `global`
+replication, no offline, all writes `serializable`, clients wait for `global`
 settlement. Tests whether commit-time validation (two-point predicate
 evaluation over prepared shapes) makes jazz competitive as a classical
 serializable database — and surfaces the OCC hot-row problem on purpose, so
@@ -762,7 +762,7 @@ except terminology: "local store size", not "SQLite size".
    pressure; report abort/retry curves at low/medium/high contention.
 3. **Counter-strategy variant**: identical mix, but
    `yearToDate*`/`paymentCount` counters modeled as **mergeable counter
-   columns** instead of serializable writes. The all-exclusive variant
+   columns** instead of serializable writes. The all-serializable variant
    serializes every payment in a warehouse through the warehouse row
    (first-committer-wins on a hot row — the classic OCC wall, present by
    design); this variant is jazz's intended answer. The side-by-side is the

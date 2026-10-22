@@ -229,7 +229,7 @@ where
         Ok(PublicationOutcome::settled(()))
     }
 
-    /// Finalize a locally-authored pending exclusive commit as the global
+    /// Finalize a locally-authored pending serializable commit as the global
     /// authority, returning the accepted or rejected fate.
     ///
     /// Validation runs against the in-memory commit unit (`tx` + `versions`),
@@ -238,16 +238,16 @@ where
     /// restart (`jazz.exclusive-read-evidence.v1`). This mirrors the foreign
     /// authority path, which validates the arriving commit unit before it is
     /// ingested.
-    pub async fn finalize_local_exclusive_commit(
+    pub async fn finalize_local_serializable_commit(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
     ) -> Result<PublicationOutcome<Fate>, Error> {
         self.require_catalogue_ready()?;
         let tx_id = tx.tx_id;
-        if tx.kind != TxKind::Exclusive {
+        if tx.kind != TxKind::Serializable {
             return Err(Error::UnsupportedCommitUnit(
-                "exclusive self-finalize requires an exclusive transaction",
+                "serializable self-finalize requires a serializable transaction",
             ));
         }
         let stored = self
@@ -256,7 +256,7 @@ where
         if !matches!(stored.fate, Fate::Pending) {
             return Ok(PublicationOutcome::settled(stored.fate));
         }
-        // Locally finalized exclusive commits bypass `ingest_commit_unit_once`,
+        // Locally finalized serializable commits bypass `ingest_commit_unit_once`,
         // so they must still take the common fate-policy path before their
         // optimistic local versions become globally accepted.
         if let Some(reason) =
@@ -274,10 +274,10 @@ where
             return Ok(PublicationOutcome::settled(fate));
         }
         // Validate through the SAME authority path the core uses for an incoming
-        // exclusive commit unit (§3.7): row/absent/predicate reads (INV-TX-16/17/18)
+        // serializable commit unit (§3.7): row/absent/predicate reads (INV-TX-16/17/18)
         // AND per-write first-committer-wins (INV-TX-20). Do not reimplement.
-        if !self.validate_exclusive_commit_unit(&tx, &versions).await? {
-            let fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
+        if !self.validate_serializable_commit_unit(&tx, &versions).await? {
+            let fate = Fate::Rejected(RejectionReason::SerializationConflict);
             self.ingest_rejected_transaction(tx, fate.clone()).await?;
             return Ok(PublicationOutcome::settled(fate));
         }
@@ -372,7 +372,7 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
     ) -> Result<(), Error> {
-        if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
+        if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Serializable {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
         }
         let versions = canonical_versions(versions);
@@ -503,7 +503,7 @@ where
                 .map(PublicationOutcome::settled);
         }
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
-            if tx.kind == TxKind::Exclusive || matches!(existing.fate, Fate::Rejected(_)) {
+            if tx.kind == TxKind::Serializable || matches!(existing.fate, Fate::Rejected(_)) {
                 let matches = if redact_permission_subject {
                     known_transaction_payload_matches_redacted_permission_subject(&existing.tx, &tx)
                 } else {
@@ -617,7 +617,7 @@ where
         }
         // A unit of an unknown kind is refused before anything else is
         // looked up for it.
-        if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive {
+        if tx.kind != TxKind::Mergeable && tx.kind != TxKind::Serializable {
             return Err(Error::UnsupportedCommitUnit("unsupported commit unit kind"));
         }
         if let Some(reason) = Box::pin(self.commit_unit_write_policy_rejection(
@@ -636,10 +636,10 @@ where
                 durability: None,
             }]));
         }
-        if tx.kind == TxKind::Exclusive
-            && !self.validate_exclusive_commit_unit(&tx, &versions).await?
+        if tx.kind == TxKind::Serializable
+            && !self.validate_serializable_commit_unit(&tx, &versions).await?
         {
-            let fate = Fate::Rejected(RejectionReason::ExclusiveConflict);
+            let fate = Fate::Rejected(RejectionReason::SerializationConflict);
             self.ingest_rejected_transaction(tx.clone(), fate.clone()).await?;
             return Ok(PublicationOutcome::settled(vec![SyncMessage::FateUpdate {
                 tx_id: tx.tx_id,
@@ -875,7 +875,7 @@ where
             if first.global_time.is_none() {
                 continue;
             }
-            if first.tx.kind != TxKind::Mergeable && first.tx.kind != TxKind::Exclusive {
+            if first.tx.kind != TxKind::Mergeable && first.tx.kind != TxKind::Serializable {
                 continue;
             }
             let mut unique_versions = BTreeMap::<
@@ -902,7 +902,7 @@ where
                 }
             }
             let version_count = unique_versions.len();
-            if first.tx.kind == TxKind::Exclusive
+            if first.tx.kind == TxKind::Serializable
                 && !view_scoped
                 && usize::try_from(first.tx.n_total_writes).ok() != Some(version_count)
             {
@@ -964,7 +964,7 @@ where
                 tx.contribution_merge.as_ref(),
             )?;
             // A reset may bulk-load only the view-authorized rows of an
-            // exclusive transaction. Preserve that scope marker even when
+            // serializable transaction. Preserve that scope marker even when
             // the redacted write count equals this fragment's length, so a
             // later sibling view can extend the same local projection.
             self.stage_tx_record(

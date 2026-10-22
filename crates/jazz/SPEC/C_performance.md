@@ -107,7 +107,7 @@ the table, the shape, or a per-call derivation instead of the actual change.
   intended to be O(delta), not O(table). The relay whole-table full recompute case has
   been fixed (degenerate system whole-table views stay incremental);
   filtered/join/client views still take the conservative full-diff full recompute
-  on exclusive-sibling drains — measure whether that path needs delta-sizing
+  on serializable-sibling drains — measure whether that path needs delta-sizing
   too.
 - **Cross-scenario levers** (from profiling): avoid per-call
   `prepared_query_plan` lookup/deep hashing; intern result-set table keys (~25%
@@ -241,7 +241,7 @@ Two work items:
    not O(table). Determine whether S4's peers ride the incremental
    receiver path at all, and why incremental cost grows with table
    size (candidates: closure expansion per output row — item 4 below;
-   exclusive-finalize forcing full evaluation; whole-table degenerate
+   serializable-finalize forcing full evaluation; whole-table degenerate
    shape lacking delta translation). This is now the top engine lever
    for the S4-vs-SQLite gap.
 

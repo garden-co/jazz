@@ -77,7 +77,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
     .unwrap();
 
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(
         tx,
         "tasks",
@@ -86,10 +86,10 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         None,
     )
     .unwrap();
-    let (rejected, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
+    let (rejected, _unit) = core.commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     core.apply_sync_message_settled(SyncMessage::FateUpdate {
         tx_id: rejected,
-        fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+        fate: Fate::Rejected(RejectionReason::SerializationConflict),
         global_time: None,
         durability: None,
     })
@@ -495,11 +495,11 @@ fn changed_merge_semantics_start_a_new_physical_column_epoch() {
 }
 
 /// An authority may advance its write schema while a client still has an
-/// exclusive transaction authored under the prior schema. The table's logical
+/// serializable transaction authored under the prior schema. The table's logical
 /// name can have changed, but the content and deletion CAS parents must still
 /// be compared against the shared physical registers.
 #[test]
-fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
+fn old_schema_serializable_cas_follows_renamed_table_physical_registers() {
     let base = schema();
     let renamed_schema = renamed_tasks_schema();
     let renamed = SchemaVersion::new(renamed_schema);
@@ -529,7 +529,7 @@ fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
     let accepted = OpenTransactionId::new();
     let stale = OpenTransactionId::new();
     for (client, tx) in [(&mut accepted_client, accepted), (&mut stale_client, stale)] {
-        client.open_exclusive(tx).unwrap();
+        client.open_serializable(tx).unwrap();
         client
             .tx_write(tx, "todos", target_row, title_cells("replacement"), None)
             .unwrap();
@@ -576,7 +576,7 @@ fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
     .unwrap();
 
     let (_accepted_id, accepted_unit) = accepted_client
-        .commit_exclusive_settled(accepted, AuthorSubject::SYSTEM, 12)
+        .commit_serializable_settled(accepted, AuthorSubject::SYSTEM, 12)
         .unwrap();
     let [accepted_fate] = core
         .apply_sync_message_settled(accepted_unit)
@@ -595,7 +595,7 @@ fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
     // exactly the pre-rename parents, so it must be rejected after the first
     // one advanced both shared physical registers.
     let (_stale_id, stale_unit) = stale_client
-        .commit_exclusive_settled(stale, AuthorSubject::SYSTEM, 13)
+        .commit_serializable_settled(stale, AuthorSubject::SYSTEM, 13)
         .unwrap();
     let [stale_fate] = core
         .apply_sync_message_settled(stale_unit)
@@ -605,7 +605,7 @@ fn old_schema_exclusive_cas_follows_renamed_table_physical_registers() {
     assert!(matches!(
         stale_fate,
         SyncMessage::FateUpdate {
-            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            fate: Fate::Rejected(RejectionReason::SerializationConflict),
             ..
         }
     ));

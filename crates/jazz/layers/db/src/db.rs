@@ -1673,7 +1673,7 @@ impl From<TxKind> for TransactionKind {
     fn from(kind: TxKind) -> Self {
         match kind {
             TxKind::Mergeable => Self::Mergeable,
-            TxKind::Exclusive => Self::Serializable,
+            TxKind::Serializable => Self::Serializable,
         }
     }
 }
@@ -2533,7 +2533,7 @@ where
     }
     for (tx_id, unit) in uploads {
         if outbox_units.insert(tx_id) {
-            // Durable recovery omits exclusive snapshot/read evidence. A live
+            // Durable recovery omits serializable snapshot/read evidence. A live
             // sibling may already retain the exact authored unit; never
             // replace that unit with its redacted history replay.
             queue_pending_upload_in(outbox, tx_id, Some(unit));
@@ -3949,7 +3949,7 @@ fn ensure_transaction_identity(identity: WriteIdentity) -> Result<(), Error> {
     ))
 }
 
-fn ensure_exclusive_target(target: &ExactWriteTarget) -> Result<(), Error> {
+fn ensure_serializable_target(target: &ExactWriteTarget) -> Result<(), Error> {
     if *target != ExactWriteTarget::Root {
         return Err(Error::new(
             ErrorCode::Schema,
@@ -3959,7 +3959,7 @@ fn ensure_exclusive_target(target: &ExactWriteTarget) -> Result<(), Error> {
     Ok(())
 }
 
-fn ensure_exclusive_view_target(target: &WriteTarget) -> Result<(), Error> {
+fn ensure_serializable_view_target(target: &WriteTarget) -> Result<(), Error> {
     if *target != WriteTarget::Root {
         return Err(Error::new(
             ErrorCode::Schema,
@@ -4494,12 +4494,12 @@ where
         options: InsertOptions,
     ) -> Result<RowUuid, Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_target(&options.target)?;
+        ensure_serializable_target(&options.target)?;
         let row = options
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
         self.db()
-            .stage_exclusive_insert(
+            .stage_serializable_insert(
                 self.tx_id(),
                 table,
                 row,
@@ -4520,9 +4520,9 @@ where
         options: UpdateOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_view_target(&options.target)?;
+        ensure_serializable_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_update(self.tx_id(), table, row, patch, options.updated_at_ms)
+            .stage_serializable_update(self.tx_id(), table, row, patch, options.updated_at_ms)
             .await
     }
 
@@ -4535,9 +4535,9 @@ where
         options: UpsertOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_view_target(&options.target)?;
+        ensure_serializable_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_upsert(
+            .stage_serializable_upsert(
                 self.tx_id(),
                 table,
                 row,
@@ -4551,9 +4551,9 @@ where
     /// Stage a soft delete.
     async fn delete(&self, table: &str, row: RowUuid, options: DeleteOptions) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_view_target(&options.target)?;
+        ensure_serializable_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_delete(self.tx_id(), table, row, options.updated_at_ms)
+            .stage_serializable_delete(self.tx_id(), table, row, options.updated_at_ms)
             .await
     }
 
@@ -4566,7 +4566,7 @@ where
         options: RestoreOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_target(&options.target)?;
+        ensure_serializable_target(&options.target)?;
         let cells = cells.ok_or_else(|| {
             Error::new(
                 ErrorCode::Schema,
@@ -4574,7 +4574,7 @@ where
             )
         })?;
         self.db()
-            .stage_exclusive_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
+            .stage_serializable_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 }

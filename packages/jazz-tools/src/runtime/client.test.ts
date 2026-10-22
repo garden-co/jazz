@@ -1005,11 +1005,11 @@ describe("JazzClient runtime transaction waits", () => {
   it("waits for connected serializable transactions at the global tier", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const handle = new SerializableWriteHandle("transaction-exclusive" as TxId, client);
+    const handle = new SerializableWriteHandle("transaction-serializable" as TxId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-exclusive", "global");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "global");
   });
 
   it("waits for local-only serializable transactions at the local tier", async () => {
@@ -1018,11 +1018,11 @@ describe("JazzClient runtime transaction waits", () => {
       ...makeContext(),
       serverUrl: undefined,
     });
-    const handle = new SerializableWriteHandle("transaction-exclusive" as TxId, client);
+    const handle = new SerializableWriteHandle("transaction-serializable" as TxId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-exclusive", "local");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "local");
   });
 
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {

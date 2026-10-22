@@ -120,9 +120,9 @@ stability.
 
 **Implementation status.** Stable snapshot reads and the pending-write overlay
 are covered by
-`exclusive_transactions::exclusive_tx_snapshot_read_ignores_newer_commits_after_open`
+`serializable_transactions::serializable_tx_snapshot_read_ignores_newer_commits_after_open`
 and
-`exclusive_transactions::exclusive_tx_pending_writes_overlay_snapshot_for_point_and_table_reads`.
+`serializable_transactions::serializable_tx_pending_writes_overlay_snapshot_for_point_and_table_reads`.
 
 Every transactional read is recorded for that validation. A point read records a
 `RowRead` when the row is present in the snapshot-visible view, or an

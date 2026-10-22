@@ -75,18 +75,18 @@ async function assertWriteHandleContract() {
   // @ts-expect-error Transaction results use the same two write durability tiers.
   callbackResult.wait({ tier: "edge" });
 
-  const exclusiveResult: SerializableWriteResult<string> = await db.serializableTransaction(
+  const serializableResult: SerializableWriteResult<string> = await db.serializableTransaction(
     () => "committed",
   );
-  exclusiveResult.wait();
+  serializableResult.wait();
   // @ts-expect-error Serializable mutations are confirmed by the authority without a tier.
-  exclusiveResult.wait({ tier: "global" });
+  serializableResult.wait({ tier: "global" });
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
-  const exclusiveCommit: SerializableWriteHandle = db.beginSerializableTransaction().commit();
-  exclusiveCommit.wait();
+  const serializableCommit: SerializableWriteHandle = db.beginSerializableTransaction().commit();
+  serializableCommit.wait();
   // @ts-expect-error Serializable commits are confirmed by the authority without a tier.
-  exclusiveCommit.wait({ tier: "global" });
+  serializableCommit.wait({ tier: "global" });
 
   void restored;
   void updated;
@@ -97,7 +97,7 @@ async function assertWriteHandleContract() {
   void streamedUpsert;
   void txId;
   void mergeableCommit;
-  void exclusiveCommit;
+  void serializableCommit;
 }
 
 void assertWriteHandleContract;

@@ -398,7 +398,7 @@ describe("db serializable transaction reads browser integration", () => {
 
   it("reads a cold remote row", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("exclusive-cold-read"),
+      uniqueDbName("serializable-cold-read"),
     );
     await deploy({
       appId,

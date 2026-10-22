@@ -425,13 +425,13 @@ fn ui_thread(
             drain_ui_downstream(&mut ui, &from_worker);
             let row_uuid = row(40 + ((idx / 18) % 8) as u8);
             let tx_id = OpenTransactionId::new();
-            block_on(ui.open_exclusive_for_test(tx_id, ui_author)).unwrap();
+            block_on(ui.open_serializable_for_test(tx_id, ui_author)).unwrap();
             let _ = block_on(ui.tx_read(tx_id, TABLE, row_uuid)).unwrap();
-            let title = format!("exclusive-{idx}");
+            let title = format!("serializable-{idx}");
             block_on(ui.tx_write(tx_id, TABLE, row_uuid, cells(title, ui_owner), None)).unwrap();
             let (tx_id, unit) = block_on(async {
                 let (published, unit) = ui
-                    .commit_exclusive(tx_id, ui_author, 1_000 + idx)
+                    .commit_serializable(tx_id, ui_author, 1_000 + idx)
                     .await
                     .unwrap();
                 let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();

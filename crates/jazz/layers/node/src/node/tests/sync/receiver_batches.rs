@@ -783,7 +783,7 @@ fn receiver_inventory_only_reset_finishes_initial_sync_cadence() {
     assert!(reader.initial_sync_flush_completed);
 }
 
-/// Two independently authorized reset fragments from one exclusive transaction
+/// Two independently authorized reset fragments from one serializable transaction
 /// are coalesced into one atomic local current projection.
 ///
 /// core ──todo fragment + sibling fragment──► alice's relay
@@ -795,7 +795,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
         tx_id,
-        kind: TxKind::Exclusive,
+        kind: TxKind::Serializable,
         n_total_writes: 2,
         made_by: AuthorSubject::system_at(tx_id.node),
         permission_subject: None,
@@ -931,7 +931,7 @@ fn receiver_batch_coalesces_reordered_and_duplicate_view_scoped_fragments() {
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
         tx_id,
-        kind: TxKind::Exclusive,
+        kind: TxKind::Serializable,
         n_total_writes: 1,
         made_by: AuthorSubject::system_at(tx_id.node),
         permission_subject: None,
@@ -1008,7 +1008,7 @@ fn receiver_batch_rejects_conflicting_view_scoped_fragments_atomically() {
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let base_tx = Transaction {
         tx_id,
-        kind: TxKind::Exclusive,
+        kind: TxKind::Serializable,
         n_total_writes: 1,
         made_by: AuthorSubject::system_at(tx_id.node),
         permission_subject: None,
@@ -1824,14 +1824,14 @@ fn assert_reset_authored_columns_conflict(
 // This stays internal because it directly exercises the protocol receiver's
 // single-message fragment assembly boundary.
 #[test]
-fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
+fn sequential_partial_serializable_bundles_index_the_complete_transaction() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
         tx_id,
-        kind: TxKind::Exclusive,
+        kind: TxKind::Serializable,
         n_total_writes: 2,
         made_by: AuthorSubject::system_at(tx_id.node),
         permission_subject: None,
@@ -1859,7 +1859,7 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
 
     for (row_uuid, version) in updates {
         reader
-            .apply_view_update(partial_exclusive_view_update(
+            .apply_view_update(partial_serializable_view_update(
                 subscription,
                 tx.clone(),
                 row_uuid,
@@ -1880,14 +1880,14 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
 }
 
 #[test]
-fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
+fn completing_partial_serializable_transaction_rejects_conflicting_metadata() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     register_whole_table_receiver(&mut reader, "todos");
     let subscription = reader.whole_table_subscription_key("todos").unwrap();
     let tx_id = TxId::new(TxTime::from(10), node(1));
     let tx = Transaction {
         tx_id,
-        kind: TxKind::Exclusive,
+        kind: TxKind::Serializable,
         n_total_writes: 2,
         made_by: AuthorSubject::system_at(tx_id.node),
         permission_subject: None,
@@ -1902,7 +1902,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         .apply_view_update(todos_receiver_reset(subscription))
         .unwrap();
     reader
-        .apply_view_update(partial_exclusive_view_update(
+        .apply_view_update(partial_serializable_view_update(
             subscription,
             tx.clone(),
             row(1),
@@ -1913,7 +1913,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
     let mut conflicting_tx = tx;
     conflicting_tx.made_by = AuthorSubject::for_test_bytes([0xa1; 16]);
     assert!(matches!(
-        reader.apply_view_update(partial_exclusive_view_update(
+        reader.apply_view_update(partial_serializable_view_update(
             subscription,
             conflicting_tx,
             row(2),
@@ -1934,7 +1934,7 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
     );
 }
 
-fn partial_exclusive_view_update(
+fn partial_serializable_view_update(
     subscription: SubscriptionKey,
     tx: Transaction,
     _row_uuid: RowUuid,
@@ -2535,11 +2535,11 @@ fn discarded_pending_identity_survives_reopen_and_later_pending_carrier() {
 }
 
 #[test]
-fn discarded_pending_identity_accepts_redacted_exclusive_read_sets() {
+fn discarded_pending_identity_accepts_redacted_serializable_read_sets() {
     let (_dir, mut reader) = open_node_with_uuid(node(3));
     let tx_id = TxId::new(TxTime::from(11), node(1));
     let mut tx = reset_scope_tx(tx_id, 1);
-    tx.kind = TxKind::Exclusive;
+    tx.kind = TxKind::Serializable;
     tx.row_read_set = Some(Vec::new());
     tx.absent_read_set = Some(Vec::new());
     tx.predicate_read_set = Some(Vec::new());

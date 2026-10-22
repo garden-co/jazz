@@ -3,7 +3,7 @@
 //! tier the caller asked for (garden-co/jazz#3694).
 //!
 //! A partial client's snapshot cut advances with any authority receipt, so
-//! without that hydration an exclusive read evaluates whatever the replica
+//! without that hydration a serializable read evaluates whatever the replica
 //! happens to hold: a row it never received reads as absent, and a row the
 //! authority already deleted still reads as present. Each test drives a Core
 //! shell and real clients over queued wire transports, with the reads issued
@@ -234,7 +234,7 @@ impl Net {
         self.drive(read)
     }
 
-    /// Poll a one-shot local exclusive read without pumping anything,
+    /// Poll a one-shot local serializable read without pumping anything,
     /// reporting `hint` once the read has had its first poll.
     fn read_while(
         &self,
@@ -601,10 +601,10 @@ fn captured_branch_snapshot_remains_readable_after_server_settlement() {
     );
 }
 
-/// A backend that never received an invite still sees it: the exclusive read
+/// A backend that never received an invite still sees it: the serializable read
 /// hydrates at its snapshot even though the cut already covers the invite.
 #[test]
-fn exclusive_read_sees_an_invite_the_backend_never_received() {
+fn serializable_read_sees_an_invite_the_backend_never_received() {
     let net = Net::new(&[0x0a, 0x0b]);
     let invite = net.create_invite(OWNER, "abc");
     net.unrelated_receipt(BACKEND);
@@ -646,7 +646,7 @@ fn revoked_invite_never_adds_a_member() {
     );
 }
 
-/// The revocation lands between the exclusive read and the commit: the read
+/// The revocation lands between the serializable read and the commit: the read
 /// saw a live invite, so the authority must reject the membership.
 #[test]
 fn revocation_after_the_read_rejects_the_redemption() {
@@ -704,11 +704,11 @@ fn a_redemption_on_another_backend_is_seen_as_taken() {
     );
 }
 
-/// Offline, an exclusive read answers from the replica instead of waiting for
+/// Offline, a serializable read answers from the replica instead of waiting for
 /// an authority that cannot answer. The transaction commits locally and the
 /// authority accepts it once it syncs, because every row it read still holds.
 #[test]
-fn offline_prepared_exclusive_commit_succeeds_while_its_reads_hold() {
+fn offline_prepared_serializable_commit_succeeds_while_its_reads_hold() {
     let net = Net::new(&[0x0a, 0x0b]);
     let invite = net.create_invite(OWNER, "abc");
     assert_eq!(
@@ -807,11 +807,11 @@ fn offline_absence_guard_conflicts_when_the_invite_was_taken() {
     assert_eq!(net.members(), 1, "the invite was redeemed only once");
 }
 
-/// An exclusive read waiting on its snapshot hydration stops waiting when
+/// A serializable read waiting on its snapshot hydration stops waiting when
 /// the authority becomes unreachable and answers from the replica; the
 /// transaction still commits because its read holds.
 #[test]
-fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
+fn serializable_read_falls_back_to_the_replica_when_the_link_is_lost() {
     let net = Net::new(&[0x0a, 0x0b]);
     let invite = net.create_invite(OWNER, "abc");
     assert_eq!(
@@ -845,7 +845,7 @@ fn exclusive_read_falls_back_to_the_replica_when_the_link_is_lost() {
 /// A transaction whose snapshot claims no authority state reads its replica
 /// offline and still commits.
 #[test]
-fn offline_exclusive_commit_from_a_genesis_snapshot_is_allowed() {
+fn offline_serializable_commit_from_a_genesis_snapshot_is_allowed() {
     let net = Net::new(&[0x0a]);
     let db = net.db(OWNER);
     db.set_remote_link_hint(RemoteLinkHint::NoServer);
@@ -864,7 +864,7 @@ fn offline_exclusive_commit_from_a_genesis_snapshot_is_allowed() {
         .expect("an offline commit is prepared locally");
 }
 
-/// garden-co/jazz#3696: every way of reading the invite inside an exclusive
+/// garden-co/jazz#3696: every way of reading the invite inside a serializable
 /// transaction must refuse a revoked invite the backend still holds, not only
 /// a filtered row query through the binding entry point.
 fn assert_revoked_invite_never_adds_a_member(check: InviteCheck) {
@@ -1307,7 +1307,7 @@ fn include_conflicts_when_the_included_row_is_revoked() {
 /// pattern it attempted, instead of recording (and hydrating) the whole
 /// joined table.
 #[test]
-fn exclusive_read_through_a_flat_join_is_unsupported() {
+fn serializable_read_through_a_flat_join_is_unsupported() {
     let net = Net::new(&[0x0a, 0x0b]);
     net.create_invite(OWNER, "abc");
 
@@ -1435,7 +1435,7 @@ fn share_cells(note: &str, list: RowUuid) -> BTreeMap<String, Value> {
     ])
 }
 
-/// How an exclusive read reaches a list's shares.
+/// How a serializable read reaches a list's shares.
 #[derive(Clone, Copy, Debug)]
 enum ShareRead {
     /// The list, including its shares (a reverse relation).
@@ -1482,7 +1482,7 @@ fn read_own_list_then_share(shares: SharePolicy, read: ShareRead) -> (usize, Red
             Some(AuthorSubject::for_test_bytes([0x0a; 16])),
         )
         .map(|result| root_rows(&query, result).len())
-        .expect("the exclusive read resolves");
+        .expect("the serializable read resolves");
     net.drive(db.serializable_tx_ref(open).insert(
         "shares",
         share_cells("red", list),

@@ -604,6 +604,7 @@ pub enum ForegroundMutationKind {
 pub enum ForegroundTransactionKind {
     Mergeable,
     // The serialized spelling predates the rename and stays stable.
+    // The serialized name keeps its pre-rename spelling for format compatibility.
     #[serde(rename = "Exclusive")]
     Serializable,
 }
@@ -8462,7 +8463,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn recovered_sibling_cannot_replace_live_exclusive_upload() {
+    async fn recovered_sibling_cannot_replace_live_serializable_upload() {
         let issuer = TestJwtIssuer::start().await;
         let schema = JazzSchema::new(
             &SchemaBuilder::new()
@@ -8646,7 +8647,7 @@ mod tests {
             foreground,
             ForegroundDbCommandRequest::CommitTransaction { transaction },
         ) else {
-            panic!("exclusive commit queues");
+            panic!("serializable commit queues");
         };
         let ForegroundDbCommandResponse::Pending { operation } = fixture.execute(
             foreground,
@@ -8667,7 +8668,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
         // Reopening a sibling recovers pending local history before reconnect.
-        // That recovery must not replace the live exclusive commit's evidence.
+        // That recovery must not replace the live serializable commit's evidence.
         let _sibling = fixture.open_foreground(&admitted);
         fixture.execute(
             foreground,
@@ -16224,7 +16225,7 @@ mod tests {
                 kind: ForegroundTransactionKind::Serializable,
             },
         ) else {
-            panic!("exclusive begin must return a handle");
+            panic!("serializable begin must return a handle");
         };
         assert_eq!(
             response(

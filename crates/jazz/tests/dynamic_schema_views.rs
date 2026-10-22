@@ -515,10 +515,10 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
     });
 }
 
-/// Local-only runtimes enforce the same exclusive parent invariant before a
+/// Local-only runtimes enforce the same serializable parent invariant before a
 /// commit can resolve at Local durability; no remote authority is required.
 #[test]
-fn exclusive_view_commit_rejects_concurrent_local_row_change() {
+fn serializable_view_commit_rejects_concurrent_local_row_change() {
     futures::executor::block_on(async {
         let owner = open_owner(empty_schema()).await;
         let view = owner.register_schema_view(schema("base")).await.unwrap();
