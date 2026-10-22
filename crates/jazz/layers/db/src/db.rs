@@ -2947,6 +2947,16 @@ impl Db {
 struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// What the batch's partial large-value updates built: descriptors
+    /// derived from stored trees and the nodes consolidations prepared,
+    /// trusted and stored whenever the staged writes apply.
+    edits: LargeEdits,
+}
+
+#[derive(Default)]
+pub(crate) struct LargeEdits {
+    pub(crate) derived: Vec<jazz_types::large_values::LargeValueRef>,
+    pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
 }
 
 enum BatchKind {
@@ -3064,6 +3074,22 @@ impl Inner {
         result
     }
 
+    /// [`Inner::apply_all`] trusting and storing what a batch's partial
+    /// large-value updates built.
+    fn apply_with_edits(
+        &mut self,
+        ops: &[(Rc<Schema>, StagedOp)],
+        edits: &LargeEdits,
+        seq: u64,
+    ) -> Result<(), Error> {
+        self.derived.extend(edits.derived.iter().cloned());
+        self.pending_nodes
+            .extend(edits.pending_nodes.iter().cloned());
+        let result = self.apply_all(ops, seq);
+        self.clear_derived();
+        result
+    }
+
     /// The newest committed version of `row` in `table` on any branch.
     fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
         let sql = format!("SELECT MAX(_seq) FROM {} WHERE id = ?1", quote(table));
@@ -3121,6 +3147,7 @@ impl Db {
             Batch {
                 kind,
                 ops: Vec::new(),
+                edits: LargeEdits::default(),
             },
         );
         Ok(())
@@ -3157,7 +3184,7 @@ impl Db {
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
-        self.commit_ops(&batch.ops, sync::Kind::Mergeable)
+        self.commit_ops(&batch, sync::Kind::Mergeable)
     }
 
     /// Serializable commit: every row the batch writes must still be at a
@@ -3193,7 +3220,7 @@ impl Db {
                 })
                 .collect();
             return self.commit_ops(
-                &batch.ops,
+                &batch,
                 sync::Kind::Serializable {
                     snapshot: *snapshot,
                     reads,
@@ -3222,22 +3249,15 @@ impl Db {
                 }
             }
         }
-        self.commit_ops(&batch.ops, sync::Kind::Mergeable)
+        self.commit_ops(&batch, sync::Kind::Mergeable)
     }
 
-    fn commit_ops(
-        &self,
-        ops: &[(Rc<Schema>, StagedOp)],
-        kind: sync::Kind,
-    ) -> Result<TxReceipt, Error> {
-        self.with_upload(|| self.commit_ops_now(ops, kind))
+    fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
-    fn commit_ops_now(
-        &self,
-        ops: &[(Rc<Schema>, StagedOp)],
-        kind: sync::Kind,
-    ) -> Result<TxReceipt, Error> {
+    fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        let ops = &batch.ops;
         let seq = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
@@ -3246,7 +3266,8 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            if let Err(error) = inner.apply_all(ops, seq) {
+            let applied = inner.apply_with_edits(ops, &batch.edits, seq);
+            if let Err(error) = applied {
                 inner
                     .conn
                     .execute_batch("ROLLBACK TO commit_batch; RELEASE commit_batch")
@@ -3275,7 +3296,7 @@ impl Db {
         &self,
         id: OpenTransactionId,
         extra: Option<StagedOp>,
-        read: impl FnOnce(&Inner, Option<Cut>) -> Result<R, Error>,
+        read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner();
         let batch = inner
@@ -3283,6 +3304,10 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let mut ops = batch.ops.clone();
+        let edits = LargeEdits {
+            derived: batch.edits.derived.clone(),
+            pending_nodes: batch.edits.pending_nodes.clone(),
+        };
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
             BatchKind::Serializable { snapshot, .. } => Some(*snapshot),
@@ -3297,8 +3322,8 @@ impl Db {
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
         let result = inner
-            .apply_all(&ops, own)
-            .and_then(|()| read(&inner, snapshot.map(|seq| Cut { seq, own })));
+            .apply_with_edits(&ops, &edits, own)
+            .and_then(|()| read(&mut inner, snapshot.map(|seq| Cut { seq, own })));
         inner
             .conn
             .execute_batch("ROLLBACK TO overlay; RELEASE overlay")
@@ -3319,6 +3344,35 @@ impl Db {
             .ops
             .push((schema, op));
         Ok(())
+    }
+
+    /// [`Self::stage`] a write whose large values a partial update built:
+    /// the batch keeps what it built for every later apply.
+    pub(crate) fn stage_with_edits(
+        &self,
+        id: OpenTransactionId,
+        op: StagedOp,
+        edits: LargeEdits,
+    ) -> Result<(), Error> {
+        let marks = {
+            let mut inner = self.inner();
+            let batch = inner
+                .batches
+                .get_mut(&id)
+                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            let marks = (batch.edits.derived.len(), batch.edits.pending_nodes.len());
+            batch.edits.derived.extend(edits.derived);
+            batch.edits.pending_nodes.extend(edits.pending_nodes);
+            marks
+        };
+        let staged = self.stage(id, op);
+        if staged.is_err()
+            && let Some(batch) = self.inner().batches.get_mut(&id)
+        {
+            batch.edits.derived.truncate(marks.0);
+            batch.edits.pending_nodes.truncate(marks.1);
+        }
+        staged
     }
 
     fn record_read(&self, id: OpenTransactionId, prepared: &PreparedQuery) -> Result<(), Error> {
@@ -3405,6 +3459,21 @@ impl TxRef<'_> {
     ) -> Result<WriteHandle, Error> {
         self.db
             .stage(self.id, StagedOp::Delete(table.to_owned(), row, opts))?;
+        Ok(WriteHandle { row, seq: 0 })
+    }
+
+    /// Undelete `row`, optionally with replacement content.
+    pub async fn restore(
+        &self,
+        table: &str,
+        row: RowUuid,
+        content: Option<BTreeMap<String, Value>>,
+        opts: RestoreOptions,
+    ) -> Result<WriteHandle, Error> {
+        self.db.stage(
+            self.id,
+            StagedOp::Restore(table.to_owned(), row, content, opts),
+        )?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
