@@ -36,6 +36,10 @@ pub enum Value {
     Bool(bool),
     String(String),
     Bytes(Vec<u8>),
+    /// Engine-owned indirect physical arm. Public result boundaries
+    /// materialize this back into the declared logical scalar type. Box the
+    /// uncommon reference so every ordinary materialized cell stays compact.
+    Large(Box<crate::large_values::LargeValueRef>),
     Uuid(uuid::Uuid),
     EnumTag(u8),
     Tuple(Vec<Value>),
@@ -1834,6 +1838,29 @@ pub(super) fn encode_value_into(
                 bytes,
             )?;
         }
+        (
+            Value::Large(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),
+        ) if value.kind == *kind => bytes.extend(crate::large_values::encode_stored_scalar(
+            *kind,
+            &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+        )?),
+        (Value::Large(value), ValueType::String)
+            if value.kind == crate::large_values::LargeValueKind::String =>
+        {
+            bytes.extend(crate::large_values::encode_stored_scalar(
+                crate::large_values::LargeValueKind::String,
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+            )?)
+        }
+        (Value::Large(value), ValueType::Bytes)
+            if value.kind == crate::large_values::LargeValueKind::Bytes =>
+        {
+            bytes.extend(crate::large_values::encode_stored_scalar(
+                crate::large_values::LargeValueKind::Bytes,
+                &crate::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+            )?)
+        }
         (Value::Uuid(value), ValueType::Uuid) => bytes.extend_from_slice(value.as_bytes()),
         (Value::String(value), ValueType::EnumTag(schema)) => {
             bytes.push(schema.discriminant(value)?)
@@ -1942,22 +1969,40 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             1 => Ok(Value::Bool(true)),
             value => Err(Error::InvalidBool(value)),
         },
-        ValueType::String => String::from_utf8(
-            crate::large_values::inline_scalar_bytes(
-                crate::large_values::LargeValueKind::String,
-                bytes,
-            )?
-            .to_vec(),
+        ValueType::String => match crate::large_values::decode_stored_scalar(
+            crate::large_values::LargeValueKind::String,
+            bytes,
         )
-        .map(Value::String)
-        .map_err(|_| Error::InvalidUtf8),
-        ValueType::Bytes => Ok(Value::Bytes(
-            crate::large_values::inline_scalar_bytes(
-                crate::large_values::LargeValueKind::Bytes,
-                bytes,
-            )?
-            .to_vec(),
-        )),
+        .map_err(|error| match error {
+            crate::large_values::Error::InvalidUtf8 => Error::InvalidUtf8,
+            other => Error::Scalar(other),
+        })? {
+            crate::large_values::StoredScalar::Primitive(bytes) => String::from_utf8(bytes)
+                .map(Value::String)
+                .map_err(|_| Error::InvalidUtf8),
+            crate::large_values::StoredScalar::Chunked(value)
+                if value.kind == crate::large_values::LargeValueKind::String =>
+            {
+                Ok(Value::Large(Box::new(value)))
+            }
+            crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            }),
+        },
+        ValueType::Bytes => match crate::large_values::decode_stored_scalar(
+            crate::large_values::LargeValueKind::Bytes,
+            bytes,
+        )? {
+            crate::large_values::StoredScalar::Primitive(bytes) => Ok(Value::Bytes(bytes)),
+            crate::large_values::StoredScalar::Chunked(value)
+                if value.kind == crate::large_values::LargeValueKind::Bytes =>
+            {
+                Ok(Value::Large(Box::new(value)))
+            }
+            crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
+                expected: value_type.clone(),
+            }),
+        },
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)) => {
             String::from_utf8(bytes.to_vec())
                 .map(Value::String)
@@ -1970,13 +2015,20 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
             Ok(Value::U32(u32::from_le_bytes(read_exact::<4>(bytes)?)))
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
-            let bytes = crate::large_values::inline_scalar_bytes(*kind, bytes)?;
-            match kind {
-                crate::large_values::LargeValueKind::Bytes => Ok(Value::Bytes(bytes.to_vec())),
-                crate::large_values::LargeValueKind::String
-                | crate::large_values::LargeValueKind::Json => String::from_utf8(bytes.to_vec())
-                    .map(Value::String)
-                    .map_err(|_| Error::InvalidUtf8),
+            match crate::large_values::decode_stored_scalar(*kind, bytes)? {
+                crate::large_values::StoredScalar::Primitive(bytes) => match kind {
+                    crate::large_values::LargeValueKind::Bytes => Ok(Value::Bytes(bytes)),
+                    crate::large_values::LargeValueKind::String
+                    | crate::large_values::LargeValueKind::Json => String::from_utf8(bytes)
+                        .map(Value::String)
+                        .map_err(|_| Error::InvalidUtf8),
+                },
+                crate::large_values::StoredScalar::Chunked(value) if value.kind == *kind => {
+                    Ok(Value::Large(Box::new(value)))
+                }
+                crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
+                    expected: value_type.clone(),
+                }),
             }
         }
         ValueType::Uuid => Ok(Value::Uuid(uuid::Uuid::from_bytes(read_exact::<16>(
@@ -2051,15 +2103,16 @@ fn validate_value_inner(
             value => Err(Error::InvalidBool(value)),
         },
         ValueType::String | ValueType::Bytes => {
-            use crate::large_values::LargeValueKind;
+            use crate::large_values::{Error as LargeValueError, LargeValueKind};
             let kind = match value_type {
                 ValueType::String => LargeValueKind::String,
                 ValueType::Bytes => LargeValueKind::Bytes,
                 _ => unreachable!("matched string or bytes value type"),
             };
-            crate::large_values::inline_scalar_bytes(kind, bytes)
-                .map(|_| ())
-                .map_err(Into::into)
+            match crate::large_values::inline_scalar_bytes(kind, bytes) {
+                Ok(_) | Err(LargeValueError::RequiresEvaluation) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::RawString)) => {
             std::str::from_utf8(bytes)
@@ -2071,9 +2124,10 @@ fn validate_value_inner(
             read_exact::<4>(bytes).map(|_| ())
         }
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))) => {
-            crate::large_values::inline_scalar_bytes(*kind, bytes)
-                .map(|_| ())
-                .map_err(Into::into)
+            match crate::large_values::inline_scalar_bytes(*kind, bytes) {
+                Ok(_) | Err(crate::large_values::Error::RequiresEvaluation) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
         }
         ValueType::Uuid => read_exact::<16>(bytes).map(|_| ()),
         ValueType::EnumTag(schema) => {
@@ -2383,6 +2437,20 @@ pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
             Value::U32(_),
             ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned { .. })),
         ) => Ok(()),
+        (
+            Value::Large(value),
+            ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(kind))),
+        ) if value.kind == *kind => Ok(()),
+        (Value::Large(value), ValueType::String)
+            if value.kind == crate::large_values::LargeValueKind::String =>
+        {
+            Ok(())
+        }
+        (Value::Large(value), ValueType::Bytes)
+            if value.kind == crate::large_values::LargeValueKind::Bytes =>
+        {
+            Ok(())
+        }
         (Value::F64(value), ValueType::F64) if !value.is_nan() => Ok(()),
         (Value::F64(_), ValueType::F64) => Err(Error::InvalidF64NaN),
         (Value::String(value), ValueType::EnumTag(schema)) => {

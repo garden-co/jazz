@@ -5775,7 +5775,7 @@ impl MigrationLens {
 fn validate_protocol_lens_defaults(table_lenses: &[TableLens]) -> Result<(), &'static str> {
     fn valid(value: &Value) -> bool {
         match value {
-            Value::Record(_) | Value::Enum(_) => false,
+            Value::Large(_) | Value::Record(_) | Value::Enum(_) => false,
             Value::Tuple(values) | Value::Array(values) => values.iter().all(valid),
             Value::Nullable(Some(value)) => valid(value),
             _ => true,
@@ -6144,6 +6144,15 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::U48(_) => {
             panic!("U48 is an engine-owned stamp width, not a Jazz protocol value")
+        }
+        Value::Large(value) => {
+            bytes.push(15);
+            let encoded = jazz_types::large_values::encode_stored_scalar(
+                value.kind,
+                &jazz_types::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+            )
+            .expect("admitted large descriptor has canonical encoding");
+            put_bytes(bytes, &encoded);
         }
     }
 }

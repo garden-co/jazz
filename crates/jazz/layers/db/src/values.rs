@@ -92,6 +92,7 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Bool(v) => Sql::Integer(*v as i64),
         Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
         Value::Bytes(v) => Sql::Text(crate::large::inline_bytes(v)),
+        Value::Large(v) => Sql::Text(crate::large::chunked_cell(v)?),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),

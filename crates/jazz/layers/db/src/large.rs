@@ -263,6 +263,19 @@ impl Chunks {
         }
     }
 
+    /// Cache a prepared value's nodes ahead of storing them.
+    pub(crate) fn cache_pinned(&self, prepared: &lv::PreparedLargeValue) {
+        for chunk in &prepared.staged_chunks {
+            self.put(
+                &ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator,
+                },
+                Bytes::from(chunk.encoded.clone()),
+            );
+        }
+    }
+
     /// Forget a reclaimed node.
     pub(crate) fn forget(&self, locator: &[u8; 32]) {
         let mut state = self.state.lock().expect("chunk cache");
@@ -286,6 +299,11 @@ impl Chunks {
         }
         state.bytes += released;
         state.evict();
+    }
+
+    /// Whether the cache is the store's only readable copy of its nodes.
+    pub(crate) fn in_memory(&self) -> bool {
+        self.state.lock().expect("chunk cache").budget.is_none()
     }
 
     /// The chunks statements needed since the last call.
@@ -592,23 +610,35 @@ pub(crate) fn store(
     chunks: &Chunks,
     prepared: &lv::PreparedLargeValue,
 ) -> Result<(), Error> {
-    let mut insert = conn
+    for chunk in &prepared.staged_chunks {
+        store_chunk(conn, Some(chunks), chunk)?;
+    }
+    Ok(())
+}
+
+/// Store one node (children before parents), caching it pinned when
+/// `cache` is given. A new branch counts one reference on each child.
+fn store_chunk(
+    conn: &Connection,
+    cache: Option<&Chunks>,
+    chunk: &lv::StagedChunk,
+) -> Result<(), Error> {
+    let locator = chunk.node_ref.locator.as_bytes();
+    let hash = chunk.node_ref.object_hash.0;
+    let inserted = conn
         .prepare_cached(
             "INSERT INTO _jazz_lv_node (locator, hash, bytes) VALUES (?1, ?2, ?3) \
              ON CONFLICT (locator) DO NOTHING",
         )
-        .map_err(storage)?;
-    let mut fresh = Vec::new();
-    for chunk in &prepared.staged_chunks {
-        let locator = chunk.node_ref.locator.as_bytes();
-        let hash = chunk.node_ref.object_hash.0;
-        let inserted = insert
-            .execute(rusqlite::params![
+        .and_then(|mut insert| {
+            insert.execute(rusqlite::params![
                 locator.as_slice(),
                 hash.as_slice(),
                 chunk.encoded
             ])
-            .map_err(storage)?;
+        })
+        .map_err(storage)?;
+    if let Some(chunks) = cache {
         chunks.put(
             &ChunkRequest {
                 object_hash: hash,
@@ -616,26 +646,92 @@ pub(crate) fn store(
             },
             Bytes::from(chunk.encoded.clone()),
         );
-        if inserted == 1 {
-            fresh.push(chunk);
-        }
     }
-    let mut reference = conn
-        .prepare_cached("UPDATE _jazz_lv_node SET refs = refs + 1 WHERE locator = ?1")
-        .map_err(storage)?;
-    for chunk in fresh {
-        let node =
-            lv::decode_node_untyped_authenticated(chunk.node_ref.object_hash, &chunk.encoded)
-                .map_err(corrupt)?;
-        if let ChunkNode::Branch { children, .. } = node {
-            for child in children {
-                reference
-                    .execute([child.node_ref.locator.as_bytes().as_slice()])
-                    .map_err(storage)?;
-            }
+    if inserted == 0 {
+        return Ok(());
+    }
+    let node = lv::decode_node_untyped_authenticated(chunk.node_ref.object_hash, &chunk.encoded)
+        .map_err(corrupt)?;
+    if let ChunkNode::Branch { children, .. } = node {
+        let mut reference = conn
+            .prepare_cached("UPDATE _jazz_lv_node SET refs = refs + 1 WHERE locator = ?1")
+            .map_err(storage)?;
+        for child in children {
+            reference
+                .execute([child.node_ref.locator.as_bytes().as_slice()])
+                .map_err(storage)?;
         }
     }
     Ok(())
+}
+
+/// Chunk `reader` into stored nodes without holding the value whole, and
+/// hold the root with a staging receipt until [`release_receipt`]. Outside
+/// a transaction the nodes commit at once and a file store reads them back
+/// from the file, so they are not cached; an in-memory store (whose cache
+/// is its only readable copy) or an open transaction caches them pinned.
+pub(crate) fn stream(
+    conn: &Connection,
+    chunks: &Chunks,
+    kind: LargeValueKind,
+    reader: impl std::io::Read,
+) -> Result<LargeValueRef, Error> {
+    let cache = (!conn.is_autocommit() || chunks.in_memory()).then_some(chunks);
+    conn.execute_batch("SAVEPOINT jazz_lv_stream")
+        .map_err(storage)?;
+    let mut failure = None;
+    let streamed = lv::prepare_streaming(kind, reader, |chunk| {
+        store_chunk(conn, cache, &chunk).map_err(|error| {
+            failure = Some(error);
+            // The real cause is in `failure`.
+            lv::Error::MalformedNode
+        })
+    });
+    let value = match streamed {
+        Ok((value, _)) => conn
+            .execute(
+                "INSERT INTO _jazz_lv_root (root, staged) VALUES (?1, 1) \
+                 ON CONFLICT (root) DO UPDATE SET staged = staged + 1",
+                [value.root.locator.as_bytes().as_slice()],
+            )
+            .map(|_| value)
+            .map_err(storage),
+        Err(error) => {
+            Err(failure.unwrap_or_else(|| Error::new(ErrorCode::WriteRejected, error.to_string())))
+        }
+    };
+    match value {
+        Ok(value) => {
+            conn.execute_batch("RELEASE jazz_lv_stream")
+                .map_err(storage)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK TO jazz_lv_stream; RELEASE jazz_lv_stream");
+            Err(error)
+        }
+    }
+}
+
+/// Spend the staging receipt [`stream`] issued for `root`. Once no cell
+/// references it either, the tree is queued for reclamation.
+pub(crate) fn release_receipt(conn: &Connection, root: &LargeValueRef) -> Result<(), Error> {
+    conn.execute(
+        "UPDATE _jazz_lv_root SET staged = staged - 1 WHERE root = ?1 AND staged > 0",
+        [root.root.locator.as_bytes().as_slice()],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Whether the root `value` names is stored here.
+pub(crate) fn root_is_local(conn: &Connection, value: &LargeValueRef) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM _jazz_lv_node WHERE locator = ?1)",
+        [value.root.locator.as_bytes().as_slice()],
+        |r| r.get(0),
+    )
+    .map_err(storage)
 }
 
 /// Delete up to `budget` unreferenced nodes. A root is reclaimed once no
