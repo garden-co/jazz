@@ -399,6 +399,27 @@ fn session_batches_preserve_permissions_on_reads_and_commit() {
             .unwrap()
             .is_none()
     );
+    // Partial edits must read as the batch's session too, before deriving bytes.
+    let error = block_on(
+        db.serializable_tx_ref(mallory)
+            .update_with_large_value_mutations(
+                "files",
+                row(2),
+                BTreeMap::new(),
+                vec![jazz::db::LargeValueUpdate::Splice {
+                    column: "ciphertext".to_owned(),
+                    within: jazz::db::LargeValueUpdatePage::Bytes { from: 0, to: 1 },
+                    splices: vec![jazz::db::LargeValueUpdateSplice {
+                        at: 0,
+                        delete: 1,
+                        insert: vec![0],
+                    }],
+                }],
+                Default::default(),
+            ),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotObserved);
     let mut staged = stage(
         &db,
         3,
