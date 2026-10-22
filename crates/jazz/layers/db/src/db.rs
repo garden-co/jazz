@@ -42,9 +42,7 @@ pub(crate) mod sync;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
-use crate::values::{
-    Schema, Sql, Table, from_sql, quote, sql_literal, storage, to_sql, unsupported,
-};
+use crate::values::{Schema, Sql, Table, from_sql, quote, storage, to_sql, unsupported};
 pub use sync::{
     Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RemoteLinkHint,
     SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream,
@@ -431,6 +429,41 @@ impl Stamp {
 
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
+/// The application tables a store holds, by their stored columns.
+fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()
+        })
+        .map_err(storage)?;
+    let mut tables = BTreeMap::new();
+    for name in names {
+        if name.starts_with("_jazz") || name.starts_with("sqlite_") || name.ends_with("__h") {
+            continue;
+        }
+        let columns: Vec<String> = conn
+            .prepare(&format!("PRAGMA table_info({})", quote(&name)))
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get(1))?
+                    .collect::<Result<_, _>>()
+            })
+            .map_err(storage)?;
+        let columns = columns
+            .into_iter()
+            .filter(|column| !matches!(column.as_str(), "rid" | "id" | "_b" | "_seq" | "_del"))
+            .collect();
+        tables.insert(name.clone(), Table::stored_only(name, columns));
+    }
+    Ok(Schema {
+        tables,
+        jazz: jazz.clone(),
+    })
+}
+
 fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
@@ -486,13 +519,21 @@ impl Db {
         let fresh: i64 = conn
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_jazz_%'", [], |r| r.get(0))
             .map_err(storage)?;
-        if fresh == 0 {
+        // A reopened store keeps every column earlier schemas added; bring
+        // it up to this schema without touching what is already there.
+        let physical = if fresh == 0 {
             conn.execute_batch(&schema.ddl()).map_err(storage)?;
-        }
+            schema.clone()
+        } else {
+            let mut physical = stored_schema(&conn, &config.schema)?;
+            let ddl = physical.union(&schema)?;
+            conn.execute_batch(&ddl).map_err(storage)?;
+            physical
+        };
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
-        for table in schema.tables.keys() {
+        for table in physical.tables.keys() {
             for name in [table.clone(), format!("{table}__h")] {
                 let max: Option<i64> = conn
                     .query_row(
@@ -516,7 +557,7 @@ impl Db {
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner,
-                physical: schema,
+                physical,
                 admitted: vec![config.schema.clone()],
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
@@ -1077,46 +1118,93 @@ impl Db {
         &self,
         current: CurrentWriteSchema,
     ) -> Result<(), Error> {
+        let publication = self
+            .inner()
+            .publications
+            .iter()
+            .find(|publication| publication.version.id == current.schema)
+            .cloned()
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
+        let mut defaults = BTreeMap::new();
+        for table in &publication.lens.table_lenses {
+            if table.source_table != table.target_table {
+                return Err(unsupported("table rename lenses on SQLite"));
+            }
+            for op in &table.ops {
+                match op {
+                    LensOp::AddColumn {
+                        column, default, ..
+                    } => {
+                        defaults.insert(
+                            (table.target_table.clone(), column.clone()),
+                            default.clone(),
+                        );
+                    }
+                    other => return Err(unsupported(format!("lens op {other:?} on SQLite"))),
+                }
+            }
+        }
+        self.activate(publication.version.schema, &defaults)
+    }
+
+    /// Make `schema` the current schema. The stored tables grow to hold it:
+    /// new tables, new columns (`ADD COLUMN ... DEFAULT`, no rows rewritten)
+    /// and new indexes. Columns other schemas added stay, so older clients
+    /// keep their data. Changing a column's type is not supported yet, and a
+    /// new required column needs a default.
+    pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
+        self.activate(schema, &BTreeMap::new())
+    }
+
+    fn activate(
+        &self,
+        schema: JazzSchema,
+        defaults: &BTreeMap<(String, String), Value>,
+    ) -> Result<(), Error> {
         {
             let mut inner = self.inner();
-            let publication = inner
-                .publications
-                .iter()
-                .find(|publication| publication.version.id == current.schema)
-                .cloned()
-                .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-            let mut ddl = String::new();
-            for table in &publication.lens.table_lenses {
-                if table.source_table != table.target_table {
-                    return Err(unsupported("table rename lenses on SQLite"));
-                }
-                for op in &table.ops {
-                    match op {
-                        LensOp::AddColumn {
-                            column, default, ..
-                        } => {
-                            let default = sql_literal(default)?;
-                            for name in [
-                                table.target_table.clone(),
-                                format!("{}__h", table.target_table),
-                            ] {
-                                ddl.push_str(&format!(
-                                    "ALTER TABLE {} ADD COLUMN {} DEFAULT {default};\n",
-                                    quote(&name),
-                                    quote(column)
-                                ));
-                            }
+            let mut target = Schema::new(&schema);
+            for table in target.tables.values_mut() {
+                let stored = inner.physical.tables.get(&table.name);
+                for column in &mut table.columns {
+                    for admitted in &inner.admitted {
+                        let earlier = admitted
+                            .tables()
+                            .iter()
+                            .find(|t| t.name == table.name)
+                            .and_then(|t| t.columns.iter().find(|c| c.name == column.name));
+                        if earlier.is_some_and(|earlier| earlier.column_type != column.ty) {
+                            return Err(unsupported(format!(
+                                "changing the type of {}.{} on SQLite",
+                                table.name, column.name
+                            )));
                         }
-                        other => return Err(unsupported(format!("lens op {other:?} on SQLite"))),
+                    }
+                    if stored.is_some_and(|stored| stored.column(&column.name).is_some()) {
+                        continue;
+                    }
+                    if let Some(default) = defaults.get(&(table.name.clone(), column.name.clone()))
+                    {
+                        column.default = Some(default.clone());
+                    }
+                    if stored.is_some() && column.default.is_none() && !column.nullable() {
+                        return Err(unsupported(format!(
+                            "adding required column {}.{} without a default",
+                            table.name, column.name
+                        )));
                     }
                 }
             }
+            let ddl = inner.physical.union(&target)?;
             inner.conn.execute_batch(&ddl).map_err(storage)?;
-            let schema = Schema::new(&publication.version.schema);
-            // The lens already added the columns; record them physically.
-            let _ = inner.physical.union(&schema)?;
-            inner.owner = Rc::new(schema);
-            inner.admitted.push(publication.version.schema.clone());
+            inner.owner = Rc::new(target);
+            if !inner
+                .admitted
+                .iter()
+                .any(|admitted| admitted.version_id() == schema.version_id())
+            {
+                inner.admitted.push(schema);
+            }
         }
         self.inner().reset_everything();
         Ok(())
