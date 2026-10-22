@@ -357,7 +357,7 @@ fn nullable(column: &crate::values::Column, value: Value) -> Value {
 fn identity_of(inner: &Inner, identity: WriteIdentity) -> Option<AuthorSubject> {
     match who(identity) {
         Who::Session(author) => Some(author),
-        Who::Local => inner.reader(),
+        Who::Local | Who::Attributed(_) => inner.reader(),
     }
 }
 
@@ -901,7 +901,7 @@ impl Db {
             return Err(schema_error("staged streaming requires a root-view target"));
         }
         if matches!(identity, WriteIdentity::Attribution(_)) {
-            return Err(unsupported("attributed staged streaming writes on SQLite"));
+            self.inner().require_attribution_authority()?;
         }
         if cells.contains_key(column) {
             return Err(rejected(

@@ -777,8 +777,8 @@ impl Binding {
 
     // ---- transactions ----
 
-    /// Begin one owner-wide transaction. Transactions bound to another
-    /// identity are not supported yet.
+    /// Begin one owner-wide transaction. Serializable authority batches may
+    /// bind an authenticated session or explicit backend provenance.
     pub fn begin_transaction(
         &self,
         id: &str,
@@ -790,12 +790,29 @@ impl Binding {
         if author.is_some() && attribution.is_some() {
             return Err("transaction identity cannot contain both author and attribution".into());
         }
-        if author.is_some() || attribution.is_some() {
-            return Err(not_supported("transactions bound to another identity"));
-        }
-        match TransactionKind::parse(kind)? {
-            TransactionKind::Mergeable => block_on(self.db.begin_mergeable(id))?,
-            TransactionKind::Serializable => block_on(self.db.begin_serializable(id))?,
+        let identity = match (author, attribution) {
+            (Some(bytes), None) => WriteIdentity::Session(self::author(bytes)?),
+            (None, Some(bytes)) => {
+                self.checked(WriteIdentity::Attribution(self::author(bytes)?))?
+            }
+            _ => WriteIdentity::Database,
+        };
+        match (TransactionKind::parse(kind)?, identity) {
+            (TransactionKind::Mergeable, WriteIdentity::Database) => {
+                block_on(self.db.begin_mergeable(id))?
+            }
+            (TransactionKind::Mergeable, _) => {
+                return Err(not_supported("identity-bound mergeable transactions"));
+            }
+            (TransactionKind::Serializable, WriteIdentity::Database) => {
+                block_on(self.db.begin_serializable(id))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_serializable_for_identity(id, author))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_serializable_for_attribution(id, author))?
+            }
         }
         Ok(())
     }
@@ -826,7 +843,8 @@ impl Binding {
     ) -> HostResult<RowUuid> {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
-        let options = insert_options(options)?;
+        let mut options = insert_options(options)?;
+        options.identity = self.checked(options.identity)?;
         Ok(block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options))?.row_uuid())
     }
 
@@ -842,7 +860,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let options = update_options(options)?;
+        let mut options = update_options(options)?;
+        options.identity = self.checked(options.identity)?;
         block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -863,7 +882,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let options = upsert_options(options)?;
+        let mut options = upsert_options(options)?;
+        options.identity = self.checked(options.identity)?;
         block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -882,7 +902,8 @@ impl Binding {
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let options = delete_options(options)?;
+        let mut options = delete_options(options)?;
+        options.identity = self.checked(options.identity)?;
         block_on(self.db.mergeable_tx_ref(id).delete(table, row, options))?;
         Ok(())
     }
@@ -927,7 +948,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let options = restore_options(options)?;
+        let mut options = restore_options(options)?;
+        options.identity = self.checked(options.identity)?;
         block_on(
             self.db
                 .mergeable_tx_ref(id)
