@@ -5,8 +5,6 @@
 //! durably committed before it replaces the admitted state or is acknowledged.
 
 use serde::{Deserialize, Serialize};
-mod codec;
-pub mod storage;
 
 use std::collections::BTreeMap;
 use uuid::Uuid;
