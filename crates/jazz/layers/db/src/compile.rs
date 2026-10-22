@@ -1670,6 +1670,23 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
     if column == "id" {
         return Ok(format!("{alias}.id"));
     }
+    if let Some((stored, whole)) = crate::values::author_record(column) {
+        // A JSON array of the record's fields, read back by
+        // `values::from_sql`.
+        let identity = "json_array(issuer, subject)";
+        let fields = if whole {
+            format!("json_array(lower(hex(account)), {identity})")
+        } else {
+            identity.to_owned()
+        };
+        let code = match stored {
+            "$deletedBy" => deletion_sql(table, alias, stored),
+            _ => stored_sql(alias, stored),
+        };
+        return Ok(format!(
+            "(SELECT {fields} FROM _jazz_authors WHERE n = {code})"
+        ));
+    }
     if let Some((stored, part)) = crate::values::author_part(column) {
         let code = match stored {
             "$deletedBy" => deletion_sql(table, alias, stored),
@@ -1686,14 +1703,6 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
         return Ok(stored_sql(alias, column));
     }
     if table.column(column).is_none() {
-        if column.starts_with("$createdBy")
-            || column.starts_with("$updatedBy")
-            || column.starts_with("$deletedBy")
-        {
-            return Err(unsupported(format!(
-                "`{column}` (author provenance is readable as `.identity.issuer` and `.identity.subject`)"
-            )));
-        }
         return Err(query_error(format!(
             "unknown column `{}.{column}`",
             table.name
@@ -1887,6 +1896,7 @@ impl Ctx<'_> {
                 if column != "id"
                     && crate::values::elided_as(column).is_none()
                     && crate::values::author_part(column).is_none()
+                    && crate::values::author_record(column).is_none()
                     && crate::large::large_capable(col) =>
             {
                 Term::Large(LargeColumn {
@@ -2164,6 +2174,12 @@ impl Ctx<'_> {
                 OrderDirection::Asc => "ASC",
                 OrderDirection::Desc => "DESC",
             };
+            if crate::values::author_record(&key.column).is_some() {
+                return Err(unsupported(format!(
+                    "ordering by the author record `{}` (order by its parts)",
+                    key.column
+                )));
+            }
             match self.column_term(table, alias, &key.column)? {
                 Term::Large(column) => {
                     any_large = true;

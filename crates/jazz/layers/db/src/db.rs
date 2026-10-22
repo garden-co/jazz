@@ -43,7 +43,9 @@ pub use crate::names::LensEffects;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
-use crate::values::{Schema, Sql, Table, from_sql, quote, storage, to_sql, unsupported};
+use crate::values::{
+    AuthorKey, Schema, Sql, Table, author_key, from_sql, quote, storage, to_sql, unsupported,
+};
 pub use sync::{
     Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
@@ -438,8 +440,8 @@ fn who(identity: WriteIdentity) -> Who {
 
 #[derive(Default)]
 pub(crate) struct AuthorCodes {
-    codes: HashMap<(String, String), i64>,
-    parts: HashMap<i64, (String, String)>,
+    codes: HashMap<AuthorKey, i64>,
+    parts: HashMap<i64, AuthorKey>,
 }
 
 /// Who wrote a row version, and when (Unix ms).
@@ -2030,59 +2032,55 @@ impl Inner {
             Some(stamp) => Ok(stamp.clone()),
             None => Ok(Stamp {
                 at: 0,
-                author: self.author_code(&self.identity.author.principal_parts())?,
+                author: self.author_code(&author_key(&self.identity.author))?,
             }),
         }
     }
 
-    /// The interned code of an author's `(issuer, subject)`. Rows store this
-    /// small integer instead of repeating both strings in every version;
+    /// The interned code of an author's account and principal. Rows store
+    /// this small integer instead of repeating them in every version;
     /// codes are local to this database and resolved back at egress.
-    pub(crate) fn author_code(&self, (issuer, subject): &(String, String)) -> Result<i64, Error> {
-        if let Some(code) = self
-            .authors
-            .borrow()
-            .codes
-            .get(&(issuer.clone(), subject.clone()))
-        {
+    pub(crate) fn author_code(&self, key: &AuthorKey) -> Result<i64, Error> {
+        if let Some(code) = self.authors.borrow().codes.get(key) {
             return Ok(*code);
         }
+        let (account, issuer, subject) = key;
+        let account = account.as_bytes().to_vec();
         self.exec(
-            "INSERT OR IGNORE INTO _jazz_authors (issuer, subject) VALUES (?1, ?2)",
-            rusqlite::params![issuer, subject],
+            "INSERT OR IGNORE INTO _jazz_authors (account, issuer, subject) VALUES (?1, ?2, ?3)",
+            rusqlite::params![account, issuer, subject],
         )
         .map_err(storage)?;
         let code: i64 = self
             .conn
             .query_row(
-                "SELECT n FROM _jazz_authors WHERE issuer = ?1 AND subject = ?2",
-                rusqlite::params![issuer, subject],
+                "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
+                rusqlite::params![account, issuer, subject],
                 |row| row.get(0),
             )
             .map_err(storage)?;
         let mut authors = self.authors.borrow_mut();
-        authors
-            .codes
-            .insert((issuer.clone(), subject.clone()), code);
-        authors
-            .parts
-            .insert(code, (issuer.clone(), subject.clone()));
+        authors.codes.insert(key.clone(), code);
+        authors.parts.insert(code, key.clone());
         Ok(code)
     }
 
-    /// The `(issuer, subject)` an author code stands for.
-    pub(crate) fn author_parts(&self, code: i64) -> Result<(String, String), Error> {
+    /// The account and principal an author code stands for.
+    pub(crate) fn author_parts(&self, code: i64) -> Result<AuthorKey, Error> {
         if let Some(parts) = self.authors.borrow().parts.get(&code) {
             return Ok(parts.clone());
         }
-        let parts: (String, String) = self
+        let (account, issuer, subject): (Vec<u8>, String, String) = self
             .conn
             .query_row(
-                "SELECT issuer, subject FROM _jazz_authors WHERE n = ?1",
+                "SELECT account, issuer, subject FROM _jazz_authors WHERE n = ?1",
                 [code],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(storage)?;
+        let account = uuid::Uuid::from_slice(&account)
+            .map_err(|e| Error::new(ErrorCode::Storage, format!("author account: {e}")))?;
+        let parts = (account, issuer, subject);
         let mut authors = self.authors.borrow_mut();
         authors.codes.insert(parts.clone(), code);
         authors.parts.insert(code, parts.clone());
@@ -3249,7 +3247,7 @@ impl Inner {
         self.last_stamp = (seq, at);
         self.writer = Some(Stamp {
             at,
-            author: self.author_code(&author.principal_parts())?,
+            author: self.author_code(&author_key(&author))?,
         });
         let result = self.apply_op(op, who, seq);
         self.writer = None;

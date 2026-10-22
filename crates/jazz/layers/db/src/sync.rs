@@ -1223,16 +1223,18 @@ impl Inner {
                 cells.push((name, cell));
                 continue;
             }
-            let (issuer, subject) = match cell {
+            let (account, issuer, subject) = match cell {
                 Cell::Int(code) => {
-                    let (issuer, subject) = self.author_parts(code)?;
+                    let (account, issuer, subject) = self.author_parts(code)?;
                     (
+                        Cell::Blob(account.as_bytes().to_vec()),
                         Cell::Text(issuer.into_bytes()),
                         Cell::Text(subject.into_bytes()),
                     )
                 }
-                _ => (Cell::Null, Cell::Null),
+                _ => (Cell::Null, Cell::Null, Cell::Null),
             };
+            cells.push((format!("{name}.account"), account));
             cells.push((format!("{name}.identity.issuer"), issuer));
             cells.push((format!("{name}.identity.subject"), subject));
         }
@@ -1243,27 +1245,25 @@ impl Inner {
     /// The stored cells of an image: author parts back to local codes.
     fn stored_cells(&self, image: &Image) -> Result<Vec<(String, Sql)>, Error> {
         let mut cells = Vec::with_capacity(image.cells.len());
-        let mut parts: BTreeMap<&'static str, (Option<String>, Option<String>)> = BTreeMap::new();
+        type Parts = (Option<uuid::Uuid>, Option<String>, Option<String>);
+        let mut parts: BTreeMap<&'static str, Parts> = BTreeMap::new();
         for (name, cell) in &image.cells {
             let Some((stored, part)) = crate::values::author_part(name) else {
                 cells.push((name.clone(), Sql::from(cell)));
                 continue;
             };
-            let text = match cell {
-                Cell::Text(text) => String::from_utf8(text.clone()).ok(),
-                _ => None,
-            };
             let entry = parts.entry(stored).or_default();
-            if part == "issuer" {
-                entry.0 = text;
-            } else {
-                entry.1 = text;
+            match (part, cell) {
+                ("account", Cell::Blob(bytes)) => entry.0 = uuid::Uuid::from_slice(bytes).ok(),
+                ("issuer", Cell::Text(text)) => entry.1 = String::from_utf8(text.clone()).ok(),
+                ("subject", Cell::Text(text)) => entry.2 = String::from_utf8(text.clone()).ok(),
+                _ => {}
             }
         }
         for (stored, parts) in parts {
             let code = match parts {
-                (Some(issuer), Some(subject)) => {
-                    Sql::Integer(self.author_code(&(issuer, subject))?)
+                (Some(account), Some(issuer), Some(subject)) => {
+                    Sql::Integer(self.author_code(&(account, issuer, subject))?)
                 }
                 _ => Sql::Null,
             };
@@ -1445,7 +1445,7 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, rows BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_shadow (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, image BLOB, PRIMARY KEY (t, id, k));\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
-    CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (issuer, subject));\
+    CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);";

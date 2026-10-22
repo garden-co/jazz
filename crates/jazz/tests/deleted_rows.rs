@@ -287,9 +287,46 @@ fn deletion_metadata_needs_include_deleted_and_a_plain_root() {
     let joined = notes().join_via("tags", "note", []);
     let message = error_of(&db, &joined, deleted());
     assert!(message.contains("in joins"), "{message}");
-    let whole = Query::from("notes").select(["$deletedBy"]);
-    let message = error_of(&db, &whole, deleted());
-    assert!(message.contains("$deletedBy"), "{message}");
+}
+
+/// `$deletedBy` reads as the whole author record (account and identity)
+/// like `$createdBy`, its parts filter, and a live row reads NULL.
+#[test]
+fn deletion_author_reads_as_a_record() {
+    let db = open(notes_schema(), 1, alice());
+    insert(&db, row(1), "gone");
+    insert(&db, row(2), "kept");
+    delete(&db, row(1));
+
+    let query = Query::from("notes").select(["$deletedBy", "$deletedBy.identity"]);
+    let rows = read(&db, &query, deleted());
+    let cell = |row: &CurrentRow, name: &str| -> Option<Vec<Value>> {
+        match row.cells().find(|(n, _)| *n == name).unwrap().1 {
+            Some(Value::Nullable(None)) | None => None,
+            Some(Value::Nullable(Some(value))) => match &**value {
+                Value::Record(record) => Some(record.to_values().unwrap()),
+                other => panic!("{name}: {other:?}"),
+            },
+            other => panic!("{name}: {other:?}"),
+        }
+    };
+    let (issuer, subject) = alice().principal_parts();
+    let identity = vec![Value::String(issuer), Value::String(subject)];
+    let whole = cell(&rows[0], "$deletedBy").expect("the deletion's author");
+    let account = alice()
+        .account_id()
+        .unwrap_or(jazz::account_registry::SYSTEM_ACCOUNT_ID);
+    assert_eq!(whole[0], Value::Uuid(account.0));
+    let Value::Record(whole_identity) = &whole[1] else {
+        panic!("{:?}", whole[1]);
+    };
+    assert_eq!(whole_identity.to_values().unwrap(), identity);
+    assert_eq!(cell(&rows[0], "$deletedBy.identity"), Some(identity));
+    assert_eq!(cell(&rows[1], "$deletedBy"), None);
+    assert_eq!(cell(&rows[1], "$deletedBy.identity"), None);
+
+    let by_account = notes().filter(eq(col("$deletedBy.account"), lit(Value::Uuid(account.0))));
+    assert_eq!(titles(&read(&db, &by_account, deleted())), ["gone"]);
 }
 
 /// Every history version of a deleted row reads the row's current
