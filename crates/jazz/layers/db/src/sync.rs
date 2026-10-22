@@ -531,15 +531,12 @@ pub(crate) struct Session {
     /// False once the client disconnected or its transport failed; the
     /// slot holds nothing and is reused by the next subscriber.
     open: bool,
-    /// Pushed chunk bytes admitted in the current one-second window, and
-    /// when it started (the ingress rate limit).
+    /// Pushed chunk bytes admitted in the current staging-policy window,
+    /// and when it started (the ingress rate limit).
     ingress: (Instant, usize),
     /// Inbound messages held back by the rate limit, in order.
     backlog: VecDeque<SyncMessage>,
 }
-
-/// Pushed large-value bytes one session may store per second.
-const INGRESS_BYTES_PER_SECOND: usize = 256 * 1024 * 1024;
 
 impl Session {
     fn new(transport: Box<dyn Transport>, identity: AuthorSubject) -> Self {
@@ -2355,13 +2352,19 @@ impl Db {
                 if let SyncMessage::PushChunks { nodes } = &message {
                     let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
                     let mut inner = self.inner.borrow_mut();
+                    let policy = inner.staging;
                     let session = &mut inner.sessions[index];
-                    if session.ingress.0.elapsed() >= std::time::Duration::from_secs(1) {
+                    if session.ingress.0.elapsed()
+                        >= std::time::Duration::from_millis(policy.window_ms)
+                    {
                         session.ingress = (Instant::now(), 0);
                     }
-                    // Over the limit: this push and everything after it wait
-                    // for a later tick, so its commit still follows it.
-                    if session.ingress.1 > 0 && session.ingress.1 + bytes > INGRESS_BYTES_PER_SECOND
+                    // Over the staging policy's budget: this push and
+                    // everything after it wait for a later window, so its
+                    // commit still follows it. A first push larger than the
+                    // whole budget is let through rather than held forever.
+                    if session.ingress.1 > 0
+                        && (session.ingress.1 + bytes) as u64 > policy.incoming_bytes_per_window
                     {
                         inbound.push_front(message);
                         session.backlog = inbound;
@@ -2850,7 +2853,8 @@ impl Db {
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
-                let expires = now_ms() + crate::large::RECEIPT_TTL_MS;
+                let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+                let expires = now_ms().saturating_add(max_age);
                 inner
                     .conn
                     .execute_batch("SAVEPOINT jazz_lv_push")
