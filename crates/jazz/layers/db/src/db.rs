@@ -430,11 +430,14 @@ pub(crate) enum Who {
     Local,
     /// A trusted session identity: policies apply now.
     Session(AuthorSubject),
+    /// SYSTEM authority admission with separately recorded provenance.
+    Attributed(AuthorSubject),
 }
 
 fn who(identity: WriteIdentity) -> Who {
     match identity {
         WriteIdentity::Session(author) if author != AuthorSubject::SYSTEM => Who::Session(author),
+        WriteIdentity::Attribution(author) => Who::Attributed(author),
         _ => Who::Local,
     }
 }
@@ -1106,16 +1109,18 @@ impl Db {
             .execute_batch("SAVEPOINT upload_local")
             .map_err(storage)?;
         let result = f();
-        let end = if result.is_ok() {
-            "RELEASE upload_local"
+        if result.is_ok() {
+            self.inner
+                .borrow()
+                .conn
+                .execute_batch("RELEASE upload_local")
+                .map_err(storage)?;
         } else {
-            "ROLLBACK TO upload_local; RELEASE upload_local"
-        };
-        self.inner
-            .borrow()
-            .conn
-            .execute_batch(end)
-            .map_err(storage)?;
+            self.inner
+                .borrow()
+                .rollback_savepoint("upload_local")
+                .map_err(storage)?;
+        }
         result
     }
 
@@ -1147,10 +1152,7 @@ impl Db {
                     (standalone && handle.seq == seq, handle)
                 }
                 Err(error) => {
-                    inner
-                        .conn
-                        .execute_batch("ROLLBACK TO w; RELEASE w")
-                        .map_err(storage)?;
+                    inner.rollback_savepoint("w").map_err(storage)?;
                     inner.changed.borrow_mut().truncate(mark);
                     return Err(error);
                 }
@@ -1208,10 +1210,7 @@ impl Db {
                     Some((seq, tables))
                 }
                 Err(_) => {
-                    inner
-                        .conn
-                        .execute_batch("ROLLBACK TO tx; RELEASE tx")
-                        .map_err(storage)?;
+                    inner.rollback_savepoint("tx").map_err(storage)?;
                     inner.changed.borrow_mut().clear();
                     None
                 }
@@ -2009,6 +2008,16 @@ impl Inner {
         }
     }
 
+    /// A rolled-back savepoint may remove interned authors and allow their
+    /// integer codes to be reused. Neither direction of the cache may outlive
+    /// that rollback, including speculative reads, advice and failed sync.
+    fn rollback_savepoint(&self, name: &str) -> rusqlite::Result<()> {
+        *self.authors.borrow_mut() = AuthorCodes::default();
+        let name = quote(name);
+        self.conn
+            .execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"))
+    }
+
     /// The interned code of an author's `(issuer, subject)`. Rows store this
     /// small integer instead of repeating both strings in every version;
     /// codes are local to this database and resolved back at egress.
@@ -2092,9 +2101,7 @@ impl Inner {
                 Ok(deleted)
             }
             Err(error) => {
-                let _ = self
-                    .conn
-                    .execute_batch("ROLLBACK TO reclaim; RELEASE reclaim");
+                let _ = self.rollback_savepoint("reclaim");
                 Err(error)
             }
         }
@@ -3148,7 +3155,7 @@ impl Batch {
     fn reader(&self) -> Option<AuthorSubject> {
         match who(self.identity) {
             Who::Session(author) => Some(author),
-            Who::Local => None,
+            Who::Local | Who::Attributed(_) => None,
         }
     }
 }
@@ -3224,11 +3231,26 @@ impl Inner {
         self.apply_as(op, Who::Local, seq)
     }
 
+    /// Attribution is only meaningful at the authority: the current upload
+    /// protocol authenticates its writer but carries no separate provenance.
+    fn require_attribution_authority(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM || self.client.is_some() {
+            return Err(unsupported(
+                "backend-attributed writes outside a SYSTEM SQLite authority",
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) => author,
             Who::Local => self.identity.author,
+            Who::Attributed(author) => {
+                self.require_attribution_authority()?;
+                author
+            }
         };
         let (last_seq, last_at) = self.last_stamp;
         let at = if seq == last_seq {
@@ -3378,6 +3400,21 @@ impl Db {
         Ok(())
     }
 
+    /// Open a SYSTEM-authorized batch with separate row provenance. This is
+    /// authority-local; a replica cannot send attributed writes over the
+    /// current wire protocol. Upload capabilities must bind the same author.
+    pub async fn begin_serializable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_authority()?;
+        self.begin_serializable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Attribution(author);
+        Ok(())
+    }
+
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.batches.contains_key(&id) {
@@ -3501,7 +3538,7 @@ impl Db {
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         if self.is_client() && batch.identity != WriteIdentity::Database {
             return Err(unsupported(
-                "session-authored serializable batches on a replica",
+                "identity-bound serializable batches on a replica",
             ));
         }
         self.with_upload(|| self.commit_ops_now(batch, kind))
@@ -3519,10 +3556,7 @@ impl Db {
             let mark = inner.changed.borrow().len();
             let applied = inner.apply_with_edits(ops, &batch.edits, seq, batch.identity);
             if let Err(error) = applied {
-                inner
-                    .conn
-                    .execute_batch("ROLLBACK TO commit_batch; RELEASE commit_batch")
-                    .map_err(storage)?;
+                inner.rollback_savepoint("commit_batch").map_err(storage)?;
                 inner.changed.borrow_mut().truncate(mark);
                 return Err(error);
             }
@@ -3584,10 +3618,7 @@ impl Db {
                     }),
                 )
             });
-        inner
-            .conn
-            .execute_batch("ROLLBACK TO overlay; RELEASE overlay")
-            .map_err(storage)?;
+        inner.rollback_savepoint("overlay").map_err(storage)?;
         inner.changed.borrow_mut().truncate(mark);
         result
     }
