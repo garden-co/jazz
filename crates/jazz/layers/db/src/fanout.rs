@@ -12,6 +12,7 @@
 //! that equality; everything else watches the whole table.
 
 use super::*;
+use crate::schema::history::{history_source_table, is_history_table};
 
 pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
 
@@ -239,8 +240,8 @@ impl Inner {
         read: ReadSpec,
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
-        if crate::schema::history::is_history_table(&prepared.query.table) {
-            return Err(unsupported("history subscriptions on SQLite"));
+        if read.include_deleted && is_history_table(&prepared.query.table) {
+            return Err(unsupported("includeDeleted on history subscriptions"));
         }
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
@@ -390,7 +391,8 @@ impl Inner {
                     .is_ok_and(|t| !t.branch_by.iter().any(|c| c == column))
         };
         let query = &prepared.query;
-        let root = schema.table(&query.table)?;
+        // A history read's rows are its source table's versions.
+        let root = schema.table(history_source_table(&query.table).unwrap_or(&query.table))?;
         // Tables the query itself reaches (joins, arrays, includes,
         // reachability): these always watch the whole table.
         let mut structural = BTreeSet::new();
@@ -1101,7 +1103,8 @@ impl Group {
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
-    query.offset == 0
+    !is_history_table(&query.table)
+        && query.offset == 0
         && query.aggregate.is_none()
         && query.joins.is_empty()
         && query.flat_join.is_none()
@@ -1173,19 +1176,32 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
     delta(true, added, Vec::new(), Vec::new())
 }
 
+/// What identifies a result row across runs: its id, plus its seq for a
+/// history read, whose versions share their row's id.
+type RowKey = (RowUuid, u64);
+
+fn row_key(row: &CurrentRow) -> RowKey {
+    let version = if is_history_table(&row.table) {
+        row.seq
+    } else {
+        0
+    };
+    (row.id, version)
+}
+
 /// The keyed diff of two results, or `None` when nothing changed.
 fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
-    let old: HashMap<RowUuid, (usize, &CurrentRow)> = before
+    let old: HashMap<RowKey, (usize, &CurrentRow)> = before
         .iter()
         .enumerate()
-        .map(|(i, row)| (row.id, (i, row)))
+        .map(|(i, row)| (row_key(row), (i, row)))
         .collect();
-    let new: BTreeSet<RowUuid> = after.iter().map(|row| row.id).collect();
+    let new: BTreeSet<RowKey> = after.iter().map(row_key).collect();
     let moved = moved_rows(before, after, &new);
     let mut added = Vec::new();
     let mut updated = Vec::new();
     for (index, row) in after.iter().enumerate() {
-        match old.get(&row.id) {
+        match old.get(&row_key(row)) {
             None => added.push(SubscriptionOutputRow {
                 row: row.clone(),
                 previous_index: None,
@@ -1194,7 +1210,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
             Some((previous, prior))
                 if prior.cells != row.cells
                     || prior.deleted != row.deleted
-                    || moved.contains(&row.id) =>
+                    || moved.contains(&row_key(row)) =>
             {
                 updated.push(SubscriptionOutputRow {
                     row: row.clone(),
@@ -1208,7 +1224,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
     let removed: Vec<RemovedRow> = before
         .iter()
         .enumerate()
-        .filter(|(_, row)| !new.contains(&row.id))
+        .filter(|(_, row)| !new.contains(&row_key(row)))
         .map(|(index, row)| RemovedRow {
             table: row.table.to_string(),
             row_uuid: row.id,
@@ -1227,17 +1243,17 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
 fn moved_rows(
     before: &[CurrentRow],
     after: &[CurrentRow],
-    kept_after: &BTreeSet<RowUuid>,
-) -> BTreeSet<RowUuid> {
-    let rank: HashMap<RowUuid, usize> = before
+    kept_after: &BTreeSet<RowKey>,
+) -> BTreeSet<RowKey> {
+    let rank: HashMap<RowKey, usize> = before
         .iter()
-        .filter(|row| kept_after.contains(&row.id))
+        .filter(|row| kept_after.contains(&row_key(row)))
         .enumerate()
-        .map(|(rank, row)| (row.id, rank))
+        .map(|(rank, row)| (row_key(row), rank))
         .collect();
-    let kept: Vec<(RowUuid, usize)> = after
+    let kept: Vec<(RowKey, usize)> = after
         .iter()
-        .filter_map(|row| Some((row.id, *rank.get(&row.id)?)))
+        .filter_map(|row| Some((row_key(row), *rank.get(&row_key(row))?)))
         .collect();
     // Patience sorting: `tails[k]` ends the best increasing run of length
     // k + 1; `back` links each element to its predecessor in its run.

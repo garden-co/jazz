@@ -539,3 +539,132 @@ fn uploaded_versions_keep_the_writers_transaction_id() {
         "acceptance times are the authority's"
     );
 }
+
+fn next_delta(
+    subscription: &mut jazz::db::SubscriptionStream,
+) -> (Vec<String>, Vec<String>, usize) {
+    match subscription.try_next_event() {
+        Some(jazz::db::SubscriptionEvent::Delta {
+            added,
+            updated,
+            removed,
+            ..
+        }) => {
+            let added: Vec<CurrentRow> = added.iter().map(|row| (**row).clone()).collect();
+            let updated: Vec<CurrentRow> = updated.iter().map(|row| (**row).clone()).collect();
+            (titles(&added), titles(&updated), removed.len())
+        }
+        other => panic!("expected a delta, got {other:?}"),
+    }
+}
+
+/// A history subscription gains a version when one is accepted, keeps the
+/// versions it has (they share the row's id, so a new version is never
+/// mistaken for an update of an old one), and follows the current row:
+/// deleting it removes every version, restoring brings them back.
+#[test]
+fn history_subscriptions_follow_accepted_versions() {
+    let db = open(notes_schema(), NODE, AuthorSubject::SYSTEM);
+    let note = row(1);
+    insert(&db, note, "first");
+    let prepared = db.prepare_query(&history_of(note)).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(
+        next_delta(&mut subscription),
+        (vec!["first".into()], vec![], 0)
+    );
+
+    update(&db, note, "second");
+    assert_eq!(
+        next_delta(&mut subscription),
+        (vec!["second".into()], vec![], 0)
+    );
+    insert(&db, row(2), "another row");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "another row's write does not touch this history"
+    );
+
+    block_on(db.delete("notes", note, Default::default())).unwrap();
+    assert_eq!(next_delta(&mut subscription), (vec![], vec![], 2));
+    block_on(db.restore("notes", note, None, Default::default())).unwrap();
+    assert_eq!(
+        next_delta(&mut subscription),
+        (vec!["first".into(), "second".into()], vec![], 0)
+    );
+
+    let message = match block_on(db.subscribe(
+        &prepared,
+        ReadOpts {
+            include_deleted: true,
+            ..Default::default()
+        },
+    )) {
+        Err(error) => error.message,
+        Ok(_) => panic!("includeDeleted history subscriptions must be refused"),
+    };
+    assert!(
+        message.contains("includeDeleted on history subscriptions"),
+        "{message}"
+    );
+}
+
+/// A history subscription under a read policy follows the current row's
+/// access: when the note is handed to someone else, its whole history
+/// leaves Bob's result.
+#[test]
+fn history_subscriptions_follow_current_access() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("owner", ColumnType::Text)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::Cmp {
+                                column: "owner".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "user".to_owned(),
+                                    "identity".to_owned(),
+                                    "subject".to_owned(),
+                                ]),
+                            })
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let db = open(schema, NODE, AuthorSubject::SYSTEM);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let note = row(1);
+    let owner = |who: String| BTreeMap::from([("owner".to_owned(), Value::String(who))]);
+    let mut cells = owner(bob.principal_parts().1);
+    cells.insert("title".to_owned(), Value::String("mine".into()));
+    block_on(db.insert(
+        "notes",
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(note),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let prepared = db.prepare_query(&history_of(note)).unwrap();
+    let mut subscription =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), bob)).unwrap();
+    assert_eq!(
+        next_delta(&mut subscription),
+        (vec!["mine".into()], vec![], 0)
+    );
+    block_on(db.update(
+        "notes",
+        note,
+        owner("someone else".into()),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(next_delta(&mut subscription), (vec![], vec![], 1));
+}
