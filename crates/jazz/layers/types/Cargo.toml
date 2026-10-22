@@ -25,4 +25,8 @@ smallvec = { version = "1.11", features = ["serde", "const_generics"] }
 sha2 = "0.10"
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+getrandom = "0.3"
 
+
+[dev-dependencies]
+futures = "0.3"

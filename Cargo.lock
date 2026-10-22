@@ -1674,6 +1674,8 @@ dependencies = [
  "blake3",
  "bytes",
  "ed25519-dalek",
+ "futures",
+ "getrandom 0.3.4",
  "internment",
  "paste",
  "postcard",

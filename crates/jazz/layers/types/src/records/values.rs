@@ -1775,7 +1775,6 @@ impl ValueType {
     }
 }
 
-#[cfg(test)]
 pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
     encode_value_into(&mut bytes, value, value_type)?;
