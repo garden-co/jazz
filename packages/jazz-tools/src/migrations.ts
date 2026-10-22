@@ -727,7 +727,12 @@ function encryptionShapeSignature(
   return JSON.stringify({
     space: [originalName(space), tableRenames?.get(scope) ?? scope],
     columns: columns
-      .map((name) => [originalName(name), columnShapeSignature(definition.columns[name]!)])
+      .map((name) => {
+        const column = definition.columns[name];
+        if (!column || isComputedColumn(column))
+          throw new Error(`Encrypted migration column "${name}" must be a stored column`);
+        return [originalName(name), columnShapeSignature(column)];
+      })
       .sort(([left], [right]) => left!.localeCompare(right!)),
     indexes: Object.keys(indexes ?? {})
       .map((name) => [originalName(name), indexes![name]])
