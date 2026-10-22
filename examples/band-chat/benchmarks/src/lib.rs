@@ -13,10 +13,9 @@ pub use fast_resume::{FastResumeFixture, FastResumeReceipt};
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -205,7 +204,8 @@ fn schema() -> JazzSchema {
                 .fk_column("member", "users")
                 .column("unread", ColumnType::Boolean)
                 .column("last_activity", ColumnType::Timestamp)
-                .index_only(["room", "member", "unread", "last_activity"]),
+                .index_only(["room", "member", "unread", "last_activity"])
+                .composite_index(["unread", "last_activity"]),
         )
         .table(
             TableSchemaBuilder::new("messages")
@@ -213,7 +213,9 @@ fn schema() -> JazzSchema {
                 .fk_column("author", "users")
                 .column("body", ColumnType::Text)
                 .column("sent_at", ColumnType::Timestamp)
-                .index_only(["room", "author", "sent_at"]),
+                .index_only(["room", "author", "sent_at"])
+                .composite_index(["room", "sent_at"])
+                .composite_index(["author", "sent_at"]),
         )
         .build();
     JazzSchema::new(&source).expect("BandChat benchmark schema compiles")
@@ -231,11 +233,8 @@ fn open_db() -> (BenchDb, TableSchema, TableSchema) {
     };
     let messages_table = table("messages");
     let memberships_table = table("memberships");
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xbc; 16]),
             author: AuthorSubject::SYSTEM,

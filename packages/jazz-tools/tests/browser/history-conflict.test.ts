@@ -9,12 +9,12 @@
  * rather than specific LWW winners, making them timing-tolerant.
  */
 
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll, afterAll } from "vitest";
 import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, stopJazzServer, type JazzServerInfo } from "./testing-server.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -66,7 +66,11 @@ describe("History & Conflict Management", () => {
   const ctx = new TestCleanup();
   let testingServer: JazzServerInfo;
   afterEach(() => ctx.cleanup());
-  beforeEach(async () => {
+  afterAll(async () => {
+    if (testingServer) await stopJazzServer(testingServer.serverUrl);
+  });
+  // Cases use fresh clients and distinct row IDs; the deployed schema is shared.
+  beforeAll(async () => {
     testingServer = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
     const { appId, serverUrl, adminSecret } = testingServer;
     await deploy({
