@@ -184,11 +184,13 @@ impl Inner {
             schema: None,
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
-        let mut statement = self.conn.prepare_cached(&compiled.sql).map_err(storage)?;
-        let cell: Option<Sql> = statement
-            .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
-            .optional()
-            .map_err(storage)?;
+        let cell: Option<Sql> = self.with_preps(&compiled.preps, |_| {
+            let mut statement = self.conn.prepare_cached(&compiled.sql).map_err(storage)?;
+            statement
+                .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
+                .optional()
+                .map_err(storage)
+        })?;
         let cell = cell.ok_or_else(|| {
             Error::new(ErrorCode::NotObserved, "large-value cell is not observed")
         })?;
@@ -533,9 +535,7 @@ impl Db {
                         for splice in lower_splices(&inner, &col, &cell, &within, splices)? {
                             let next = inner.edited(table, &col, cell.clone(), splice)?;
                             cell = match &next {
-                                Value::Large(large) => {
-                                    Sql::Text(crate::large::chunked_cell(large)?)
-                                }
+                                Value::Large(large) => inner.large_cell(large)?,
                                 other => to_sql(other)?.ok_or_else(|| unsupported("NaN"))?,
                             };
                             value = Some(next);

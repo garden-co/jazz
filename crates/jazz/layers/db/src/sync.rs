@@ -432,9 +432,6 @@ pub(crate) struct Client {
     requested: BTreeSet<ChunkRequest>,
     /// Nodes to ask for on the next send.
     wanted: BTreeSet<ChunkRequest>,
-    /// Inbound messages held, in order, until the chunks their rows'
-    /// indexed large values need have arrived.
-    held: VecDeque<SyncMessage>,
     /// Nodes pushed for each unsettled commit.
     pushed: HashMap<u64, Vec<jazz_types::large_values::Locator>>,
     /// Requests the server could not answer; never asked again.
@@ -1324,36 +1321,6 @@ impl Inner {
         Ok(())
     }
 
-    /// The nodes `images` need before they are installed: every chunk of a
-    /// large value in an indexed column, so index maintenance never waits.
-    fn prefetch(&self, images: &[Image]) -> Result<Vec<ChunkRequest>, Error> {
-        let client = self.client.as_ref().expect("client");
-        let mut need = Vec::new();
-        for image in images {
-            let Ok(table) = self.physical.table(&image.table) else {
-                continue;
-            };
-            let indexed: BTreeSet<&str> =
-                table.indexes.iter().flatten().map(String::as_str).collect();
-            for (name, cell) in &image.cells {
-                let Cell::Text(raw) = cell else {
-                    continue;
-                };
-                if !indexed.contains(name.as_str()) {
-                    continue;
-                }
-                if let Ok(crate::large::Logical::Chunked(value)) = crate::large::logical(raw) {
-                    need.extend(
-                        crate::large::missing_frontier(&self.conn, &value)?
-                            .into_iter()
-                            .filter(|r| !client.unavailable.contains(r)),
-                    );
-                }
-            }
-        }
-        Ok(need)
-    }
-
     /// The nodes a commit's large values need pushed first: (their
     /// locators, the batches carrying them).
     fn pushes_for(
@@ -1610,7 +1577,6 @@ impl Client {
             answers: HashMap::new(),
             requested: BTreeSet::new(),
             wanted: BTreeSet::new(),
-            held: VecDeque::new(),
             pushed: HashMap::new(),
             unavailable: BTreeSet::new(),
             arrived: false,
@@ -2014,8 +1980,8 @@ impl Db {
                 }
             }
             // Chunks are not ordered with rows; everything else is applied
-            // in arrival order, behind any message still held for chunks.
-            let mut queue = std::mem::take(&mut client.held);
+            // in arrival order.
+            let mut queue = VecDeque::new();
             for message in inbound {
                 match message {
                     SyncMessage::Chunks { nodes, missing } => {
@@ -2024,17 +1990,9 @@ impl Db {
                     other => queue.push_back(other),
                 }
             }
+            // Rows install without their chunks: a chunked cell carries the
+            // sort key its indexes need.
             while let Some(message) = queue.pop_front() {
-                if let SyncMessage::Rows { images } = &message {
-                    let need = inner.prefetch(images)?;
-                    if !need.is_empty() {
-                        let client = inner.client.as_mut().expect("client");
-                        client.wanted.extend(need);
-                        queue.push_front(message);
-                        client.held = std::mem::take(&mut queue);
-                        break;
-                    }
-                }
                 match message {
                     SyncMessage::Rows { images } => {
                         for image in images {
