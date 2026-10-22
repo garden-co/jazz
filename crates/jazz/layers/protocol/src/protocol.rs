@@ -18,7 +18,7 @@ use crate::ids::{
     AuthorSubject, MigrationLensId, NodeUuid, RowAuthor, RowUuid, SchemaLineagePublicationId,
     SchemaVersionId,
 };
-use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::object::{ObjectId, OutputOccurrenceId};
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalTime;
@@ -727,7 +727,7 @@ impl RowVersionRef {
 pub struct PeerPayloadInventory {
     /// Transactions whose full version payload has already been shipped to the
     /// peer and can be referenced by tx id. Partial mergeable or view-scoped
-    /// exclusive coverage must remain explicit `VersionBundle` payloads until
+    /// serializable coverage must remain explicit `VersionBundle` payloads until
     /// the wire protocol grows finer-grained inventory refs.
     pub complete_tx_payloads: Vec<TxId>,
     /// Server-stamped authorization generation for the binding view carried by
@@ -3677,13 +3677,14 @@ mod synthetic_replacement_token_tests {
     }
 }
 
-/// Protocol-visible result member.
+/// Internal result member. Peer source-closure delivery rejects result-member
+/// deltas; this type is retained for local query evaluation and bookkeeping.
 ///
 /// A member identifies one terminal output of a lowered query program. Ordinary
 /// current-row views use [`ResultMemberEntry::Row`] with a compatibility
 /// [`ResultRowEntry`] projection, but the member also carries enough optional
 /// identity to represent deleted-row, historical, branch, and schema-projected
-/// rows without creating a second result-set protocol.
+/// rows within the same internal result model.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub enum ResultMemberEntry {
     /// Real table row membership.
@@ -3714,13 +3715,6 @@ pub enum ResultMemberEntry {
         /// Stable tuple revision.
         revision: Vec<u8>,
     },
-    /// Real row whose occurrence needs typed derivation discriminators.
-    TypedRow {
-        /// Compatibility row payload and legacy ordered source-row identity.
-        row: RealRowMemberEntry,
-        /// Versioned full output occurrence identity.
-        occurrence_key: ResultKey,
-    },
 }
 
 /// Real table row membership, including both the ordinary current-content
@@ -3734,8 +3728,8 @@ pub struct RealRowMemberEntry {
     pub row_uuid: RowUuid,
     /// Stable identity of the rendered output occurrence. This is the root
     /// row for ordinary single-source output and the ordered source tuple for
-    /// a flat join. It deliberately does not include content-version fields,
-    /// so replacements retain their output address.
+    /// a flat join. History roots also include their content transaction.
+    /// Serialized using the complete ResultKey encoding.
     pub occurrence_id: Option<OutputOccurrenceId>,
     /// Visible content transaction, when this member has a content row.
     #[serde(default)]
@@ -3814,8 +3808,8 @@ impl RealRowMemberEntry {
         self
     }
 
-    /// Stable output occurrence identity. Old persisted members without this
-    /// field are normalized to their legacy single-source identity.
+    /// Stable output occurrence identity. Members constructed without an
+    /// explicit occurrence default to their single-source row identity.
     pub fn output_occurrence_id(&self) -> OutputOccurrenceId {
         self.occurrence_id.clone().unwrap_or_else(|| {
             OutputOccurrenceId::single_source(ObjectId::from_uuid(self.row_uuid.0))
@@ -3911,7 +3905,7 @@ impl ResultMemberEntry {
     /// output. Synthetic rows use their synthetic table/relation name.
     pub fn table_name(&self) -> Option<&str> {
         match self {
-            Self::Row(entry) | Self::TypedRow { row: entry, .. } => Some(entry.table.as_str()),
+            Self::Row(entry) => Some(entry.table.as_str()),
             Self::Synthetic { table, .. } => Some(table.as_str()),
             Self::PathTuple { target_table, .. } => Some(target_table.as_str()),
         }
@@ -3920,25 +3914,21 @@ impl ResultMemberEntry {
     /// Return the real-row member payload, when this member is a real row.
     pub fn as_real_row(&self) -> Option<&RealRowMemberEntry> {
         match self {
-            Self::Row(entry) | Self::TypedRow { row: entry, .. } => Some(entry),
+            Self::Row(entry) => Some(entry),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
 
     /// Return the stable rendered-output address for a real-row member.
     pub fn output_occurrence_id(&self) -> Option<OutputOccurrenceId> {
-        match self {
-            Self::TypedRow { occurrence_key, .. } => Some(occurrence_key.as_occurrence().clone()),
-            _ => self
-                .as_real_row()
-                .map(RealRowMemberEntry::output_occurrence_id),
-        }
+        self.as_real_row()
+            .map(RealRowMemberEntry::output_occurrence_id)
     }
 
     /// Return the ordinary current-content projection when this member has one.
     pub fn as_row(&self) -> Option<ResultRowEntry> {
         match self {
-            Self::Row(entry) | Self::TypedRow { row: entry, .. } => entry.row_projection(),
+            Self::Row(entry) => entry.row_projection(),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
@@ -3946,7 +3936,7 @@ impl ResultMemberEntry {
     /// Consume the ordinary row entry when this member is row-shaped.
     pub fn into_row(self) -> Option<ResultRowEntry> {
         match self {
-            Self::Row(entry) | Self::TypedRow { row: entry, .. } => entry.row_projection(),
+            Self::Row(entry) => entry.row_projection(),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
@@ -3960,19 +3950,7 @@ impl From<ResultRowEntry> for ResultMemberEntry {
 
 impl From<RealRowMemberEntry> for ResultMemberEntry {
     fn from(entry: RealRowMemberEntry) -> Self {
-        let occurrence_key = entry
-            .occurrence_id
-            .as_ref()
-            .filter(|occurrence| occurrence.has_typed_discriminators())
-            .cloned()
-            .map(ResultKey::from_occurrence);
-        match occurrence_key {
-            Some(occurrence_key) => Self::TypedRow {
-                row: entry,
-                occurrence_key,
-            },
-            None => Self::Row(entry),
-        }
+        Self::Row(entry)
     }
 }
 
@@ -3990,7 +3968,7 @@ impl PartialEq<ResultMemberEntry> for ResultRowEntry {
 
 /// One exact native row version in a subscription's atomic supporting set.
 ///
-/// No query source occurrence, role or completeness claim crosses this boundary.
+/// Current-winner membership is explicit; query source aliases never cross this boundary.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct SupportingRow {
     /// Permanent physical table identity; logical scan aliases never identify a row.
@@ -4003,6 +3981,9 @@ pub struct SupportingRow {
     pub row: RowUuid,
     /// Exact content or deletion-register version.
     pub version: RowVersionRefEntry,
+    /// This scope admits the version as the current winner of its register.
+    /// Historical support alone does not assert current membership.
+    pub is_current: bool,
 }
 
 impl SupportingRow {
@@ -4112,8 +4093,9 @@ pub enum ProgramFactEntry {
     ReadFrontierSettled(ReadFrontierSettledEntry),
     /// Complete transaction payload coverage fact.
     CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry),
-    /// View-complete exclusive transaction coverage fact.
-    ViewCompleteExclusiveCoverage(ViewCompleteExclusiveCoverageEntry),
+    /// View-complete serializable transaction coverage fact.
+    #[serde(rename = "ViewCompleteExclusiveCoverage")]
+    ViewCompleteSerializableCoverage(ViewCompleteSerializableCoverageEntry),
     /// Policy decision fact.
     PolicyDecision(PolicyDecisionEntry),
     /// Content/deletion/replacement version witness.
@@ -4479,9 +4461,9 @@ pub struct CompleteTxPayloadCoverageEntry {
     pub payload_digest: Vec<u8>,
 }
 
-/// View-complete exclusive transaction coverage fact.
+/// View-complete serializable transaction coverage fact.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct ViewCompleteExclusiveCoverageEntry {
+pub struct ViewCompleteSerializableCoverageEntry {
     /// Covered transaction/batch.
     pub tx: TxId,
     /// View/source scope.
@@ -6271,19 +6253,19 @@ pub enum LocalEvent {
         /// Mutated table.
         table: String,
     },
-    /// Open an exclusive transaction.
+    /// Open an serializable transaction.
     OpenTx,
-    /// Write inside an exclusive transaction.
+    /// Write inside an serializable transaction.
     WriteInTx {
         /// Transaction id.
         tx: TxId,
     },
-    /// Commit an exclusive transaction.
+    /// Commit an serializable transaction.
     CommitTx {
         /// Transaction id.
         tx: TxId,
     },
-    /// Abandon an exclusive transaction.
+    /// Abandon an serializable transaction.
     AbandonTx {
         /// Transaction id.
         tx: TxId,
@@ -6360,10 +6342,12 @@ mod tests {
             version_table: jazz_types::Intern<String>,
             row: RowUuid,
             version: RowVersionRefEntry,
+            is_current: bool,
         }
         for name in ["", "todos", "résumé/倉庫", &"long_label".repeat(100)] {
             for populated in [false, true] {
                 let old = PreviousSupportingRow {
+                    is_current: true,
                     physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
                         [3; 16],
                     )),
@@ -6499,6 +6483,7 @@ mod tests {
     #[test]
     fn peer_view_rejects_duplicate_exact_supporting_row() {
         let row = SupportingRow {
+            is_current: true,
             physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([3; 16])),
             version_table: "todos".to_owned().into(),
             row: RowUuid::from_bytes([4; 16]),
@@ -7605,23 +7590,31 @@ mod tests {
         );
     }
 
+    /// Alice's row-member identity retains union and history discriminators.
+    /// This lower-layer test covers the serializable internal member wrapper;
+    /// peer delivery rejects result members rather than transmitting them.
     #[test]
-    fn result_member_transport_preserves_typed_union_occurrence() {
+    fn result_member_serialization_preserves_complete_occurrence() {
         let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
         let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
-        let occurrence =
+        for occurrence in [
+            OutputOccurrenceId::single_source(root),
             OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
-                .unwrap();
-        let member: ResultMemberEntry = RealRowMemberEntry::current_content((
-            jazz_types::Intern::new("todos".to_owned()),
-            RowUuid(*root.uuid()),
-            TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
-        ))
-        .with_occurrence_id(occurrence.clone())
-        .into();
-        let bytes = postcard::to_allocvec(&member).unwrap();
-        let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
+                .unwrap(),
+            OutputOccurrenceId::history(root, TxTime(42), NodeUuid::from_bytes([3; 16])),
+        ] {
+            let member: ResultMemberEntry = RealRowMemberEntry::current_content((
+                jazz_types::Intern::new("todos".to_owned()),
+                RowUuid(*root.uuid()),
+                TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
+            ))
+            .with_occurrence_id(occurrence.clone())
+            .into();
+            assert!(matches!(&member, ResultMemberEntry::Row(_)));
+            let bytes = postcard::to_allocvec(&member).unwrap();
+            let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
+        }
     }
 
     #[test]

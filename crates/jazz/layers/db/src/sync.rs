@@ -35,9 +35,13 @@ use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::Poll;
-use std::time::Instant;
+use web_time::Instant;
 
+use crate::protocol::SnapshotRef;
+use crate::tx::TxId;
+use jazz_protocol::protocol::{PermissionAdvice, PermissionAdviceAction};
 use jazz_types::large_values::chunks::ChunkRequest;
+use jazz_types::time::{GlobalTime, TxTime};
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -46,13 +50,15 @@ pub use crate::wire::TransportError;
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// Optimistic local seqs start here; every server seq is below it.
-pub const LOCAL_BASE: u64 = 1 << 62;
+/// Optimistic local seqs start here; every server seq is below it. Below
+/// 2^53, so seqs stay exact where SQLite integers surface as JS numbers
+/// (Durable Objects).
+pub const LOCAL_BASE: u64 = 1 << 52;
 
 /// A message transport between a client and its server.
 pub trait Transport {
@@ -177,6 +183,12 @@ pub enum WireTarget {
     View {
         head: BranchSelector,
         base: Option<BranchSelector>,
+    },
+    /// A view over a base frozen at a snapshot (resolved by the receiver).
+    FrozenView {
+        head: BranchSelector,
+        base: BranchSelector,
+        snapshot: SnapshotRef,
     },
 }
 
@@ -363,6 +375,18 @@ pub enum SyncMessage {
         through: u64,
         result: Result<(), WireError>,
     },
+    // client → server
+    /// A permission preflight: would the session's identity be allowed
+    /// `action` right now? Never writes.
+    Advise {
+        id: u64,
+        action: PermissionAdviceAction,
+    },
+    // server → client
+    Advice {
+        id: u64,
+        advice: PermissionAdvice,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -428,13 +452,12 @@ pub(crate) struct Client {
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
     answers: HashMap<u64, Option<(u64, Vec<[u8; 16]>)>>,
+    /// Permission preflights asked for; `None` until answered.
+    advice: HashMap<u64, Option<PermissionAdvice>>,
     /// Large-value nodes asked for and not yet answered.
     requested: BTreeSet<ChunkRequest>,
     /// Nodes to ask for on the next send.
     wanted: BTreeSet<ChunkRequest>,
-    /// Inbound messages held, in order, until the chunks their rows'
-    /// indexed large values need have arrived.
-    held: VecDeque<SyncMessage>,
     /// Nodes pushed for each unsettled commit.
     pushed: HashMap<u64, Vec<jazz_types::large_values::Locator>>,
     /// Requests the server could not answer; never asked again.
@@ -515,6 +538,11 @@ pub(crate) struct Session {
     outbox: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// The versions this tick's accepted commits from the client wrote:
+    /// (table, id, branch key, seq). Each ships even when a later version
+    /// supersedes it, so the replica holds every state its own commits
+    /// produced (a snapshot naming one reads it there).
+    committed: Vec<(String, RowUuid, Vec<u8>, u64)>,
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     /// The replica's coherence watches: `(table, column, value)` for every
@@ -546,6 +574,7 @@ impl Session {
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
+            committed: Vec::new(),
             support: BTreeMap::new(),
             watch: HashSet::new(),
             resume: BTreeMap::new(),
@@ -657,8 +686,12 @@ fn wire_target(target: &WriteTarget) -> Result<WireTarget, Error> {
             base: match base {
                 None => None,
                 Some(BranchViewBase::Current(base)) => Some(base.clone()),
-                Some(BranchViewBase::Snapshot { .. }) => {
-                    return Err(unsupported("frozen snapshot bases over sync"));
+                Some(BranchViewBase::Snapshot { branch, snapshot }) => {
+                    return Ok(WireTarget::FrozenView {
+                        head: head.clone(),
+                        base: branch.clone(),
+                        snapshot: snapshot.clone(),
+                    });
                 }
             },
         },
@@ -719,6 +752,17 @@ fn view_target(target: WireTarget) -> WriteTarget {
         WireTarget::View { head, base } => WriteTarget::BranchView {
             head,
             base: base.map(BranchViewBase::Current),
+        },
+        WireTarget::FrozenView {
+            head,
+            base,
+            snapshot,
+        } => WriteTarget::BranchView {
+            head,
+            base: Some(BranchViewBase::Snapshot {
+                branch: base,
+                snapshot,
+            }),
         },
     }
 }
@@ -1170,8 +1214,7 @@ impl Inner {
             names.join(", "),
             placeholders.join(", ")
         );
-        self.conn
-            .execute(&sql, params_from_iter(values.iter()))
+        self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         Ok(())
     }
@@ -1184,21 +1227,19 @@ impl Inner {
             self.gone.borrow_mut().push(image);
         }
         let id = row.0.as_bytes().to_vec();
-        self.conn
-            .execute(
-                &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
-                rusqlite::params![id, key],
-            )
-            .map_err(storage)?;
-        self.conn
-            .execute(
-                &format!(
-                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq >= ?3",
-                    quote(&format!("{table}__h"))
-                ),
-                rusqlite::params![id, key, from_seq as i64],
-            )
-            .map_err(storage)?;
+        self.exec(
+            &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
+            rusqlite::params![id, key],
+        )
+        .map_err(storage)?;
+        self.exec(
+            &format!(
+                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq >= ?3",
+                quote(&format!("{table}__h"))
+            ),
+            rusqlite::params![id, key, from_seq as i64],
+        )
+        .map_err(storage)?;
         self.changed
             .borrow_mut()
             .push((table.to_owned(), row, key.to_vec()));
@@ -1242,10 +1283,7 @@ impl Inner {
         let mut out = BTreeSet::new();
         for op in ops {
             let Some(row) = op.row() else { continue };
-            let sql = format!(
-                "SELECT _b FROM {} WHERE id = ?1 AND _seq = ?2",
-                quote(op.table())
-            );
+            let sql = format!("SELECT _b FROM {} WHERE {ID_AT_SEQ}", quote(op.table()));
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
@@ -1293,7 +1331,8 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shadow (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, image BLOB, PRIMARY KEY (t, id, k));\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (issuer, subject));\
-    CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));";
+    CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
+    CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));";
 
 type RowKey = (String, RowUuid, Vec<u8>);
 
@@ -1328,36 +1367,6 @@ impl Inner {
             crate::large::install_fetched(&self.conn, &self.chunks, &request, bytes)?;
         }
         Ok(())
-    }
-
-    /// The nodes `images` need before they are installed: every chunk of a
-    /// large value in an indexed column, so index maintenance never waits.
-    fn prefetch(&self, images: &[Image]) -> Result<Vec<ChunkRequest>, Error> {
-        let client = self.client.as_ref().expect("client");
-        let mut need = Vec::new();
-        for image in images {
-            let Ok(table) = self.physical.table(&image.table) else {
-                continue;
-            };
-            let indexed: BTreeSet<&str> =
-                table.indexes.iter().flatten().map(String::as_str).collect();
-            for (name, cell) in &image.cells {
-                let Cell::Text(raw) = cell else {
-                    continue;
-                };
-                if !indexed.contains(name.as_str()) {
-                    continue;
-                }
-                if let Ok(crate::large::Logical::Chunked(value)) = crate::large::logical(raw) {
-                    need.extend(
-                        crate::large::missing_frontier(&self.conn, &value)?
-                            .into_iter()
-                            .filter(|r| !client.unavailable.contains(r)),
-                    );
-                }
-            }
-        }
-        Ok(need)
     }
 
     /// The nodes a commit's large values need pushed first: (their
@@ -1421,18 +1430,16 @@ impl Inner {
             .iter()
             .map(|(t, r, k)| (t.clone(), *r.0.as_bytes(), k.clone()))
             .collect();
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO _jazz_pending (tx, commit_msg, rows) VALUES (?1, ?2, ?3)",
-                rusqlite::params![tx as i64, encode(commit), encode(&rows)],
-            )
-            .map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_pending (tx, commit_msg, rows) VALUES (?1, ?2, ?3)",
+            rusqlite::params![tx as i64, encode(commit), encode(&rows)],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
-        self.conn
-            .execute("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
+        self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
         Ok(())
     }
@@ -1441,32 +1448,28 @@ impl Inner {
         let Some(client) = &self.client else {
             return Ok(());
         };
-        self.conn
-            .execute("DELETE FROM _jazz_shadow", [])
-            .map_err(storage)?;
+        self.exec("DELETE FROM _jazz_shadow", []).map_err(storage)?;
         for ((table, row, key), image) in &client.shadow {
-            self.conn
-                .execute(
-                    "INSERT INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        table,
-                        row.0.as_bytes().to_vec(),
-                        key,
-                        image.as_ref().map(encode)
-                    ],
-                )
-                .map_err(storage)?;
+            self.exec(
+                "INSERT INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    table,
+                    row.0.as_bytes().to_vec(),
+                    key,
+                    image.as_ref().map(encode)
+                ],
+            )
+            .map_err(storage)?;
         }
         Ok(())
     }
 
     fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
-                rusqlite::params![key, encode(&value)],
-            )
-            .map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
+            rusqlite::params![key, encode(&value)],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
@@ -1504,13 +1507,87 @@ impl Inner {
         tx: u64,
         result: &Result<(), WireError>,
     ) -> Result<(), Error> {
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO _jazz_applied (node, tx, result) VALUES (?1, ?2, ?3)",
-                rusqlite::params![node.to_vec(), tx as i64, encode(result)],
-            )
-            .map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_applied (node, tx, result) VALUES (?1, ?2, ?3)",
+            rusqlite::params![node.to_vec(), tx as i64, encode(result)],
+        )
+        .map_err(storage)?;
         Ok(())
+    }
+
+    /// Where a commit landed in the authority's order: `Some(seq)` once
+    /// accepted, `None` once rejected. Kept by the authority for every
+    /// upload and by a replica for its own, so snapshots that name
+    /// individual commits stay readable after they settle.
+    fn record_settled(&self, node: [u8; 16], tx: u64, seq: Option<u64>) -> Result<(), Error> {
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_settled (node, tx, seq) VALUES (?1, ?2, ?3)",
+            rusqlite::params![node.to_vec(), tx as i64, seq.map(|s| s as i64)],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<u64>>, Error> {
+        match self.conn.query_row(
+            "SELECT seq FROM _jazz_settled WHERE node = ?1 AND tx = ?2",
+            rusqlite::params![node.to_vec(), tx as i64],
+            |r| r.get::<_, Option<i64>>(0),
+        ) {
+            Ok(seq) => Ok(Some(seq.map(|s| s as u64))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
+    /// The cut a snapshot reference reads: the authority's state through
+    /// its global base, plus each commit it names individually (a
+    /// replica's writes not yet settled when it was captured) wherever
+    /// that commit is now: still pending here, or settled at a seq.
+    pub(crate) fn resolve_snapshot(&self, snapshot: &SnapshotRef) -> Result<Cut, Error> {
+        if snapshot.local_base.0 != 0 {
+            return Err(unsupported(
+                "snapshot references with a local base (captured before SQLite)",
+            ));
+        }
+        // A replica reads snapshots from its own store: it must already hold
+        // the authority state the reference was captured at.
+        let horizon = self.client.as_ref().map_or(self.seq, |client| client.known);
+        if snapshot.global_base.0 > horizon {
+            return Err(unsupported(
+                "reading a snapshot newer than this replica's synced state",
+            ));
+        }
+        let mut cut = Cut::at(snapshot.global_base.0);
+        let me = *self.identity.node.as_bytes();
+        for dot in &snapshot.dots {
+            let node = *dot.node.as_bytes();
+            let tx = dot.time.0;
+            match self.settled(node, tx)? {
+                Some(Some(seq)) => {
+                    cut.extra.push(seq);
+                    continue;
+                }
+                // Rejected: it never happened.
+                Some(None) => continue,
+                None => {}
+            }
+            if node == me
+                && let Some(client) = &self.client
+            {
+                if client.pending.iter().any(|p| p.tx == tx) {
+                    cut.extra.push(tx);
+                    continue;
+                }
+                if client.fates.get(&tx).is_some_and(Result::is_err) {
+                    continue;
+                }
+            }
+            return Err(unsupported(
+                "reading a snapshot that names another replica's commits not yet settled here",
+            ));
+        }
+        Ok(cut)
     }
 
     /// Reload a replica's sync state after a restart: pending commits are
@@ -1621,9 +1698,9 @@ impl Client {
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
+            advice: HashMap::new(),
             requested: BTreeSet::new(),
             wanted: BTreeSet::new(),
-            held: VecDeque::new(),
             pushed: HashMap::new(),
             unavailable: BTreeSet::new(),
             arrived: false,
@@ -1692,6 +1769,9 @@ impl Db {
         resend.append(&mut client.unsent);
         client.unsent = resend;
         // A new session answers nothing the old one was asked.
+        for slot in client.advice.values_mut() {
+            slot.get_or_insert(PermissionAdvice::Unknown);
+        }
         let asked = std::mem::take(&mut client.requested);
         client.wanted.extend(asked);
         client.connection += 1;
@@ -1952,6 +2032,58 @@ impl Db {
         .await
     }
 
+    /// Freeze everything this database has committed, its own unsettled
+    /// writes included, as a persistable reference for snapshot reads and
+    /// frozen branch bases. A replica whose link can answer first lets its
+    /// pending writes settle, so the reference is one authority cut any
+    /// replica can read; writes still pending after that (offline) are
+    /// named individually and stay readable here and at the authority.
+    pub async fn capture_snapshot(&self) -> Result<SnapshotRef, Error> {
+        let node = self.inner.borrow().identity.node;
+        if !self.is_client() {
+            return Ok(SnapshotRef {
+                owner: node,
+                global_base: GlobalTime(self.inner.borrow().seq),
+                local_base: TxTime(0),
+                dots: Vec::new(),
+            });
+        }
+        let captured: Vec<u64> = {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            client.pending.iter().map(|p| p.tx).collect()
+        };
+        poll_fn(|_| {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            let settling = client.transport.is_some()
+                && may_wait(client.hint.get())
+                && client.pending.iter().any(|p| captured.contains(&p.tx));
+            if settling {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await;
+        let inner = self.inner.borrow();
+        let client = inner.client.as_ref().expect("client");
+        Ok(SnapshotRef {
+            owner: node,
+            global_base: GlobalTime(client.known),
+            local_base: TxTime(0),
+            dots: client
+                .pending
+                .iter()
+                .filter(|p| captured.contains(&p.tx))
+                .map(|p| TxId {
+                    time: TxTime(p.tx),
+                    node,
+                })
+                .collect(),
+        })
+    }
+
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         if tier < DurabilityTier::Global || !self.is_client() {
@@ -1969,6 +2101,160 @@ impl Db {
             }
         })
         .await
+    }
+
+    /// Wait until every transaction pending upload when called (recovered
+    /// ones included) reaches `tier`, failing with the first the server
+    /// rejected. Writes made after the call are not waited for.
+    pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
+        if tier < DurabilityTier::Global || !self.is_client() {
+            return Ok(());
+        }
+        let pending: Vec<u64> = {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            client.pending.iter().map(|p| p.tx).collect()
+        };
+        for tx in pending {
+            self.wait_for_transaction(tx, tier).await?;
+        }
+        Ok(())
+    }
+
+    /// Ask the upstream authority whether `action` would be allowed for
+    /// this replica's session; wait with [`Db::permission_advice`]. Without
+    /// a connected upstream the answer is `Unknown`: a replica's own policy
+    /// evidence may be incomplete, so it never decides locally.
+    pub fn request_permission_advice(&self, action: PermissionAdviceAction) -> u64 {
+        let mut inner = self.inner.borrow_mut();
+        let Some(client) = inner.client.as_mut() else {
+            return 0;
+        };
+        let id = client.next_id;
+        client.next_id += 1;
+        if client.transport.is_some() && may_wait(client.hint.get()) {
+            client.advice.insert(id, None);
+            client.outbox.push(SyncMessage::Advise { id, action });
+        } else {
+            client.advice.insert(id, Some(PermissionAdvice::Unknown));
+        }
+        id
+    }
+
+    /// The answer to a [`Db::request_permission_advice`]; `Unknown` if the
+    /// link fails or the request was cancelled first.
+    pub async fn permission_advice(&self, id: u64) -> PermissionAdvice {
+        poll_fn(|_| {
+            let mut inner = self.inner.borrow_mut();
+            let Some(client) = inner.client.as_mut() else {
+                return Poll::Ready(PermissionAdvice::Unknown);
+            };
+            match client.advice.get(&id) {
+                None => Poll::Ready(PermissionAdvice::Unknown),
+                Some(Some(advice)) => {
+                    let advice = *advice;
+                    client.advice.remove(&id);
+                    Poll::Ready(advice)
+                }
+                Some(None) if client.transport.is_none() || !may_wait(client.hint.get()) => {
+                    client.advice.remove(&id);
+                    Poll::Ready(PermissionAdvice::Unknown)
+                }
+                Some(None) => Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    /// Resolve an outstanding request as `Unknown`; its answer is ignored.
+    pub fn cancel_permission_advice_request(&self, id: u64) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(slot) = inner.client.as_mut().and_then(|c| c.advice.get_mut(&id)) {
+            slot.get_or_insert(PermissionAdvice::Unknown);
+        }
+    }
+
+    /// Dry-run `action` as `identity` (`None`: a trusted link) and roll it
+    /// back. A server that is itself a replica answers `Unknown`.
+    fn advise(
+        &self,
+        identity: Option<AuthorSubject>,
+        action: PermissionAdviceAction,
+    ) -> PermissionAdvice {
+        if self.is_client() {
+            return PermissionAdvice::Unknown;
+        }
+        let who = match identity {
+            Some(author) => Who::Session(author),
+            None => Who::Local,
+        };
+        let op = match action {
+            PermissionAdviceAction::Read { table, row } => {
+                let inner = self.inner.borrow();
+                let id = row.0.as_bytes().to_vec();
+                let images = match inner.images_where(&table, false, "id = ?1", &[&id]) {
+                    Ok(images) => images,
+                    Err(_) => return PermissionAdvice::Unknown,
+                };
+                let Some(image) = images.into_iter().find(|image| !image.deleted) else {
+                    return PermissionAdvice::Denied;
+                };
+                return match readable(&inner, &table, row, &image.key, identity) {
+                    Ok(true) => PermissionAdvice::Allowed,
+                    Ok(false) => PermissionAdvice::Denied,
+                    Err(_) => PermissionAdvice::Unknown,
+                };
+            }
+            PermissionAdviceAction::Insert { table, cells } => {
+                let owner = self.inner.borrow().owner.clone();
+                // The candidate has no id yet: a policy that looks at it
+                // cannot be decided.
+                match owner.table(&table) {
+                    Ok(schema) => {
+                        if schema
+                            .policy(crate::tools::Operation::Insert)
+                            .is_some_and(depends_on_row_id)
+                        {
+                            return PermissionAdvice::Unknown;
+                        }
+                    }
+                    Err(_) => return PermissionAdvice::Unknown,
+                }
+                StagedOp::Insert(
+                    table,
+                    cells,
+                    InsertOptions {
+                        row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                        ..Default::default()
+                    },
+                )
+            }
+            PermissionAdviceAction::Update { table, row, patch } => {
+                StagedOp::Update(table, row, patch, Default::default())
+            }
+            PermissionAdviceAction::Delete { table, row } => {
+                StagedOp::Delete(table, row, Default::default())
+            }
+        };
+        let mut inner = self.inner();
+        let seq = inner.seq + 1;
+        if inner.conn.execute_batch("SAVEPOINT advise").is_err() {
+            return PermissionAdvice::Unknown;
+        }
+        let mark = inner.changed.borrow().len();
+        let applied = inner.apply_as(&op, who, seq).map(drop);
+        let undone = inner
+            .conn
+            .execute_batch("ROLLBACK TO advise; RELEASE advise");
+        inner.changed.borrow_mut().truncate(mark);
+        match (applied, undone) {
+            (_, Err(_)) => PermissionAdvice::Unknown,
+            (Ok(()), Ok(())) => PermissionAdvice::Allowed,
+            (Err(error), Ok(())) if error.code == ErrorCode::WriteRejected => {
+                PermissionAdvice::Denied
+            }
+            (Err(_), Ok(())) => PermissionAdvice::Unknown,
+        }
     }
 
     /// Client half of a tick: apply what the server sent, rebase if a
@@ -2027,8 +2313,8 @@ impl Db {
                 }
             }
             // Chunks are not ordered with rows; everything else is applied
-            // in arrival order, behind any message still held for chunks.
-            let mut queue = std::mem::take(&mut client.held);
+            // in arrival order.
+            let mut queue = VecDeque::new();
             for message in inbound {
                 match message {
                     SyncMessage::Chunks { nodes, missing } => {
@@ -2037,17 +2323,9 @@ impl Db {
                     other => queue.push_back(other),
                 }
             }
+            // Rows install without their chunks: a chunked cell carries the
+            // sort key its indexes need.
             while let Some(message) = queue.pop_front() {
-                if let SyncMessage::Rows { images } = &message {
-                    let need = inner.prefetch(images)?;
-                    if !need.is_empty() {
-                        let client = inner.client.as_mut().expect("client");
-                        client.wanted.extend(need);
-                        queue.push_front(message);
-                        client.held = std::mem::take(&mut queue);
-                        break;
-                    }
-                }
                 match message {
                     SyncMessage::Rows { images } => {
                         for image in images {
@@ -2093,6 +2371,13 @@ impl Db {
                             ));
                         }
                     }
+                    SyncMessage::Advice { id, advice } => {
+                        let client = inner.client.as_mut().expect("client");
+                        // Late answers to cancelled requests are dropped.
+                        if let Some(slot @ None) = client.advice.get_mut(&id) {
+                            *slot = Some(advice);
+                        }
+                    }
                     SyncMessage::Answer { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
@@ -2111,10 +2396,13 @@ impl Db {
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
+                        let accepted = result.is_ok();
                         client.fates.insert(tx, result.map_err(from_wire_error));
+                        let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &locators)?;
                         }
+                        inner.record_settled(node, tx, accepted.then_some(through))?;
                         inner.forget_pending(tx)?;
                         rebase = true;
                     }
@@ -2259,7 +2547,12 @@ impl Inner {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
-                _ => *shadow = Some(image),
+                // The replaced server version stays as history.
+                Some(old) => {
+                    let older = std::mem::replace(old, image);
+                    self.put_image(&older, true)?;
+                }
+                None => *shadow = Some(image),
             }
             return Ok(true);
         }
@@ -2460,6 +2753,7 @@ impl Db {
             let identity = inner.sessions[index].identity;
             let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
+            let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
             for (table, row, key) in recheck {
@@ -2606,6 +2900,22 @@ impl Db {
                     }),
                 }
             }
+            // Superseded versions of the client's own commits land in its
+            // history, while the row stays readable.
+            for (table, row, key, seq) in committed {
+                let superseded = inner
+                    .current_image(&table, row, &key)?
+                    .is_some_and(|current| current.seq != seq);
+                if superseded && readable(&inner, &table, row, &key, policy)? {
+                    let id = row.0.as_bytes().to_vec();
+                    images.extend(inner.images_where(
+                        &table,
+                        true,
+                        "id = ?1 AND _b = ?2 AND _seq = ?3",
+                        &[&id, &key, &(seq as i64)],
+                    )?);
+                }
+            }
             for image in &images {
                 watch.insert(wk((
                     image.table.clone(),
@@ -2738,6 +3048,12 @@ impl Db {
                     dropped.set(dropped.get() + 1);
                 }
             }
+            SyncMessage::Advise { id, action } => {
+                let advice = self.advise(policy, action);
+                self.inner.borrow_mut().sessions[index]
+                    .outbox
+                    .push(SyncMessage::Advice { id, advice });
+            }
             SyncMessage::Fetch {
                 id,
                 query,
@@ -2747,7 +3063,7 @@ impl Db {
                 let prepared = self.prepare_query_bound(&query, binding)?;
                 let mut inner = self.inner();
                 let read = ReadSpec {
-                    cut: at.map(|seq| Cut { seq, own: 0 }),
+                    cut: at.map(Cut::at),
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
@@ -2807,14 +3123,27 @@ impl Db {
                         Ok(rows) => (Ok(()), rows),
                         Err((error, rows)) => {
                             let result = Err(wire_error(&error));
-                            self.inner.borrow().record_fate(node, tx, &result)?;
+                            let inner = self.inner.borrow();
+                            inner.record_fate(node, tx, &result)?;
+                            inner.record_settled(node, tx, None)?;
                             (result, rows)
                         }
                     },
                 };
                 let mut inner = self.inner.borrow_mut();
-                let through = inner.seq;
+                // An accepted commit's fate carries the seq it landed at (a
+                // resend gets the recorded one), so the replica learns it.
+                let through = match (&result, inner.settled(node, tx)?) {
+                    (Ok(()), Some(Some(seq))) => seq,
+                    _ => inner.seq,
+                };
                 let session = &mut inner.sessions[index];
+                if result.is_ok() {
+                    session.committed.extend(
+                        rows.iter()
+                            .map(|(table, row, key)| (table.clone(), *row, key.clone(), through)),
+                    );
+                }
                 session.touched.extend(rows);
                 session.outbox.push(SyncMessage::Fate {
                     tx,
@@ -2975,6 +3304,7 @@ impl Db {
             }
             inner
                 .record_fate(origin.0, origin.1, &Ok(()))
+                .and_then(|()| inner.record_settled(origin.0, origin.1, Some(seq)))
                 .map_err(|e| (e, Vec::new()))?;
             inner
                 .conn
@@ -2992,6 +3322,32 @@ impl Db {
     pub(crate) fn sync_tick(&self) -> Result<(), Error> {
         self.server_tick()?;
         self.client_tick()
+    }
+}
+
+/// Whether a policy can look at the row's own id (subqueries count: they
+/// may correlate on it).
+fn depends_on_row_id(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Cmp { column, .. }
+        | PolicyExpr::IsNull { column }
+        | PolicyExpr::IsNotNull { column }
+        | PolicyExpr::Contains { column, .. }
+        | PolicyExpr::In { column, .. }
+        | PolicyExpr::InList { column, .. } => column == "id",
+        PolicyExpr::Inherits { via_column, .. } => via_column == "id",
+        PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsRel { .. } => true,
+        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().any(depends_on_row_id),
+        PolicyExpr::Not(item) => depends_on_row_id(item),
+        PolicyExpr::SessionCmp { .. }
+        | PolicyExpr::SessionIsNull { .. }
+        | PolicyExpr::SessionIsNotNull { .. }
+        | PolicyExpr::SessionContains { .. }
+        | PolicyExpr::SessionInList { .. }
+        | PolicyExpr::True
+        | PolicyExpr::False => false,
     }
 }
 
@@ -3061,10 +3417,11 @@ impl Db {
         }
         if let Some(tx) = open_tx {
             return Ok(SerializedReadResult::Rows(
-                self.exclusive_tx_ref(tx).all_prepared(&prepared).await?,
+                self.serializable_tx_ref(tx).all_prepared(&prepared).await?,
             ));
         }
-        if self.is_client() && opts.tier != ReadTier::LocalOnly {
+        let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
+        if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
                 (_, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => Some(Some(

@@ -184,6 +184,12 @@ jobs:
       - name: Run CI-equivalent M3 differential partition
         if: ${{ !cancelled() }}
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-differential
+      # jazz-db's SQL must also run on Durable Object SQLite; this runs the
+      # suite under its limits. Like the oracle, it reports even when an
+      # earlier step fails.
+      - name: Run CI-equivalent Durable Object SQLite limits partition
+        if: ${{ !cancelled() }}
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition durable-object-limits
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
