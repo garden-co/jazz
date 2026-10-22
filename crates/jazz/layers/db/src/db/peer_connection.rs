@@ -3869,6 +3869,7 @@ where
                             }
                             if let Err(error) = ensure_supported_register_shape_options(
                                 &opts,
+                                ast.query().is_some_and(|query| query.uses_history()),
                                 *local_receiver,
                                 peer.role(),
                                 delegated_session_capability(*ingest_context, peer.role()),
@@ -4186,6 +4187,7 @@ where
                             };
                             if ensure_supported_register_shape_options(
                                 &opts,
+                                shape.query().uses_history(),
                                 *local_receiver,
                                 peer.role(),
                                 delegated_session_capability(*ingest_context, peer.role()),
