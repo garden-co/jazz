@@ -1,3 +1,5 @@
+import type { TxId } from "./runtime/client.js";
+import { historyTableName, resolveQueryTable } from "./runtime/history-relation.js";
 import { resolveQueryOutputTable } from "./runtime/query-output-table.js";
 import {
   DefinedTable,
@@ -503,13 +505,11 @@ export type TableSelected<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
   TSelection extends TableSelectableColumn<TSchema, TTable> = BaseColumnName<TSchema, TTable>,
-> = Simplify<
-  ("*" extends TSelection
-    ? TableRow<TSchema, TTable>
-    : Pick<
-        TableRow<TSchema, TTable>,
-        Extract<TSelection | "id", keyof TableRow<TSchema, TTable>>
-      >) &
+> = SelectedRow<TableRow<TSchema, TTable>, TSelection>;
+
+/** Shared projection typing for ordinary and history rows. */
+type SelectedRow<TRow, TSelection> = Simplify<
+  ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
     Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
@@ -839,15 +839,7 @@ type BuilderInclude<TMeta extends AnyTableMeta> = {
 type SelectedFromMeta<
   TMeta extends AnyTableMeta,
   TSelection = DefaultTableSelection<TMeta>,
-> = Simplify<
-  ("*" extends SelectedColumnNames<TSelection>
-    ? TableRowFromMeta<TMeta>
-    : Pick<
-        TableRowFromMeta<TMeta>,
-        Extract<SelectedColumnNames<TSelection> | "id", keyof TableRowFromMeta<TMeta>>
-      >) &
-    Pick<ProvenanceMagicColumns, Extract<SelectedColumnNames<TSelection>, ProvenanceMagicColumn>>
->;
+> = SelectedRow<TableRowFromMeta<TMeta>, SelectedColumnNames<TSelection>>;
 
 type SelectedColumnNames<TSelection> =
   TSelection extends Record<string, LargeValuePage> ? keyof TSelection : TSelection;
@@ -1279,7 +1271,7 @@ export class TypedTableQueryBuilder<
 
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
     const built: BuiltCondition[] = [];
-    const tableSchema = this._schema[this._table];
+    const tableSchema = resolveQueryTable(this._schema, this._table);
     const transforms = this._outputColumnTransforms();
     for (const [key, value] of Object.entries(conditions)) {
       if (transforms?.[key]?.computed)
@@ -1393,6 +1385,37 @@ export interface Query<
   }): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
 }
 
+export type HistoryRow<TRow extends { id: string }> = TRow & {
+  $transactionId: TxId;
+  $acceptedAt: Date;
+};
+
+/**
+ * Query previous values of a table's rows.
+ * Only includes authority-confirmed versions.
+ * Bound the query with an exact row ID or an explicit `id.in` list;
+ * joins and transaction-ID predicates are not supported.
+ */
+export interface HistoryQuery<
+  TRow extends { id: string },
+  TWhere,
+  TSelection extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | "*" = keyof HistoryRow<TRow>,
+> extends QueryBuilder<SelectedRow<HistoryRow<TRow>, TSelection>> {
+  where(
+    input: TWhere & { $acceptedAt?: TimestampWhere<false> },
+  ): HistoryQuery<TRow, TWhere, TSelection>;
+  select<TColumn extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | "*">(
+    ...columns: [TColumn, ...TColumn[]]
+  ): HistoryQuery<TRow, TWhere, TColumn>;
+  orderBy(
+    column: keyof TRow | "$acceptedAt" | ProvenanceMagicColumn,
+    direction?: "asc" | "desc",
+  ): HistoryQuery<TRow, TWhere, TSelection>;
+  limit(count: number): HistoryQuery<TRow, TWhere, TSelection>;
+  offset(count: number): HistoryQuery<TRow, TWhere, TSelection>;
+  includeDeleted(): HistoryQuery<TRow, TWhere, TSelection>;
+}
+
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<
   TTable,
   {},
@@ -1413,6 +1436,13 @@ export type App<TSchema extends SchemaLike> = Simplify<
   {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
+    /** Read-only queries over accepted content versions of each table. */
+    readonly $history: {
+      readonly [TTable in TableName<TSchema>]: HistoryQuery<
+        TableRowFromMeta<SchemaMeta<TTable, TSchema>>,
+        TableWhereFromMeta<SchemaMeta<TTable, TSchema>>
+      >;
+    };
     union<TTable extends TableName<TSchema>>(
       relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<
@@ -1782,6 +1812,7 @@ function createAppForTables(
   registeredWasmSchema = wasmSchema;
   const columnTransformsByTable = definition ? columnTransformsForSchema(definition) : undefined;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
+  const history = {} as App<Schema<SchemaDefinition>>["$history"];
 
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
@@ -1791,10 +1822,21 @@ function createAppForTables(
       columnTransformsByTable?.[tableName],
       columnTransformsByTable,
     );
+    Object.defineProperty(history, tableName, {
+      enumerable: true,
+      get: () =>
+        new TypedTableQueryBuilder(
+          historyTableName(tableName),
+          wasmSchema,
+          columnTransformsByTable?.[tableName],
+          columnTransformsByTable,
+        ),
+    });
   }
 
   return {
     ...tables,
+    $history: history,
     union<TTable extends string>(
       relations:
         | readonly RelationSeedQuery<TTable>[]
