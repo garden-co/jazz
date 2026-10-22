@@ -362,7 +362,7 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
-            .with_cut(read.cut)
+            .with_cut(read.cut.clone())
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -904,18 +904,14 @@ impl Inner {
                 Err(error) => return Some(Err(error)),
             }
         }
-        let marks = vec!["?"; rows.len()].join(", ");
         let sql = format!(
-            "SELECT t.id{columns} FROM {} AS t WHERE t.id IN ({marks})",
+            "SELECT t.id{columns} FROM {} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each(?1))",
             quote(&table.name)
         );
-        let ids: Vec<Vec<u8>> = rows
-            .iter()
-            .map(|row| row.id.0.as_bytes().to_vec())
-            .collect();
+        let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
             let mut statement = self.conn.prepare_cached(&sql)?;
-            let found = statement.query_map(params_from_iter(ids.iter()), |r| {
+            let found = statement.query_map([&ids], |r| {
                 let id: Vec<u8> = r.get(0)?;
                 let values = (1..=order.len())
                     .map(|i| r.get::<_, Sql>(i))

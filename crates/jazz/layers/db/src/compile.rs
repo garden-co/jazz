@@ -178,7 +178,9 @@ impl MatchTest {
 impl Prep {
     fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
         let hash = blake3::hash(question.as_bytes());
-        let slot = i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes"));
+        // 52 bits: exact as a JS number (Durable Objects).
+        let slot =
+            i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) & ((1 << 52) - 1);
         make(slot)
     }
 
@@ -222,18 +224,37 @@ pub struct Ctx<'a> {
 }
 
 /// A frozen snapshot: the state as of commit `seq`, plus the open
-/// transaction's own staged writes (written at `own`).
-#[derive(Clone, Copy, Debug)]
+/// transaction's own staged writes (written at `own`), plus the versions
+/// written by the individual commits in `extra` (a replica's own writes
+/// that were not yet in `seq` when the snapshot was taken).
+#[derive(Clone, Debug, Default)]
 pub struct Cut {
     pub seq: u64,
     pub own: u64,
+    pub extra: Vec<u64>,
 }
 
-/// A head branch, optionally composed over a live base branch.
+impl Cut {
+    pub fn at(seq: u64) -> Self {
+        Self {
+            seq,
+            ..Self::default()
+        }
+    }
+
+    /// Whether a version written at `seq` is in the cut.
+    pub fn sees(&self, seq: u64) -> bool {
+        seq <= self.seq || seq == self.own || self.extra.contains(&seq)
+    }
+}
+
+/// A head branch, optionally composed over a base branch that is live or
+/// frozen at `base_cut`.
 #[derive(Clone, Debug)]
 pub struct View {
     pub head: crate::protocol::BranchSelector,
     pub base: Option<crate::protocol::BranchSelector>,
+    pub base_cut: Option<Cut>,
 }
 
 /// A compiled root query.
@@ -288,12 +309,36 @@ impl<'a> Ctx<'a> {
     /// they are; for rows changed since, the newest superseded image at or
     /// before the cut stands in. Rows created after the cut have neither.
     fn rows(&mut self, table: &Table, columns: &str) -> String {
+        self.rows_at(table, columns, self.cut.clone())
+    }
+
+    fn rows_at(&mut self, table: &Table, columns: &str, cut: Option<Cut>) -> String {
         let name = quote(&table.name);
-        let Some(cut) = self.cut else {
+        let Some(cut) = cut else {
             return name;
         };
         let seq = self.bind(Sql::Integer(cut.seq as i64));
         let own = self.bind(Sql::Integer(cut.own as i64));
+        // Seqs are integers, so the extra commits are inlined.
+        let extra = cut
+            .extra
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (visible, h_visible, newer) = if extra.is_empty() {
+            (
+                format!("_seq <= {seq} OR _seq = {own}"),
+                format!("h2._seq <= {seq}"),
+                format!("c._seq > {seq} AND c._seq <> {own}"),
+            )
+        } else {
+            (
+                format!("_seq <= {seq} OR _seq = {own} OR _seq IN ({extra})"),
+                format!("(h2._seq <= {seq} OR h2._seq IN ({extra}))"),
+                format!("c._seq > {seq} AND c._seq <> {own} AND c._seq NOT IN ({extra})"),
+            )
+        };
         let history = quote(&format!("{}__h", table.name));
         let h_columns = columns
             .replace("rid, ", "")
@@ -302,11 +347,11 @@ impl<'a> Ctx<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "(SELECT {columns} FROM {name} WHERE _seq <= {seq} OR _seq = {own} \
+            "(SELECT {columns} FROM {name} WHERE {visible} \
              UNION ALL SELECT NULL, {h_columns} FROM {history} AS h JOIN {name} AS c \
-             ON c.id = h.id AND c._b = h._b WHERE c._seq > {seq} AND c._seq <> {own} \
+             ON c.id = h.id AND c._b = h._b WHERE {newer} \
              AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
-             WHERE h2.id = h.id AND h2._b = h._b AND h2._seq <= {seq}))"
+             WHERE h2.id = h.id AND h2._b = h._b AND {h_visible}))"
         )
     }
 
@@ -351,7 +396,8 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 let base = self.bind(Sql::Blob(table.selector_key(&base)?));
-                let base_rows = self.rows(table, &columns);
+                let base_cut = view.base_cut.clone().or_else(|| self.cut.clone());
+                let base_rows = self.rows_at(table, &columns, base_cut);
                 let head_rows = self.rows(table, &columns);
                 format!(
                     "(SELECT {columns} FROM {rows} WHERE _b = {head} UNION ALL SELECT {inherited} \
@@ -1543,7 +1589,7 @@ fn and(parts: &[String]) -> String {
     if parts.is_empty() {
         "1".to_owned()
     } else {
-        format!("({})", parts.join(" AND "))
+        chain(parts, " AND ")
     }
 }
 
@@ -1551,8 +1597,70 @@ fn or(parts: &[String]) -> String {
     if parts.is_empty() {
         "0".to_owned()
     } else {
-        format!("({})", parts.join(" OR "))
+        chain(parts, " OR ")
     }
+}
+
+/// Terms flatter than this join as one chain. SQLite parses a chain of n
+/// terms n deep, and Durable Object SQLite caps expression depth at 100.
+const CHAIN_MAX: usize = 32;
+
+/// `parts` joined by `op`, nested in halves past [`CHAIN_MAX`] so the depth
+/// grows with the log of the count. SQLite splits nested AND and OR terms
+/// the same as a flat chain.
+fn chain(parts: &[String], op: &str) -> String {
+    if parts.len() <= CHAIN_MAX {
+        return format!("({})", parts.join(op));
+    }
+    let (left, right) = parts.split_at(parts.len() / 2);
+    format!("({}{op}{})", chain(left, op), chain(right, op))
+}
+
+/// Lists longer than this bind as one JSON array read by `json_each`, not
+/// a parameter per value: Durable Object SQLite caps a statement at 100
+/// bound parameters.
+pub(crate) const BOUND_LIST_MAX: usize = 16;
+
+/// A `SELECT` of `values` from the JSON array bound at `mark`, and that
+/// array; `None` when the values have no exact shared JSON form (reals, or
+/// blobs mixed with other types).
+pub(crate) fn json_list(values: &[&Sql], mark: &str) -> Option<(String, Sql)> {
+    let blobs = values.iter().any(|value| matches!(value, Sql::Blob(_)));
+    let mut items = Vec::with_capacity(values.len());
+    for value in values {
+        items.push(match value {
+            Sql::Null => serde_json::Value::Null,
+            Sql::Blob(bytes) => serde_json::Value::String(hex(bytes)),
+            _ if blobs => return None,
+            Sql::Integer(n) => serde_json::Value::from(*n),
+            Sql::Text(text) => serde_json::Value::String(String::from_utf8(text.clone()).ok()?),
+            Sql::Real(_) => return None,
+        });
+    }
+    let column = if blobs { "unhex(value)" } else { "value" };
+    Some((
+        format!("SELECT {column} FROM json_each({mark})"),
+        Sql::Text(serde_json::Value::Array(items).to_string().into_bytes()),
+    ))
+}
+
+/// Ids as a JSON array for [`json_list`]'s blob form.
+pub(crate) fn json_ids<'a>(ids: impl IntoIterator<Item = &'a [u8]>) -> Sql {
+    let items: Vec<serde_json::Value> = ids
+        .into_iter()
+        .map(|id| serde_json::Value::String(hex(id)))
+        .collect();
+    Sql::Text(serde_json::Value::Array(items).to_string().into_bytes())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    out
 }
 
 fn bool_sql(value: bool) -> String {
@@ -1767,6 +1875,7 @@ impl Ctx<'_> {
         if options.is_empty() || matches!(left, Term::Missing | Term::NaN) {
             return Ok("0".to_owned());
         }
+        let list = self.bound_list(&options);
         if let Term::Large(column) = &left {
             let small = |option: &Term| match option {
                 Term::Bound(_, Sql::Text(cell)) => {
@@ -1782,20 +1891,44 @@ impl Ctx<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(or(&parts));
             }
-            let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
-            let list = list.join(", ");
+            let list = list.unwrap_or_else(|| {
+                let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
+                list.join(", ")
+            });
             return Ok(format!(
                 "({} IN ({list}) AND {} IN ({list}))",
                 crate::large::key_sql(&column.cell),
                 column.cell
             ));
         }
-        let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
-        Ok(format!(
-            "({} IN ({}))",
-            left.sql().expect("present"),
+        let list = list.unwrap_or_else(|| {
+            let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
             list.join(", ")
-        ))
+        });
+        Ok(format!("({} IN ({list}))", left.sql().expect("present")))
+    }
+
+    /// A long list of values bound last, rebound as one JSON array
+    /// ([`json_list`]): its `SELECT`, or `None` to keep one placeholder per
+    /// value.
+    fn bound_list(&mut self, options: &[Term]) -> Option<String> {
+        if options.len() <= BOUND_LIST_MAX || options.len() > self.params.len() {
+            return None;
+        }
+        let first = self.params.len() - options.len();
+        let mut values = Vec::with_capacity(options.len());
+        for (i, option) in options.iter().enumerate() {
+            match option {
+                Term::Bound(mark, value) if *mark == format!("?{}", first + i + 1) => {
+                    values.push(value)
+                }
+                _ => return None,
+            }
+        }
+        let (select, array) = json_list(&values, &format!("?{}", first + 1))?;
+        self.params.truncate(first);
+        self.params.push(array);
+        Some(select)
     }
 
     fn contains(&mut self, left: Term, right: Term) -> String {

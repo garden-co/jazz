@@ -1,3 +1,4 @@
+import { resolveQueryTable } from "./history-relation.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 export const HIDDEN_INCLUDE_COLUMN_PREFIX = "__jazz_include_";
@@ -11,7 +12,7 @@ export function resolveSelectedColumns(
   schema: WasmSchema,
   projection: readonly string[] | undefined,
 ): string[] {
-  const table = schema[tableName];
+  const table = resolveQueryTable(schema, tableName);
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }

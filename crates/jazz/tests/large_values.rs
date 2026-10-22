@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, JsonSetEdit, LargeValueUpdate,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, Journal, JsonSetEdit, LargeValueUpdate,
     LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -297,32 +297,43 @@ fn scratch(name: &str) -> PathBuf {
     dir.join("store.sqlite")
 }
 
+/// Every journal mode, including the ones browser VFSes need (no WAL):
+/// the large-value reader connection sees exactly the committed chunks.
 #[test]
 fn a_file_store_reads_chunks_back_after_reopening() {
-    let path = scratch("reopen");
-    let values: Vec<String> = (0..4).map(|n| text(20 + n, LARGE)).collect();
-    {
-        let db = block_on(Db::open_at(config(true), &path, FileOptions::default())).unwrap();
-        for (n, value) in values.iter().enumerate() {
-            insert(&db, n as u8 + 1, value, b"");
+    for journal in [Journal::Wal, Journal::Rollback, Journal::Memory] {
+        let path = scratch(&format!("reopen-{journal:?}"));
+        let options = FileOptions {
+            journal,
+            ..FileOptions::default()
+        };
+        let values: Vec<String> = (0..4).map(|n| text(20 + n, LARGE)).collect();
+        {
+            let db = block_on(Db::open_at(config(true), &path, options)).unwrap();
+            for (n, value) in values.iter().enumerate() {
+                insert(&db, n as u8 + 1, value, b"");
+            }
+            // Read back within the same session, through the reader.
+            assert_eq!(ordered(&db).len(), values.len(), "{journal:?}");
         }
+        let db = block_on(Db::open_at(config(true), &path, options)).unwrap();
+        let mut expected: Vec<(String, RowUuid)> = values
+            .iter()
+            .enumerate()
+            .map(|(n, value)| (value.clone(), row(n as u8 + 1)))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            ordered(&db),
+            expected.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            "{journal:?}"
+        );
+        let found = ids(
+            &db,
+            Query::from("docs").filter(eq(col("body"), lit(Value::String(values[2].clone())))),
+        );
+        assert_eq!(found, vec![row(3)], "{journal:?}");
     }
-    let db = block_on(Db::open_at(config(true), &path, FileOptions::default())).unwrap();
-    let mut expected: Vec<(String, RowUuid)> = values
-        .iter()
-        .enumerate()
-        .map(|(n, value)| (value.clone(), row(n as u8 + 1)))
-        .collect();
-    expected.sort();
-    assert_eq!(
-        ordered(&db),
-        expected.iter().map(|(_, id)| *id).collect::<Vec<_>>()
-    );
-    let found = ids(
-        &db,
-        Query::from("docs").filter(eq(col("body"), lit(Value::String(values[2].clone())))),
-    );
-    assert_eq!(found, vec![row(3)]);
 }
 
 /// The file needs nothing but SQLite: a plain connection, with no Jazz
