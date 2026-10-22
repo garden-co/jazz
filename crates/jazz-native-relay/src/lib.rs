@@ -603,7 +603,6 @@ pub enum ForegroundMutationKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum ForegroundTransactionKind {
     Mergeable,
-    // The serialized spelling predates the rename and stays stable.
     // The serialized name keeps its pre-rename spelling for format compatibility.
     #[serde(rename = "Exclusive")]
     Serializable,
