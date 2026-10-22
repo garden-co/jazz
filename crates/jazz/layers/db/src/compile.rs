@@ -1545,6 +1545,32 @@ impl<'a> Ctx<'a> {
                 or(&parts)
             }
             PolicyExpr::Not(inner) => format!("(NOT COALESCE({}, 0))", recurse(self, inner)?),
+            PolicyExpr::Cmp {
+                column,
+                op,
+                value: PolicyValue::SessionRef(path),
+            } if crate::values::author_record(column).is_some()
+                && path.first().map(String::as_str) == Some("user") =>
+            {
+                self.author_cmp(table, alias, column, op, path, session)?
+            }
+            PolicyExpr::Cmp {
+                column,
+                op,
+                value: PolicyValue::SessionRef(path),
+            } if is_uuid(table, column)
+                && path.first().map(String::as_str) != Some("__jazz_outer_row") =>
+            {
+                // A claim is JSON, so a UUID claim arrives as its string:
+                // compare it with a UUID column as the UUID it spells.
+                let value = match session.resolve(path) {
+                    Some(Value::String(text)) => text.parse().map(Value::Uuid).ok(),
+                    value => value,
+                };
+                let left = self.column_term(table, alias, column)?;
+                let right = self.present(value)?;
+                self.cmp(op.clone(), left, right)?
+            }
             PolicyExpr::Cmp { column, op, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
@@ -2083,6 +2109,14 @@ fn array_element_id(element: &str) -> String {
     format!("unhex(replace({element}.value, '-', ''))")
 }
 
+/// Whether `column` is a UUID column (nullable or not).
+fn is_uuid(table: &Table, column: &str) -> bool {
+    table.column(column).is_some_and(|column| match &column.ty {
+        ValueType::Nullable(inner) => matches!(**inner, ValueType::Uuid),
+        ty => matches!(ty, ValueType::Uuid),
+    })
+}
+
 /// Whether `column` is an array column (nullable or not).
 fn is_array(table: &Table, column: &str) -> bool {
     let Some(column) = table.column(column) else {
@@ -2346,6 +2380,76 @@ impl Ctx<'_> {
             self.preps.push(prep);
         }
         slot
+    }
+
+    /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
+    /// the session's user (or its identity): equal when every part is, with
+    /// an accountless session standing for the system account as
+    /// [`crate::values::author_key`] stores it.
+    fn author_cmp(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        column: &str,
+        op: &CmpOp,
+        path: &[String],
+        session: &Session,
+    ) -> Result<String, Error> {
+        let (_, whole) = crate::values::author_record(column).expect("author record");
+        let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        let parts: &[&str] = match (whole, path.as_slice()) {
+            (true, ["user"]) => &["account", "identity.issuer", "identity.subject"],
+            (false, ["user", "identity"]) => &["issuer", "subject"],
+            _ => {
+                return Err(query_error(format!(
+                    "comparing `{column}` with `session.{}`: compare an author record \
+                     with `session.user` and its identity with `session.user.identity`",
+                    path.join(".")
+                )));
+            }
+        };
+        let negate = match op {
+            CmpOp::Eq => false,
+            CmpOp::Ne => true,
+            op => {
+                return Err(unsupported(format!(
+                    "comparing the author record `{column}` with {op:?}"
+                )));
+            }
+        };
+        if session.system || session.subject.is_none() {
+            return Ok(bool_sql(negate));
+        }
+        let record = if whole {
+            column.to_owned()
+        } else {
+            column.trim_end_matches(".identity").to_owned()
+        };
+        let mut clauses = Vec::new();
+        for part in parts {
+            let part = part.trim_start_matches("identity.");
+            let field = match part {
+                "account" => format!("{record}.account"),
+                part => format!("{record}.identity.{part}"),
+            };
+            let left = self.column_term(table, alias, &field)?;
+            let value = match part {
+                "account" => {
+                    Some(Value::Uuid(session.account.unwrap_or(
+                        jazz_types::account_registry::SYSTEM_ACCOUNT_ID.0,
+                    )))
+                }
+                part => session.resolve(&["user".into(), "identity".into(), part.into()]),
+            };
+            let right = self.present(value)?;
+            clauses.push(self.cmp(CmpOp::Eq, left, right)?);
+        }
+        let all = and(&clauses);
+        Ok(if negate {
+            format!("(NOT COALESCE({all}, 0))")
+        } else {
+            all
+        })
     }
 
     fn cmp(&mut self, op: CmpOp, left: Term, right: Term) -> Result<String, Error> {

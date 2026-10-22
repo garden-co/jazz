@@ -2009,10 +2009,7 @@ impl Inner {
                 .cloned()
                 .map(from_wire)
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(author) = author
-                .as_deref()
-                .map(AuthorSubject::from_untrusted_canonical)
-            {
+            if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
                 ops.iter_mut().for_each(|op| op.attribute(author));
             }
@@ -2253,6 +2250,12 @@ impl Db {
         if ops.is_empty() || seq != inner.seq {
             return;
         }
+        // The writer the authority stamps: an explicit identity, or the
+        // system at this node (the authority stamps its own writes as its
+        // node, so a trusted link names its own).
+        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
+            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+        });
         let rows = inner.written_rows(&ops, seq).unwrap_or_default();
         let mut shadows = Vec::new();
         for (table, row, key) in &rows {
@@ -2289,10 +2292,7 @@ impl Db {
                     tx: seq,
                     kind,
                     ops: wire,
-                    author: ops
-                        .iter()
-                        .find_map(StagedOp::author)
-                        .map(|author| author.canonical().to_owned()),
+                    author: author.map(|author| author.canonical().to_owned()),
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
@@ -3967,17 +3967,20 @@ impl Db {
 /// identity) writes unchecked, attributed to the author it names.
 fn commit_who(policy: Option<AuthorSubject>, author: Option<&str>) -> Result<Who, Error> {
     let author = author
-        .map(AuthorSubject::from_untrusted_canonical)
+        .map(AuthorSubject::from_canonical)
         .transpose()
         .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;
     match (policy, author) {
+        // A node's own writes (it names itself as the system at that node)
+        // over a session link are that session's: the link decides.
+        (Some(session), Some(AuthorSubject::SystemAt(_))) => Ok(Who::Session(session)),
         (Some(session), Some(author)) if author != session => Err(Error::new(
             ErrorCode::WriteRejected,
             "attribution requires a trusted serving node",
         )),
         (Some(session), _) => Ok(Who::Session(session)),
-        (None, Some(author)) => Ok(Who::Attributed(author)),
-        (None, None) => Ok(Who::Local),
+        (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
+        (None, _) => Ok(Who::Local),
     }
 }
 
