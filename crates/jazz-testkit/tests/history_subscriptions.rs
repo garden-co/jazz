@@ -1802,3 +1802,98 @@ async fn include_deleted_subscription_follows_access_row_revocation_and_deletion
         })
         .await;
 }
+
+/// Alice reads `$deletedAt`/`$deletedBy` only for the deleted task she may
+/// read. The hidden deleted task's deletion metadata stays hidden on the
+/// current table, including through a deletion-time filter, and on history,
+/// for remote and local-first reads and for a history subscription.
+/// bob -> delete readable and hidden tasks -> server policy -> alice
+#[tokio::test(flavor = "current_thread")]
+async fn deletion_metadata_respects_read_policy() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use jazz::query::{in_list, is_null, not};
+            use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("tasks")
+                        .column("title", ColumnType::Text)
+                        .column("visible", ColumnType::Boolean)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::Cmp {
+                                    column: "visible".into(),
+                                    op: CmpOp::Eq,
+                                    value: PolicyValue::Literal(Value::Boolean(true)),
+                                })
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                .with_delete(PolicyExpr::True),
+                        ),
+                )
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let mut rows = Vec::new();
+            for (title, visible) in [("readable", true), ("hidden", false)] {
+                let (row, _, tx) = bob
+                    .insert("tasks", row_input!("title" => title, "visible" => visible))
+                    .unwrap();
+                settled(&bob, tx).await;
+                settled(&bob, bob.delete("tasks", row).unwrap()).await;
+                rows.push(row);
+            }
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-deletion-metadata")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let opts = |tier| jazz::db::ReadOpts {
+                tier,
+                read_view: jazz::protocol::ReadViewSpec {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let ids = || {
+                in_list(
+                    col("id"),
+                    rows.iter()
+                        .map(|row| lit(jazz::groove::records::Value::Uuid(*row.uuid()))),
+                )
+            };
+            let current = Query::from("tasks")
+                .filter(not(is_null(col("$deletedAt"))))
+                .select(["title", "$deletedAt", "$deletedBy"]);
+            let history = Query::from("history.tasks").filter(ids()).select([
+                "title",
+                "$deletedAt",
+                "$deletedBy",
+            ]);
+            for tier in [ReadTier::Remote, ReadTier::LocalFirst] {
+                for query in [current.clone(), history.clone()] {
+                    let found = alice.query_with_opts(query, opts(tier)).await.unwrap();
+                    assert_eq!(found.len(), 1, "{tier:?} reveals only the readable task");
+                    assert_eq!(found[0].get("title"), Some(&Value::Text("readable".into())));
+                    assert!(found[0].get("$deletedAt").is_some());
+                    assert!(found[0].get("$deletedBy").is_some());
+                }
+            }
+            let mut stream = alice
+                .subscribe_with_opts(history, opts(ReadTier::Remote))
+                .await
+                .unwrap();
+            let added = next(&mut stream).await.added;
+            assert_eq!(added.len(), 1);
+            assert_eq!(
+                added[0].row.get("title"),
+                Some(&Value::Text("readable".into()))
+            );
+            drop(stream);
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}
