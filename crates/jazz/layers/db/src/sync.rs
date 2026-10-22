@@ -27,7 +27,9 @@
 //!   A stale or partial replica can only cause a conflict, never a
 //!   non-serializable commit.
 
+use crate::schema::history::{history_source_table, is_history_table};
 use crate::values::query_error;
+use rusqlite::OptionalExtension;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -398,6 +400,14 @@ pub enum SyncMessage {
     /// named like the server's current schema.
     Schema {
         version: [u8; 16],
+    },
+    // server → client
+    /// The transactions behind the versions a history read ships, as
+    /// (seq, writer node, writer tx), sent ahead of their `Rows`: a
+    /// replica lists a history version only once it knows its
+    /// `$transactionId`.
+    Origins {
+        commits: Vec<(u64, [u8; 16], u64)>,
     },
 }
 
@@ -877,6 +887,10 @@ impl Inner {
     /// The supporting tables a remote query reads (see [`Support`]), by
     /// stored table and column names.
     pub(crate) fn support_of(&self, query: &Query) -> Result<Vec<Support>, Error> {
+        // History reads take no relationships.
+        if is_history_table(&query.table) {
+            return Ok(Vec::new());
+        }
         let table = self.schema.table(&query.table)?;
         let mut support = Vec::new();
         for include in &query.includes {
@@ -898,6 +912,60 @@ impl Inner {
             });
         }
         Ok(support)
+    }
+
+    /// The images a history read ships for its result `rows` (versions of
+    /// `source`): each version, then the current image of its row in its
+    /// branch, so a replica never takes an old version for its current
+    /// one. The versions' seqs go to `seqs`, for their origins.
+    fn history_versions(
+        &self,
+        source: &str,
+        rows: &[CurrentRow],
+        images: &mut Vec<Image>,
+        seqs: &mut BTreeSet<u64>,
+    ) -> Result<(), Error> {
+        let mut current = BTreeSet::new();
+        for row in rows {
+            let rid = row.id.0.as_bytes().to_vec();
+            let seq = row.seq as i64;
+            let mut found = self.images_where(source, false, ID_AT_SEQ, &[&rid, &seq])?;
+            if found.is_empty() {
+                found = self.images_where(source, true, ID_AT_SEQ, &[&rid, &seq])?;
+            }
+            for image in &found {
+                seqs.insert(image.seq);
+                current.insert((row.id, image.key.clone()));
+            }
+            images.extend(found);
+        }
+        for (row, key) in current {
+            images.extend(self.current_image(source, row, &key)?);
+        }
+        Ok(())
+    }
+
+    /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_settled`
+    /// for uploads, this authority's node for its own commits.
+    fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1")
+            .map_err(storage)?;
+        let mut out = Vec::with_capacity(seqs.len());
+        for &seq in seqs {
+            let recorded = statement
+                .query_row([seq as i64], |r| {
+                    Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64))
+                })
+                .optional()
+                .map_err(storage)?;
+            out.push(match recorded {
+                Some((node, tx)) => (seq, node.try_into().unwrap_or([0; 16]), tx),
+                None => (seq, *self.identity.node.as_bytes(), seq),
+            });
+        }
+        Ok(out)
     }
 
     /// Ship the readable supporting rows of one shipped image, and watch
@@ -1956,12 +2024,6 @@ impl Db {
     /// filters, multi-hop includes, nested arrays, aggregates) would see a
     /// partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
-        if crate::schema::history::is_history_table(&query.table) {
-            return Err(crate::values::unsupported(format!(
-                "a synced read of `{}`",
-                query.table
-            )));
-        }
         let other_tables = !query.joins.is_empty()
             || query.flat_join.is_some()
             || !query.reachable.is_empty()
@@ -2429,6 +2491,11 @@ impl Db {
                             ));
                         }
                     }
+                    SyncMessage::Origins { commits } => {
+                        for (seq, node, tx) in commits {
+                            inner.record_settled(node, tx, Some(seq))?;
+                        }
+                    }
                     SyncMessage::Advice { id, advice } => {
                         let client = inner.client.as_mut().expect("client");
                         // Late answers to cancelled requests are dropped.
@@ -2871,6 +2938,8 @@ impl Db {
                 })
                 .collect();
             let mut images = Vec::new();
+            // Seqs of shipped history versions: their origins go first.
+            let mut history_seqs = BTreeSet::new();
             for (id, queue, group, list) in subs {
                 let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
                 if events.is_empty() {
@@ -2897,12 +2966,17 @@ impl Db {
                         continue;
                     };
                     for row in added.iter().chain(updated.iter()) {
-                        let table = names.stored_table(&row.table)?.to_owned();
+                        // A history row is a version of its source table.
+                        let history = history_source_table(&row.table);
+                        let table = names
+                            .stored_table(history.unwrap_or(&row.table))?
+                            .to_owned();
                         // Unchanged for a resumed client: a version it declared
                         // holding (`Hold` watched it and re-ships it if stale).
                         // A row's seq alone cannot say so: it may have entered
                         // the result while away, through a policy or filter.
                         let unchanged = since.is_some()
+                            && history.is_none()
                             && watch.contains(&wk((
                                 table.clone(),
                                 "id".to_owned(),
@@ -2911,8 +2985,21 @@ impl Db {
                         if unchanged && support.is_none() {
                             continue;
                         }
-                        let key = (table.clone(), row.id, row.seq);
-                        if !cache.contains_key(&key) {
+                        let key = (row.table.to_string(), row.id, row.seq);
+                        if history.is_some() {
+                            if !cache.contains_key(&key) {
+                                let mut found = Vec::new();
+                                inner.history_versions(
+                                    &table,
+                                    std::slice::from_ref(&**row),
+                                    &mut found,
+                                    &mut history_seqs,
+                                )?;
+                                cache.insert(key.clone(), found);
+                            } else {
+                                history_seqs.insert(row.seq);
+                            }
+                        } else if !cache.contains_key(&key) {
                             let id = row.id.0.as_bytes().to_vec();
                             let seq = row.seq as i64;
                             let found =
@@ -2927,7 +3014,9 @@ impl Db {
                     }
                     for gone in removed {
                         let id = gone.row_uuid.0.as_bytes().to_vec();
-                        let table = names.stored_table(&gone.table)?;
+                        let table = names.stored_table(
+                            history_source_table(&gone.table).unwrap_or(&gone.table),
+                        )?;
                         for image in inner.images_where(table, false, "id = ?1", &[&id])? {
                             touched.insert((image.table.clone(), gone.row_uuid, image.key.clone()));
                         }
@@ -3018,10 +3107,15 @@ impl Db {
                     )));
                 }
             }
+            let mut out = Vec::new();
+            if !history_seqs.is_empty() {
+                out.push(SyncMessage::Origins {
+                    commits: inner.origins(&history_seqs)?,
+                });
+            }
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
-            let mut out = Vec::new();
             let mut seen = HashSet::new();
             images.retain(|image| {
                 seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
@@ -3175,21 +3269,34 @@ impl Db {
             } => {
                 let prepared = db.prepare_query_bound(&query, binding)?;
                 let mut inner = db.inner();
-                let table = inner.schema.stored_table(&query.table)?.to_owned();
+                // A history read ships versions of its source table.
+                let history = history_source_table(&query.table);
+                let table = inner
+                    .schema
+                    .stored_table(history.unwrap_or(&query.table))?
+                    .to_owned();
                 let read = ReadSpec {
                     cut: at.map(Cut::at),
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
                 let mut images = Vec::new();
-                for row in &rows {
-                    let rid = row.id.0.as_bytes().to_vec();
-                    let seq = row.seq as i64;
-                    let mut found = inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
-                    if found.is_empty() {
-                        found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                let mut origins = Vec::new();
+                if history.is_some() {
+                    let mut seqs = BTreeSet::new();
+                    inner.history_versions(&table, &rows, &mut images, &mut seqs)?;
+                    origins = inner.origins(&seqs)?;
+                } else {
+                    for row in &rows {
+                        let rid = row.id.0.as_bytes().to_vec();
+                        let seq = row.seq as i64;
+                        let mut found =
+                            inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
+                        if found.is_empty() {
+                            found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                        }
+                        images.extend(found);
                     }
-                    images.extend(found);
                 }
                 let support = inner.support_of(&query)?;
                 let mut extra = Vec::new();
@@ -3212,6 +3319,11 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
                 session.held = held;
+                if !origins.is_empty() {
+                    session
+                        .outbox
+                        .push(SyncMessage::Origins { commits: origins });
+                }
                 if !images.is_empty() {
                     session.outbox.push(SyncMessage::Rows { images });
                 }
@@ -3607,6 +3719,12 @@ impl Db {
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
         if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
+            // A fetch reads the authority's live rows only.
+            if opts.include_deleted && is_history_table(&query.table) {
+                return Err(crate::values::unsupported(
+                    "includeDeleted on synced history reads",
+                ));
+            }
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
                 (_, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => Some(Some(
