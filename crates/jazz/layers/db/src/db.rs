@@ -433,11 +433,17 @@ pub(crate) enum Who {
     Local,
     /// A trusted session identity: policies apply now.
     Session(AuthorSubject),
+    /// Unchecked like `Local` (the database identity stays the policy
+    /// subject), with this author as the write's provenance.
+    Attributed(AuthorSubject),
 }
 
 fn who(identity: WriteIdentity) -> Who {
     match identity {
         WriteIdentity::Session(author) if author != AuthorSubject::SYSTEM => Who::Session(author),
+        WriteIdentity::Attribution(author) if author != AuthorSubject::SYSTEM => {
+            Who::Attributed(author)
+        }
         _ => Who::Local,
     }
 }
@@ -1117,12 +1123,9 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
-        let local = matches!(who, Who::Local);
         self.with_upload(|| {
             let handle = self.write(op.table(), |inner, seq| inner.apply_as(&op, who, seq))?;
-            if local {
-                self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
-            }
+            self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
             Ok(handle)
         })
     }
@@ -3293,6 +3296,44 @@ fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, u64)> {
 }
 
 impl StagedOp {
+    fn identity(&self) -> Option<WriteIdentity> {
+        match self {
+            StagedOp::Insert(.., o) => Some(o.identity),
+            StagedOp::Update(.., o) => Some(o.identity),
+            StagedOp::Upsert(.., o) => Some(o.identity),
+            StagedOp::Delete(.., o) => Some(o.identity),
+            StagedOp::Restore(.., o) => Some(o.identity),
+            StagedOp::Move(..) => None,
+        }
+    }
+
+    /// The write's provenance author when it is not the database's own: a
+    /// trusted session's, or an attribution.
+    pub(crate) fn author(&self) -> Option<AuthorSubject> {
+        match self.identity()? {
+            WriteIdentity::Session(author) | WriteIdentity::Attribution(author)
+                if author != AuthorSubject::SYSTEM =>
+            {
+                Some(author)
+            }
+            _ => None,
+        }
+    }
+
+    /// Attribute the write to `author` (unchecked, as an uploaded write is
+    /// re-applied locally).
+    pub(crate) fn attribute(&mut self, author: AuthorSubject) {
+        let identity = WriteIdentity::Attribution(author);
+        match self {
+            StagedOp::Insert(.., o) => o.identity = identity,
+            StagedOp::Update(.., o) => o.identity = identity,
+            StagedOp::Upsert(.., o) => o.identity = identity,
+            StagedOp::Delete(.., o) => o.identity = identity,
+            StagedOp::Restore(.., o) => o.identity = identity,
+            StagedOp::Move(..) => {}
+        }
+    }
+
     fn table(&self) -> &str {
         match self {
             StagedOp::Insert(t, ..)
@@ -3319,14 +3360,16 @@ impl StagedOp {
 impl Inner {
     /// Apply one staged write as client-local staging (the authority checks
     /// policies on upload, as for Jazz's mergeable batches).
+    /// Re-apply a staged write unchecked, keeping its provenance.
     fn apply(&mut self, op: &StagedOp, seq: u64) -> Result<WriteHandle, Error> {
-        self.apply_as(op, Who::Local, seq)
+        let who = op.author().map_or(Who::Local, Who::Attributed);
+        self.apply_as(op, who, seq)
     }
 
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
-            Who::Session(author) => author,
+            Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.identity.author,
         };
         let (last_seq, last_at) = self.last_stamp;

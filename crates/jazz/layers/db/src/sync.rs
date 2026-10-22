@@ -340,11 +340,16 @@ pub enum SyncMessage {
         at: Option<u64>,
         include_deleted: bool,
     },
+    /// `author`: the provenance the writes carry when it is not the
+    /// sender's own (a trusted session or an attribution), as a canonical
+    /// author subject. Only a trusted link may set one that differs from
+    /// its own identity.
     Commit {
         node: [u8; 16],
         tx: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
+        author: Option<String>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -1980,14 +1985,21 @@ impl Inner {
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
             let rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-            let SyncMessage::Commit { ops, .. } = &commit else {
+            let SyncMessage::Commit { ops, author, .. } = &commit else {
                 continue;
             };
-            let ops = ops
+            let mut ops = ops
                 .iter()
                 .cloned()
                 .map(from_wire)
                 .collect::<Result<Vec<_>, _>>()?;
+            if let Some(author) = author
+                .as_deref()
+                .map(AuthorSubject::from_untrusted_canonical)
+            {
+                let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+                ops.iter_mut().for_each(|op| op.attribute(author));
+            }
             client.pending.push(Pending {
                 tx,
                 ops,
@@ -2261,6 +2273,10 @@ impl Db {
                     tx: seq,
                     kind,
                     ops: wire,
+                    author: ops
+                        .iter()
+                        .find_map(StagedOp::author)
+                        .map(|author| author.canonical().to_owned()),
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
@@ -3685,12 +3701,16 @@ impl Db {
                 tx,
                 kind,
                 ops,
+                author,
             } => {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
-                    None => match db.authorize_commit(policy, kind, ops, (node, tx)) {
+                    None => match commit_who(policy, author.as_deref())
+                        .map_err(|error| (error, Vec::new()))
+                        .and_then(|who| db.authorize_commit(who, policy, kind, ops, (node, tx)))
+                    {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
                         Err((error, rows)) => {
@@ -3787,6 +3807,7 @@ impl Db {
     #[allow(clippy::type_complexity)]
     fn authorize_commit(
         &self,
+        who: Who,
         identity: Option<AuthorSubject>,
         kind: WireKind,
         ops: Vec<WireOp>,
@@ -3880,10 +3901,6 @@ impl Db {
                 }
             }
         }
-        let who = match identity {
-            Some(author) => Who::Session(author),
-            None => Who::Local,
-        };
         let seq = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
@@ -3924,6 +3941,25 @@ impl Db {
     pub(crate) fn sync_tick(&self) -> Result<(), Error> {
         self.server_tick()?;
         self.client_tick()
+    }
+}
+
+/// Who an uploaded commit is applied as. A session link writes under its
+/// own identity and may not name another author; a trusted link (no policy
+/// identity) writes unchecked, attributed to the author it names.
+fn commit_who(policy: Option<AuthorSubject>, author: Option<&str>) -> Result<Who, Error> {
+    let author = author
+        .map(AuthorSubject::from_untrusted_canonical)
+        .transpose()
+        .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;
+    match (policy, author) {
+        (Some(session), Some(author)) if author != session => Err(Error::new(
+            ErrorCode::WriteRejected,
+            "attribution requires a trusted serving node",
+        )),
+        (Some(session), _) => Ok(Who::Session(session)),
+        (None, Some(author)) => Ok(Who::Attributed(author)),
+        (None, None) => Ok(Who::Local),
     }
 }
 
