@@ -37,6 +37,7 @@ use std::rc::Rc;
 use std::task::Poll;
 use web_time::Instant;
 
+use jazz_protocol::protocol::{PermissionAdvice, PermissionAdviceAction};
 use jazz_types::large_values::chunks::ChunkRequest;
 use serde::{Deserialize, Serialize};
 
@@ -365,6 +366,18 @@ pub enum SyncMessage {
         through: u64,
         result: Result<(), WireError>,
     },
+    // client → server
+    /// A permission preflight: would the session's identity be allowed
+    /// `action` right now? Never writes.
+    Advise {
+        id: u64,
+        action: PermissionAdviceAction,
+    },
+    // server → client
+    Advice {
+        id: u64,
+        advice: PermissionAdvice,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -430,6 +443,8 @@ pub(crate) struct Client {
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
     answers: HashMap<u64, Option<(u64, Vec<[u8; 16]>)>>,
+    /// Permission preflights asked for; `None` until answered.
+    advice: HashMap<u64, Option<PermissionAdvice>>,
     /// Large-value nodes asked for and not yet answered.
     requested: BTreeSet<ChunkRequest>,
     /// Nodes to ask for on the next send.
@@ -1577,6 +1592,7 @@ impl Client {
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
+            advice: HashMap::new(),
             requested: BTreeSet::new(),
             wanted: BTreeSet::new(),
             pushed: HashMap::new(),
@@ -1647,6 +1663,9 @@ impl Db {
         resend.append(&mut client.unsent);
         client.unsent = resend;
         // A new session answers nothing the old one was asked.
+        for slot in client.advice.values_mut() {
+            slot.get_or_insert(PermissionAdvice::Unknown);
+        }
         let asked = std::mem::take(&mut client.requested);
         client.wanted.extend(asked);
         client.connection += 1;
@@ -1944,6 +1963,142 @@ impl Db {
         Ok(())
     }
 
+    /// Ask the upstream authority whether `action` would be allowed for
+    /// this replica's session; wait with [`Db::permission_advice`]. Without
+    /// a connected upstream the answer is `Unknown`: a replica's own policy
+    /// evidence may be incomplete, so it never decides locally.
+    pub fn request_permission_advice(&self, action: PermissionAdviceAction) -> u64 {
+        let mut inner = self.inner.borrow_mut();
+        let Some(client) = inner.client.as_mut() else {
+            return 0;
+        };
+        let id = client.next_id;
+        client.next_id += 1;
+        if client.transport.is_some() && may_wait(client.hint.get()) {
+            client.advice.insert(id, None);
+            client.outbox.push(SyncMessage::Advise { id, action });
+        } else {
+            client.advice.insert(id, Some(PermissionAdvice::Unknown));
+        }
+        id
+    }
+
+    /// The answer to a [`Db::request_permission_advice`]; `Unknown` if the
+    /// link fails or the request was cancelled first.
+    pub async fn permission_advice(&self, id: u64) -> PermissionAdvice {
+        poll_fn(|_| {
+            let mut inner = self.inner.borrow_mut();
+            let Some(client) = inner.client.as_mut() else {
+                return Poll::Ready(PermissionAdvice::Unknown);
+            };
+            match client.advice.get(&id) {
+                None => Poll::Ready(PermissionAdvice::Unknown),
+                Some(Some(advice)) => {
+                    let advice = *advice;
+                    client.advice.remove(&id);
+                    Poll::Ready(advice)
+                }
+                Some(None) if client.transport.is_none() || !may_wait(client.hint.get()) => {
+                    client.advice.remove(&id);
+                    Poll::Ready(PermissionAdvice::Unknown)
+                }
+                Some(None) => Poll::Pending,
+            }
+        })
+        .await
+    }
+
+    /// Resolve an outstanding request as `Unknown`; its answer is ignored.
+    pub fn cancel_permission_advice_request(&self, id: u64) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(slot) = inner.client.as_mut().and_then(|c| c.advice.get_mut(&id)) {
+            slot.get_or_insert(PermissionAdvice::Unknown);
+        }
+    }
+
+    /// Dry-run `action` as `identity` (`None`: a trusted link) and roll it
+    /// back. A server that is itself a replica answers `Unknown`.
+    fn advise(
+        &self,
+        identity: Option<AuthorSubject>,
+        action: PermissionAdviceAction,
+    ) -> PermissionAdvice {
+        if self.is_client() {
+            return PermissionAdvice::Unknown;
+        }
+        let who = match identity {
+            Some(author) => Who::Session(author),
+            None => Who::Local,
+        };
+        let op = match action {
+            PermissionAdviceAction::Read { table, row } => {
+                let inner = self.inner.borrow();
+                let id = row.0.as_bytes().to_vec();
+                let images = match inner.images_where(&table, false, "id = ?1", &[&id]) {
+                    Ok(images) => images,
+                    Err(_) => return PermissionAdvice::Unknown,
+                };
+                let Some(image) = images.into_iter().find(|image| !image.deleted) else {
+                    return PermissionAdvice::Denied;
+                };
+                return match readable(&inner, &table, row, &image.key, identity) {
+                    Ok(true) => PermissionAdvice::Allowed,
+                    Ok(false) => PermissionAdvice::Denied,
+                    Err(_) => PermissionAdvice::Unknown,
+                };
+            }
+            PermissionAdviceAction::Insert { table, cells } => {
+                let owner = self.inner.borrow().owner.clone();
+                // The candidate has no id yet: a policy that looks at it
+                // cannot be decided.
+                match owner.table(&table) {
+                    Ok(schema) => {
+                        if schema
+                            .policy(crate::tools::Operation::Insert)
+                            .is_some_and(depends_on_row_id)
+                        {
+                            return PermissionAdvice::Unknown;
+                        }
+                    }
+                    Err(_) => return PermissionAdvice::Unknown,
+                }
+                StagedOp::Insert(
+                    table,
+                    cells,
+                    InsertOptions {
+                        row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                        ..Default::default()
+                    },
+                )
+            }
+            PermissionAdviceAction::Update { table, row, patch } => {
+                StagedOp::Update(table, row, patch, Default::default())
+            }
+            PermissionAdviceAction::Delete { table, row } => {
+                StagedOp::Delete(table, row, Default::default())
+            }
+        };
+        let mut inner = self.inner();
+        let seq = inner.seq + 1;
+        if inner.conn.execute_batch("SAVEPOINT advise").is_err() {
+            return PermissionAdvice::Unknown;
+        }
+        let mark = inner.changed.borrow().len();
+        let applied = inner.apply_as(&op, who, seq).map(drop);
+        let undone = inner
+            .conn
+            .execute_batch("ROLLBACK TO advise; RELEASE advise");
+        inner.changed.borrow_mut().truncate(mark);
+        match (applied, undone) {
+            (_, Err(_)) => PermissionAdvice::Unknown,
+            (Ok(()), Ok(())) => PermissionAdvice::Allowed,
+            (Err(error), Ok(())) if error.code == ErrorCode::WriteRejected => {
+                PermissionAdvice::Denied
+            }
+            (Err(_), Ok(())) => PermissionAdvice::Unknown,
+        }
+    }
+
     /// Client half of a tick: apply what the server sent, rebase if a
     /// pending transaction settled or a shadowed row changed, then send.
     fn client_tick(&self) -> Result<(), Error> {
@@ -2056,6 +2211,13 @@ impl Db {
                                 Some(ids),
                                 resumed,
                             ));
+                        }
+                    }
+                    SyncMessage::Advice { id, advice } => {
+                        let client = inner.client.as_mut().expect("client");
+                        // Late answers to cancelled requests are dropped.
+                        if let Some(slot @ None) = client.advice.get_mut(&id) {
+                            *slot = Some(advice);
                         }
                     }
                     SyncMessage::Answer { id, through, rows } => {
@@ -2703,6 +2865,12 @@ impl Db {
                     dropped.set(dropped.get() + 1);
                 }
             }
+            SyncMessage::Advise { id, action } => {
+                let advice = self.advise(policy, action);
+                self.inner.borrow_mut().sessions[index]
+                    .outbox
+                    .push(SyncMessage::Advice { id, advice });
+            }
             SyncMessage::Fetch {
                 id,
                 query,
@@ -2957,6 +3125,32 @@ impl Db {
     pub(crate) fn sync_tick(&self) -> Result<(), Error> {
         self.server_tick()?;
         self.client_tick()
+    }
+}
+
+/// Whether a policy can look at the row's own id (subqueries count: they
+/// may correlate on it).
+fn depends_on_row_id(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Cmp { column, .. }
+        | PolicyExpr::IsNull { column }
+        | PolicyExpr::IsNotNull { column }
+        | PolicyExpr::Contains { column, .. }
+        | PolicyExpr::In { column, .. }
+        | PolicyExpr::InList { column, .. } => column == "id",
+        PolicyExpr::Inherits { via_column, .. } => via_column == "id",
+        PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsRel { .. } => true,
+        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().any(depends_on_row_id),
+        PolicyExpr::Not(item) => depends_on_row_id(item),
+        PolicyExpr::SessionCmp { .. }
+        | PolicyExpr::SessionIsNull { .. }
+        | PolicyExpr::SessionIsNotNull { .. }
+        | PolicyExpr::SessionContains { .. }
+        | PolicyExpr::SessionInList { .. }
+        | PolicyExpr::True
+        | PolicyExpr::False => false,
     }
 }
 
