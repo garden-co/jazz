@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::runtime::ServerLinkAdmission;
+use crate::runtime::{CommitUnitTrust, ConnectionSessionContext};
 use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
@@ -16,11 +18,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt as _, StreamExt as _};
-use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
-use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
-use jazz::serving::ServerLinkAdmission;
+use jazz::records::Value as CoreValue;
 use jazz::tools::Session;
 use jazz::wire::{
     WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
@@ -488,9 +488,9 @@ fn session_claims(
         _ => BTreeMap::new(),
     };
     let provider_claims =
-        jazz::serving::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
+        crate::runtime::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
             .map_err(|error| error.to_string())?;
-    Ok(jazz::serving::auth_admission::admitted_session_claims(
+    Ok(crate::runtime::auth_admission::admitted_session_claims(
         &session.issuer,
         &session.user_id,
         author,
@@ -1094,11 +1094,6 @@ async fn send_ws_encoded_frames(
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
     for batch in encode_ws_frame_batches(frames).map_err(axum::Error::new)? {
-        #[cfg(feature = "sync-autopsy")]
-        jazz::db::sync_autopsy::record(format!(
-            "server websocket send batch bytes={}",
-            batch.len()
-        ));
         socket.send(Message::Binary(batch.into())).await?;
     }
     Ok(())
@@ -2824,7 +2819,7 @@ mod tests {
         fn wire_inbound_context(&self) -> Option<jazz::wire::WireInboundContext> {
             self.adapter.wire_inbound_context()
         }
-        fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
+        fn connection_session_context(&self) -> Option<crate::runtime::ConnectionSessionContext> {
             self.adapter.connection_session_context()
         }
         fn permits_delegated_sessions(&self) -> bool {

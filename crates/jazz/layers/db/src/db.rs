@@ -429,6 +429,36 @@ impl Stamp {
 
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
+/// The new-column defaults a migration lens carries, keyed by (table,
+/// column). SQLite applies a lens by growing the stored tables, so a lens
+/// may add and drop columns (dropped values stay stored) and tables; renames,
+/// copies and transforms are not supported yet.
+pub fn lens_column_defaults(
+    lens: &MigrationLens,
+) -> Result<BTreeMap<(String, String), Value>, Error> {
+    let mut defaults = BTreeMap::new();
+    for table in &lens.table_lenses {
+        if table.source_table != table.target_table {
+            return Err(unsupported("table rename lenses on SQLite"));
+        }
+        for op in &table.ops {
+            match op {
+                LensOp::AddColumn {
+                    column, default, ..
+                } => {
+                    defaults.insert(
+                        (table.target_table.clone(), column.clone()),
+                        default.clone(),
+                    );
+                }
+                LensOp::DropColumn { .. } => {}
+                other => return Err(unsupported(format!("lens op {other:?} on SQLite"))),
+            }
+        }
+    }
+    Ok(defaults)
+}
+
 /// The application tables a store holds, by their stored columns.
 fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
@@ -1127,25 +1157,7 @@ impl Db {
             .find(|publication| publication.version.id == current.schema)
             .cloned()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        let mut defaults = BTreeMap::new();
-        for table in &publication.lens.table_lenses {
-            if table.source_table != table.target_table {
-                return Err(unsupported("table rename lenses on SQLite"));
-            }
-            for op in &table.ops {
-                match op {
-                    LensOp::AddColumn {
-                        column, default, ..
-                    } => {
-                        defaults.insert(
-                            (table.target_table.clone(), column.clone()),
-                            default.clone(),
-                        );
-                    }
-                    other => return Err(unsupported(format!("lens op {other:?} on SQLite"))),
-                }
-            }
-        }
+        let defaults = lens_column_defaults(&publication.lens)?;
         self.activate(publication.version.schema, &defaults)
     }
 
@@ -1156,6 +1168,16 @@ impl Db {
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
         self.activate(schema, &BTreeMap::new())
+    }
+
+    /// [`Db::activate_schema`], with defaults for new columns keyed by
+    /// (table, column), as [`lens_column_defaults`] reads them off a lens.
+    pub async fn activate_schema_with_defaults(
+        &self,
+        schema: JazzSchema,
+        defaults: &BTreeMap<(String, String), Value>,
+    ) -> Result<(), Error> {
+        self.activate(schema, defaults)
     }
 
     fn activate(
