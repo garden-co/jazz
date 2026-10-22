@@ -13,7 +13,6 @@ transport-compression-zstd = ["jazz-compression/zstd"]
 transport-compression-ruzstd = ["jazz-compression/ruzstd"]
 
 [dependencies]
-groove = { workspace = true, default-features = false }
 jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-compression.workspace = true
@@ -30,6 +29,5 @@ uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 web-time = "1.1"
 
 [dev-dependencies]
-groove = { workspace = true, default-features = false, features = ["test"] }
 jazz-types = { workspace = true, features = ["testing"] }
 jazz-model = { workspace = true, features = ["testing"] }

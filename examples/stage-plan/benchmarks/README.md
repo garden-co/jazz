@@ -35,19 +35,17 @@ CodSpeed history; the workloads and their correctness checks are unchanged.
 ## Nightly cases (`benches/nightly.rs`)
 
 Scaling sweeps that explain a cost but do not need a receipt on every PR keep
-their former W1 names: bounded activity page (profile S, 9,000 RocksDB, and the
+their former W1 names: bounded activity page (profile S, 9,000 file-backed, and the
 memory sweep), comments scaling, indexed update without a subscription, point
 subscribe without a policy, the 900-row policy attach and resubscribe. The
 nightly CodSpeed run measures them on main; the benchmark smoke gate compiles
 them on every PR; run them locally with
 `cargo bench -p jazz-example-stage-plan-benchmark --bench nightly`.
 
-The `_sqlite` cases repeat the per-merge storage-bound cases (add, check off,
-bulk complete and reopen the task list; open the board and a task's detail;
-the 30,000-row activity page; move a card) on SQLite with WAL and
-`synchronous=NORMAL`, the store the native relay uses on React Native, Swift and
-Kotlin. They replace the SQLite engine runs of the retired realistic benchmark
-workflow, so a SQLite-only regression shows up in the nightly history.
+All cases now run on the SQLite engine. Cases that ran on RocksDB on main
+(the `_rocksdb` nightly names and the walltime cases listed above) use a
+file-backed SQLite database with WAL and `synchronous=NORMAL`; the former
+`_sqlite` twins were dropped because they now measure the same thing.
 
 Dropped because a CodSpeed case above measures the same operation: the
 in-memory twins of the board, task-detail, profile-S activity page and

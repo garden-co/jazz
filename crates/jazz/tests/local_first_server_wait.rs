@@ -1,3 +1,4 @@
+// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Local first with a server-wait timeout (`FirstLoad::WaitForRemote`):
 //! the opening, empty or not, waits a bounded time for the server's answer
 //! while the remote could answer, and never waits when it cannot.
@@ -8,7 +9,7 @@
 //! race.
 
 // Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
-#[path = "../../jazz-testkit/src/duplex_transport.rs"]
+#[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -24,10 +25,9 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, FirstLoad, ReadOpts, RemoteLinkHint, SerializedReadResult,
     SubscriptionEvent, SubscriptionStream,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -49,13 +49,10 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn config(node: u8, author: AuthorSubject) -> DbConfig<TestStorage> {
+fn config(node: u8, author: AuthorSubject) -> DbConfig {
     let schema = schema();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,

@@ -2,6 +2,7 @@ import { columnTypeSignature } from "./runtime/schema-metadata.js";
 import { structuralValuesEqual } from "./runtime/structural-values.js";
 import { sqlTypeToWasm } from "./codegen/schema-reader.js";
 import { toValue } from "./runtime/value-converter.js";
+import { isComputedColumn } from "./dsl.js";
 import type {
   AnyTypedColumnBuilder,
   ColumnBuilderOptional,
@@ -34,12 +35,18 @@ import {
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
-type NormalizedSchema<TSchema extends SchemaLike> =
+type StoredSchema<S> = {
+  [T in keyof S]: {
+    [K in keyof S[T] as S[T][K] extends AnyTypedColumnBuilder ? K : never]: S[T][K];
+  };
+};
+type NormalizedSchema<TSchema extends SchemaLike> = StoredSchema<
   TSchema extends AppSchema<infer TDefinition>
     ? CompactSchema<TDefinition>
     : TSchema extends SchemaDefinition
       ? CompactSchema<TSchema>
-      : never;
+      : never
+>;
 
 type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
 type AddedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
@@ -755,7 +762,8 @@ function unwrapSchemaTables<TSchema extends SchemaLike>(
       return [
         tableName,
         Object.fromEntries(
-          Object.entries(columns).map(([name, builder]) => {
+          Object.entries(columns).flatMap(([name, builder]) => {
+            if (isComputedColumn(builder)) return [];
             const references = lowered.columns.find((column) => column.name === name)?.references;
             // Preserve the caller's builder and methods while presenting its effective stored reference
             // metadata to the existing column-shape comparison (including renamed columns).
@@ -764,7 +772,7 @@ function unwrapSchemaTables<TSchema extends SchemaLike>(
               ...builder._build(columnName),
               references,
             });
-            return [name, effective];
+            return [[name, effective]];
           }),
         ),
       ];
