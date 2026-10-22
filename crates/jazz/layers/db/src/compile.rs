@@ -932,9 +932,14 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             Predicate::Contains(l, r) => {
+                let array = matches!(l, Operand::Column(column) if is_array(table, column));
                 let l = self.operand(l, table, alias)?;
                 let r = self.operand(r, table, alias)?;
-                self.contains(l, r)
+                if array {
+                    self.array_contains(l, r)
+                } else {
+                    self.contains(l, r)
+                }
             }
             Predicate::IsNull(operand) => match self.operand(operand, table, alias)? {
                 Term::Missing => "1".to_owned(),
@@ -1106,7 +1111,11 @@ impl<'a> Ctx<'a> {
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
-                self.contains(left, right)
+                if is_array(table, column) {
+                    self.array_contains(left, right)
+                } else {
+                    self.contains(left, right)
+                }
             }
             PolicyExpr::In {
                 column,
@@ -1590,6 +1599,18 @@ fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<(String, V
     }
 }
 
+/// Whether `column` is an array column (nullable or not).
+fn is_array(table: &Table, column: &str) -> bool {
+    let Some(column) = table.column(column) else {
+        return false;
+    };
+    let ty = match &column.ty {
+        ValueType::Nullable(inner) => inner.as_ref(),
+        ty => ty,
+    };
+    matches!(ty, ValueType::Array(_))
+}
+
 pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<String, Error> {
     if column == "id" {
         return Ok(format!("{alias}.id"));
@@ -1974,6 +1995,22 @@ impl Ctx<'_> {
         self.params.truncate(first);
         self.params.push(array);
         Some(select)
+    }
+
+    /// An array cell (JSON text, see [`crate::values::to_sql`]) holding an
+    /// element equal to `right`.
+    fn array_contains(&mut self, left: Term, right: Term) -> String {
+        let (Some(array), Term::Bound(placeholder, needle)) = (left.sql(), right) else {
+            return "0".to_owned();
+        };
+        // Rebind the needle in its own slot, as `json_each` reads elements.
+        let slot = placeholder[1..]
+            .parse::<usize>()
+            .expect("a numbered placeholder")
+            - 1;
+        self.params[slot] = crate::values::array_needle(needle);
+        let needle = placeholder;
+        format!("EXISTS (SELECT 1 FROM json_each({array}) WHERE value = {needle})")
     }
 
     fn contains(&mut self, left: Term, right: Term) -> String {
