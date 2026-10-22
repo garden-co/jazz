@@ -36,6 +36,8 @@ mod flush_once_per_refresh;
 mod gset_merge;
 #[path = "../history_conflict.rs"]
 mod history_conflict;
+#[path = "../history_subscriptions.rs"]
+mod history_subscriptions;
 #[path = "../inherited_policies.rs"]
 mod inherited_policies;
 #[path = "../invitation_revocation.rs"]

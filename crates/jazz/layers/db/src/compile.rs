@@ -224,18 +224,37 @@ pub struct Ctx<'a> {
 }
 
 /// A frozen snapshot: the state as of commit `seq`, plus the open
-/// transaction's own staged writes (written at `own`).
-#[derive(Clone, Copy, Debug)]
+/// transaction's own staged writes (written at `own`), plus the versions
+/// written by the individual commits in `extra` (a replica's own writes
+/// that were not yet in `seq` when the snapshot was taken).
+#[derive(Clone, Debug, Default)]
 pub struct Cut {
     pub seq: u64,
     pub own: u64,
+    pub extra: Vec<u64>,
 }
 
-/// A head branch, optionally composed over a live base branch.
+impl Cut {
+    pub fn at(seq: u64) -> Self {
+        Self {
+            seq,
+            ..Self::default()
+        }
+    }
+
+    /// Whether a version written at `seq` is in the cut.
+    pub fn sees(&self, seq: u64) -> bool {
+        seq <= self.seq || seq == self.own || self.extra.contains(&seq)
+    }
+}
+
+/// A head branch, optionally composed over a base branch that is live or
+/// frozen at `base_cut`.
 #[derive(Clone, Debug)]
 pub struct View {
     pub head: crate::protocol::BranchSelector,
     pub base: Option<crate::protocol::BranchSelector>,
+    pub base_cut: Option<Cut>,
 }
 
 /// A compiled root query.
@@ -290,12 +309,36 @@ impl<'a> Ctx<'a> {
     /// they are; for rows changed since, the newest superseded image at or
     /// before the cut stands in. Rows created after the cut have neither.
     fn rows(&mut self, table: &Table, columns: &str) -> String {
+        self.rows_at(table, columns, self.cut.clone())
+    }
+
+    fn rows_at(&mut self, table: &Table, columns: &str, cut: Option<Cut>) -> String {
         let name = quote(&table.stored);
-        let Some(cut) = self.cut else {
+        let Some(cut) = cut else {
             return name;
         };
         let seq = self.bind(Sql::Integer(cut.seq as i64));
         let own = self.bind(Sql::Integer(cut.own as i64));
+        // Seqs are integers, so the extra commits are inlined.
+        let extra = cut
+            .extra
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (visible, h_visible, newer) = if extra.is_empty() {
+            (
+                format!("_seq <= {seq} OR _seq = {own}"),
+                format!("h2._seq <= {seq}"),
+                format!("c._seq > {seq} AND c._seq <> {own}"),
+            )
+        } else {
+            (
+                format!("_seq <= {seq} OR _seq = {own} OR _seq IN ({extra})"),
+                format!("(h2._seq <= {seq} OR h2._seq IN ({extra}))"),
+                format!("c._seq > {seq} AND c._seq <> {own} AND c._seq NOT IN ({extra})"),
+            )
+        };
         let history = quote(&format!("{}__h", table.stored));
         let h_columns = columns
             .replace("rid, ", "")
@@ -304,11 +347,11 @@ impl<'a> Ctx<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "(SELECT {columns} FROM {name} WHERE _seq <= {seq} OR _seq = {own} \
+            "(SELECT {columns} FROM {name} WHERE {visible} \
              UNION ALL SELECT NULL, {h_columns} FROM {history} AS h JOIN {name} AS c \
-             ON c.id = h.id AND c._b = h._b WHERE c._seq > {seq} AND c._seq <> {own} \
+             ON c.id = h.id AND c._b = h._b WHERE {newer} \
              AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
-             WHERE h2.id = h.id AND h2._b = h._b AND h2._seq <= {seq}))"
+             WHERE h2.id = h.id AND h2._b = h._b AND {h_visible}))"
         )
     }
 
@@ -353,7 +396,8 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 let base = self.bind(Sql::Blob(table.selector_key(&base)?));
-                let base_rows = self.rows(table, &columns);
+                let base_cut = view.base_cut.clone().or_else(|| self.cut.clone());
+                let base_rows = self.rows_at(table, &columns, base_cut);
                 let head_rows = self.rows(table, &columns);
                 format!(
                     "(SELECT {columns} FROM {rows} WHERE _b = {head} UNION ALL SELECT {inherited} \

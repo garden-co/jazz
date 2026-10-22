@@ -2148,6 +2148,7 @@ mod tests {
             .supporting_rows
             .added_rows_mut()
             .push(crate::protocol::SupportingRow {
+                is_current: true,
                 physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
                     [0x21; 16],
                 )),

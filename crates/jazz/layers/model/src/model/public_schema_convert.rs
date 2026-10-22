@@ -518,6 +518,12 @@ fn convert_table(
     name: &TableName,
     table: &TableSchema,
 ) -> Result<CoreTableSchema, SchemaConversionError> {
+    if crate::schema::history::is_history_table(&name.as_str()) {
+        return Err(err(
+            format!("$.{}", name.as_str()),
+            "table names starting with \"history.\" are reserved for virtual history relations",
+        ));
+    }
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();

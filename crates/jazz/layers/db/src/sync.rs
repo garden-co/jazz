@@ -37,8 +37,11 @@ use std::rc::Rc;
 use std::task::Poll;
 use web_time::Instant;
 
+use crate::protocol::SnapshotRef;
+use crate::tx::TxId;
 use jazz_protocol::protocol::{PermissionAdvice, PermissionAdviceAction};
 use jazz_types::large_values::chunks::ChunkRequest;
+use jazz_types::time::{GlobalTime, TxTime};
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -180,6 +183,12 @@ pub enum WireTarget {
     View {
         head: BranchSelector,
         base: Option<BranchSelector>,
+    },
+    /// A view over a base frozen at a snapshot (resolved by the receiver).
+    FrozenView {
+        head: BranchSelector,
+        base: BranchSelector,
+        snapshot: SnapshotRef,
     },
 }
 
@@ -538,6 +547,11 @@ pub(crate) struct Session {
     outbox: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// The versions this tick's accepted commits from the client wrote:
+    /// (table, id, branch key, seq). Each ships even when a later version
+    /// supersedes it, so the replica holds every state its own commits
+    /// produced (a snapshot naming one reads it there).
+    committed: Vec<(String, RowUuid, Vec<u8>, u64)>,
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     /// The replica's coherence watches: `(table, column, value)` for every
@@ -574,6 +588,7 @@ impl Session {
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
+            committed: Vec::new(),
             support: BTreeMap::new(),
             watch: HashSet::new(),
             resume: BTreeMap::new(),
@@ -687,8 +702,12 @@ fn wire_target(target: &WriteTarget) -> Result<WireTarget, Error> {
             base: match base {
                 None => None,
                 Some(BranchViewBase::Current(base)) => Some(base.clone()),
-                Some(BranchViewBase::Snapshot { .. }) => {
-                    return Err(unsupported("frozen snapshot bases over sync"));
+                Some(BranchViewBase::Snapshot { branch, snapshot }) => {
+                    return Ok(WireTarget::FrozenView {
+                        head: head.clone(),
+                        base: branch.clone(),
+                        snapshot: snapshot.clone(),
+                    });
                 }
             },
         },
@@ -749,6 +768,17 @@ fn view_target(target: WireTarget) -> WriteTarget {
         WireTarget::View { head, base } => WriteTarget::BranchView {
             head,
             base: base.map(BranchViewBase::Current),
+        },
+        WireTarget::FrozenView {
+            head,
+            base,
+            snapshot,
+        } => WriteTarget::BranchView {
+            head,
+            base: Some(BranchViewBase::Snapshot {
+                branch: base,
+                snapshot,
+            }),
         },
     }
 }
@@ -1322,7 +1352,8 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shadow (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, image BLOB, PRIMARY KEY (t, id, k));\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (issuer, subject));\
-    CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));";
+    CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
+    CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));";
 
 type RowKey = (String, RowUuid, Vec<u8>);
 
@@ -1503,6 +1534,81 @@ impl Inner {
         )
         .map_err(storage)?;
         Ok(())
+    }
+
+    /// Where a commit landed in the authority's order: `Some(seq)` once
+    /// accepted, `None` once rejected. Kept by the authority for every
+    /// upload and by a replica for its own, so snapshots that name
+    /// individual commits stay readable after they settle.
+    fn record_settled(&self, node: [u8; 16], tx: u64, seq: Option<u64>) -> Result<(), Error> {
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_settled (node, tx, seq) VALUES (?1, ?2, ?3)",
+            rusqlite::params![node.to_vec(), tx as i64, seq.map(|s| s as i64)],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<u64>>, Error> {
+        match self.conn.query_row(
+            "SELECT seq FROM _jazz_settled WHERE node = ?1 AND tx = ?2",
+            rusqlite::params![node.to_vec(), tx as i64],
+            |r| r.get::<_, Option<i64>>(0),
+        ) {
+            Ok(seq) => Ok(Some(seq.map(|s| s as u64))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
+    /// The cut a snapshot reference reads: the authority's state through
+    /// its global base, plus each commit it names individually (a
+    /// replica's writes not yet settled when it was captured) wherever
+    /// that commit is now: still pending here, or settled at a seq.
+    pub(crate) fn resolve_snapshot(&self, snapshot: &SnapshotRef) -> Result<Cut, Error> {
+        if snapshot.local_base.0 != 0 {
+            return Err(unsupported(
+                "snapshot references with a local base (captured before SQLite)",
+            ));
+        }
+        // A replica reads snapshots from its own store: it must already hold
+        // the authority state the reference was captured at.
+        let horizon = self.client.as_ref().map_or(self.seq, |client| client.known);
+        if snapshot.global_base.0 > horizon {
+            return Err(unsupported(
+                "reading a snapshot newer than this replica's synced state",
+            ));
+        }
+        let mut cut = Cut::at(snapshot.global_base.0);
+        let me = *self.identity.node.as_bytes();
+        for dot in &snapshot.dots {
+            let node = *dot.node.as_bytes();
+            let tx = dot.time.0;
+            match self.settled(node, tx)? {
+                Some(Some(seq)) => {
+                    cut.extra.push(seq);
+                    continue;
+                }
+                // Rejected: it never happened.
+                Some(None) => continue,
+                None => {}
+            }
+            if node == me
+                && let Some(client) = &self.client
+            {
+                if client.pending.iter().any(|p| p.tx == tx) {
+                    cut.extra.push(tx);
+                    continue;
+                }
+                if client.fates.get(&tx).is_some_and(Result::is_err) {
+                    continue;
+                }
+            }
+            return Err(unsupported(
+                "reading a snapshot that names another replica's commits not yet settled here",
+            ));
+        }
+        Ok(cut)
     }
 
     /// Reload a replica's sync state after a restart: pending commits are
@@ -1963,6 +2069,58 @@ impl Db {
         .await
     }
 
+    /// Freeze everything this database has committed, its own unsettled
+    /// writes included, as a persistable reference for snapshot reads and
+    /// frozen branch bases. A replica whose link can answer first lets its
+    /// pending writes settle, so the reference is one authority cut any
+    /// replica can read; writes still pending after that (offline) are
+    /// named individually and stay readable here and at the authority.
+    pub async fn capture_snapshot(&self) -> Result<SnapshotRef, Error> {
+        let node = self.inner.borrow().identity.node;
+        if !self.is_client() {
+            return Ok(SnapshotRef {
+                owner: node,
+                global_base: GlobalTime(self.inner.borrow().seq),
+                local_base: TxTime(0),
+                dots: Vec::new(),
+            });
+        }
+        let captured: Vec<u64> = {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            client.pending.iter().map(|p| p.tx).collect()
+        };
+        poll_fn(|_| {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            let settling = client.transport.is_some()
+                && may_wait(client.hint.get())
+                && client.pending.iter().any(|p| captured.contains(&p.tx));
+            if settling {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await;
+        let inner = self.inner.borrow();
+        let client = inner.client.as_ref().expect("client");
+        Ok(SnapshotRef {
+            owner: node,
+            global_base: GlobalTime(client.known),
+            local_base: TxTime(0),
+            dots: client
+                .pending
+                .iter()
+                .filter(|p| captured.contains(&p.tx))
+                .map(|p| TxId {
+                    time: TxTime(p.tx),
+                    node,
+                })
+                .collect(),
+        })
+    }
+
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         if tier < DurabilityTier::Global || !self.is_client() {
@@ -2282,10 +2440,13 @@ impl Db {
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
+                        let accepted = result.is_ok();
                         client.fates.insert(tx, result.map_err(from_wire_error));
+                        let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &locators)?;
                         }
+                        inner.record_settled(node, tx, accepted.then_some(through))?;
                         inner.forget_pending(tx)?;
                         rebase = true;
                     }
@@ -2453,7 +2614,12 @@ impl Inner {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
-                _ => *shadow = Some(image),
+                // The replaced server version stays as history.
+                Some(old) => {
+                    let older = std::mem::replace(old, image);
+                    self.put_image(&older, true)?;
+                }
+                None => *shadow = Some(image),
             }
             return Ok(true);
         }
@@ -2657,6 +2823,7 @@ impl Db {
                 .session_schema(index)
                 .unwrap_or_else(|| inner.owner.clone());
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
+            let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
             for (table, row, key) in recheck {
@@ -2803,6 +2970,22 @@ impl Db {
                         id: *row.0.as_bytes(),
                         key,
                     }),
+                }
+            }
+            // Superseded versions of the client's own commits land in its
+            // history, while the row stays readable.
+            for (table, row, key, seq) in committed {
+                let superseded = inner
+                    .current_image(&table, row, &key)?
+                    .is_some_and(|current| current.seq != seq);
+                if superseded && readable(&inner, &table, row, &key, policy)? {
+                    let id = row.0.as_bytes().to_vec();
+                    images.extend(inner.images_where(
+                        &table,
+                        true,
+                        "id = ?1 AND _b = ?2 AND _seq = ?3",
+                        &[&id, &key, &(seq as i64)],
+                    )?);
                 }
             }
             for image in &images {
@@ -2980,7 +3163,7 @@ impl Db {
                 let mut inner = db.inner();
                 let table = inner.schema.stored_table(&query.table)?.to_owned();
                 let read = ReadSpec {
-                    cut: at.map(|seq| Cut { seq, own: 0 }),
+                    cut: at.map(Cut::at),
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
@@ -3039,14 +3222,27 @@ impl Db {
                         Ok(rows) => (Ok(()), rows),
                         Err((error, rows)) => {
                             let result = Err(wire_error(&error));
-                            self.inner.borrow().record_fate(node, tx, &result)?;
+                            let inner = self.inner.borrow();
+                            inner.record_fate(node, tx, &result)?;
+                            inner.record_settled(node, tx, None)?;
                             (result, rows)
                         }
                     },
                 };
                 let mut inner = self.inner.borrow_mut();
-                let through = inner.seq;
+                // An accepted commit's fate carries the seq it landed at (a
+                // resend gets the recorded one), so the replica learns it.
+                let through = match (&result, inner.settled(node, tx)?) {
+                    (Ok(()), Some(Some(seq))) => seq,
+                    _ => inner.seq,
+                };
                 let session = &mut inner.sessions[index];
+                if result.is_ok() {
+                    session.committed.extend(
+                        rows.iter()
+                            .map(|(table, row, key)| (table.clone(), *row, key.clone(), through)),
+                    );
+                }
                 session.touched.extend(rows);
                 session.outbox.push(SyncMessage::Fate {
                     tx,
@@ -3211,6 +3407,7 @@ impl Db {
             }
             inner
                 .record_fate(origin.0, origin.1, &Ok(()))
+                .and_then(|()| inner.record_settled(origin.0, origin.1, Some(seq)))
                 .map_err(|e| (e, Vec::new()))?;
             inner
                 .conn
@@ -3394,7 +3591,8 @@ impl Db {
                 self.serializable_tx_ref(tx).all_prepared(&prepared).await?,
             ));
         }
-        if self.is_client() && opts.tier != ReadTier::LocalOnly {
+        let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
+        if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
                 (_, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => Some(Some(
