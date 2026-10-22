@@ -492,8 +492,9 @@ mod tests {
             (read.added_indices, read.removed_indices),
             (vec![0], vec![1])
         );
-        // Version 1, the root uuid, no joined rows, no union arms.
-        let key = |id: u8| [&[1][..], &[id; 16], &[0; 4], &[0; 4]].concat();
+        // Key version 2, the root uuid, no joined rows, no union arms, and a
+        // current (not historical) root source.
+        let key = |id: u8| [&[2][..], &[id; 16], &[0; 4], &[0; 4], &[0]].concat();
         assert_eq!(read.added_occurrence_keys[0].as_ref(), key(7));
         assert_eq!(read.removed_occurrence_keys[0].as_ref(), key(8));
     }

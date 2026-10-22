@@ -106,6 +106,8 @@ export type { WhereOperator, WhereOperatorColumn } from "./where-operators.js";
 export type {
   Schema,
   TableDefinition,
+  HistoryQuery,
+  HistoryRow,
   SchemaDefinition,
   Simplify,
   CompactSchema,
