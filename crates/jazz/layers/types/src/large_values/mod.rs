@@ -3172,7 +3172,8 @@ fn validate_descriptor_shape_v1(value: &LargeValueRef) -> Result<(), Error> {
 /// Recover the tail-free descriptor of `value`'s immutable base tree by
 /// undoing each tail edit's length effects in reverse order. This performs no
 /// reads; callers compare the result against the authenticated root node.
-fn tail_base_descriptor(value: &LargeValueRef) -> Result<LargeValueRef, Error> {
+/// The descriptor of `value`'s immutable base tree: its tail undone.
+pub fn tail_base_descriptor(value: &LargeValueRef) -> Result<LargeValueRef, Error> {
     validate_descriptor(value)?;
     let mut replay = value.clone();
     for edit in value.edit_tail.iter().rev() {

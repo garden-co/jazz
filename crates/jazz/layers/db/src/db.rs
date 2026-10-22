@@ -33,7 +33,10 @@ mod fanout;
 pub use fanout::FanoutStats;
 #[path = "large_ops.rs"]
 mod large_ops;
-pub use large_ops::{JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice};
+pub use large_ops::{
+    JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
+    LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+};
 #[path = "sync.rs"]
 pub(crate) mod sync;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
@@ -297,6 +300,14 @@ struct Inner {
     /// Nodes a large-value edit consolidated, stored when the edited cell
     /// is bound inside the write's transaction.
     pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
+    /// Descriptors this store's own edit derived for the write in flight:
+    /// trusted as built, so binding them re-validates nothing.
+    derived: Vec<jazz_types::large_values::LargeValueRef>,
+    /// Limits on local streaming uploads and on pushed nodes awaiting
+    /// their commit.
+    staging: LargeValueStagingPolicy,
+    /// The staging ingress window: (start ms, encoded bytes admitted).
+    ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
     /// schema view's that issued it.
     schema: Rc<Schema>,
@@ -497,6 +508,9 @@ impl Db {
                 conn,
                 chunks,
                 pending_nodes: Vec::new(),
+                derived: Vec::new(),
+                staging: LargeValueStagingPolicy::default(),
+                ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner,
                 physical: schema,
@@ -1703,7 +1717,7 @@ impl Inner {
         }
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
-        crate::large::store(&self.conn, &self.chunks, &prepared)?;
+        crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
         Ok(Sql::Text(crate::large::chunked_cell(&prepared.value_ref)?))
     }
 
@@ -1726,11 +1740,20 @@ impl Inner {
             .iter()
             .find(|prepared| prepared.value_ref.root == large.root)
         {
-            crate::large::store(&self.conn, &self.chunks, prepared)?;
-        } else if !crate::large::root_is_local(&self.conn, large)? {
-            return Err(unsupported(
-                "writing a large value whose chunks this store does not hold",
-            ));
+            crate::large::store(&self.conn, &self.chunks, prepared, self.client.is_some())?;
+        } else if self.derived.contains(large) {
+            // Derived here from a stored tree by an append or splice.
+        } else if self.client.is_none() {
+            // An authority admits a descriptor only over a complete, honest
+            // tree. A replica's edits build on trees its upstream holds,
+            // which it may have only partly fetched.
+            if !crate::large::root_is_local(&self.conn, large)? {
+                return Err(rejected(format!(
+                    "`{}`: the large-value descriptor names chunks this store does not hold",
+                    column.name
+                )));
+            }
+            crate::large::admit(&self.conn, &self.chunks, large)?;
         }
         Ok(Sql::Text(crate::large::chunked_cell(large)?))
     }
