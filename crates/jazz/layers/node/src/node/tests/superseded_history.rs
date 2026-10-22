@@ -313,8 +313,10 @@ fn catch_up_from_a_seq_returns_every_image_after_it() {
     let since = writes[0].1;
     for ((tx, seq), (title, body)) in writes[1..].iter().zip(expected) {
         assert!(*seq > since);
+        // Settled, so its touched-rows list is released: read what storage
+        // holds for it, across history and global current.
         let [version] = core
-            .query_versions_for_tx(*tx)
+            .stored_versions_for_tx_for_test(*tx)
             .resolve()
             .unwrap()
             .try_into()

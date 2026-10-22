@@ -1664,9 +1664,11 @@ where
     S: OrderedKvStorage,
 {
     /// Every version this node stores for `tx_id`, found by scanning every
-    /// physical history table. Test-only: it inspects storage without the
-    /// touched-rows list, so it also reads settled transactions whose list
-    /// was released. Ordered like [`Self::query_versions_for_tx`].
+    /// physical history table and its global-current images (an accepted
+    /// image is in history only once superseded, SPEC 2 §2.7.1). Test-only:
+    /// it inspects storage without the touched-rows list, so it also reads
+    /// settled transactions whose list was released. Ordered like
+    /// [`Self::query_versions_for_tx`].
     pub async fn stored_versions_for_tx_for_test(
         &mut self,
         tx_id: TxId,
@@ -1683,13 +1685,14 @@ where
         let mut versions = Vec::new();
         for table_id in table_ids {
             let storage_table = physical_history_table_name(table_id);
-            let records = self
+            let mut records = self
                 .database
                 .primary_key_scan_raw(&storage_table, &[])
                 .await?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
+            records.extend(self.current_image_records(&storage_table, &[]).await?);
             for record in records {
                 let view = record.borrowed();
                 if view.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)? != tx_id.time.0
