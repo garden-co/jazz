@@ -3938,6 +3938,8 @@ mod tests {
             crate::groove::records::ValueType::Bool => GrooveValue::Bool(true),
             crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
             crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            // Author columns hold dictionary codes.
+            value_type if value_type.as_interned().is_some() => GrooveValue::U32(0),
             crate::groove::records::ValueType::Internal(_) => {
                 panic!("public schemas must not contain Groove internal storage types")
             }

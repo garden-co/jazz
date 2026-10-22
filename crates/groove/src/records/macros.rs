@@ -33,10 +33,15 @@ pub enum FieldKind {
     Array,
     Nullable,
     Record,
+    /// A dictionary code of an interned column.
+    Interned,
 }
 
 impl FieldKind {
     fn matches(self, value_type: &ValueType) -> bool {
+        if matches!(self, Self::Interned) {
+            return value_type.as_interned().is_some();
+        }
         matches!(
             (self, value_type),
             (Self::U64, ValueType::U64)
@@ -636,6 +641,31 @@ pub fn assert_record_field_layout(
         field.value_type,
         kind
     );
+}
+
+/// Implement [`RecordField`](crate::records::RecordField) for a `u32`
+/// newtype holding the dictionary code of an interned column. The code is
+/// the field's value inside the node; resolve it through
+/// [`Dictionaries`](crate::dictionary::Dictionaries) where the value is
+/// needed.
+#[macro_export]
+macro_rules! impl_record_field_dictionary_code {
+    ($ty:ty) => {
+        impl $crate::records::RecordField for $ty {
+            fn read(
+                record: &$crate::records::BorrowedRecord<'_>,
+                idx: usize,
+            ) -> Result<Self, $crate::records::Error> {
+                record.get_dictionary_code(idx).map(Self)
+            }
+
+            fn to_value(&self) -> $crate::records::Value {
+                $crate::records::Value::U32(self.0)
+            }
+
+            const COLUMN_KIND: $crate::records::FieldKind = $crate::records::FieldKind::Interned;
+        }
+    };
 }
 
 #[macro_export]

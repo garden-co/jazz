@@ -154,11 +154,13 @@ pub(super) struct RoutedRecord<'a> {
 }
 
 impl PredicateRecord for RoutedRecord<'_> {
-    fn value(self, name: &str) -> Result<Value, IvmRuntimeError> {
+    fn stored_value(self, name: &str) -> Result<(Value, Option<ValueType>), IvmRuntimeError> {
         let index = resolve_field_name(&self.routes.descriptor, name)
             .ok_or_else(|| records::Error::FieldNotFound(name.to_owned()))?;
         let field = &self.routes.fields[index];
-        let mut ty = &self.routes.descriptor.fields()[index].value_type;
+        let declared = &self.routes.descriptor.fields()[index].value_type;
+        let interned = declared.contains_interned().then(|| declared.clone());
+        let mut ty = declared;
         for _ in 0..field.present_wrappers {
             let ValueType::Nullable(inner) = ty else {
                 unreachable!("validated field route")
@@ -169,7 +171,15 @@ impl PredicateRecord for RoutedRecord<'_> {
         for _ in 0..field.present_wrappers {
             value = Value::Nullable(Some(Box::new(value)));
         }
-        Ok(value)
+        Ok((value, interned))
+    }
+
+    fn is_interned(self, name: &str) -> Result<bool, IvmRuntimeError> {
+        let index = resolve_field_name(&self.routes.descriptor, name)
+            .ok_or_else(|| records::Error::FieldNotFound(name.to_owned()))?;
+        Ok(self.routes.descriptor.fields()[index]
+            .value_type
+            .contains_interned())
     }
 
     fn literal_ordering(

@@ -650,6 +650,7 @@ fn local_unavailable_inputs_follow_cold_current_global_receivers() {
             descriptor: source.descriptor.clone(),
             records: vec![
                 covered_input_record(
+                    &node.authors.clone(),
                     node.table("parents").unwrap(),
                     &source.descriptor,
                     &current,
@@ -1309,6 +1310,7 @@ fn local_unavailable_confirmed_row_keeps_pending_successor() {
         .remove(0);
     let mut batch = node.database.open_batch();
     stage_transaction_record(
+        &node.authors.clone(),
         &mut batch,
         TransactionRecordWrite::Update,
         stored.node_alias,

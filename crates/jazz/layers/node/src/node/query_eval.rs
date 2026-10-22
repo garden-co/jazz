@@ -1749,10 +1749,7 @@ where
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn clear_prepared_query_plan_cache_for_test(&mut self) {
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
+        self.query.clear_prepared_query_plans();
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -2337,17 +2334,20 @@ where
                 .iter()
                 .filter(|(_, weight)| *weight > 0)
                 .map(|(record, _)| {
-                    CurrentRow::new(
+                    let (raw, descriptor) = self
+                        .authors
+                        .resolve_record(record.descriptor(), record.raw())?;
+                    Ok(CurrentRow::new(
                         query.table.clone(),
-                        OwnedRecord::new(record.raw().to_vec(), record.descriptor()),
-                    )
+                        OwnedRecord::new(raw, descriptor),
+                    ))
                 })
-                .collect()
+                .collect::<Result<_, Error>>()?
         } else {
             let mut rows = Vec::new();
             for (record, weight) in deltas.iter() {
                 if weight > 0 {
-                    let row = decode_current_row(table_schema, record)?;
+                    let row = decode_current_row(&self.authors, table_schema, record)?;
                     let row = self.materialize_current_row(table_schema, row)?;
                     let count = usize::try_from(weight).map_err(|_| {
                         Error::InvalidStoredValue(
@@ -4843,6 +4843,7 @@ where
                     &terminal_schemas,
                     &tables,
                     &self.node_aliases,
+                    &self.authors,
                 ) {
                     Ok(transitions) => transitions,
                     Err(error) => {
@@ -4895,6 +4896,7 @@ where
                             &terminal_schemas,
                             &tables,
                             &self.node_aliases,
+                            &self.authors,
                         ) {
                             Ok(transitions) => transitions,
                             Err(error) => {
@@ -5021,6 +5023,7 @@ where
 /// Both a fresh collector reset and later aggregate deltas pass through this
 /// conversion so they expose the same synthetic `CurrentRow` descriptor.
 fn aggregate_current_row_from_record(
+    authors: &author_codes::AuthorCodes,
     query: &crate::query::Query,
     output: &AppRowSchema,
     row_uuid: RowUuid,
@@ -5085,6 +5088,8 @@ fn aggregate_current_row_from_record(
     }
     let descriptor = RecordDescriptor::new_with_fields(fields);
     let raw = descriptor.create(&values)?;
+    // A group key may be an author code; the row leaves the node resolved.
+    let (raw, descriptor) = authors.resolve_record(descriptor, &raw)?;
     Ok(CurrentRow::new_with_publication_fields(
         query.table.clone(),
         OwnedRecord::new(raw, descriptor),

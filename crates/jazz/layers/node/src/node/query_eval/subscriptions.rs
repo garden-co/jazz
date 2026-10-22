@@ -314,9 +314,7 @@ where
         self.query
             .query_shape_cache
             .retain(|(cached_shape, _, _), _| *cached_shape != shape_id);
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
+        self.query.clear_compiled_query_programs();
         self.query
             .applied_view_update_generations
             .retain(|key, _| key.shape_id != shape_id);

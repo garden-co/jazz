@@ -344,7 +344,7 @@ impl IvmRuntime {
         let table_storage_descriptors = schema
             .tables
             .iter()
-            .map(|table| (table.name.clone(), table.storage_record_schema()))
+            .map(|table| (table.name.clone(), table.record_schema()))
             .collect();
         let table_descriptors = schema
             .tables
@@ -705,6 +705,17 @@ pub enum IvmRuntimeError {
     Dictionary(#[from] crate::dictionary::DictionaryError),
     #[error(transparent)]
     InvalidInternedColumn(#[from] crate::schema::InternedColumnError),
+    /// An operator read the dictionary code of an interned field where it
+    /// needed the value, without the node's dictionaries to resolve it.
+    #[error("field {0} holds a dictionary code that was read without resolving it")]
+    UnresolvedDictionaryCode(String),
+    /// An operator that orders or does arithmetic on values was given an
+    /// interned field. Equality, joins and grouping on codes are supported.
+    #[error("{operator} on interned field {field} is not supported yet")]
+    UnsupportedInternedOperand {
+        operator: &'static str,
+        field: String,
+    },
     #[error("recursive node {node:?} exceeded iteration limit {max_iters}")]
     RecursiveIterationLimit { node: NodeId, max_iters: usize },
     #[error(transparent)]

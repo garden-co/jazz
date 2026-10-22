@@ -11,6 +11,7 @@ use groove::records::{
 };
 
 use super::NodeAliases;
+use super::author_codes::{AuthorCode, AuthorCodes};
 use super::codec::{
     VersionRow, VersionRowParts, authored_column_ids_from_value, deletion_event_from_value,
     history_values_from_parts, nullable_value, version_tx_id_from_aliases,
@@ -21,7 +22,7 @@ use super::query_engine::{
     ResultMembershipSchema, ResultMembershipVersionSchema, TypedOutputField, VersionWitnessSchema,
     VersionedRowRefSchema,
 };
-use crate::ids::{NodeAlias, RowAuthor, RowUuid, SchemaVersionAlias};
+use crate::ids::{NodeAlias, RowUuid, SchemaVersionAlias};
 use crate::node::terminal_root::{
     TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
 };
@@ -760,6 +761,7 @@ impl MaintainedSubscriptionView {
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
         node_aliases: &NodeAliases,
+        authors: &AuthorCodes,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
@@ -778,6 +780,7 @@ impl MaintainedSubscriptionView {
                 kind,
                 tables,
                 node_aliases,
+                authors,
                 &mut decode_plan_cache,
                 &mut payload_plans,
                 read_view,
@@ -804,6 +807,7 @@ impl MaintainedSubscriptionView {
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
         node_aliases: &NodeAliases,
+        authors: &AuthorCodes,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
         // A single IVM drain may touch the same source fact through more than
@@ -826,7 +830,12 @@ impl MaintainedSubscriptionView {
                 let operations = terminal
                     .operations
                     .into_iter()
-                    .map(|operation| rebind_terminal_operation_to_layout(operation, layout))
+                    .map(|operation| {
+                        rebind_terminal_operation_to_layout(
+                            resolve_terminal_operation(operation, authors)?,
+                            layout,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 // Keep operation order: a later full insertion starts a new
                 // tree and must not inherit descendants from the removed root.
@@ -873,7 +882,7 @@ impl MaintainedSubscriptionView {
                 continue;
             }
             let delta_transitions =
-                self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
+                self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases, authors)?;
             transitions.supporting_changed |= delta_transitions.supporting_changed;
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
@@ -2015,6 +2024,55 @@ fn covered_input_for_version(
     })
 }
 
+/// Terminal operations leave the node, so their payload carries authors,
+/// not the node-local codes the IVM output holds. Resolution happens before
+/// the operation is rebound to its (logical) public layout and retained.
+fn resolve_terminal_operation(
+    mut operation: TerminalOperation,
+    authors: &AuthorCodes,
+) -> Result<TerminalOperation, super::Error> {
+    if !operation.root_descriptor.contains_interned() {
+        return Ok(operation);
+    }
+    if let TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } =
+        &mut operation.edit
+    {
+        let descriptor = terminal_value_descriptor(&operation.root_descriptor, &operation.path)?;
+        *value = authors.resolve_record(descriptor, value)?.0;
+    }
+    operation.root_descriptor = operation.root_descriptor.logical();
+    Ok(operation)
+}
+
+/// The descriptor of the record a terminal edit at `path` carries: the root
+/// itself, or the element record of the last addressed collection.
+fn terminal_value_descriptor(
+    root: &RecordDescriptor,
+    path: &[TerminalPathSegment],
+) -> Result<RecordDescriptor, super::Error> {
+    let mut descriptor = *root;
+    for segment in path {
+        let TerminalPathSegment::Collection(name) = segment else {
+            continue;
+        };
+        let element = descriptor
+            .field_index(name)
+            .map(|index| &descriptor.fields()[index].value_type);
+        let Some(ValueType::Array(element)) = element else {
+            return Err(super::Error::InvalidStoredValue(
+                "terminal operation path names a non-collection field",
+            ));
+        };
+        let ValueType::Record(child) = element.as_ref() else {
+            return Err(super::Error::InvalidStoredValue(
+                "terminal operation collection does not contain records",
+            ));
+        };
+        descriptor = **child;
+    }
+    Ok(descriptor)
+}
+
 /// Rebind a runtime terminal operation to its early-bound prepared layout.
 ///
 /// The runtime may tighten one or more nullable layers of a root field after
@@ -2488,7 +2546,9 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
                 Some(groove::records::FieldIdentity::Name(field.name.clone()));
         }
     }
-    let root_descriptor = RecordDescriptor::new_with_fields(descriptor_fields);
+    // The layout is the public shape terminal operations leave the node in,
+    // after their author codes are resolved.
+    let root_descriptor = RecordDescriptor::new_with_fields(descriptor_fields).logical();
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"jazz terminal root publication v1");
     let role_descriptor =
@@ -2596,6 +2656,7 @@ fn decode_typed_terminal_record(
     kind: &MaintainedTerminalKind,
     tables: &TableSchemas,
     node_aliases: &NodeAliases,
+    authors: &AuthorCodes,
     decode_plan_cache: &mut VersionDecodePlanCache,
     payload_plans: &mut std::collections::HashMap<
         RecordDescriptor,
@@ -2707,12 +2768,20 @@ fn decode_typed_terminal_record(
                         .payload_fields
                         .iter()
                         .map(|field| {
-                            record
-                                .get_idx(field_idx(record, &field.name)?)
-                                .map_err(super::Error::from)
+                            // The digest is a public revision: it covers
+                            // authors, not node-local author codes.
+                            let value = record.get_idx(field_idx(record, &field.name)?)?;
+                            let (value, ty) = authors.resolve_value(value, &field.ty)?;
+                            Ok((
+                                TypedOutputField {
+                                    name: field.name.clone(),
+                                    ty,
+                                },
+                                value,
+                            ))
                         })
-                        .collect::<Result<Vec<_>, _>>()
-                        .and_then(|values| flat_join_row_digest(&schema.payload_fields, &values))
+                        .collect::<Result<(Vec<_>, Vec<_>), super::Error>>()
+                        .and_then(|(fields, values)| flat_join_row_digest(&fields, &values))
                 })
                 .transpose()?;
             let branch_or_prefix = schema
@@ -2764,7 +2833,7 @@ fn decode_typed_terminal_record(
                     )?)
                 }
             };
-            let (descriptor, row_bytes) = plan.encode(record)?;
+            let (descriptor, row_bytes) = plan.encode(record, authors)?;
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
                 descriptor,
@@ -2925,6 +2994,7 @@ fn flat_join_row_digest_preimage(
             .enumerate()
             .map(|(index, field)| (format!("flat_join_payload_{index}"), field.ty.clone())),
     );
+    super::author_codes::refuse_codes(&descriptor)?;
     let descriptor_bytes = groove::records::encode_persisted_record_descriptor(&descriptor)?;
     // The public payload descriptor is the runtime revision contract. An inner join may
     // nevertheless tighten a proven-present `Nullable(T)` runtime field to
@@ -3194,16 +3264,12 @@ fn decode_typed_version_witness(
             plan.schema_version_idx,
         )?),
         tx_time,
-        created_by: RowAuthor::from_record(record.get_record(plan.created_by_idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject(),
+        created_by: AuthorCode(record.get_dictionary_code(plan.created_by_idx)?),
         created_at: provenance_time(
             record_u64_idx(record, plan.created_at_idx)?,
             "maintained witness created_at_ms exceeds packed HLC range",
         )?,
-        updated_by: RowAuthor::from_record(record.get_record(plan.updated_by_idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-            .as_author_subject(),
+        updated_by: AuthorCode(record.get_dictionary_code(plan.updated_by_idx)?),
         updated_at: provenance_time(
             record_u64_idx(record, plan.updated_at_idx)?,
             "maintained witness updated_at_ms exceeds packed HLC range",
@@ -3790,7 +3856,7 @@ mod tests {
     use groove::schema::ColumnType;
 
     use super::*;
-    use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionAlias};
+    use crate::ids::{NodeUuid, SchemaVersionAlias};
     use crate::node::codec::{VersionRow, VersionRowParts};
     use crate::node::{Error, PhysicalColumnId};
     use crate::protocol::ResultRowEntry;
@@ -4038,6 +4104,7 @@ mod tests {
                     &schemas,
                     &BTreeMap::new(),
                     &aliases(),
+                    &AuthorCodes::detached(),
                 )
                 .unwrap();
             assert_eq!(opening.adds.len(), 1);
@@ -4057,6 +4124,7 @@ mod tests {
                     &schemas,
                     &BTreeMap::new(),
                     &aliases(),
+                    &AuthorCodes::detached(),
                 )
                 .unwrap();
             assert_eq!(changed.adds.len(), 1);
@@ -4985,9 +5053,9 @@ mod tests {
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
-                created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
+                created_by: AuthorCode(0),
                 created_at: TxTime(time),
-                updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
+                updated_by: AuthorCode(0),
                 updated_at: TxTime(time),
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
                 authored_columns: Some(BTreeSet::from([PhysicalColumnId(1)])),
@@ -5012,9 +5080,9 @@ mod tests {
                 tx_node_alias: NodeAlias(10),
                 schema_version_alias: SchemaVersionAlias(0),
                 tx_time: TxTime(time),
-                created_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
+                created_by: AuthorCode(0),
                 created_at: TxTime(time),
-                updated_by: AuthorSubject::system_at(NodeUuid(uuid::Uuid::from_u128(10))),
+                updated_by: AuthorCode(0),
                 updated_at: TxTime(time),
                 cells: BTreeMap::new(),
                 authored_columns: None,
@@ -6136,6 +6204,7 @@ mod tests {
                 &schemas,
                 &tables,
                 &aliases(),
+                &AuthorCodes::detached(),
             )
             .unwrap()
             .adds
@@ -6148,6 +6217,7 @@ mod tests {
                 &schemas,
                 &tables,
                 &aliases(),
+                &AuthorCodes::detached(),
             )
             .unwrap()
             .adds
@@ -6165,6 +6235,7 @@ mod tests {
                 &schemas,
                 &tables,
                 &aliases(),
+                &AuthorCodes::detached(),
             )
             .unwrap();
         assert_eq!(removed.removes, [direct]);
@@ -6178,6 +6249,7 @@ mod tests {
                 &schemas,
                 &tables,
                 &aliases(),
+                &AuthorCodes::detached(),
             )
             .unwrap();
         assert_eq!(rehydrated.adds, std::slice::from_ref(&inherited));

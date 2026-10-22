@@ -416,8 +416,10 @@ where
             tables,
             initial_received,
             covered_input_sources,
-        ) = self
-            .open_seeded_maintained_subscription_view_in_authorization_mode(
+        ) = Box::pin(
+            // Boxed: this future is large, and debug builds open
+            // subscriptions from deep, unboxed caller stacks.
+            self.open_seeded_maintained_subscription_view_in_authorization_mode(
                 shape,
                 binding,
                 identity,
@@ -445,8 +447,9 @@ where
                 },
                 pending_overlay,
                 progress_waker,
-            )
-            .await?;
+            ),
+        )
+        .await?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,
@@ -1122,6 +1125,7 @@ where
         // logical projection as a synthetic version in the read schema.
         let schema_alias = version.schema_version_alias();
         let record = super::read_sources::covered_input_record(
+            &self.authors,
             &source_table,
             &runtime_source.descriptor,
             &row,
@@ -1239,6 +1243,7 @@ where
                         &local.terminal_schemas,
                         &local.tables,
                         &self.node_aliases,
+                        &self.authors,
                     )?;
                     terminal_operations.extend(transitions.terminal_operations);
                     if crate::debug_env::covered_input_trace() {

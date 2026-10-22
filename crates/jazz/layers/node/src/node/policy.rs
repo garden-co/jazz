@@ -34,16 +34,20 @@ fn updated_provenance(previous: RowProvenance, version: &VersionRecord) -> RowPr
     }
 }
 
-fn stored_version_provenance(version: &VersionRow) -> RowProvenance {
-    RowProvenance {
-        created_by: version.created_by(),
+fn stored_version_provenance(
+    authors: &author_codes::AuthorCodes,
+    version: &VersionRow,
+) -> Result<RowProvenance, Error> {
+    Ok(RowProvenance {
+        created_by: authors.subject(version.created_by())?,
         created_at: version.created_at().physical_ms(),
-        updated_by: version.updated_by(),
+        updated_by: authors.subject(version.updated_by())?,
         updated_at: version.updated_at().physical_ms(),
-    }
+    })
 }
 
 fn reconstructed_policy_subject_row(
+    authors: &author_codes::AuthorCodes,
     table: &TableSchema,
     row_uuid: RowUuid,
     cells: &BTreeMap<String, Value>,
@@ -53,7 +57,7 @@ fn reconstructed_policy_subject_row(
         table,
         row_uuid,
         cells,
-        stored_version_provenance(version),
+        stored_version_provenance(authors, version)?,
         Some((version.tx_time(), version.tx_node_alias())),
     )
 }
@@ -1268,7 +1272,7 @@ where
         if projected_table.name != table.name {
             return Ok(None);
         }
-        reconstructed_policy_subject_row(table, row_uuid, &cells, &version).map(Some)
+        reconstructed_policy_subject_row(&self.authors, table, row_uuid, &cells, &version).map(Some)
     }
 
     fn policy_projection_for_version_row(
@@ -1495,6 +1499,7 @@ where
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
                 return reconstructed_policy_subject_row(
+                    &self.authors,
                     table,
                     version.row_uuid(),
                     &cells,
@@ -1513,6 +1518,7 @@ where
                     self.policy_projection_for_version_row(&current_version)?;
                 if projected_table.name == table.name {
                     return reconstructed_policy_subject_row(
+                        &self.authors,
                         table,
                         version.row_uuid(),
                         &cells,

@@ -18,6 +18,7 @@ pub(super) fn encode_result_descriptor(
     descriptor: &RecordDescriptor,
 ) -> Result<Vec<u8>, Error> {
     validate_role_fields(role, descriptor)?;
+    super::author_codes::refuse_codes(descriptor)?;
     let mut bytes = RESULT_DESCRIPTOR_MAGIC.to_vec();
     bytes.push(role as u8);
     bytes.extend(records::encode_persisted_record_descriptor(descriptor)?);
@@ -385,6 +386,9 @@ fn current_role_schema(
 /// The caller scopes reuse to a single terminal's delta batch.
 pub(super) struct CurrentPayloadEncodePlan {
     projector: records::RecordProjector,
+    /// The projected record's descriptor when it still carries author codes,
+    /// which `encode` resolves: a payload leaves the node.
+    interned: Option<RecordDescriptor>,
     descriptor: Vec<u8>,
 }
 
@@ -460,17 +464,27 @@ impl CurrentPayloadEncodePlan {
             records::RecordProjector::new_registry_rebound(descriptor, canonical, mapping)?;
         Ok(Self {
             projector,
-            descriptor: encode_result_descriptor(ResultDescriptorRole::Current, &canonical)?,
+            interned: canonical.contains_interned().then_some(canonical),
+            descriptor: encode_result_descriptor(
+                ResultDescriptorRole::Current,
+                &canonical.logical(),
+            )?,
         })
     }
 
-    pub(super) fn encode(&self, record: BorrowedRecord<'_>) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    pub(super) fn encode(
+        &self,
+        record: BorrowedRecord<'_>,
+        authors: &super::author_codes::AuthorCodes,
+    ) -> Result<(Vec<u8>, Vec<u8>), Error> {
         // Both descriptors are trusted compiled schemas. Copy the selected
         // encoded fields; do not decode and re-encode our own encoder's output.
-        Ok((
-            self.descriptor.clone(),
-            self.projector.project(record)?.into_raw(),
-        ))
+        let projected = self.projector.project(record)?.into_raw();
+        let projected = match self.interned {
+            Some(descriptor) => authors.resolve_record(descriptor, &projected)?.0,
+            None => projected,
+        };
+        Ok((self.descriptor.clone(), projected))
     }
 }
 
@@ -479,7 +493,8 @@ pub(super) fn encode_current_payload_record(
     record: BorrowedRecord<'_>,
     schema: &super::query_engine::ResultMembershipSchema,
 ) -> Result<(Vec<u8>, Vec<u8>), Error> {
-    CurrentPayloadEncodePlan::new(record.descriptor(), schema)?.encode(record)
+    CurrentPayloadEncodePlan::new(record.descriptor(), schema)?
+        .encode(record, &super::author_codes::AuthorCodes::detached())
 }
 
 pub(super) fn decode_current_payload_record(
@@ -488,7 +503,7 @@ pub(super) fn decode_current_payload_record(
     schema: &super::query_engine::ResultMembershipSchema,
 ) -> Result<super::CurrentRow, Error> {
     use super::{CurrentRowPublicationField, CurrentRowResultVisibility};
-    let canonical = current_role_schema(schema)?;
+    let canonical = current_role_schema(schema)?.logical();
     if encode_result_descriptor(ResultDescriptorRole::Current, &canonical)? != payload.descriptor {
         return Err(Error::InvalidStoredValue(
             "result payload role schema differs from compiled output",
@@ -519,7 +534,7 @@ pub(super) fn decode_current_payload_record(
         .iter()
         .filter(|field| field.name != schema.row_field)
     {
-        fields.push(DescriptorField::new(&field.name, field.ty.clone()));
+        fields.push(DescriptorField::new(&field.name, field.ty.logical()));
         publications.push(
             schema
                 .payload_publication_fields
@@ -889,7 +904,12 @@ mod tests {
             let raw = source
                 .create(&[ignored, value.clone(), id.clone()])
                 .unwrap();
-            let (descriptor, projected) = plan.encode(source.bind(&raw)).unwrap();
+            let (descriptor, projected) = plan
+                .encode(
+                    source.bind(&raw),
+                    &super::super::author_codes::AuthorCodes::detached(),
+                )
+                .unwrap();
             assert_eq!(projected, selected.create(&[id, value]).unwrap());
             assert_eq!(
                 descriptor,
@@ -900,7 +920,13 @@ mod tests {
             ("row_uuid", ValueType::Uuid),
             ("payload", ValueType::String),
         ]);
-        assert!(plan.encode(wrong_source.bind(&[])).is_err());
+        assert!(
+            plan.encode(
+                wrong_source.bind(&[]),
+                &super::super::author_codes::AuthorCodes::detached()
+            )
+            .is_err()
+        );
     }
 
     // Malformed member/schema pairings cannot be authored through the public

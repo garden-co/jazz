@@ -3,6 +3,33 @@ import { schema as s } from "../index.js";
 import { applyColumnTransforms } from "./row-transformer.js";
 
 describe("column transform input access", () => {
+  it("does not inspect unrelated tables when guarding hopped stored-transform queries", () => {
+    const app = s.defineApp({
+      sources: s.table({ targetId: s.uuid() }, { target: s.rel("targets", "targetId") }),
+      targets: s.table(
+        { value: s.int().transform({ from: (value) => value, to: (value: number) => value }) },
+        {},
+      ),
+      unrelated: s.table({ text: s.string() }, {}),
+    });
+    const unrelated = app.wasmSchema.unrelated!;
+    const original = Object.getOwnPropertyDescriptor(unrelated, "columns")!;
+    let unrelatedReads = 0;
+    Object.defineProperty(unrelated, "columns", {
+      configurable: true,
+      get() {
+        unrelatedReads++;
+        return original.value;
+      },
+    });
+    try {
+      expect(() => app.sources.hopTo("target").where({ value: 1 }).orderBy("value")).not.toThrow();
+      expect(unrelatedReads).toBe(0);
+    } finally {
+      Object.defineProperty(unrelated, "columns", original);
+    }
+  });
+
   it("does not read any values when no transforms are configured", () => {
     const row = {
       get untouched() {
