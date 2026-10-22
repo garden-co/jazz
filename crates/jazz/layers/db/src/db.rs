@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::ids::{AuthorSubject, RowUuid};
 use crate::protocol::{
-    BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
+    BranchSelector, BranchViewBase, CurrentWriteSchema, MigrationLens, ReadViewSourceSpec,
     SchemaVersion,
 };
 use crate::query::Query;
@@ -39,6 +39,7 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+pub use crate::names::LensEffects;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
@@ -323,10 +324,13 @@ struct Inner {
     schema: Rc<Schema>,
     /// The owner's current schema.
     owner: Rc<Schema>,
-    /// The stored tables: the union of every admitted schema.
+    /// The stored tables: the union of every admitted schema, keyed and
+    /// named by stored names.
     physical: Schema,
     /// Admitted structural schemas, by version, and registered views.
     admitted: Vec<JazzSchema>,
+    /// Where each admitted version stores its tables and columns.
+    names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
@@ -464,36 +468,6 @@ impl Stamp {
 
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
-/// The new-column defaults a migration lens carries, keyed by (table,
-/// column). SQLite applies a lens by growing the stored tables, so a lens
-/// may add and drop columns (dropped values stay stored) and tables; renames,
-/// copies and transforms are not supported yet.
-pub fn lens_column_defaults(
-    lens: &MigrationLens,
-) -> Result<BTreeMap<(String, String), Value>, Error> {
-    let mut defaults = BTreeMap::new();
-    for table in &lens.table_lenses {
-        if table.source_table != table.target_table {
-            return Err(unsupported("table rename lenses on SQLite"));
-        }
-        for op in &table.ops {
-            match op {
-                LensOp::AddColumn {
-                    column, default, ..
-                } => {
-                    defaults.insert(
-                        (table.target_table.clone(), column.clone()),
-                        default.clone(),
-                    );
-                }
-                LensOp::DropColumn { .. } => {}
-                other => return Err(unsupported(format!("lens op {other:?} on SQLite"))),
-            }
-        }
-    }
-    Ok(defaults)
-}
-
 /// The application tables a store holds, by their stored columns.
 fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
@@ -523,13 +497,19 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
             .map_err(storage)?;
         let columns = columns
             .into_iter()
-            .filter(|column| !matches!(column.as_str(), "rid" | "id" | "_b" | "_seq" | "_del"))
+            .filter(|column| {
+                !matches!(
+                    column.as_str(),
+                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c"
+                )
+            })
             .collect();
         tables.insert(name.clone(), Table::stored_only(name, columns));
     }
     Ok(Schema {
         tables,
         jazz: jazz.clone(),
+        policies_from: None,
     })
 }
 
@@ -621,7 +601,10 @@ impl Db {
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
-        let schema = Schema::new(&config.schema);
+        // A version this file admitted keeps its names; another one is
+        // named against the most recently admitted.
+        let mut names = crate::names::Names::load(&conn)?;
+        let schema = names.resolve(&config.schema, &[], names.latest())?;
         let chunks = crate::large::Chunks::install(path)?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
@@ -650,13 +633,20 @@ impl Db {
         // it up to this schema without touching what is already there.
         let physical = if fresh == 0 {
             execute_script(&conn, &schema.ddl())?;
-            schema.clone()
+            let mut physical = Schema {
+                tables: BTreeMap::new(),
+                jazz: config.schema.clone(),
+                policies_from: None,
+            };
+            physical.union(&schema)?;
+            physical
         } else {
             let mut physical = stored_schema(&conn, &config.schema)?;
             let ddl = physical.union(&schema)?;
             execute_script(&conn, &ddl)?;
             physical
         };
+        names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
@@ -686,6 +676,7 @@ impl Db {
                 owner,
                 physical,
                 admitted: vec![config.schema.clone()],
+                names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
                 identity: config.identity,
@@ -1256,9 +1247,8 @@ impl Db {
         Ok(())
     }
 
-    /// Make a published version current. An `AddColumn` lens is an
-    /// `ALTER TABLE ADD COLUMN ... DEFAULT`: SQLite records the default in
-    /// the schema and existing rows read it without being rewritten.
+    /// Make a published version current with the lens it was published
+    /// with (see [`Db::activate_schema_with_lenses`]).
     pub async fn activate_catalogue_schema_for_test(
         &self,
         current: CurrentWriteSchema,
@@ -1270,8 +1260,7 @@ impl Db {
             .find(|publication| publication.version.id == current.schema)
             .cloned()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        let defaults = lens_column_defaults(&publication.lens)?;
-        self.activate(publication.version.schema, &defaults)
+        self.activate(publication.version.schema, &[publication.lens])
     }
 
     /// Make `schema` the current schema. The stored tables grow to hold it:
@@ -1280,44 +1269,52 @@ impl Db {
     /// keep their data. Changing a column's type is not supported yet, and a
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &BTreeMap::new())
+        self.activate(schema, &[])
     }
 
-    /// [`Db::activate_schema`], with defaults for new columns keyed by
-    /// (table, column), as [`lens_column_defaults`] reads them off a lens.
-    pub async fn activate_schema_with_defaults(
+    /// [`Db::activate_schema`], with the migration lenses into `schema`
+    /// (lenses into other versions are ignored). A lens's added columns
+    /// take its defaults, and a renamed table or column keeps the stored
+    /// table or column of its source, so every version reads and writes the
+    /// same rows (see [`crate::names`]).
+    pub async fn activate_schema_with_lenses(
         &self,
         schema: JazzSchema,
-        defaults: &BTreeMap<(String, String), Value>,
+        lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.activate(schema, defaults)
+        self.activate(schema, lenses)
     }
 
-    fn activate(
-        &self,
-        schema: JazzSchema,
-        defaults: &BTreeMap<(String, String), Value>,
-    ) -> Result<(), Error> {
+    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
         {
             let mut inner = self.inner();
-            let mut target = Schema::new(&schema);
+            let version = schema.version_id();
+            let mut defaults = BTreeMap::new();
+            for lens in lenses.iter().filter(|lens| lens.target == version) {
+                defaults.extend(LensEffects::of(lens)?.defaults);
+            }
+            let base = inner.owner.names();
+            let mut target = inner.names.resolve(&schema, lenses, Some(&base))?;
+            let admitted: Vec<Schema> = inner
+                .admitted
+                .iter()
+                .map(|admitted| inner.named(admitted))
+                .collect();
             for table in target.tables.values_mut() {
-                let stored = inner.physical.tables.get(&table.name);
+                let stored = inner.physical.tables.get(&table.stored);
                 for column in &mut table.columns {
-                    for admitted in &inner.admitted {
-                        let earlier = admitted
-                            .tables()
-                            .iter()
-                            .find(|t| t.name == table.name)
-                            .and_then(|t| t.columns.iter().find(|c| c.name == column.name));
-                        if earlier.is_some_and(|earlier| earlier.column_type != column.ty) {
-                            return Err(unsupported(format!(
-                                "changing the type of {}.{} on SQLite",
-                                table.name, column.name
-                            )));
-                        }
+                    let earlier = admitted.iter().find_map(|admitted| {
+                        admitted
+                            .by_stored(&table.stored)
+                            .and_then(|t| t.columns.iter().find(|c| c.stored == column.stored))
+                    });
+                    if earlier.is_some_and(|earlier| earlier.ty != column.ty) {
+                        return Err(unsupported(format!(
+                            "changing the type of {}.{} on SQLite",
+                            table.name, column.name
+                        )));
                     }
-                    if stored.is_some_and(|stored| stored.column(&column.name).is_some()) {
+                    if stored.is_some_and(|stored| stored.column(&column.stored).is_some()) {
                         continue;
                     }
                     if let Some(default) = defaults.get(&(table.name.clone(), column.name.clone()))
@@ -1334,11 +1331,13 @@ impl Db {
             }
             let ddl = inner.physical.union(&target)?;
             execute_script(&inner.conn, &ddl)?;
+            let Inner { names, conn, .. } = &mut *inner;
+            names.admit(conn, &target)?;
             inner.owner = Rc::new(target);
             if !inner
                 .admitted
                 .iter()
-                .any(|admitted| admitted.version_id() == schema.version_id())
+                .any(|admitted| admitted.version_id() == version)
             {
                 inner.admitted.push(schema);
             }
@@ -1457,6 +1456,14 @@ impl MergeableTx<'_> {
 }
 
 impl Inner {
+    /// An admitted schema under the names this store keeps it by.
+    fn named(&self, schema: &JazzSchema) -> Schema {
+        match self.names.get(&schema.version_id()) {
+            Some(names) => Schema::stored_as(schema, names),
+            None => Schema::new(schema),
+        }
+    }
+
     /// Runs a write through the statement cache. Writes to app tables
     /// fire the large-value refcount triggers, so preparing one compiles
     /// those trigger programs too; re-preparing per row dominated bulk
@@ -1502,7 +1509,16 @@ impl Inner {
         Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_history_origin(self.history_origin())
             .compile_query(&prepared.query, read.include_deleted)
+    }
+
+    /// The node history reads name this store's own commits by: set on the
+    /// authority only (see `compile::Ctx::history_origin`).
+    pub(crate) fn history_origin(&self) -> Option<[u8; 16]> {
+        self.client
+            .is_none()
+            .then(|| *self.identity.node.as_bytes())
     }
 
     fn run(
@@ -1523,16 +1539,23 @@ impl Inner {
         let mut compiled = self.compile(prepared, identity, read)?;
         let rows = self.execute(&compiled, &prepared.query.table)?;
         // Array relations are part of a subscription's dependencies.
-        fn arrays(out: &mut BTreeSet<String>, arrays: &[crate::query::ArraySubquery]) {
-            for array in arrays {
-                out.insert(array.table.clone());
-                arrays_nested(out, &array.nested_arrays);
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        fn arrays(
+            schema: &Schema,
+            out: &mut BTreeSet<String>,
+            list: &[crate::query::ArraySubquery],
+        ) -> Result<(), Error> {
+            for array in list {
+                out.insert(schema.stored_table(&array.table)?.to_owned());
+                arrays(schema, out, &array.nested_arrays)?;
             }
+            Ok(())
         }
-        fn arrays_nested(out: &mut BTreeSet<String>, nested: &[crate::query::ArraySubquery]) {
-            arrays(out, nested)
-        }
-        arrays(&mut compiled.tables, &prepared.query.array_subqueries);
+        arrays(
+            schema,
+            &mut compiled.tables,
+            &prepared.query.array_subqueries,
+        )?;
         Ok((rows, compiled.tables))
     }
 
@@ -1673,16 +1696,15 @@ impl Inner {
     }
 
     fn cell(&self, table: &str, row: RowUuid, column: &str) -> Result<Value, Error> {
-        let ty = self
-            .schema
-            .table(table)?
+        let table = self.schema.table(table)?;
+        let column = table
             .column(column)
-            .map(|c| c.ty.clone())
             .ok_or_else(|| unsupported("unknown correlation column"))?;
+        let ty = column.ty.clone();
         let sql = format!(
             "SELECT {} FROM {} WHERE id = ?1",
-            quote(column),
-            quote(table)
+            quote(&column.stored),
+            quote(&table.stored)
         );
         let cell: Sql = self
             .conn
@@ -1782,7 +1804,7 @@ impl Inner {
     /// Resolve which stored row a patch-style write addresses.
     fn locate(&self, table: &Table, row: RowUuid, target: &Target) -> Result<Located, Error> {
         let at = |key: Vec<u8>, cells: BTreeMap<String, Value>| -> Result<Located, Error> {
-            Ok(match self.existing(&table.name, row, &key)? {
+            Ok(match self.existing(&table.stored, row, &key)? {
                 Some((seq, deleted)) => Located::Row { key, seq, deleted },
                 None => Located::Absent { cells },
             })
@@ -1790,7 +1812,7 @@ impl Inner {
         match target {
             Target::Root if table.branch_by.is_empty() => at(Vec::new(), BTreeMap::new()),
             Target::Root => {
-                let sql = format!("SELECT _b FROM {} WHERE id = ?1", quote(&table.name));
+                let sql = format!("SELECT _b FROM {} WHERE id = ?1", quote(&table.stored));
                 let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
                 let keys: Vec<Vec<u8>> = statement
                     .query_map([row.0.as_bytes().to_vec()], |r| r.get(0))
@@ -1819,7 +1841,7 @@ impl Inner {
                 } else {
                     table.selector_cells(head)?
                 };
-                if let Some((seq, deleted)) = self.existing(&table.name, row, &head_key)? {
+                if let Some((seq, deleted)) = self.existing(&table.stored, row, &head_key)? {
                     return Ok(Located::Row {
                         key: head_key,
                         seq,
@@ -1830,7 +1852,7 @@ impl Inner {
                     let base_key = table.selector_key(base)?;
                     if base_key != head_key
                         && let Some((_, false)) =
-                            self.existing_at(&table.name, row, &base_key, at.as_ref())?
+                            self.existing_at(&table.stored, row, &base_key, at.as_ref())?
                     {
                         return Ok(Located::Inherited {
                             from: base_key,
@@ -1863,7 +1885,7 @@ impl Inner {
         params.push(Sql::Blob(key.to_vec()));
         let sql = format!(
             "SELECT COALESCE({condition}, 0) FROM {} AS a WHERE a.id = ?{} AND a._b = ?{}",
-            quote(&table.name),
+            quote(&table.stored),
             params.len() - 1,
             params.len()
         );
@@ -1915,7 +1937,7 @@ impl Inner {
             let sql = format!(
                 "SELECT a.id, a._b, a._seq, a._del, COALESCE({condition}, 0) FROM {} AS a \
                  WHERE a.id IN (SELECT unhex(value) FROM json_each(?{}))",
-                quote(&table.name),
+                quote(&table.stored),
                 params.len()
             );
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
@@ -2165,10 +2187,10 @@ impl Inner {
     /// Every stored column of `table`, including ones only other schema
     /// views know: history and copy-on-write carry whole stored rows.
     fn columns_list(&self, table: &Table) -> String {
-        let physical = self.physical.table(&table.name).unwrap_or(table);
+        let physical = self.physical.tables.get(&table.stored).unwrap_or(table);
         physical
             .stored()
-            .map(|c| format!(", {}", quote(&c.name)))
+            .map(|c| format!(", {}", quote(&c.stored)))
             .collect()
     }
 
@@ -2177,10 +2199,10 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del{columns}) SELECT id, _b, _seq, _del{columns} FROM {} \
-             WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
-            quote(&format!("{}__h", table.name)),
-            quote(&table.name)
+            "INSERT INTO {} (id, _b, _seq, _del, _c{columns}) SELECT id, _b, _seq, _del, _c{columns} \
+             FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            quote(&format!("{}__h", table.stored)),
+            quote(&table.stored)
         );
         // An image written earlier in the same commit is not superseded
         // history: history holds committed images only.
@@ -2208,15 +2230,15 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         // A frozen base is copied as it was at the cut.
         let source = match at {
-            None => Some(quote(&table.name)),
-            Some(cut) => match self.existing(&table.name, row, from)? {
-                Some((current, _)) if cut.sees(current) => Some(quote(&table.name)),
+            None => Some(quote(&table.stored)),
+            Some(cut) => match self.existing(&table.stored, row, from)? {
+                Some((current, _)) if cut.sees(current) => Some(quote(&table.stored)),
                 _ => self
-                    .version_at(&table.name, row, from, cut)?
+                    .version_at(&table.stored, row, from, cut)?
                     .map(|version| {
                         format!(
                             "(SELECT * FROM {} WHERE _seq = {version})",
-                            quote(&format!("{}__h", table.name))
+                            quote(&format!("{}__h", table.stored))
                         )
                     }),
             },
@@ -2228,15 +2250,19 @@ impl Inner {
             )));
         };
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _seq, _del{columns}) SELECT id, ?1, ?2, _del{columns} FROM {source} \
-             WHERE id = ?3 AND _b = ?4",
-            name = quote(&table.name)
+            "INSERT INTO {name} (id, _b, _seq, _del, _c{columns}) SELECT id, ?1, ?2, _del, 0{columns} \
+             FROM {source} WHERE id = ?3 AND _b = ?4",
+            name = quote(&table.stored)
         );
         self.exec(&sql, rusqlite::params![to, seq as i64, id, from])
             .map_err(storage)?;
-        self.set_cells(table, row, to, head_cells, seq, None)
+        self.set_cells(table, row, to, head_cells, seq, None, false)
     }
 
+    /// Write cells (and the deletion flag) into a row's current version
+    /// at `seq`. `content` says whether the write authored content; a
+    /// version stays a content version once any write of its commit did.
+    #[allow(clippy::too_many_arguments)]
     fn set_cells(
         &self,
         table: &Table,
@@ -2245,8 +2271,17 @@ impl Inner {
         cells: &BTreeMap<String, Value>,
         seq: u64,
         deleted: Option<bool>,
+        content: bool,
     ) -> Result<(), Error> {
-        let mut sets = vec!["_seq = ?1".to_owned()];
+        // Right-hand sides read the row before this update: `_seq` is still
+        // the previous version's.
+        let mut sets = vec![
+            "_seq = ?1".to_owned(),
+            format!(
+                "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
+                content = content as u8
+            ),
+        ];
         let mut values = vec![Sql::Integer(seq as i64)];
         if let Some(deleted) = deleted {
             values.push(Sql::Integer(deleted as i64));
@@ -2257,7 +2292,11 @@ impl Inner {
                 Some(column) => self.bind_cell(column, value)?,
                 None => Self::bind_value(value)?,
             });
-            sets.push(format!("{} = ?{}", quote(name), values.len()));
+            sets.push(format!(
+                "{} = ?{}",
+                quote(table.stored_name(name)),
+                values.len()
+            ));
         }
         for (name, value) in self.stamp()?.updated() {
             values.push(value);
@@ -2267,7 +2306,7 @@ impl Inner {
         values.push(Sql::Blob(key.to_vec()));
         let sql = format!(
             "UPDATE {} SET {} WHERE id = ?{} AND _b = ?{}",
-            quote(&table.name),
+            quote(&table.stored),
             sets.join(", "),
             values.len() - 1,
             values.len()
@@ -2276,7 +2315,7 @@ impl Inner {
             .map_err(storage)?;
         self.changed
             .borrow_mut()
-            .push((table.name.clone(), row, key.to_vec()));
+            .push((table.stored.clone(), row, key.to_vec()));
         Ok(())
     }
 
@@ -2310,7 +2349,7 @@ impl Inner {
         }
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
-        if self.existing(table_name, row, &key)?.is_some() {
+        if self.existing(&table.stored, row, &key)?.is_some() {
             return Err(rejected(format!(
                 "row {row:?} already exists in `{table_name}`"
             )));
@@ -2333,7 +2372,7 @@ impl Inner {
                     )));
                 }
             };
-            names.push(quote(&column.name));
+            names.push(quote(&column.stored));
             values.push(value);
         }
         let stamp = self.stamp()?;
@@ -2345,7 +2384,7 @@ impl Inner {
         let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            quote(table_name),
+            quote(&table.stored),
             names.join(", "),
             placeholders.join(", ")
         );
@@ -2353,7 +2392,7 @@ impl Inner {
             .map_err(storage)?;
         self.changed
             .borrow_mut()
-            .push((table_name.to_owned(), row, key.clone()));
+            .push((table.stored.clone(), row, key.clone()));
         if let Who::Session(author) = who
             && !self.check(table, row, &key, author, Operation::Insert)?
         {
@@ -2434,7 +2473,15 @@ impl Inner {
                 }
                 self.snapshot(table, row, &key, seq)?;
                 // An upsert over a tombstone replaces it.
-                self.set_cells(table, row, &key, &cells, seq, deleted.then_some(false))?;
+                self.set_cells(
+                    table,
+                    row,
+                    &key,
+                    &cells,
+                    seq,
+                    deleted.then_some(false),
+                    true,
+                )?;
                 key
             }
             Located::Inherited {
@@ -2445,7 +2492,7 @@ impl Inner {
             } => {
                 self.authorize_patch(table, row, &from, &who, verb)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
-                self.set_cells(table, row, &to, &cells, seq, None)?;
+                self.set_cells(table, row, &to, &cells, seq, None, true)?;
                 to
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
@@ -2521,7 +2568,7 @@ impl Inner {
             } => {
                 check(self, &key)?;
                 self.snapshot(table, row, &key, seq)?;
-                self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true))?;
+                self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true), false)?;
             }
             // Deleting an inherited row is a head register: a head tombstone
             // that masks the base row.
@@ -2533,7 +2580,7 @@ impl Inner {
             } => {
                 check(self, &from)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
-                self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true))?;
+                self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true), false)?;
             }
             _ => {
                 return Err(rejected(format!(
@@ -2584,7 +2631,15 @@ impl Inner {
                 cells.insert(column.name.clone(), value);
             }
         }
-        self.set_cells(table, row, &key, &cells, seq, Some(false))?;
+        self.set_cells(
+            table,
+            row,
+            &key,
+            &cells,
+            seq,
+            Some(false),
+            content.is_some(),
+        )?;
         if let Who::Session(author) = who
             && !self.check(table, row, &key, author, Operation::Insert)?
         {
@@ -2731,8 +2786,8 @@ impl Inner {
             }
             let sql = format!(
                 "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _del = 0",
-                quote(&column.name),
-                quote(table)
+                quote(&column.stored),
+                quote(&t.stored)
             );
             let cell: Sql = self
                 .conn
@@ -3019,12 +3074,19 @@ impl Db {
                     ));
                 }
             } else {
-                check_direct_lens(&inner.owner.jazz, &schema)?;
+                // A version this file admitted before (it has stored names)
+                // was checked then; it may since be more than one lens away.
+                if inner.names.get(&version).is_none() {
+                    check_direct_lens(&inner.owner.jazz, &schema)?;
+                }
                 inner.admitted.push(schema.clone());
             }
-            let logical = Schema::new(&schema);
+            let base = inner.owner.names();
+            let logical = inner.names.resolve(&schema, &[], Some(&base))?;
             let ddl = inner.physical.union(&logical)?;
             execute_script(&inner.conn, &ddl)?;
+            let Inner { names, conn, .. } = &mut *inner;
+            names.admit(conn, &logical)?;
             inner
                 .views
                 .entry(SchemaViewId::for_schema(&schema))
@@ -3061,6 +3123,16 @@ impl Db {
 struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// What the batch's partial large-value updates built: descriptors
+    /// derived from stored trees and the nodes consolidations prepared,
+    /// trusted and stored whenever the staged writes apply.
+    edits: LargeEdits,
+}
+
+#[derive(Default)]
+pub(crate) struct LargeEdits {
+    pub(crate) derived: Vec<jazz_types::large_values::LargeValueRef>,
+    pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
 }
 
 enum BatchKind {
@@ -3183,7 +3255,24 @@ impl Inner {
         result
     }
 
-    /// The newest committed version of `row` in `table` on any branch.
+    /// [`Inner::apply_all`] trusting and storing what a batch's partial
+    /// large-value updates built.
+    fn apply_with_edits(
+        &mut self,
+        ops: &[(Rc<Schema>, StagedOp)],
+        edits: &LargeEdits,
+        seq: u64,
+    ) -> Result<(), Error> {
+        self.derived.extend(edits.derived.iter().cloned());
+        self.pending_nodes
+            .extend(edits.pending_nodes.iter().cloned());
+        let result = self.apply_all(ops, seq);
+        self.clear_derived();
+        result
+    }
+
+    /// The newest committed version of `row` in stored table `table` on
+    /// any branch.
     fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
         let sql = format!("SELECT MAX(_seq) FROM {} WHERE id = ?1", quote(table));
         self.conn
@@ -3240,6 +3329,7 @@ impl Db {
             Batch {
                 kind,
                 ops: Vec::new(),
+                edits: LargeEdits::default(),
             },
         );
         Ok(())
@@ -3276,7 +3366,7 @@ impl Db {
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
-        self.commit_ops(&batch.ops, sync::Kind::Mergeable)
+        self.commit_ops(&batch, sync::Kind::Mergeable)
     }
 
     /// Serializable commit: every row the batch writes must still be at a
@@ -3312,7 +3402,7 @@ impl Db {
                 })
                 .collect();
             return self.commit_ops(
-                &batch.ops,
+                &batch,
                 sync::Kind::Serializable {
                     snapshot: *snapshot,
                     reads,
@@ -3321,10 +3411,10 @@ impl Db {
         }
         {
             let inner = self.inner();
-            for (_, op) in &batch.ops {
+            for (schema, op) in &batch.ops {
                 if let Some(row) = op.row()
                     && inner
-                        .newest_seq(op.table(), row)?
+                        .newest_seq(schema.stored_table(op.table())?, row)?
                         .is_some_and(|seq| seq > *snapshot)
                 {
                     return Err(conflict(
@@ -3341,22 +3431,15 @@ impl Db {
                 }
             }
         }
-        self.commit_ops(&batch.ops, sync::Kind::Mergeable)
+        self.commit_ops(&batch, sync::Kind::Mergeable)
     }
 
-    fn commit_ops(
-        &self,
-        ops: &[(Rc<Schema>, StagedOp)],
-        kind: sync::Kind,
-    ) -> Result<TxReceipt, Error> {
-        self.with_upload(|| self.commit_ops_now(ops, kind))
+    fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
-    fn commit_ops_now(
-        &self,
-        ops: &[(Rc<Schema>, StagedOp)],
-        kind: sync::Kind,
-    ) -> Result<TxReceipt, Error> {
+    fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        let ops = &batch.ops;
         let seq = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
@@ -3365,7 +3448,8 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            if let Err(error) = inner.apply_all(ops, seq) {
+            let applied = inner.apply_with_edits(ops, &batch.edits, seq);
+            if let Err(error) = applied {
                 inner
                     .conn
                     .execute_batch("ROLLBACK TO commit_batch; RELEASE commit_batch")
@@ -3394,7 +3478,7 @@ impl Db {
         &self,
         id: OpenTransactionId,
         extra: Option<StagedOp>,
-        read: impl FnOnce(&Inner, Option<Cut>) -> Result<R, Error>,
+        read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner();
         let batch = inner
@@ -3402,6 +3486,10 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let mut ops = batch.ops.clone();
+        let edits = LargeEdits {
+            derived: batch.edits.derived.clone(),
+            pending_nodes: batch.edits.pending_nodes.clone(),
+        };
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
             BatchKind::Serializable { snapshot, .. } => Some(*snapshot),
@@ -3415,9 +3503,9 @@ impl Db {
             .execute_batch("SAVEPOINT overlay")
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
-        let result = inner.apply_all(&ops, own).and_then(|()| {
+        let result = inner.apply_with_edits(&ops, &edits, own).and_then(|()| {
             read(
-                &inner,
+                &mut inner,
                 snapshot.map(|seq| Cut {
                     own,
                     ..Cut::at(seq)
@@ -3444,6 +3532,35 @@ impl Db {
             .ops
             .push((schema, op));
         Ok(())
+    }
+
+    /// [`Self::stage`] a write whose large values a partial update built:
+    /// the batch keeps what it built for every later apply.
+    pub(crate) fn stage_with_edits(
+        &self,
+        id: OpenTransactionId,
+        op: StagedOp,
+        edits: LargeEdits,
+    ) -> Result<(), Error> {
+        let marks = {
+            let mut inner = self.inner();
+            let batch = inner
+                .batches
+                .get_mut(&id)
+                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            let marks = (batch.edits.derived.len(), batch.edits.pending_nodes.len());
+            batch.edits.derived.extend(edits.derived);
+            batch.edits.pending_nodes.extend(edits.pending_nodes);
+            marks
+        };
+        let staged = self.stage(id, op);
+        if staged.is_err()
+            && let Some(batch) = self.inner().batches.get_mut(&id)
+        {
+            batch.edits.derived.truncate(marks.0);
+            batch.edits.pending_nodes.truncate(marks.1);
+        }
+        staged
     }
 
     fn record_read(&self, id: OpenTransactionId, prepared: &PreparedQuery) -> Result<(), Error> {
@@ -3527,6 +3644,21 @@ impl TxRef<'_> {
     ) -> Result<WriteHandle, Error> {
         self.db
             .stage(self.id, StagedOp::Delete(table.to_owned(), row, opts))?;
+        Ok(WriteHandle { row, seq: 0 })
+    }
+
+    /// Undelete `row`, optionally with replacement content.
+    pub async fn restore(
+        &self,
+        table: &str,
+        row: RowUuid,
+        content: Option<BTreeMap<String, Value>>,
+        opts: RestoreOptions,
+    ) -> Result<WriteHandle, Error> {
+        self.db.stage(
+            self.id,
+            StagedOp::Restore(table.to_owned(), row, content, opts),
+        )?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
