@@ -68,7 +68,7 @@ dictionary family is not one of the logical pack's stores; the physical
 SQLite and RocksDB images carry it.
 
 The RocksDB archive retains internal column family
-`__groove_storage_internal_v1` and profile marker `raw-v1`. ResultKey V1 has a
+`__groove_storage_internal_v1` and profile marker `raw-v1`. ResultKey has a
 separate golden fixture; this corpus contains no ResultKey occurrence payload.
 
 | Artifact            | SHA-256                                                            |
