@@ -458,7 +458,11 @@ where
                     || (self.client_relay_scope().is_some()
                         && (stored.global_time.is_none()
                             || stored.global_time == bundle.global_time)));
-            let stored_versions = self.query_versions_for_tx(*tx_id).await?;
+            // A settled transaction's stored versions are read at the
+            // bundle's coordinates; the checks below compare row for row.
+            let stored_versions = self
+                .stored_versions_for_tx_at(*tx_id, &stored, &bundle.versions)
+                .await?;
             let mut stored_by_key = BTreeMap::new();
             for stored_version in &stored_versions {
                 let version = self.version_record_from_row(stored_version)?;
@@ -531,7 +535,10 @@ where
 
     /// Subscribe to the raw history storage table. History holds pending
     /// images (seq 0) and superseded accepted images; a row's latest accepted
-    /// image is its global-current record (SPEC 2 §2.7.1).
+    /// image is its global-current record (SPEC 2 §2.7.1). Rows are stored
+    /// rows: their author columns hold node-local dictionary codes, not
+    /// `RowAuthor` values, so this is for tests and diagnostics only.
+    #[doc(hidden)]
     pub async fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
         let schema_version = self.catalogue.local_schema_version_id;
@@ -2175,9 +2182,16 @@ where
         // to a same-frame body: the receiver already admitted that complete
         // immutable transaction on this link. Re-read its stored bodies before
         // accepting a source coordinate, rather than trusting the sender's
-        // declaration alone.
+        // declaration alone. A settled transaction whose list was released
+        // is checked per coordinate below, by the resident-body point read.
         for tx_id in &referenced_complete_payloads {
-            for version in self.query_versions_for_tx(*tx_id).await? {
+            let Some(stored) = self.query_transaction(*tx_id).await? else {
+                continue;
+            };
+            let Some(listed) = self.query_listed_versions_for_tx(*tx_id, &stored).await? else {
+                continue;
+            };
+            for version in listed {
                 admitted_versions.insert((
                     *tx_id,
                     version.table().to_owned(),
@@ -3096,19 +3110,31 @@ where
             })
             .collect::<BTreeSet<_>>();
         let witness_tx_id = self.version_tx_id(version)?;
+        let witness_branch = version.branch_key().canonical_bytes();
         let physical_candidates = if logical_candidates.len() == 1 {
             logical_candidates
         } else {
-            self.query_versions_for_tx(witness_tx_id)
-                .await?
-                .into_iter()
-                .filter(|candidate| {
-                    candidate.row_uuid() == version.row_uuid()
-                        && candidate.branch_key() == version.branch_key()
-                })
-                .filter_map(|candidate| self.physical_table_id_for_version(&candidate).ok())
-                .filter(|table_id| logical_candidates.contains(table_id))
-                .collect::<BTreeSet<_>>()
+            // Keep the candidate tables that hold this row for the witness's
+            // transaction: one exact point read per candidate.
+            let mut holding = BTreeSet::new();
+            if let Some(stored_tx) = self.query_transaction(witness_tx_id).await? {
+                for table_id in logical_candidates {
+                    if self
+                        .query_tx_version_at(
+                            witness_tx_id,
+                            &stored_tx,
+                            table_id,
+                            &witness_branch,
+                            version.row_uuid(),
+                        )
+                        .await?
+                        .is_some()
+                    {
+                        holding.insert(table_id);
+                    }
+                }
+            }
+            holding
         };
         let [projected_table_id] = physical_candidates.iter().copied().collect::<Vec<_>>()[..]
         else {
@@ -3132,17 +3158,16 @@ where
                 // physical table, branch, row, transaction, and layer. This is the
                 // same identity boundary used for repair payloads; reused or
                 // unknown logical names fail closed before history is read.
-                if let Some(canonical) = self
-                    .query_versions_for_tx(witness_tx_id)
-                    .await?
-                    .into_iter()
-                    .find(|candidate| {
-                        candidate.row_uuid() == version.row_uuid()
-                            && candidate.branch_key() == version.branch_key()
-                            && self
-                                .physical_table_id_for_version(candidate)
-                                .is_ok_and(|table_id| table_id == projected_table_id)
-                    })
+                if let Some(stored_tx) = self.query_transaction(witness_tx_id).await?
+                    && let Some(canonical) = self
+                        .query_tx_version_at(
+                            witness_tx_id,
+                            &stored_tx,
+                            projected_table_id,
+                            &witness_branch,
+                            version.row_uuid(),
+                        )
+                        .await?
                 {
                     return Ok(canonical);
                 }

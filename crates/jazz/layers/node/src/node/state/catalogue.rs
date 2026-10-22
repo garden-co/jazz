@@ -434,7 +434,7 @@ where
     }
 
     fn allocate_physical_table_id(&mut self) -> Result<PhysicalTableId, Error> {
-        let id = PhysicalTableId(self.catalogue.next_physical_table_id);
+        let id = checked_physical_table_id(self.catalogue.next_physical_table_id)?;
         self.catalogue.next_physical_table_id = self
             .catalogue
             .next_physical_table_id
@@ -1252,12 +1252,8 @@ where
         }
         self.catalogue.active_schema = active;
         self.query.version_storage_sources_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_compiled_query_programs();
+        self.query.clear_policy_authorization();
         if authorization_source_changed {
             self.groove_runtime_token = next_groove_runtime_token();
         }

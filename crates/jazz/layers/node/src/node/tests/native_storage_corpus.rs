@@ -42,25 +42,25 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "41e4d8c066fd1d69b805222298a272b1fa65d63c5aaf900ed852d30fa46a37a0";
+    "b2ec98c2d7db7a4d5e0461b01f9333c6a234a326e5138f7c627971582c1861ef";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "3cde2455ceb1865e0b26dad2e211f4fa485d9738a2f6ee326359040d70ac6b5f";
+    "390a9bd1a325d56615dba9b96daf3fb6ff319e0a60ddbf89ee449616cb42d45b";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "41e4d8c066fd1d69b805222298a272b1fa65d63c5aaf900ed852d30fa46a37a0";
+    "b2ec98c2d7db7a4d5e0461b01f9333c6a234a326e5138f7c627971582c1861ef";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "d5f147c8f49779cfe3af9e841817f7a1b59a20e91c66028a113e8edca657b898";
+    "0d37d7da9892d3aadb4e7bd6f9dfccf805a97289fe16b1e1fb2994812eb5f40c";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "d3f92cb74553585e87ad77b7562a0135a1ce5c36015c3b87a0b93cceb428aa31";
+    "15d96f0deee77ffe70e939675cad0f3b1166086291011399be306275e06a1bc3";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "13a764fc200da6a82c351afb05566927485146d90b3d1eb50eb62faefd0ac5c3";
+    "877f7f6d56b7e25154c1066836f9abb3e62ab1bf63aeb27ca4adb3ac2787ae8d";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -2546,10 +2546,10 @@ fn superseded_writes_store_native_bytes_are_pinned() {
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(core_dir.path(), &refs).unwrap();
     // The class-CF layout stores the family in the shared meta class, each
-    // key framed by the family name's u32 big-endian length and the name.
-    let name = crate::schema::SUPERSEDED_WRITES_STORE.as_bytes();
-    let mut framed = u32::try_from(name.len()).unwrap().to_be_bytes().to_vec();
-    framed.extend_from_slice(name);
+    // key framed by the family's u32 big-endian class table id.
+    let table_id =
+        groove::storage::class_table_id(crate::schema::SUPERSEDED_WRITES_STORE).unwrap();
+    let framed = table_id.to_be_bytes().to_vec();
     let entries = crate::local_executor::block_on(async {
         groove::storage::collect_scan(
             storage

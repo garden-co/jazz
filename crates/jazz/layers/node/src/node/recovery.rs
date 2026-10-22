@@ -263,9 +263,10 @@ where
         }
         for (node_alias, tx_id, record) in rejected_headers {
             let versions = self.rejected_versions_for(node_alias, tx_id).await?;
-            self.rejections
-                .rejected_transactions
-                .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
+            self.rejections.rejected_transactions.insert(
+                tx_id,
+                RejectedTransaction::new(tx_id, self.authors.resolve_owned(&record)?, versions),
+            );
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
@@ -290,6 +291,7 @@ impl<S: OrderedKvStorage> NodeState<S> {
         tx.predicate_read_set = None;
         let mut batch = self.database.open_batch();
         stage_transaction_record(
+            &self.authors,
             &mut batch,
             TransactionRecordWrite::Update,
             stored.node_alias,

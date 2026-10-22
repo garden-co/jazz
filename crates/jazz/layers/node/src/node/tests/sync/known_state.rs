@@ -1496,7 +1496,7 @@ fn assert_eviction_failure_contract(
     );
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
     assert_eq!(persisted_history.len(), 2);
-    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let persisted_versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     assert_eq!(persisted_versions.len(), 1);
     let persisted_version = persisted_versions
         .first()
@@ -1507,7 +1507,7 @@ fn assert_eviction_failure_contract(
         .to_string();
     let logical_history_key = history_primary_key(persisted_version).unwrap().into_bytes();
     let (history_table, history_key) =
-        jazz_class_v2_history_physical_target(&logical_history_table, &logical_history_key);
+        jazz_class_v3_history_physical_target(&logical_history_table, &logical_history_key);
     reader.cache_tx_versions(tx_id, persisted_versions.clone());
     assert!(reader.cached_tx_versions(tx_id).is_some());
     assert!(matches!(
@@ -1671,7 +1671,7 @@ fn failed_body_eviction_still_invalidates_volatile_scope_and_cursors() {
         title_cells("clear failure again"),
     );
     let persisted_history = reader.row_history("todos", row_uuid).unwrap();
-    let persisted_versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let persisted_versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     reader.cache_tx_versions(tx_id, persisted_versions);
     assert!(matches!(
         reader

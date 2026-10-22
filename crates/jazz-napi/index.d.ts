@@ -130,6 +130,8 @@ export declare class NapiDb {
   foregroundTxTimeHighWater(): bigint
   /** Merge a checked host-retained node clock before opening new local writes. */
   seedForegroundTxTimeHighWater(highWater: bigint): void
+  /** Capture through the same ordered owner queue as local mutations. */
+  captureSnapshot(): Uint8Array | PendingNativeRead
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }

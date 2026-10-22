@@ -13,6 +13,13 @@ import {
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
 import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
+import {
+  columnTransformDependencies,
+  dependencyContext,
+  storedDependencyValues,
+  type ColumnTransform,
+} from "./column-transforms.js";
+
 export type { WasmValue };
 
 export interface IncludeSpec {
@@ -132,15 +139,23 @@ function buildIncludePlans(
 }
 
 type ReadColumnTransformRegistry = Readonly<
-  Record<string, Readonly<Record<string, { from(value: unknown): unknown }>> | undefined>
+  Record<
+    string,
+    Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>> | undefined
+  >
 >;
 
 export function applyColumnTransforms(
   row: Record<string, unknown>,
-  transforms?: Readonly<Record<string, { from(value: unknown): unknown }>>,
+  transforms?: Readonly<Record<string, Pick<ColumnTransform, "from" | "dependsOn" | "computed">>>,
   excludedColumns: readonly string[] = [],
+  stored?: Readonly<Record<string, unknown>>,
+  appValues?: ReadonlyMap<string, unknown>,
+  partialColumns?: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   if (!transforms) return row;
+  const source =
+    stored ?? storedDependencyValues(columnTransformDependencies(transforms).columns, row);
   for (const column in transforms) {
     if (
       !Object.hasOwn(transforms, column) ||
@@ -149,18 +164,14 @@ export function applyColumnTransforms(
     ) {
       continue;
     }
-    row[column] = transforms[column]!.from(row[column]);
+    const transform = transforms[column]!;
+    if (!transform.computed)
+      row[column] =
+        appValues?.has(column) && (!partialColumns || !Object.hasOwn(partialColumns, column))
+          ? appValues.get(column)
+          : transform.from(row[column], dependencyContext(transform, source));
   }
   return row;
-}
-
-function applyTableColumnTransforms(
-  row: Record<string, unknown>,
-  tableName: string,
-  transformsByTable: ReadColumnTransformRegistry | undefined,
-  excludedColumns: readonly string[],
-): Record<string, unknown> {
-  return applyColumnTransforms(row, transformsByTable?.[tableName], excludedColumns);
 }
 
 function transformIncludedValue(
@@ -251,9 +262,8 @@ function transformRowValues(
     obj[plan.relation.name] = transformIncludedValue(value, plan, schema, transformsByTable);
   }
 
-  return applyRootTransforms
-    ? applyTableColumnTransforms(obj, tableName, transformsByTable, includedRelationNames)
-    : obj;
+  const transforms = applyRootTransforms ? transformsByTable?.[tableName] : undefined;
+  return transforms ? applyColumnTransforms(obj, transforms, includedRelationNames) : obj;
 }
 
 function timestampToDate(value: number, _columnName?: string): Date {
@@ -320,6 +330,7 @@ function prepareRowTransform(
   schema: WasmSchema,
   tableName: string,
   includes: IncludeSpec,
+  relations?: Map<string, Relation[]>,
 ): PreparedRowTransform {
   if (!schema[tableName]) {
     throw new Error(`Unknown table "${tableName}" in schema`);
@@ -327,7 +338,11 @@ function prepareRowTransform(
   const includePlans =
     Object.keys(includes).length === 0
       ? []
-      : buildIncludePlans(tableName, normalizeIncludeEntries(includes), analyzeRelations(schema));
+      : buildIncludePlans(
+          tableName,
+          normalizeIncludeEntries(includes),
+          relations ?? analyzeRelations(schema),
+        );
   return {
     includePlans,
     includedRelationNames: includePlans.map((plan) => plan.relation.name),
@@ -405,10 +420,11 @@ export function createRowTransformer<T>(
   projection?: readonly string[],
   transformsByTable?: ReadColumnTransformRegistry,
   applyRootTransforms = true,
+  relations?: Map<string, Relation[]>,
 ): (row: WasmRow) => T {
   let prepared: PreparedRowTransform | undefined;
   return (row) => {
-    prepared ??= prepareRowTransform(schema, tableName, includes);
+    prepared ??= prepareRowTransform(schema, tableName, includes, relations);
     return transformPreparedRow<T>(
       prepared,
       row,

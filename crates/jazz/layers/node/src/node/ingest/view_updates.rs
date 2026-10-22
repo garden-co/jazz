@@ -203,6 +203,7 @@ where
             )?;
             // The write's cells as a row; its identity takes no part.
             let incoming = VersionRow::from_wire_with_schema_version(
+                &self.authors,
                 &table_schema,
                 version,
                 authored,
@@ -1116,7 +1117,16 @@ where
             ));
         }
         for tx_id in tx_ids {
-            for version in self.query_versions_for_tx(tx_id).await? {
+            let Some(stored) = self.query_transaction(tx_id).await? else {
+                continue;
+            };
+            // A released list belongs to a settled transaction, whose
+            // overlays were dropped when it settled.
+            for version in self
+                .query_listed_versions_for_tx(tx_id, &stored)
+                .await?
+                .unwrap_or_default()
+            {
                 self.write_ahead_current_delete(batch, &version)?;
             }
         }

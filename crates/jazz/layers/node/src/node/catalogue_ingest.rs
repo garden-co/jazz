@@ -430,13 +430,8 @@ where
         self.catalogue.physical_write_plan_cache.clear();
         self.catalogue.physical_current_winner_projections.clear();
         self.query.version_storage_sources_cache.clear();
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_prepared_query_plans();
+        self.query.clear_policy_authorization();
         // A trusted snapshot is a complete replacement of the authority
         // catalogue. Once its registry and durable receipt have both crossed
         // the activation boundary, it also proves that a transient earlier

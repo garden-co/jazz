@@ -1011,12 +1011,13 @@ fn pending_edit_over_origin_writes_no_mask_rows() {
     let over_origin = last_writes(&db);
     // Outside origin's row, its `title` entry, the history and the
     // transaction log, settling writes only: the delta row and its `title`
-    // entry deleted, and origin's `by_seq` entry inserted (fresh row) or
-    // moved (edit). The retired mask cost one more delete for the fresh row
-    // and two (its row and `title` entry) for the edit.
+    // entry deleted, origin's `by_seq` entry inserted (fresh row) or
+    // moved (edit), and the settled transaction's touched-rows list
+    // released. The retired mask cost one more delete for the fresh row and
+    // two (its row and `title` entry) for the edit.
     assert_eq!(
         (fresh.other.count, over_origin.other.count),
-        (3, 4),
+        (4, 5),
         "settling deletes the delta row and nothing beside it: \
          {fresh:?} vs {over_origin:?}"
     );
@@ -6868,7 +6869,7 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
     let unit = core
         .node()
         .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id())
+        .stored_commit_unit_for_test(write.mergeable_tx_id())
         .resolve();
     let SyncMessage::CommitUnit { tx, versions } = unit.unwrap() else {
         panic!("commit unit expected");

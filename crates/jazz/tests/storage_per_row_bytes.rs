@@ -14,7 +14,8 @@
 //! both tables at `Global`; the reader connects after every write settled and
 //! subscribes to both tables. Every store is RocksDB. After close, every
 //! column family is read raw and each entry is attributed to its logical
-//! table (class-CF framing `u32be len | name | key`) or, in `indices`, to its
+//! table (class-CF framing `u32be table id | key`, where the id is the
+//! catalogue physical table id or a fixed system id) or, in `indices`, to its
 //! `table\0index\0` prefix. Bytes are key plus value.
 
 // Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
@@ -124,19 +125,26 @@ struct Group {
     value_bytes: usize,
 }
 
-fn split_logical(cf: &str, key: &[u8]) -> (String, Vec<u8>) {
+/// Split a class-layout key into its logical table and its logical key. A
+/// fixed system id names its system family; any other id is a catalogue
+/// physical table id, whose family the class names.
+fn split_logical(cf: &str, key: &[u8], fixed: &BTreeMap<u32, String>) -> (String, Vec<u8>) {
     if key.len() >= 4 {
-        let len = u32::from_be_bytes(key[..4].try_into().unwrap()) as usize;
-        if len > 0
-            && key.len() >= 4 + len
-            && key[4..4 + len]
-                .iter()
-                .all(|byte| byte.is_ascii_graphic() && *byte != b'\0')
+        let id = u32::from_be_bytes(key[..4].try_into().unwrap());
+        if let Some(name) = fixed.get(&id) {
+            return (name.clone(), key[4..].to_vec());
+        }
+        let suffix = match cf {
+            "__groove_class_history" => Some("history"),
+            "__groove_class_global_current" => Some("global_current"),
+            "__groove_class_ahead_current" => Some("ahead_current"),
+            "__groove_class_meta" => Some("rejected_versions"),
+            _ => None,
+        };
+        if let Some(suffix) = suffix
+            && u64::from(id) <= jazz::groove::storage::MAX_JAZZ_PHYSICAL_TABLE_ID
         {
-            return (
-                String::from_utf8(key[4..4 + len].to_vec()).unwrap(),
-                key[4 + len..].to_vec(),
-            );
+            return (format!("jazz_physical_{id}_{suffix}"), key[4..].to_vec());
         }
     }
     (cf.to_owned(), key.to_vec())
@@ -171,12 +179,12 @@ fn index_name(key: &[u8], names: &BTreeMap<u32, String>) -> Option<String> {
     names.get(&id).cloned()
 }
 
-fn logical_entry(family: &str, key: &[u8]) -> (String, Vec<u8>) {
+fn logical_entry(family: &str, key: &[u8], tables: &BTreeMap<u32, String>) -> (String, Vec<u8>) {
     // The class layout stores the `indices` class without a logical frame.
     if family == "__groove_class_indices" {
         return ("indices".to_owned(), key.to_vec());
     }
-    split_logical(family, key)
+    split_logical(family, key, tables)
 }
 
 fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
@@ -184,12 +192,22 @@ fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
     let families = rocksdb::DB::list_cf(&options, path).expect("list column families");
     let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false)
         .expect("open RocksDB read-only");
+    let tables = schema()
+        .lower_to_groove()
+        .column_families()
+        .into_iter()
+        .filter_map(|name| {
+            jazz::groove::storage::class_table_id(&name)
+                .ok()
+                .map(|id| (id, name.to_owned()))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut names = BTreeMap::new();
     for family in &families {
         let handle = db.cf_handle(family).expect("column family handle");
         for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
             let (key, value) = entry.expect("raw entry");
-            let (logical, rest) = logical_entry(family, &key);
+            let (logical, rest) = logical_entry(family, &key, &tables);
             if logical == "indices"
                 && let Some((id, name)) = index_registry_entry(&rest, &value)
             {
@@ -202,7 +220,7 @@ fn measure(path: &std::path::Path) -> BTreeMap<String, Group> {
         let handle = db.cf_handle(family).expect("column family handle");
         for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
             let (key, value) = entry.expect("raw entry");
-            let (logical, rest) = logical_entry(family, &key);
+            let (logical, rest) = logical_entry(family, &key, &tables);
             let group = if logical == "indices" {
                 index_name(&rest, &names).unwrap_or(logical)
             } else {

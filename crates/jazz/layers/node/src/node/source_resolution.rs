@@ -353,6 +353,9 @@ where
         key: &BranchKey,
         snapshot: Option<&SnapshotRef>,
     ) -> Result<(BTreeMap<RowUuid, VersionRow>, BTreeMap<RowUuid, VersionRow>), Error> {
+        if let Some(snapshot) = snapshot {
+            self.ensure_frozen_snapshot_available(snapshot).await?;
+        }
         let mut content = BTreeMap::new();
         let mut tx_ids = BTreeMap::new();
         let snapshot = snapshot.map(|snapshot| Snapshot {
@@ -371,6 +374,9 @@ where
                 let Some(tx) = self.query_transaction(tx_id).await? else {
                     continue;
                 };
+                if matches!(tx.fate, crate::tx::Fate::Rejected(_)) {
+                    continue;
+                }
                 let visible = match &snapshot {
                     Some(snapshot) => self.snapshot_covers(tx_id, snapshot).await,
                     None => visible_at_tier(&tx, tier),
@@ -525,6 +531,7 @@ where
             }
             let updated = self.newer_of_deletion(version, deletion)?;
             rows.push(current_row_from_materialized_cells_with_layer_provenance(
+                &self.authors,
                 &read_table,
                 version,
                 version,
@@ -680,7 +687,12 @@ where
             };
             let updated = self.newer_of_deletion(&content, deletions.get(&row_uuid))?;
             match current_row_from_materialized_cells_with_layer_provenance(
-                read_table, &content, &content, updated, &cells,
+                &self.authors,
+                read_table,
+                &content,
+                &content,
+                updated,
+                &cells,
             ) {
                 Ok(row) => rows.push(row),
                 Err(error) if is_unrepresentable_enum_projection(&error) => {}
