@@ -19,6 +19,11 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
 }
 
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
+    // Only the large-value collation and functions interrupt a statement,
+    // when a chunk it needs is not local (see `crate::large`).
+    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::OperationInterrupted) {
+        return crate::large::missing();
+    }
     Error::new(ErrorCode::Storage, error.to_string())
 }
 

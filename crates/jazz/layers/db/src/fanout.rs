@@ -65,6 +65,12 @@ pub(super) struct Group {
     /// reads: (target, root column). A change to a target row cannot move
     /// the result, only refresh the rows that reference it.
     includes: Vec<(String, String)>,
+    /// The last run needed large-value chunks this replica does not hold
+    /// yet: the run is retried when chunks arrive, and nothing (opening,
+    /// delta or settlement) is published meanwhile.
+    awaiting: bool,
+    /// Whether the opening was published.
+    opened: bool,
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -204,6 +210,9 @@ impl Fanout {
     pub(super) fn flush_settled(&mut self) {
         for group in self.groups.values() {
             let group = group.borrow();
+            if group.awaiting {
+                continue;
+            }
             for member in &group.members {
                 if member.settled.get()
                     && !member.told.get()
@@ -259,17 +268,30 @@ impl Inner {
             .cloned()
         {
             let mut group = handle.borrow_mut();
-            let queue: Queue = Rc::new(RefCell::new(VecDeque::from([open(&group.rows)])));
+            let queue: Queue = Rc::new(RefCell::new(if group.opened {
+                VecDeque::from([open(&group.rows)])
+            } else {
+                VecDeque::new()
+            }));
             group.members.push(member(&queue));
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        let rows = self.execute(&compiled, &prepared.query.table)?;
+        // A replica missing chunks the result needs opens it once they arrive.
+        let (rows, awaiting) = match self.execute(&compiled, &prepared.query.table) {
+            Ok(rows) => (rows, false),
+            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+            Err(error) => return Err(error),
+        };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let recheck = recheckable(&prepared.query, &read, &compiled);
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
-        let queue: Queue = Rc::new(RefCell::new(VecDeque::from([open(&rows)])));
+        let queue: Queue = Rc::new(RefCell::new(if awaiting {
+            VecDeque::new()
+        } else {
+            VecDeque::from([open(&rows)])
+        }));
         let gid = self.fan.next;
         self.fan.next += 1;
         self.fan.index(gid, &watches);
@@ -286,6 +308,8 @@ impl Inner {
             projected,
             keys: Vec::new(),
             includes,
+            awaiting,
+            opened: !awaiting,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -927,9 +951,27 @@ impl Inner {
         })
     }
 
+    /// Re-run every result that waited for large-value chunks.
+    pub(super) fn retry_awaiting(&self) {
+        for handle in self.fan.groups.values() {
+            let mut group = handle.borrow_mut();
+            if !group.awaiting {
+                continue;
+            }
+            if group.opened {
+                self.refresh_group(&mut group, None);
+            } else {
+                self.reset_group(&mut group);
+            }
+        }
+    }
+
     fn reset_group(&self, group: &mut Group) {
         match self.run(&group.prepared, group.identity, &group.read) {
+            Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
             Ok(rows) => {
+                group.awaiting = false;
+                group.opened = true;
                 group.push(opening(&rows));
                 group.rows = rows;
                 group.keys.clear();
@@ -946,6 +988,8 @@ impl Inner {
             match self.recheck_rows(group, ids) {
                 Some(Ok(Some(event))) => return group.push(event),
                 Some(Ok(None)) => return,
+                // Missing chunks: the full run below decides to wait.
+                Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
                     return group.push(SubscriptionEvent::Rejected {
                         reason: error.to_string(),
@@ -956,6 +1000,10 @@ impl Inner {
         }
         let rows = match self.run(&group.prepared, group.identity, &group.read) {
             Ok(rows) => rows,
+            Err(error) if crate::large::is_missing(&error) => {
+                group.awaiting = true;
+                return;
+            }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
                     reason: error.to_string(),
@@ -964,8 +1012,12 @@ impl Inner {
                 return;
             }
         };
+        let was_awaiting = std::mem::take(&mut group.awaiting);
         if let Some(event) = diff(&group.rows, &rows) {
             group.push(event);
+        } else if was_awaiting {
+            // Settlement withheld while waiting is published now.
+            group.push(delta(false, Vec::new(), Vec::new(), Vec::new()));
         }
         // Order keys that are not shown may have moved even when no row
         // did: read them again with the rows.

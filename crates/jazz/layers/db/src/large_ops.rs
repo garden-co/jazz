@@ -136,6 +136,19 @@ fn utf16_byte(text: &str, at: u64) -> Option<usize> {
 }
 
 impl Inner {
+    /// Forget what the finished write's edits derived.
+    fn clear_derived(&mut self) {
+        self.pending_nodes.clear();
+        self.derived.clear();
+    }
+
+    /// Whose read policy a cell-level read or edit runs under: the store's
+    /// own author (the system author reads everything).
+    fn reader(&self) -> Option<AuthorSubject> {
+        let author = self.identity.author;
+        (author != AuthorSubject::SYSTEM).then_some(author)
+    }
+
     /// The stored cell of `column` in the row visible to `identity`, with
     /// its column. Errors when the row is not visible.
     fn physical_cell(
@@ -176,8 +189,9 @@ impl Inner {
             .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
             .optional()
             .map_err(storage)?;
-        let cell =
-            cell.ok_or_else(|| rejected(format!("row {row:?} is not visible in `{table}`")))?;
+        let cell = cell.ok_or_else(|| {
+            Error::new(ErrorCode::NotObserved, "large-value cell is not observed")
+        })?;
         Ok((col, cell))
     }
 
@@ -189,7 +203,7 @@ impl Inner {
         range: std::ops::Range<u64>,
         utf16: bool,
     ) -> Result<Vec<u8>, Error> {
-        let (col, cell) = self.physical_cell(table, row, column, None)?;
+        let (col, cell) = self.physical_cell(table, row, column, self.reader())?;
         let Sql::Text(cell) = cell else {
             return Err(not_large(table, column));
         };
@@ -278,7 +292,10 @@ impl Inner {
             })?,
         };
         let next = match outcome {
-            lv::TailOutcome::Updated(next) => next,
+            lv::TailOutcome::Updated(next) => {
+                self.derived.push(next.clone());
+                next
+            }
             lv::TailOutcome::ConsolidationRequired(transient) => {
                 let mut continuation = lv::ConsolidationContinuation::new(transient)
                     .map_err(|e| rejected(e.to_string()))?;
@@ -324,10 +341,10 @@ fn nullable(column: &crate::values::Column, value: Value) -> Value {
     }
 }
 
-fn identity_of(identity: WriteIdentity) -> Option<AuthorSubject> {
+fn identity_of(inner: &Inner, identity: WriteIdentity) -> Option<AuthorSubject> {
     match who(identity) {
         Who::Session(author) => Some(author),
-        Who::Local => None,
+        Who::Local => inner.reader(),
     }
 }
 
@@ -367,7 +384,8 @@ impl Db {
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
         let inner = self.inner();
-        let (col, cell) = inner.physical_cell(table, row, column, None)?;
+        let reader = inner.reader();
+        let (col, cell) = inner.physical_cell(table, row, column, reader)?;
         if crate::large::kind(&col) != lv::LargeValueKind::Json {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -470,7 +488,7 @@ impl Db {
         let value = {
             let mut inner = self.inner();
             let (col, cell) =
-                inner.physical_cell(table, row, column, identity_of(opts.identity))?;
+                inner.physical_cell(table, row, column, identity_of(&inner, opts.identity))?;
             let value = inner.edited(table, &col, cell, edit)?;
             nullable(&col, value)
         };
@@ -479,7 +497,7 @@ impl Db {
             StagedOp::Update(table.to_owned(), row, cells, opts.clone()),
             who(opts.identity),
         );
-        self.inner().pending_nodes.clear();
+        self.inner().clear_derived();
         result
     }
 
@@ -506,7 +524,7 @@ impl Db {
             for mutation in mutations {
                 let column = mutation.column().to_owned();
                 let (col, mut cell) =
-                    inner.physical_cell(table, row, &column, identity_of(opts.identity))?;
+                    inner.physical_cell(table, row, &column, identity_of(&inner, opts.identity))?;
                 let value = match mutation {
                     LargeValueUpdate::Splice {
                         within, splices, ..
@@ -557,50 +575,31 @@ impl Db {
             Ok(())
         })();
         if let Err(error) = result {
-            self.inner().pending_nodes.clear();
+            self.inner().clear_derived();
             return Err(error);
         }
         let result = self.write_op(
             StagedOp::Update(table.to_owned(), row, patch, opts.clone()),
             who(opts.identity),
         );
-        self.inner().pending_nodes.clear();
+        self.inner().clear_derived();
         result
     }
 
     /// Insert a row whose `column` is read from `reader`, chunked as it
-    /// streams: the logical value is never held whole. The chunks commit
-    /// first, held by a staging receipt that the row's insert releases.
+    /// streams: the logical value is never held whole. Each finalized node
+    /// is stored as it is produced, held by the upload's lease until the
+    /// row commits (see [`Self::begin_streaming_value_upload`]).
     pub async fn insert_streaming_value<R: std::io::Read>(
         &self,
         table: &str,
-        mut cells: BTreeMap<String, Value>,
+        cells: BTreeMap<String, Value>,
         column: &str,
         reader: R,
-        opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
-        let (col, root) = {
-            let inner = self.inner();
-            let col = inner
-                .schema
-                .table(table)?
-                .column(column)
-                .filter(|c| crate::large::large_capable(c))
-                .ok_or_else(|| not_large(table, column))?
-                .clone();
-            let value =
-                crate::large::stream(&inner.conn, &inner.chunks, crate::large::kind(&col), reader)?;
-            (col, value)
-        };
-        cells.insert(
-            column.to_owned(),
-            nullable(&col, Value::Large(Box::new(root.clone()))),
-        );
-        let result = self.insert(table, cells, opts).await;
-        // The row now holds the root, or the insert failed: either way the
-        // receipt is spent, and unreferenced chunks become reclaimable.
-        crate::large::release_receipt(&self.inner().conn, &root)?;
-        result
+        let row = self.inner().ids.next_row_id();
+        self.insert_streaming_value_with_id(table, row, cells, column, reader)
+            .await
     }
 
     /// [`Self::insert_streaming_value`] with a caller-chosen row id.
@@ -612,13 +611,398 @@ impl Db {
         column: &str,
         reader: R,
     ) -> Result<WriteHandle, Error> {
-        let opts = InsertOptions {
-            row_id: Some(row),
-            ..Default::default()
-        };
-        self.insert_streaming_value(table, cells, column, reader, opts)
-            .await
+        self.write_streaming_value_with_id(
+            StreamingMutationKind::Insert,
+            table,
+            row,
+            cells,
+            column,
+            reader,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
     }
+
+    /// Complete an insert, update or upsert whose `column` is read from
+    /// `reader`, with the identity, timestamp and branch view the ordinary
+    /// mutation would take.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_streaming_value_with_id<R: std::io::Read>(
+        &self,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: BTreeMap<String, Value>,
+        column: &str,
+        mut reader: R,
+        identity: Option<AuthorSubject>,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle, Error> {
+        let mut upload = self.begin_streaming_value_upload(table, &cells, column)?;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    self.push_streaming_value_upload(&mut upload, &buffer[..read])
+                        .await?
+                }
+                Err(error) => {
+                    self.abort_streaming_value_upload(upload).await?;
+                    return Err(Error::new(
+                        ErrorCode::WriteRejected,
+                        format!("streaming value reader failed: {error}"),
+                    ));
+                }
+            }
+        }
+        self.finish_streaming_value_upload(
+            upload,
+            mutation,
+            table,
+            row,
+            cells,
+            column,
+            identity.map_or(WriteIdentity::Database, WriteIdentity::Session),
+            now_ms,
+            head,
+            base,
+        )
+        .await
+    }
+
+    /// Begin a resumable upload of one large value, for hosts that feed it
+    /// in pieces (such as an asynchronous browser stream). Nothing is
+    /// stored until the first push.
+    pub fn begin_streaming_value_upload(
+        &self,
+        table: &str,
+        cells: &BTreeMap<String, Value>,
+        column: &str,
+    ) -> Result<StreamingValueUpload, Error> {
+        let col = streaming_column(&self.inner(), table, column)?;
+        if cells.contains_key(column) {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                format!("{table}.{column} is streamed, so the other cells cannot also set it"),
+            ));
+        }
+        let kind = crate::large::kind(&col);
+        let emitted = Rc::new(RefCell::new(Vec::new()));
+        let stage = Rc::clone(&emitted);
+        Ok(StreamingValueUpload {
+            id: *lv::Locator::random().as_bytes(),
+            kind,
+            initialized: false,
+            preparation: Some(lv::PushStreamingPreparation::new(
+                kind,
+                Box::new(move |chunk| {
+                    stage.borrow_mut().push(chunk);
+                    Ok(())
+                }),
+            )),
+            emitted,
+        })
+    }
+
+    /// Feed one piece of an upload, storing every node it finalizes. A
+    /// piece over the staging policy's ingress budget, or one that fails
+    /// validation, closes the upload and releases what it stored.
+    pub async fn push_streaming_value_upload(
+        &self,
+        upload: &mut StreamingValueUpload,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        let inner = self.inner();
+        let now = streaming_now_ms();
+        if upload.preparation.is_none() {
+            return Err(closed());
+        }
+        if !upload.initialized {
+            crate::large::begin_upload(&inner.conn, &upload.id, now)?;
+            upload.initialized = true;
+        } else if !crate::large::touch_upload(&inner.conn, &upload.id, now)? {
+            upload.preparation.take();
+            return Err(expired());
+        }
+        let Some(preparation) = upload.preparation.as_mut() else {
+            return Err(closed());
+        };
+        let staged = preparation
+            .push(bytes)
+            .map_err(|e| rejected(e.to_string()))
+            .map(|()| std::mem::take(&mut *upload.emitted.borrow_mut()))
+            .and_then(|staged| {
+                admit_ingress(&inner, &staged, now)?;
+                crate::large::stage_upload(
+                    &inner.conn,
+                    &inner.chunks,
+                    &upload.id,
+                    &staged,
+                    inner.client.is_some(),
+                )
+            });
+        if let Err(error) = staged {
+            upload.preparation.take();
+            crate::large::end_upload(&inner.conn, &upload.id)?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Abandon an upload and release what it stored.
+    pub async fn abort_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+    ) -> Result<(), Error> {
+        upload.preparation.take();
+        crate::large::end_upload(&self.inner().conn, &upload.id)
+    }
+
+    /// Finish an upload and publish its row mutation. Whether or not the
+    /// write succeeds, the upload's lease ends: a committed row holds the
+    /// value from then on, and anything else is reclaimable.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        mut cells: BTreeMap<String, Value>,
+        column: &str,
+        identity: WriteIdentity,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle, Error> {
+        let value = {
+            let inner = self.inner();
+            let now = streaming_now_ms();
+            let alive = if upload.initialized {
+                crate::large::touch_upload(&inner.conn, &upload.id, now)?
+            } else {
+                crate::large::begin_upload(&inner.conn, &upload.id, now)?;
+                true
+            };
+            let finished = match upload.preparation.take() {
+                _ if !alive => Err(expired()),
+                None => Err(closed()),
+                Some(preparation) => preparation.finish().map_err(|e| rejected(e.to_string())),
+            };
+            let staged = std::mem::take(&mut *upload.emitted.borrow_mut());
+            let value = finished.and_then(|(value, _)| {
+                let col = streaming_column(&inner, table, column)?;
+                if crate::large::kind(&col) != upload.kind {
+                    return Err(not_large(table, column));
+                }
+                admit_ingress(&inner, &staged, now)?;
+                crate::large::stage_upload(
+                    &inner.conn,
+                    &inner.chunks,
+                    &upload.id,
+                    &staged,
+                    inner.client.is_some(),
+                )?;
+                crate::large::finish_upload(&inner.conn, &value)?;
+                Ok((col, value))
+            });
+            match value {
+                Ok(value) => value,
+                Err(error) => {
+                    crate::large::end_upload(&inner.conn, &upload.id)?;
+                    return Err(error);
+                }
+            }
+        };
+        let (col, value) = value;
+        self.inner().derived.push(value.clone());
+        cells.insert(
+            column.to_owned(),
+            nullable(&col, Value::Large(Box::new(value))),
+        );
+        let result = match mutation {
+            StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
+                ErrorCode::WriteRejected,
+                "a streamed insert writes one exact branch, not a branch view",
+            )),
+            StreamingMutationKind::Insert => {
+                self.insert(
+                    table,
+                    cells,
+                    InsertOptions {
+                        row_id: Some(row),
+                        identity,
+                        target: head.map_or(ExactWriteTarget::Root, ExactWriteTarget::Branch),
+                        updated_at_ms: now_ms,
+                    },
+                )
+                .await
+            }
+            StreamingMutationKind::Update => {
+                let target = view_target(head, base);
+                self.update(
+                    table,
+                    row,
+                    cells,
+                    UpdateOptions {
+                        identity,
+                        target,
+                        updated_at_ms: now_ms,
+                    },
+                )
+                .await
+            }
+            StreamingMutationKind::Upsert => {
+                let target = view_target(head, base);
+                self.upsert(
+                    table,
+                    row,
+                    cells,
+                    UpsertOptions {
+                        identity,
+                        target,
+                        updated_at_ms: now_ms,
+                    },
+                )
+                .await
+            }
+        };
+        let mut inner = self.inner();
+        inner.clear_derived();
+        crate::large::end_upload(&inner.conn, &upload.id)?;
+        result
+    }
+
+    /// Replace the limits on local streaming uploads.
+    pub fn set_large_value_staging_policy(&self, policy: LargeValueStagingPolicy) {
+        self.inner().staging = policy;
+    }
+
+    /// End every streaming upload left untouched past the staging policy's
+    /// maximum age, and every pushed-node receipt past it; returns how
+    /// many uploads ended.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        let inner = self.inner();
+        let now = streaming_now_ms();
+        let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+        crate::large::expire_receipts(&inner.conn, now)?;
+        crate::large::expire_uploads(&inner.conn, now.saturating_sub(max_age))
+    }
+}
+
+/// How a finished streaming upload publishes its row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamingMutationKind {
+    /// Create a new row.
+    Insert,
+    /// Patch an existing row visible in the selected branch view.
+    Update,
+    /// Patch the visible row or create it when absent.
+    Upsert,
+}
+
+/// Limits on local streaming uploads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LargeValueStagingPolicy {
+    /// Encoded node bytes all uploads may store per window.
+    pub incoming_bytes_per_window: u64,
+    /// The fixed rate-limit window, in milliseconds.
+    pub window_ms: u64,
+    /// How long an untouched upload (or pushed node awaiting its commit)
+    /// is held before maintenance releases it.
+    pub max_age_ms: u64,
+}
+
+impl Default for LargeValueStagingPolicy {
+    fn default() -> Self {
+        Self {
+            // One maximum-size logical wire message per second.
+            incoming_bytes_per_window: 256 * 1024 * 1024,
+            window_ms: 1_000,
+            max_age_ms: 10 * 60 * 1_000,
+        }
+    }
+}
+
+type Stage = Box<dyn FnMut(lv::StagedChunk) -> Result<(), lv::Error>>;
+
+/// A resumable upload of one large value: the tree under construction and
+/// the lease that holds its stored nodes.
+pub struct StreamingValueUpload {
+    id: [u8; 32],
+    kind: lv::LargeValueKind,
+    initialized: bool,
+    preparation: Option<lv::PushStreamingPreparation<fn(lv::ContentHash) -> lv::Locator, Stage>>,
+    emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
+}
+
+fn streaming_column(
+    inner: &Inner,
+    table: &str,
+    column: &str,
+) -> Result<crate::values::Column, Error> {
+    inner
+        .schema
+        .table(table)?
+        .column(column)
+        .filter(|c| crate::large::large_capable(c))
+        .cloned()
+        .ok_or_else(|| not_large(table, column))
+}
+
+fn view_target(head: Option<BranchSelector>, base: Option<BranchViewBase>) -> WriteTarget {
+    match head {
+        Some(head) => WriteTarget::BranchView { head, base },
+        None => WriteTarget::Root,
+    }
+}
+
+/// Charge `staged` to the staging policy's ingress window.
+fn admit_ingress(inner: &Inner, staged: &[lv::StagedChunk], now: i64) -> Result<(), Error> {
+    let bytes: u64 = staged.iter().map(|chunk| chunk.encoded.len() as u64).sum();
+    if bytes == 0 {
+        return Ok(());
+    }
+    let policy = inner.staging;
+    let mut window = inner.ingress.borrow_mut();
+    let now = now.max(0) as u64;
+    if now.saturating_sub(window.0) >= policy.window_ms {
+        *window = (now, 0);
+    }
+    if window.1.saturating_add(bytes) > policy.incoming_bytes_per_window {
+        return Err(Error::new(
+            ErrorCode::WriteRejected,
+            "streaming upload exceeds the large-value ingress rate limit",
+        ));
+    }
+    window.1 += bytes;
+    Ok(())
+}
+
+fn streaming_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
+fn expired() -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        "streaming upload expired: it went untouched past the staging policy's maximum age",
+    )
+}
+
+fn closed() -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        "streaming upload is closed: an earlier push or finish ended it",
+    )
 }
 
 /// Splices in a page's coordinates, lowered to byte coordinates of the
