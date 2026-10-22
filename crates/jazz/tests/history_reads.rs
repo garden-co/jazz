@@ -668,3 +668,205 @@ fn history_subscriptions_follow_current_access() {
     .unwrap();
     assert_eq!(next_delta(&mut subscription), (vec![], vec![], 1));
 }
+
+/// A server, plus clients for Alice and Bob connected to it.
+struct Synced {
+    server: Db,
+    alice: Db,
+    bob: Db,
+    /// Bob's replica holds every note, so he can update them.
+    _bob_notes: jazz::db::SubscriptionStream,
+}
+
+const SERVER_NODE: [u8; 16] = [0x01; 16];
+const ALICE_NODE: [u8; 16] = [0x02; 16];
+const BOB_NODE: [u8; 16] = [0x03; 16];
+
+impl Synced {
+    fn new() -> Self {
+        let server = open(notes_schema(), SERVER_NODE, AuthorSubject::SYSTEM);
+        let connect = |node: [u8; 16], who: u8| {
+            let author = AuthorSubject::for_test_bytes([who; 16]);
+            let client = open(notes_schema(), node, author);
+            let (client_side, server_side) = duplex();
+            std::mem::forget(block_on(client.connect_upstream(client_side)));
+            server.accept_subscriber(server_side, author);
+            client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+            client
+        };
+        let alice = connect(ALICE_NODE, 0xa1);
+        let bob = connect(BOB_NODE, 0xb0);
+        let notes = bob.prepare_query(&Query::from("notes")).unwrap();
+        let _bob_notes = block_on(bob.subscribe(&notes, ReadOpts::default())).unwrap();
+        Self {
+            server,
+            alice,
+            bob,
+            _bob_notes,
+        }
+    }
+
+    fn pump(&self) {
+        for _ in 0..4 {
+            block_on(self.alice.tick()).unwrap();
+            block_on(self.bob.tick()).unwrap();
+            block_on(self.server.tick()).unwrap();
+        }
+        block_on(self.alice.tick()).unwrap();
+        block_on(self.bob.tick()).unwrap();
+    }
+
+    /// A host one-shot read on Alice's client, ticking everyone while it
+    /// waits for the server.
+    fn alice_reads(&self, query: &Query, opts: ReadOpts) -> Result<Vec<CurrentRow>, String> {
+        use std::future::Future;
+        let bytes = postcard::to_allocvec(query).unwrap();
+        let read = self.alice.all_serialized_query(
+            &bytes,
+            opts,
+            None,
+            None,
+            None,
+            false,
+            || false,
+            |attachment| self.alice.detach_query(attachment),
+        );
+        let mut read = std::pin::pin!(read);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..50 {
+            if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                return match result.map_err(|error| error.message)? {
+                    jazz::db::SerializedReadResult::Rows(rows) => Ok(rows),
+                    other => panic!("{other:?}"),
+                };
+            }
+            block_on(self.server.tick()).unwrap();
+            block_on(self.alice.tick()).unwrap();
+        }
+        panic!("the read did not complete");
+    }
+}
+
+fn local_only() -> ReadOpts {
+    ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..Default::default()
+    }
+}
+
+/// Alice has never seen the note. A remote history read fetches every
+/// version with the transaction that wrote it (the server's own commits
+/// and Bob's upload alike) and keeps them, so a later local read answers
+/// the same.
+#[test]
+fn remote_history_reads_fetch_versions_with_their_transactions() {
+    let synced = Synced::new();
+    let note = row(1);
+    let first = insert(&synced.server, note, "first");
+    synced.pump();
+    let second = update(&synced.bob, note, "second");
+    synced.pump();
+    let third = update(&synced.server, note, "third");
+    synced.pump();
+    assert!(read(&synced.alice, &history_of(note), local_only()).is_empty());
+
+    let remote = ReadOpts {
+        tier: ReadTier::Remote,
+        ..Default::default()
+    };
+    let versions = synced
+        .alice_reads(&history_of(note), remote.clone())
+        .unwrap();
+    let expected = [
+        (first, SERVER_NODE),
+        (second, BOB_NODE),
+        (third, SERVER_NODE),
+    ];
+    assert_eq!(titles(&versions), ["first", "second", "third"]);
+    assert_eq!(
+        versions.iter().map(transaction_id).collect::<Vec<_>>(),
+        expected
+    );
+    let at_server = read(&synced.server, &history_of(note), ReadOpts::default());
+    assert_eq!(
+        versions.iter().map(accepted_at).collect::<Vec<_>>(),
+        at_server.iter().map(accepted_at).collect::<Vec<_>>()
+    );
+
+    let cached = read(&synced.alice, &history_of(note), local_only());
+    assert_eq!(titles(&cached), ["first", "second", "third"]);
+    let current = read(
+        &synced.alice,
+        &Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(note.0)))),
+        local_only(),
+    );
+    assert_eq!(
+        titles(&current),
+        ["third"],
+        "fetched history never stands in for the current row"
+    );
+
+    let message = synced
+        .alice_reads(
+            &history_of(note),
+            ReadOpts {
+                include_deleted: true,
+                ..remote
+            },
+        )
+        .unwrap_err();
+    assert!(
+        message.contains("includeDeleted on synced history reads"),
+        "{message}"
+    );
+}
+
+/// Alice subscribes to a note's history. Versions arrive from the server
+/// with their transactions; Bob's accepted update adds one; Alice's own
+/// update joins only once the server accepted it.
+#[test]
+fn local_first_history_subscriptions_receive_accepted_versions() {
+    let synced = Synced::new();
+    let note = row(1);
+    let first = insert(&synced.server, note, "first");
+    synced.pump();
+    let prepared = synced.alice.prepare_query(&history_of(note)).unwrap();
+    let mut subscription =
+        block_on(synced.alice.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let mut drain = || {
+        let mut added = Vec::new();
+        while let Some(event) = subscription.try_next_event() {
+            if let jazz::db::SubscriptionEvent::Delta { added: rows, .. } = event {
+                added.extend(rows.iter().map(|row| (**row).clone()));
+            }
+        }
+        added
+    };
+    synced.pump();
+    assert_eq!(titles(&drain()), ["first"]);
+
+    let second = update(&synced.bob, note, "second");
+    synced.pump();
+    let added = drain();
+    assert_eq!(titles(&added), ["second"]);
+    assert_eq!(transaction_id(&added[0]), (second, BOB_NODE));
+
+    let third = update(&synced.alice, note, "third");
+    assert!(drain().is_empty(), "a pending write is not a version");
+    synced.pump();
+    let added = drain();
+    assert_eq!(titles(&added), ["third"]);
+    assert_eq!(transaction_id(&added[0]), (third, ALICE_NODE));
+
+    assert_eq!(
+        read(&synced.alice, &history_of(note), local_only())
+            .iter()
+            .map(transaction_id)
+            .collect::<Vec<_>>(),
+        [
+            (first, SERVER_NODE),
+            (second, BOB_NODE),
+            (third, ALICE_NODE)
+        ]
+    );
+}
