@@ -35,6 +35,7 @@ pub use jazz_types::app_id;
 pub use jazz_types::column_schema;
 pub use jazz_types::identity;
 pub use jazz_types::ids;
+pub use jazz_types::large_values;
 pub use jazz_types::local_executor;
 pub use jazz_types::object;
 pub use jazz_types::postcard_exact;
