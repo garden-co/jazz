@@ -1170,8 +1170,7 @@ impl Inner {
             names.join(", "),
             placeholders.join(", ")
         );
-        self.conn
-            .execute(&sql, params_from_iter(values.iter()))
+        self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         Ok(())
     }
@@ -1184,21 +1183,19 @@ impl Inner {
             self.gone.borrow_mut().push(image);
         }
         let id = row.0.as_bytes().to_vec();
-        self.conn
-            .execute(
-                &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
-                rusqlite::params![id, key],
-            )
-            .map_err(storage)?;
-        self.conn
-            .execute(
-                &format!(
-                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq >= ?3",
-                    quote(&format!("{table}__h"))
-                ),
-                rusqlite::params![id, key, from_seq as i64],
-            )
-            .map_err(storage)?;
+        self.exec(
+            &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
+            rusqlite::params![id, key],
+        )
+        .map_err(storage)?;
+        self.exec(
+            &format!(
+                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq >= ?3",
+                quote(&format!("{table}__h"))
+            ),
+            rusqlite::params![id, key, from_seq as i64],
+        )
+        .map_err(storage)?;
         self.changed
             .borrow_mut()
             .push((table.to_owned(), row, key.to_vec()));
@@ -1242,10 +1239,7 @@ impl Inner {
         let mut out = BTreeSet::new();
         for op in ops {
             let Some(row) = op.row() else { continue };
-            let sql = format!(
-                "SELECT _b FROM {} WHERE id = ?1 AND _seq = ?2",
-                quote(op.table())
-            );
+            let sql = format!("SELECT _b FROM {} WHERE {ID_AT_SEQ}", quote(op.table()));
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
@@ -1421,18 +1415,16 @@ impl Inner {
             .iter()
             .map(|(t, r, k)| (t.clone(), *r.0.as_bytes(), k.clone()))
             .collect();
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO _jazz_pending (tx, commit_msg, rows) VALUES (?1, ?2, ?3)",
-                rusqlite::params![tx as i64, encode(commit), encode(&rows)],
-            )
-            .map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_pending (tx, commit_msg, rows) VALUES (?1, ?2, ?3)",
+            rusqlite::params![tx as i64, encode(commit), encode(&rows)],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
-        self.conn
-            .execute("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
+        self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
         Ok(())
     }
@@ -1441,32 +1433,28 @@ impl Inner {
         let Some(client) = &self.client else {
             return Ok(());
         };
-        self.conn
-            .execute("DELETE FROM _jazz_shadow", [])
-            .map_err(storage)?;
+        self.exec("DELETE FROM _jazz_shadow", []).map_err(storage)?;
         for ((table, row, key), image) in &client.shadow {
-            self.conn
-                .execute(
-                    "INSERT INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        table,
-                        row.0.as_bytes().to_vec(),
-                        key,
-                        image.as_ref().map(encode)
-                    ],
-                )
-                .map_err(storage)?;
+            self.exec(
+                "INSERT INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    table,
+                    row.0.as_bytes().to_vec(),
+                    key,
+                    image.as_ref().map(encode)
+                ],
+            )
+            .map_err(storage)?;
         }
         Ok(())
     }
 
     fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
-                rusqlite::params![key, encode(&value)],
-            )
-            .map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
+            rusqlite::params![key, encode(&value)],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
@@ -1504,12 +1492,11 @@ impl Inner {
         tx: u64,
         result: &Result<(), WireError>,
     ) -> Result<(), Error> {
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO _jazz_applied (node, tx, result) VALUES (?1, ?2, ?3)",
-                rusqlite::params![node.to_vec(), tx as i64, encode(result)],
-            )
-            .map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_applied (node, tx, result) VALUES (?1, ?2, ?3)",
+            rusqlite::params![node.to_vec(), tx as i64, encode(result)],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
