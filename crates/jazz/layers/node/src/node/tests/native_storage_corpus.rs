@@ -42,25 +42,25 @@ const EPOCH_1_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PRODUCER_NATIVE_CORPUS_PACK_SHA256: &str =
-    "c35d883d10124cb952d67c7e797508bf18b4dadca77ecc1e9ab6274c2e6e424e";
+    "0ad0a374704b27613b6bf33c1e18b4e6df775db3c0b9a9252841f0949f290d1b";
 const CURRENT_PRODUCER_NATIVE_CORPUS_RECEIPT_SHA256: &str =
-    "458265c4c4d3610a16b2a680820433696cf07631a1a50ae756108ce5c72e7bd5";
+    "a749ff5be5035427d9c750391dfb42f1fab95792ebd16e765bd2b69260e70915";
 // Pinned alongside the physical SQLite/RocksDB images below so their contents
 // are checked independently of a newly produced store.
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-producer.pack.base64");
 const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
-    "c35d883d10124cb952d67c7e797508bf18b4dadca77ecc1e9ab6274c2e6e424e";
+    "0ad0a374704b27613b6bf33c1e18b4e6df775db3c0b9a9252841f0949f290d1b";
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "45ca448dcf57433e9e5a329652beb6bf3cbae60b6c508bb54c5a896dbf27199f";
+    "988644edf90652600d59febae4d11c61e7cb21e3e5fba0f879bfeb203d3dcc19";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "6cc542586345ac3b3d1e7f3f1419c92683d83f504b0a28390fd4777fc1e1651c";
+    "66410558dd1becf0a78a56fc75e1f74580b8575edf75719ab01e5d22ec9b45c9";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "da4bcb7c54b1ff5bf6266d70b7527a3911caf0a36827ad2b1d5029e283964030";
+    "0d267e2c450b94059667293802b3ea88017af59794cf7941cea36d5d468e2539";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
@@ -2350,13 +2350,15 @@ fn native_jazz_corpus_rejects_a_receipt_omitting_all_physical_application_famili
 /// Before linear history this receipt reopened and extended the alpha.54 root.
 /// The history codec is now `jazz.history-version-current.v4` and old roots
 /// are refused rather than migrated, so the receipt pins the refusal instead:
-/// the root lacks the dictionary, durable-index and node-storage markers and
+/// the root lacks the dictionary, durable-index, key-free-rows and
+/// node-storage markers and
 /// declares retired per-family Jazz markers.
 ///
 /// ```text
 /// alpha.54 root ──open(node profile)──✗ UnsupportedStorageCodecs
 ///                                       missing [groove.dictionary.v1,
 ///                                                groove.durable-index.v2,
+///                                                groove.key-free-rows.v1,
 ///                                                jazz.node-storage.v2]
 /// ```
 #[test]
@@ -2429,6 +2431,7 @@ fn assert_refused_as_pre_linear_root(result: Result<(), groove::storage::Error>,
                 vec![
                     "groove.dictionary.v1".to_owned(),
                     "groove.durable-index.v2".to_owned(),
+                    "groove.key-free-rows.v1".to_owned(),
                     "groove.large-value.v2".to_owned(),
                     "groove.ordered-chunk-storage.v2".to_owned(),
                     "jazz.node-storage.v2".to_owned(),
