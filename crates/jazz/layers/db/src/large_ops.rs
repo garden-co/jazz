@@ -588,8 +588,13 @@ impl Db {
                 .filter(|c| crate::large::large_capable(c))
                 .ok_or_else(|| not_large(table, column))?
                 .clone();
-            let value =
-                crate::large::stream(&inner.conn, &inner.chunks, crate::large::kind(&col), reader)?;
+            let value = crate::large::stream(
+                &inner.conn,
+                &inner.chunks,
+                crate::large::kind(&col),
+                reader,
+                inner.client.is_some(),
+            )?;
             (col, value)
         };
         cells.insert(
