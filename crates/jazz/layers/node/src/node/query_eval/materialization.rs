@@ -160,7 +160,7 @@ where
         let mut rows = Vec::new();
         for (record, weight) in deltas.iter() {
             if weight > 0 {
-                let row = decode_current_row(&table, record)?;
+                let row = decode_current_row(&self.authors, &table, record)?;
                 rows.push(self.materialize_current_row(&table, row)?);
             }
         }
@@ -186,7 +186,7 @@ where
                         "include-deleted query result is missing its deletion marker",
                     ))?;
                 let deleted = record.get_bool(deleted_field_idx)?;
-                let row = decode_current_row(&table, record)?;
+                let row = decode_current_row(&self.authors, &table, record)?;
                 let row = self.materialize_current_row(&table, row)?;
                 rows.push(if deleted { row.into_deleted() } else { row });
             }
@@ -202,7 +202,7 @@ where
         let mut rows = Vec::new();
         for (record, weight) in deltas.iter() {
             if weight > 0 {
-                let row = decode_current_row(table, record)?;
+                let row = decode_current_row(&self.authors, table, record)?;
                 rows.push(self.materialize_current_row(table, row)?);
             }
         }
@@ -218,6 +218,7 @@ where
         let mut rows = Vec::new();
         for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
             rows.push(aggregate_current_row_from_record(
+                &self.authors,
                 query,
                 output,
                 aggregate_query_row_uuid(output, &record)?,
@@ -646,7 +647,8 @@ where
             return Ok(None);
         };
         let read_table = self.table_in_schema_ref(&projected_table, read_schema)?;
-        let mut row = current_row_from_materialized_cells(read_table, version, &cells)?;
+        let mut row =
+            current_row_from_materialized_cells(&self.authors, read_table, version, &cells)?;
         self.bind_current_row_columns_in_schema(read_schema, &mut row)?;
         Ok(Some(row))
     }
@@ -665,6 +667,7 @@ where
         )?;
         let payload_record = decoded.borrowed();
         let mut row = aggregate_current_row_from_record(
+            &self.authors,
             query,
             output,
             aggregate_result_member_row_uuid(member)?,
@@ -990,7 +993,7 @@ where
         let mut rows = Vec::new();
         for (record, weight) in app_rows.iter() {
             if weight > 0 {
-                let row = decode_current_row(&table, record)?;
+                let row = decode_current_row(&self.authors, &table, record)?;
                 rows.push(self.materialize_current_row(&table, row)?);
             }
         }

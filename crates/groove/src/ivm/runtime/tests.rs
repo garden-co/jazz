@@ -3415,6 +3415,7 @@ fn prepared_projection_keeps_mixed_fields_encoded_and_shares_batch_output() {
                 target,
                 &source,
                 row.raw(),
+                None,
             )
             .unwrap()
         })
@@ -3424,7 +3425,7 @@ fn prepared_projection_keeps_mixed_fields_encoded_and_shares_batch_output() {
         .unwrap();
     PROJECT_VALUE_EVALUATIONS.with(|count| count.set(0));
     let output =
-        NodeState::update_map_project(&project, target, &input, Some(&plan), false).unwrap();
+        NodeState::update_map_project(&project, target, &input, Some(&plan), false, None).unwrap();
     assert_eq!(
         PROJECT_VALUE_EVALUATIONS.with(|count| count.get()),
         input.deltas.len(),
@@ -3513,7 +3514,7 @@ fn prepared_projection_omission_rolls_back_partial_row_and_preserves_following_r
         .unwrap()
         .unwrap();
     let output =
-        NodeState::update_map_project(&project, target, &input, Some(&plan), false).unwrap();
+        NodeState::update_map_project(&project, target, &input, Some(&plan), false, None).unwrap();
     assert_eq!(output.deltas.len(), 2);
     for (row, id) in output.deltas.iter().zip([0, 2]) {
         assert_eq!(
@@ -3561,7 +3562,7 @@ fn prepared_constant_error_is_evaluated_only_for_present_rows() {
         .unwrap();
     let mut input = RecordDeltas::empty(descriptor);
     assert!(
-        NodeState::update_map_project(&project, descriptor, &input, Some(&plan), false)
+        NodeState::update_map_project(&project, descriptor, &input, Some(&plan), false, None)
             .unwrap()
             .is_empty()
     );
@@ -3569,14 +3570,16 @@ fn prepared_constant_error_is_evaluated_only_for_present_rows() {
         record: Bytes::from(descriptor.create(&[Value::U8(0)]).unwrap()),
         weight: 1,
     });
-    let prepared = NodeState::update_map_project(&project, descriptor, &input, Some(&plan), false)
-        .unwrap_err();
+    let prepared =
+        NodeState::update_map_project(&project, descriptor, &input, Some(&plan), false, None)
+            .unwrap_err();
     let semantic = project_record(
         &project.expressions,
         &project.mapping,
         descriptor,
         &descriptor,
         input.deltas[0].raw(),
+        None,
     )
     .unwrap_err();
     assert_eq!(format!("{prepared:?}"), format!("{semantic:?}"));
@@ -3619,7 +3622,7 @@ fn projection_reuse_checks_physical_slots_not_names_or_logical_order() {
         }],
     };
     let output =
-        NodeState::update_map_project(&project, target, &input, Some(&plan), false).unwrap();
+        NodeState::update_map_project(&project, target, &input, Some(&plan), false, None).unwrap();
     assert_eq!(
         output.deltas[0].record.as_ptr(),
         input.deltas[0].record.as_ptr()
@@ -3641,7 +3644,7 @@ fn projection_reuse_checks_physical_slots_not_names_or_logical_order() {
         .unwrap()
         .unwrap();
     let output =
-        NodeState::update_map_project(&swapped, target, &input, Some(&plan), false).unwrap();
+        NodeState::update_map_project(&swapped, target, &input, Some(&plan), false, None).unwrap();
     assert_ne!(
         output.deltas[0].record.as_ptr(),
         input.deltas[0].record.as_ptr()
@@ -3684,6 +3687,7 @@ fn projection_composition_skips_only_adjacent_total_selections() {
         outer.output,
         &descriptor,
         &raw,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -3735,10 +3739,7 @@ fn source_batch_prepares_one_descriptor_per_variant() {
         rows.push(crate::records::encode_variant_record(tag, &payload));
     }
     crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(0));
-    let dictionaries = crate::dictionary::SharedDictionaries::default();
-    let groups =
-        NodeState::group_source_rows(&table, &dictionaries, rows.iter().map(Vec::as_slice))
-            .unwrap();
+    let groups = NodeState::group_source_rows(&table, rows.iter().map(Vec::as_slice)).unwrap();
     assert_eq!(
         crate::schema::VARIANT_DESCRIPTOR_BUILDS.with(|count| count.get()),
         2
@@ -3757,7 +3758,7 @@ fn source_batch_prepares_one_descriptor_per_variant() {
     }
     let unknown = crate::records::encode_variant_record(3, &[]);
     assert!(matches!(
-        NodeState::group_source_rows(&table, &dictionaries, [unknown.as_slice()]),
+        NodeState::group_source_rows(&table, [unknown.as_slice()]),
         Err(IvmRuntimeError::UnknownTableVariant { version: 3, .. })
     ));
 }
@@ -3834,8 +3835,15 @@ fn join_consumers_retain_only_required_columns_without_mutating_shared_sources()
             Value::U64(7),
         ])
         .unwrap();
-    let bytes =
-        project_record(&op.expressions, &op.mapping, projected.output, &input, &raw).unwrap();
+    let bytes = project_record(
+        &op.expressions,
+        &op.mapping,
+        projected.output,
+        &input,
+        &raw,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         projected.output.bind(&bytes).get_idx(0).unwrap(),
         Value::String("retained".into())

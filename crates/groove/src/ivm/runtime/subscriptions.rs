@@ -525,7 +525,11 @@ impl PredicateExpr {
                 Self::LtEq { field, value } => (field, value, std::cmp::Ordering::is_le),
                 _ => return Ok(None),
             };
-        let actual = resolved_record_value(record, field)?;
+        // An interned field holds a code, never a large value.
+        let (actual, None) = super::key_encoding::PredicateRecord::stored_value(record, field)?
+        else {
+            return Ok(None);
+        };
         let actual = match actual {
             Value::Nullable(Some(value)) => *value,
             value => value,
@@ -583,10 +587,26 @@ impl PredicateExpr {
         }
     }
 
+    /// Whether `record` satisfies this predicate. Interned fields the
+    /// predicate inspects are resolved through `dictionaries`.
     pub(super) fn matches(
         &self,
         record: impl super::key_encoding::PredicateRecord,
         comparison: ValueComparison,
+        dictionaries: &crate::dictionary::SharedDictionaries,
+    ) -> Result<bool, IvmRuntimeError> {
+        self.matches_resolved(
+            super::key_encoding::ResolvingRecord::new(record, dictionaries),
+            comparison,
+            dictionaries,
+        )
+    }
+
+    fn matches_resolved(
+        &self,
+        record: impl super::key_encoding::PredicateRecord,
+        comparison: ValueComparison,
+        dictionaries: &crate::dictionary::SharedDictionaries,
     ) -> Result<bool, IvmRuntimeError> {
         match self {
             Self::TemplateArgument { .. } => Err(IvmRuntimeError::UnsupportedOperator),
@@ -637,7 +657,7 @@ impl PredicateExpr {
                 };
                 match value {
                     Value::Enum(value) if value.tag() == *case_tag => {
-                        payload.matches(value.record().borrowed(), comparison)
+                        payload.matches(value.record().borrowed(), comparison, dictionaries)
                     }
                     // Wrong arms and NULL never match. This is intentionally
                     // fail-closed so cross-case updates produce ordinary
@@ -649,11 +669,11 @@ impl PredicateExpr {
             }
             Self::And(predicates) => predicates
                 .iter()
-                .map(|predicate| predicate.matches(record, comparison))
+                .map(|predicate| predicate.matches_resolved(record, comparison, dictionaries))
                 .try_fold(true, |acc, matches| matches.map(|matches| acc && matches)),
             Self::Or(predicates) => predicates
                 .iter()
-                .map(|predicate| predicate.matches(record, comparison))
+                .map(|predicate| predicate.matches_resolved(record, comparison, dictionaries))
                 .try_fold(false, |acc, matches| matches.map(|matches| acc || matches)),
         }
     }
@@ -1957,7 +1977,9 @@ fn lift_literal_filter_node(
             predicate,
             comparison,
         } => {
-            if let PredicateExpr::Eq { field, value } = predicate {
+            if let PredicateExpr::Eq { field, value } = predicate
+                && !field_is_interned(runtime, input, field)?
+            {
                 let joined =
                     literal_filter_binding_join((**input).clone(), field, value, binding_field)?;
                 let input_output = runtime.infer_builder_output(input)?;
@@ -2045,6 +2067,7 @@ fn lift_literal_filter_node(
                 predicate: PredicateExpr::Eq { field, value },
                 ..
             } = input.as_ref()
+                && !field_is_interned(runtime, filtered_input, field)?
             {
                 let joined = literal_filter_binding_join(
                     (**filtered_input).clone(),
@@ -2419,6 +2442,69 @@ fn lift_literal_filter_node(
         | GraphBuilder::StreamingChecksum { .. }
         | GraphBuilder::RecursiveStepWitness { .. } => Ok(None),
     }
+}
+
+/// The interned dictionary a field's codes belong to, looking through
+/// `Nullable`.
+fn interned_dictionary(value_type: &ValueType) -> Option<&str> {
+    match value_type {
+        ValueType::Nullable(inner) => interned_dictionary(inner),
+        other => other.as_interned().map(|(dictionary, _)| dictionary),
+    }
+}
+
+/// Refuse ordering by an interned field: a code's order is allocation order,
+/// not the order of the values.
+fn refuse_interned_field(
+    output: &RecordDescriptor,
+    field: &FieldRef,
+    operator: &'static str,
+) -> Result<(), IvmRuntimeError> {
+    let index = resolve_field_ref(output, field)?;
+    if output.fields()[index].value_type.contains_interned() {
+        return Err(IvmRuntimeError::UnsupportedInternedOperand {
+            operator,
+            field: output.fields()[index].name.clone().unwrap_or_default(),
+        });
+    }
+    Ok(())
+}
+
+/// Join keys compare encoded key bytes. Two codes of one dictionary are equal
+/// exactly when their values are, so an interned key may only meet a key
+/// interned into the same dictionary; a code never equals a plain value.
+fn check_interned_join_keys(
+    left: &RecordDescriptor,
+    right: &RecordDescriptor,
+    left_on: &[FieldRef],
+    right_on: &[FieldRef],
+) -> Result<(), IvmRuntimeError> {
+    for (left_key, right_key) in left_on.iter().zip(right_on) {
+        let left_index = resolve_field_ref(left, left_key)?;
+        let right_index = resolve_field_ref(right, right_key)?;
+        let left_dictionary = interned_dictionary(&left.fields()[left_index].value_type);
+        let right_dictionary = interned_dictionary(&right.fields()[right_index].value_type);
+        if left_dictionary != right_dictionary {
+            return Err(IvmRuntimeError::UnsupportedInternedOperand {
+                operator: "a join between an interned and a differently typed key",
+                field: left.fields()[left_index].name.clone().unwrap_or_default(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether `field` of `input`'s output is interned. Its values are
+/// dictionary codes, so an equality filter on it compares resolved values and
+/// is not lifted into a join with a literal binding.
+fn field_is_interned(
+    runtime: &IvmRuntime,
+    input: &GraphBuilder,
+    field: &str,
+) -> Result<bool, IvmRuntimeError> {
+    let output = runtime.infer_builder_output(input)?;
+    Ok(resolve_field_name(&output, field)
+        .is_some_and(|index| output.fields()[index].value_type.contains_interned()))
 }
 
 fn literal_filter_binding_join(
@@ -4893,11 +4979,32 @@ impl IvmRuntime {
             GraphBuilder::Index { .. } => Ok(index_record_descriptor()),
             GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::BindingSource { output, .. } => Ok(*output),
-            GraphBuilder::Filter { input, .. }
-            | GraphBuilder::ArgMaxBy { input, .. }
-            | GraphBuilder::ArgMinBy { input, .. }
-            | GraphBuilder::TopBy { input, .. } => {
+            GraphBuilder::Filter { input, .. } => {
                 self.infer_builder_output_cached(input, output_memo)
+            }
+            GraphBuilder::ArgMaxBy {
+                input, order_cols, ..
+            }
+            | GraphBuilder::ArgMinBy {
+                input, order_cols, ..
+            } => {
+                let output = self.infer_builder_output_cached(input, output_memo)?;
+                for column in order_cols {
+                    refuse_interned_field(&output, column, "ordering")?;
+                }
+                Ok(output)
+            }
+            GraphBuilder::TopBy {
+                input,
+                order_cols,
+                tie_cols,
+                ..
+            } => {
+                let output = self.infer_builder_output_cached(input, output_memo)?;
+                for column in order_cols.iter().map(|order| &order.field).chain(tie_cols) {
+                    refuse_interned_field(&output, column, "ordering")?;
+                }
+                Ok(output)
             }
             GraphBuilder::CollectBy { input, collect, .. } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
@@ -5002,16 +5109,36 @@ impl IvmRuntime {
                 }
                 Ok(output.unwrap_or_default())
             }
-            GraphBuilder::Join { left, right, .. } => {
+            GraphBuilder::Join {
+                left,
+                right,
+                left_on,
+                right_on,
+                ..
+            } => {
                 let left = self.infer_builder_output_cached(left, output_memo)?;
                 let right = self.infer_builder_output_cached(right, output_memo)?;
+                check_interned_join_keys(&left, &right, left_on, right_on)?;
                 Ok(join_descriptor(&left, &right))
             }
-            GraphBuilder::SemiJoin { left, .. } => {
-                self.infer_builder_output_cached(left, output_memo)
+            GraphBuilder::SemiJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                ..
             }
-            GraphBuilder::AntiJoin { left, .. } => {
-                self.infer_builder_output_cached(left, output_memo)
+            | GraphBuilder::AntiJoin {
+                left,
+                right,
+                left_on,
+                right_on,
+                ..
+            } => {
+                let left = self.infer_builder_output_cached(left, output_memo)?;
+                let right = self.infer_builder_output_cached(right, output_memo)?;
+                check_interned_join_keys(&left, &right, left_on, right_on)?;
+                Ok(left)
             }
             GraphBuilder::Recursive { seed, step, .. } => {
                 let seed = self.infer_builder_output_cached(seed, output_memo)?;

@@ -317,6 +317,8 @@ fn hydrate_nested_payload_enum_cases(
 }
 
 mod aggregate_read_result;
+mod author_codes;
+use author_codes::AuthorCode;
 /// The local delta's rows, held in memory: overlay row key (physical table,
 /// `(branch_key, row_uuid)` primary key) -> the pending transaction whose
 /// image it holds, plus how many rows each physical table holds under each
@@ -643,6 +645,8 @@ pub struct NodeState<S = BoxedStorage> {
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
     database: DatabaseSlot,
+    /// The database's `authors` dictionary: author columns hold its codes.
+    pub(crate) authors: author_codes::AuthorCodes,
     local_chunk_reader: groove::chunks::LocalChunkReader,
     chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
     /// Shared with the owning `Node`: whether covered receiver installs hand
@@ -1171,6 +1175,31 @@ struct QueryServing {
     /// authority receipt: only an exact compatible Local lowering may use it;
     /// Remote/Global reads must open fresh coverage.
     retained_root_window_sources: BTreeMap<AuthorityResultKey, RetainedRootWindowSource>,
+}
+
+impl QueryServing {
+    /// Invalidate compiler output and its admission proofs while retaining
+    /// prepared shape plans and policy authorization state.
+    fn clear_compiled_query_programs(&mut self) {
+        self.compiled_query_program_cache.clear();
+        self.query_program_templates.clear();
+        self.supported_query_program_requests.clear();
+    }
+
+    /// Prepared plans and the programs derived from them share an invalidation
+    /// boundary when their sources or the underlying runtime are retired.
+    fn clear_prepared_query_plans(&mut self) {
+        self.query_shape_cache.clear();
+        self.clear_compiled_query_programs();
+    }
+
+    /// Retire authorization requests together with their lowered graphs and
+    /// temporary replacements when the policy context changes.
+    fn clear_policy_authorization(&mut self) {
+        self.read_policy_authorization_request_cache.clear();
+        self.policy_authorization_graph_cache.clear();
+        self.policy_authorization_graph_replacements.clear();
+    }
 }
 
 /// Compiler-owned description of the root window stage represented by a

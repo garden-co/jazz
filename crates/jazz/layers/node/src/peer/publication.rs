@@ -1553,6 +1553,7 @@ impl PeerState {
                                 &maintained_subscription_view.terminal_schemas,
                                 &maintained_subscription_view.tables,
                                 &node.node_aliases,
+                                &node.authors,
                             )?;
                         if initial_snapshot {
                             initial_deletion_witness |=

@@ -1594,7 +1594,7 @@ fn history_query_collector_preserves_version_keys_and_windows() {
         let mut maintained = MaintainedSubscriptionView::default();
         while let Ok(delta) = subscription.try_recv() {
             maintained
-                .apply_multisink_deltas(delta, &schemas, &tables, &node.node_aliases)
+                .apply_multisink_deltas(delta, &schemas, &tables, &node.node_aliases, &node.authors)
                 .unwrap();
         }
         let rows = maintained.structured_app_rows_by_terminal_key().unwrap();
@@ -1628,7 +1628,13 @@ fn history_query_collector_preserves_version_keys_and_windows() {
             node.drive_ready_query_runtime_with_waker(None).unwrap();
             while let Ok(delta) = subscription.try_recv() {
                 maintained
-                    .apply_multisink_deltas(delta, &schemas, &tables, &node.node_aliases)
+                    .apply_multisink_deltas(
+                        delta,
+                        &schemas,
+                        &tables,
+                        &node.node_aliases,
+                        &node.authors,
+                    )
                     .unwrap();
             }
             let updated = maintained.structured_app_rows_by_terminal_key().unwrap();

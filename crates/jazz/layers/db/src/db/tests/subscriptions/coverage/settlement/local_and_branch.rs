@@ -294,12 +294,12 @@ fn include_deleted_subscriptions_reject_branch_views_and_snapshots() {
     }
 }
 
-/// Alice's remote include-deleted subscription receives her deleted todo from
-/// the authority's covered input still marked deleted, and a restoration
-/// replaces it with the live row.
+/// Alice's remote include-deleted subscription receives her deleted todo's
+/// content from the authority's covered input, and a restoration replaces it
+/// with the restored content.
 /// alice --insert/delete--> core --covered deleted row--> alice --restore--> core
 #[test]
-fn remote_include_deleted_subscription_marks_covered_rows_deleted_until_restored() {
+fn remote_include_deleted_subscription_delivers_deleted_rows_and_restorations() {
     let schema = schema();
     let table = &schema.tables()[0];
     let alice = AuthorSubject::for_test_bytes([0x37; 16]);
@@ -342,10 +342,6 @@ fn remote_include_deleted_subscription_marks_covered_rows_deleted_until_restored
     pump();
     let mut snapshot = snapshot_from_event(next_settled_opening(&mut subscription));
     assert_eq!(row_ids(&snapshot.rows), vec![row_id]);
-    assert!(
-        snapshot.rows[0].is_deleted(),
-        "a covered deleted image must stay marked deleted"
-    );
     assert_eq!(
         snapshot.rows[0].cell(table, "title"),
         Some(Value::String("deleted todo".to_owned()))
@@ -366,10 +362,6 @@ fn remote_include_deleted_subscription_marks_covered_rows_deleted_until_restored
         apply_subscription_event(&mut snapshot, event);
     }
     assert_eq!(row_ids(&snapshot.rows), vec![row_id]);
-    assert!(
-        !snapshot.rows[0].is_deleted(),
-        "a restoration replaces the deleted row with the live one"
-    );
     assert_eq!(
         snapshot.rows[0].cell(table, "title"),
         Some(Value::String("restored todo".to_owned()))

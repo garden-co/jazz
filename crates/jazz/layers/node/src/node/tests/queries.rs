@@ -2900,7 +2900,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     let mut changed_root_keys = BTreeSet::new();
     while let Ok(deltas) = subscription.try_recv() {
         let transitions = maintained
-            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
+            .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases, &node.authors)
             .unwrap();
         changed_root_keys.extend(
             transitions
@@ -3057,7 +3057,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     while let Ok(deltas) = subscription.try_recv() {
         changed_root_keys.extend(
             maintained
-                .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
+                .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases, &node.authors)
                 .unwrap()
                 .terminal_operations
                 .into_iter()

@@ -1,6 +1,7 @@
 //! read sources query-evaluation tests.
 
 use super::*;
+use crate::node::author_codes::AuthorCodes;
 
 /// This is intentionally structural: write-policy admission supplies inline
 /// rows before there is a public result to inspect. A provenance-only policy
@@ -46,6 +47,7 @@ fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
     );
 
     let (_graph, descriptor, metadata) = inline_current_graph_with_source_metadata_for_test(
+        &AuthorCodes::detached(),
         table,
         vec![candidate],
         SchemaVersionAlias(7),
