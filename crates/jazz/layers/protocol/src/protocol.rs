@@ -3465,6 +3465,8 @@ pub struct ReadViewSpec {
 
 impl ReadViewSpec {
     /// Whether this is the current/default read view implemented by execution.
+    /// An include-deleted current read is not default, so callers that gate a
+    /// fast path on this take the general path for it.
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -3521,13 +3523,16 @@ impl ReadViewKey {
 // discriminants or field layout.
 const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
 const READ_VIEW_KEY_CODEC_VERSION: u8 = 2;
+// Include-deleted read views append their flag, so they get their own version
+// and every other read view keeps its existing durable key (SPEC 6 §6.5).
+const READ_VIEW_KEY_CODEC_VERSION_INCLUDE_DELETED: u8 = 3;
 
 fn canonical_register_shape_options_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
     // Preserve existing durable keys; only the new visibility uses JRVK v3.
     bytes.push(if options.read_view.include_deleted {
-        3
+        READ_VIEW_KEY_CODEC_VERSION_INCLUDE_DELETED
     } else {
         READ_VIEW_KEY_CODEC_VERSION
     });

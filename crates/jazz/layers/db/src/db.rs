@@ -3559,25 +3559,57 @@ fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     ))
 }
 
-fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
-    ensure_supported_read_view(opts)
+/// Include-deleted subscriptions support the same read views as include-deleted
+/// one-shot reads: the current source, or any source of a history query.
+/// Branch-view and snapshot reads of current tables reject the flag until
+/// they are specified and tested (SPEC 6 §6.6).
+fn ensure_supported_include_deleted_read_view(
+    read_view: &ReadViewSpec,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    if !read_view.include_deleted || query_uses_history {
+        return Ok(());
+    }
+    match read_view.source {
+        ReadViewSourceSpec::Current => Ok(()),
+        ReadViewSourceSpec::BranchView { .. } => Err(Error::new(
+            ErrorCode::Query,
+            "branch views do not support include_deleted yet",
+        )),
+        ReadViewSourceSpec::Snapshot { .. } => Err(Error::new(
+            ErrorCode::Query,
+            "snapshots do not support include_deleted yet",
+        )),
+    }
 }
 
-fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
+fn ensure_supported_subscription_read_opts(
+    opts: &ReadOpts,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    ensure_supported_read_view(opts)?;
+    ensure_supported_include_deleted_read_view(&opts.read_view, query_uses_history)
+}
+
+fn ensure_supported_register_shape_read_view(
+    opts: &RegisterShapeOptions,
+    query_uses_history: bool,
+) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
         ..ReadOpts::default()
     };
-    ensure_supported_read_view(&read_opts)
+    ensure_supported_subscription_read_opts(&read_opts, query_uses_history)
 }
 
 fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
+    query_uses_history: bool,
     local_receiver: bool,
     peer_role: PeerRole,
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
-    ensure_supported_register_shape_read_view(opts)?;
+    ensure_supported_register_shape_read_view(opts, query_uses_history)?;
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(

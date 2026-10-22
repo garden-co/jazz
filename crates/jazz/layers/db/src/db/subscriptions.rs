@@ -993,7 +993,7 @@ where
     ) -> Result<SubscriptionStream, Error> {
         let coverage_tier = coverage_tier.unwrap_or_else(|| read_coverage_tier(&opts));
         self.await_open_schema_for_coverage(coverage_tier).await?;
-        ensure_supported_subscription_read_opts(&opts)?;
+        ensure_supported_subscription_read_opts(&opts, prepared.shape.query().uses_history())?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
         let (coverage_tier, opening_gate) =
@@ -1427,8 +1427,8 @@ where
     ) -> Result<SubscriptionStream, Error> {
         self.await_open_schema_for_coverage(read_coverage_tier(&opts))
             .await?;
-        ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
+        ensure_supported_subscription_read_opts(&opts, query.uses_history())?;
         let prepared = self.prepare_query(&query)?;
         self.open_subscription(&prepared, opts, author, authorization_mode, true)
             .await

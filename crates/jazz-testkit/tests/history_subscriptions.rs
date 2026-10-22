@@ -1676,3 +1676,129 @@ async fn include_deleted_subscription_respects_read_policy() {
         })
         .await;
 }
+
+/// Alice reads Bob's deleted task through a separate access row. Revoking that
+/// row, and later deleting it, retracts the deleted task from her remote
+/// include-deleted subscription: only the protected root is widened to deleted
+/// rows, so a deleted grant grants nothing.
+/// bob -> revoke / re-grant / delete access -> server policy -> alice
+#[tokio::test(flavor = "current_thread")]
+async fn include_deleted_subscription_follows_access_row_revocation_and_deletion() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+            let grant = ObjectId::from_uuid(uuid::Uuid::from_u128(78));
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("tasks")
+                        .column("title", ColumnType::Text)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::Exists {
+                                    table: "access".into(),
+                                    condition: Box::new(PolicyExpr::and(vec![
+                                        PolicyExpr::Cmp {
+                                            column: "id".into(),
+                                            op: CmpOp::Eq,
+                                            value: PolicyValue::Literal(Value::Uuid(grant)),
+                                        },
+                                        PolicyExpr::Cmp {
+                                            column: "allowed".into(),
+                                            op: CmpOp::Eq,
+                                            value: PolicyValue::Literal(Value::Boolean(true)),
+                                        },
+                                    ])),
+                                })
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                .with_delete(PolicyExpr::True),
+                        ),
+                )
+                .table(
+                    TableSchema::builder("access")
+                        .column("allowed", ColumnType::Boolean)
+                        .allow_all(),
+                )
+                .build();
+            let (server, bob) = backend(schema.clone()).await;
+            let (_, _, tx) = bob
+                .insert_with_id("access", *grant.uuid(), row_input!("allowed" => true))
+                .unwrap();
+            settled(&bob, tx).await;
+            let (row, _, tx) = bob
+                .insert("tasks", row_input!("title" => "protected"))
+                .unwrap();
+            settled(&bob, tx).await;
+            settled(&bob, bob.delete("tasks", row).unwrap()).await;
+            let alice = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("alice-deleted-access")
+                .ready_on("tasks", Duration::from_secs(30))
+                .connect()
+                .await;
+            let mut stream = alice
+                .subscribe_with_opts(
+                    Query::from("tasks").select(["title"]),
+                    jazz::db::ReadOpts {
+                        tier: ReadTier::Remote,
+                        read_view: jazz::protocol::ReadViewSpec {
+                            include_deleted: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let initial = next(&mut stream).await;
+            assert_eq!(initial.added.len(), 1);
+            assert_eq!(
+                initial.added[0].row.get("title"),
+                Some(&Value::Text("protected".into()))
+            );
+            let protected = initial.added[0].id.clone();
+
+            // Revoke the grant without deleting it.
+            settled(
+                &bob,
+                bob.update(
+                    "access",
+                    grant,
+                    vec![("allowed".into(), Value::Boolean(false))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let revoked = next(&mut stream).await;
+            assert!(revoked.added.is_empty());
+            assert_eq!(revoked.removed.len(), 1);
+            assert_eq!(revoked.removed[0].id, protected);
+
+            settled(
+                &bob,
+                bob.update(
+                    "access",
+                    grant,
+                    vec![("allowed".into(), Value::Boolean(true))],
+                )
+                .unwrap(),
+            )
+            .await;
+            let granted = next(&mut stream).await;
+            assert_eq!(granted.added.len(), 1);
+            assert_eq!(granted.added[0].id, protected);
+
+            // A deleted grant is not a grant, even for an include-deleted read.
+            settled(&bob, bob.delete("access", grant).unwrap()).await;
+            let deleted_grant = next(&mut stream).await;
+            assert!(deleted_grant.added.is_empty());
+            assert_eq!(deleted_grant.removed.len(), 1);
+            assert_eq!(deleted_grant.removed[0].id, protected);
+
+            drop(stream);
+            alice.shutdown().await.unwrap();
+            bob.shutdown().await.unwrap();
+        })
+        .await;
+}

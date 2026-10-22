@@ -1866,6 +1866,8 @@ where
                 .entry(table.name.clone())
                 .or_default()
                 .extend(metadata);
+            // Include-deleted occurrences keep the authority's deletion bit so
+            // a covered deleted image materializes as a deleted row.
             let mut fields = descriptor.fields().to_vec();
             if source_request.visibility == RowVisibility::IncludeDeleted {
                 fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
