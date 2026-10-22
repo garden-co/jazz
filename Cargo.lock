@@ -1537,6 +1537,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-doc-shelf-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-example-epic-drop-benchmark"
 version = "0.1.0"
 dependencies = [
