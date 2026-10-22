@@ -45,13 +45,29 @@ const WINDOW: u64 = 64 * 1024;
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The chunk tables. Nodes are keyed by their random locator and verified
-/// against the object hash a parent or descriptor commits to; `refs` counts
-/// parent branches. Roots are counted by the cells that reference them.
+/// against the object hash a parent or descriptor commits to. A branch's
+/// edges to its children are kept apart from the children themselves, so
+/// nodes may arrive in any order (a replica fetches parents first, an
+/// upload may send leaves first) and a node is held while any stored
+/// branch, cell root, staging count or upload receipt names it.
+/// A root's `base` is the descriptor of its tree (no edit tail) once this
+/// store built or validated it; later descriptors over the same root are
+/// checked against it instead of walking the tree again.
+/// `_jazz_lv_receipt` holds nodes a client pushed ahead of the commit that
+/// references them, until `expires` (ms); `_jazz_lv_unpushed` holds nodes
+/// this replica wrote that its upstream may not have yet.
 pub(crate) const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS _jazz_lv_node (locator BLOB PRIMARY KEY, hash BLOB NOT NULL, \
- bytes BLOB NOT NULL, refs INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+ bytes BLOB NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_edge (child BLOB NOT NULL, parent BLOB NOT NULL, \
+ PRIMARY KEY (child, parent)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS _jazz_lv_edge_parent ON _jazz_lv_edge (parent);
 CREATE TABLE IF NOT EXISTS _jazz_lv_root (root BLOB PRIMARY KEY, durable INTEGER NOT NULL \
- DEFAULT 0, staged INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+ DEFAULT 0, staged INTEGER NOT NULL DEFAULT 0, base BLOB) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_receipt (locator BLOB PRIMARY KEY, \
+ expires INTEGER NOT NULL) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS _jazz_lv_receipt_expires ON _jazz_lv_receipt (expires);
+CREATE TABLE IF NOT EXISTS _jazz_lv_unpushed (locator BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE ON _jazz_lv_root \
  WHEN NEW.durable = 0 AND NEW.staged = 0 BEGIN \
@@ -170,11 +186,16 @@ fn corrupt(error: lv::Error) -> Error {
     Error::new(ErrorCode::Storage, format!("large value: {error}"))
 }
 
-fn missing() -> Error {
+pub(crate) fn missing() -> Error {
     Error::new(
         ErrorCode::NotObserved,
-        "large-value chunks are not available locally yet",
+        "large-value chunks are not available locally yet; they were requested from upstream, so retry after the next sync tick",
     )
+}
+
+/// Whether `error` is a statement that needed chunks this store lacks.
+pub(crate) fn is_missing(error: &Error) -> bool {
+    error.code == ErrorCode::NotObserved
 }
 
 /// Verified chunks this process has read or written, and the way to read
@@ -603,21 +624,50 @@ unsafe extern "C" fn destroy(user: *mut c_void) {
     unsafe { drop(Arc::from_raw(user as *const Chunks)) };
 }
 
-/// Store a prepared value's new nodes and cache them. Each new branch
-/// counts one reference on each of its children.
+/// Store a prepared value's new nodes and cache them. A replica (`replica`)
+/// also marks them unpushed, for its next upload.
 pub(crate) fn store(
     conn: &Connection,
     chunks: &Chunks,
     prepared: &lv::PreparedLargeValue,
+    replica: bool,
 ) -> Result<(), Error> {
     for chunk in &prepared.staged_chunks {
         store_chunk(conn, Some(chunks), chunk)?;
+        if replica {
+            mark_unpushed(conn, &chunk.node_ref.locator)?;
+        }
     }
+    record_base(conn, &prepared.value_ref)
+}
+
+/// Record `value`'s base descriptor on its root as built or validated here.
+fn record_base(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
+    let base = lv::tail_base_descriptor(value).map_err(corrupt)?;
+    let encoded = lv::encode_large_value_ref(&base).map_err(corrupt)?;
+    conn.prepare_cached(
+        "INSERT INTO _jazz_lv_root (root, base) VALUES (?1, ?2) \
+         ON CONFLICT (root) DO UPDATE SET base = excluded.base",
+    )
+    .and_then(|mut statement| {
+        statement.execute(rusqlite::params![
+            value.root.locator.as_bytes().as_slice(),
+            encoded
+        ])
+    })
+    .map_err(storage)?;
     Ok(())
 }
 
-/// Store one node (children before parents), caching it pinned when
-/// `cache` is given. A new branch counts one reference on each child.
+fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
+    conn.prepare_cached("INSERT OR IGNORE INTO _jazz_lv_unpushed (locator) VALUES (?1)")
+        .and_then(|mut statement| statement.execute([locator.as_bytes().as_slice()]))
+        .map_err(storage)?;
+    Ok(())
+}
+
+/// Store one node, caching it pinned when `cache` is given. A new branch
+/// records an edge to each child, whether or not the child is stored yet.
 fn store_chunk(
     conn: &Connection,
     cache: Option<&Chunks>,
@@ -653,13 +703,15 @@ fn store_chunk(
     let node = lv::decode_node_untyped_authenticated(chunk.node_ref.object_hash, &chunk.encoded)
         .map_err(corrupt)?;
     if let ChunkNode::Branch { children, .. } = node {
-        let mut reference = conn
-            .prepare_cached("UPDATE _jazz_lv_node SET refs = refs + 1 WHERE locator = ?1")
+        let mut edge = conn
+            .prepare_cached("INSERT OR IGNORE INTO _jazz_lv_edge (child, parent) VALUES (?1, ?2)")
             .map_err(storage)?;
         for child in children {
-            reference
-                .execute([child.node_ref.locator.as_bytes().as_slice()])
-                .map_err(storage)?;
+            edge.execute([
+                child.node_ref.locator.as_bytes().as_slice(),
+                locator.as_slice(),
+            ])
+            .map_err(storage)?;
         }
     }
     Ok(())
@@ -675,17 +727,25 @@ pub(crate) fn stream(
     chunks: &Chunks,
     kind: LargeValueKind,
     reader: impl std::io::Read,
+    replica: bool,
 ) -> Result<LargeValueRef, Error> {
     let cache = (!conn.is_autocommit() || chunks.in_memory()).then_some(chunks);
     conn.execute_batch("SAVEPOINT jazz_lv_stream")
         .map_err(storage)?;
     let mut failure = None;
     let streamed = lv::prepare_streaming(kind, reader, |chunk| {
-        store_chunk(conn, cache, &chunk).map_err(|error| {
-            failure = Some(error);
-            // The real cause is in `failure`.
-            lv::Error::MalformedNode
-        })
+        store_chunk(conn, cache, &chunk)
+            .and_then(|()| {
+                if replica {
+                    mark_unpushed(conn, &chunk.node_ref.locator)?;
+                }
+                Ok(())
+            })
+            .map_err(|error| {
+                failure = Some(error);
+                // The real cause is in `failure`.
+                lv::Error::MalformedNode
+            })
     });
     let value = match streamed {
         Ok((value, _)) => conn
@@ -694,8 +754,8 @@ pub(crate) fn stream(
                  ON CONFLICT (root) DO UPDATE SET staged = staged + 1",
                 [value.root.locator.as_bytes().as_slice()],
             )
-            .map(|_| value)
-            .map_err(storage),
+            .map_err(storage)
+            .and_then(|_| record_base(conn, &value).map(|()| value)),
         Err(error) => {
             Err(failure.unwrap_or_else(|| Error::new(ErrorCode::WriteRejected, error.to_string())))
         }
@@ -721,6 +781,261 @@ pub(crate) fn release_receipt(conn: &Connection, root: &LargeValueRef) -> Result
         [root.root.locator.as_bytes().as_slice()],
     )
     .map_err(storage)?;
+    Ok(())
+}
+
+/// One stored node: (object hash, encoded bytes).
+pub(crate) fn node(
+    conn: &Connection,
+    locator: &lv::Locator,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
+    conn.prepare_cached("SELECT hash, bytes FROM _jazz_lv_node WHERE locator = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_row([locator.as_bytes().as_slice()], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .optional()
+        })
+        .map_err(storage)
+}
+
+fn request_of(node_ref: &lv::NodeRef) -> ChunkRequest {
+    ChunkRequest {
+        object_hash: node_ref.object_hash.0,
+        locator: node_ref.locator,
+    }
+}
+
+/// Authenticate `bytes` as the node `request` names, or fail.
+fn authenticate(request: &ChunkRequest, bytes: &[u8]) -> Result<ChunkNode, Error> {
+    lv::decode_node_untyped_authenticated(lv::ContentHash(request.object_hash), bytes)
+        .map_err(corrupt)
+}
+
+/// Visit `value`'s stored tree depth-first. `descend` sees each node that
+/// is stored (with whether it is) and says whether to visit its children.
+fn walk(
+    conn: &Connection,
+    value: &LargeValueRef,
+    mut descend: impl FnMut(&ChunkRequest, Option<&[u8]>) -> Result<bool, Error>,
+) -> Result<(), Error> {
+    let mut stack = vec![request_of(&value.root)];
+    let mut seen = BTreeSet::new();
+    while let Some(request) = stack.pop() {
+        if !seen.insert(request.locator) {
+            continue;
+        }
+        let stored = node(conn, &request.locator)?;
+        let bytes = stored
+            .as_ref()
+            .filter(|(hash, _)| hash.as_slice() == request.object_hash)
+            .map(|(_, bytes)| bytes.as_slice());
+        if !descend(&request, bytes)? {
+            continue;
+        }
+        if let Some(bytes) = bytes
+            && let ChunkNode::Branch { children, .. } = authenticate(&request, bytes)?
+        {
+            stack.extend(children.iter().map(|child| request_of(&child.node_ref)));
+        }
+    }
+    Ok(())
+}
+
+/// The nodes of `value` this store lacks and can name now: the frontier of
+/// its stored tree. Empty when the whole tree is local.
+pub(crate) fn missing_frontier(
+    conn: &Connection,
+    value: &LargeValueRef,
+) -> Result<Vec<ChunkRequest>, Error> {
+    let mut missing = Vec::new();
+    walk(conn, value, |request, bytes| {
+        if bytes.is_none() {
+            missing.push(request.clone());
+        }
+        Ok(bytes.is_some())
+    })?;
+    Ok(missing)
+}
+
+/// The nodes of `value` this replica wrote and has not pushed upstream.
+/// A node the upstream holds was validated there with its whole subtree,
+/// so the walk stops at the first pushed node on each path.
+pub(crate) fn unpushed(
+    conn: &Connection,
+    value: &LargeValueRef,
+) -> Result<Vec<(ChunkRequest, Vec<u8>)>, Error> {
+    let mut out = Vec::new();
+    walk(conn, value, |request, bytes| {
+        let Some(bytes) = bytes else {
+            return Ok(false);
+        };
+        let pending: bool = conn
+            .prepare_cached("SELECT EXISTS (SELECT 1 FROM _jazz_lv_unpushed WHERE locator = ?1)")
+            .and_then(|mut statement| {
+                statement.query_row([request.locator.as_bytes().as_slice()], |r| r.get(0))
+            })
+            .map_err(storage)?;
+        if pending {
+            out.push((request.clone(), bytes.to_vec()));
+        }
+        Ok(pending)
+    })?;
+    Ok(out)
+}
+
+/// The upstream accepted (or finally refused) the commit these nodes were
+/// pushed for.
+pub(crate) fn mark_pushed(conn: &Connection, locators: &[lv::Locator]) -> Result<(), Error> {
+    let mut statement = conn
+        .prepare_cached("DELETE FROM _jazz_lv_unpushed WHERE locator = ?1")
+        .map_err(storage)?;
+    for locator in locators {
+        statement
+            .execute([locator.as_bytes().as_slice()])
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// Store a node fetched from upstream, after authenticating it against the
+/// hash this replica asked for.
+pub(crate) fn install_fetched(
+    conn: &Connection,
+    chunks: &Chunks,
+    request: &ChunkRequest,
+    bytes: Vec<u8>,
+) -> Result<(), Error> {
+    authenticate(request, &bytes)?;
+    store_chunk(
+        conn,
+        Some(chunks),
+        &lv::StagedChunk {
+            node_ref: lv::NodeRef {
+                object_hash: lv::ContentHash(request.object_hash),
+                locator: request.locator,
+            },
+            encoded: bytes,
+        },
+    )
+}
+
+/// How long a pushed node waits for the commit that references it.
+pub(crate) const RECEIPT_TTL_MS: i64 = 10 * 60 * 1000;
+
+/// Store a node a client pushed ahead of its commit, held by a receipt
+/// until `expires`.
+pub(crate) fn receive_pushed(
+    conn: &Connection,
+    chunks: &Chunks,
+    request: &ChunkRequest,
+    bytes: Vec<u8>,
+    expires: i64,
+) -> Result<(), Error> {
+    if let Some((hash, _)) = node(conn, &request.locator)?
+        && hash.as_slice() != request.object_hash
+    {
+        return Err(Error::new(
+            ErrorCode::WriteRejected,
+            "opaque locator already names different content",
+        ));
+    }
+    install_fetched(conn, chunks, request, bytes)?;
+    conn.prepare_cached(
+        "INSERT INTO _jazz_lv_receipt (locator, expires) VALUES (?1, ?2) \
+         ON CONFLICT (locator) DO UPDATE SET expires = MAX(expires, excluded.expires)",
+    )
+    .and_then(|mut statement| {
+        statement.execute(rusqlite::params![
+            request.locator.as_bytes().as_slice(),
+            expires
+        ])
+    })
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Drop receipts that expired by `now`; their nodes are reclaimed unless a
+/// commit referenced them meanwhile.
+pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
+    conn.execute_batch(&format!(
+        "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
+         SELECT locator FROM _jazz_lv_receipt WHERE expires <= {now}; \
+         DELETE FROM _jazz_lv_receipt WHERE expires <= {now};"
+    ))
+    .map_err(storage)
+}
+
+struct Stored<'a>(&'a Connection);
+
+impl lv::chunks::ChunkProvider for Stored<'_> {
+    fn get(
+        &self,
+        request: ChunkRequest,
+    ) -> lv::chunks::ChunkFuture<'_, Result<Bytes, lv::chunks::ChunkError>> {
+        let found = match node(self.0, &request.locator) {
+            Ok(Some((hash, bytes))) if hash.as_slice() == request.object_hash => {
+                Ok(Bytes::from(bytes))
+            }
+            Ok(_) => Err(lv::chunks::ChunkError::Unavailable),
+            Err(error) => Err(lv::chunks::ChunkError::Backend(error.to_string())),
+        };
+        Box::pin(std::future::ready(found))
+    }
+}
+
+/// Admit an uploaded descriptor: its tree must be complete here and honest
+/// (structure, metrics, logical hash and content), and its edit tail must
+/// replay against it. A root validated once is trusted afterwards, so an
+/// append re-checks only its tail.
+pub(crate) fn admit(
+    conn: &Connection,
+    chunks: &Chunks,
+    value: &LargeValueRef,
+) -> Result<(), Error> {
+    let rejected = |what: String| Error::new(ErrorCode::WriteRejected, what);
+    let base = lv::tail_base_descriptor(value).map_err(|e| rejected(e.to_string()))?;
+    let encoded = lv::encode_large_value_ref(&base).map_err(corrupt)?;
+    let known: Option<Option<Vec<u8>>> = conn
+        .prepare_cached("SELECT base FROM _jazz_lv_root WHERE root = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_row([value.root.locator.as_bytes().as_slice()], |r| r.get(0))
+                .optional()
+        })
+        .map_err(storage)?;
+    match known.flatten() {
+        Some(known) if known == encoded => {}
+        Some(_) => {
+            return Err(rejected(
+                "the descriptor disagrees with its stored tree".into(),
+            ));
+        }
+        None => {
+            crate::options::block_on(lv::visit_reachable_chunks(&base, &Stored(conn), |_| {}))
+                .map_err(|e| rejected(format!("large value: {e}")))?;
+            let mut validator =
+                lv::LogicalValueValidator::new(&base).map_err(|e| rejected(e.to_string()))?;
+            let mut offset = 0;
+            while offset < base.byte_length {
+                let end = (offset + WINDOW).min(base.byte_length);
+                let window =
+                    chunks.run(|inputs| lv::byte_range_attempt(&base, offset..end, inputs))?;
+                validator
+                    .push(&window)
+                    .map_err(|e| rejected(e.to_string()))?;
+                offset = end;
+            }
+            validator
+                .finish(&base)
+                .map_err(|e| rejected(e.to_string()))?;
+            record_base(conn, &base)?;
+        }
+    }
+    if !value.edit_tail.is_empty() {
+        chunks.run(|inputs| lv::validate_edit_tail_attempt(value, inputs))?;
+    }
     Ok(())
 }
 
@@ -766,7 +1081,8 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_root WHERE root = ?1 \
                  AND (durable > 0 OR staged > 0)) \
-                 OR EXISTS (SELECT 1 FROM _jazz_lv_node WHERE locator = ?1 AND refs > 0)",
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = ?1)",
                 [&locator],
                 |r| r.get(0),
             )
@@ -798,14 +1114,10 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
         let node = lv::decode_node_untyped_authenticated(lv::ContentHash(hash), &bytes)
             .map_err(corrupt)?;
         if let ChunkNode::Branch { children, .. } = node {
-            for child in children {
-                let child = child.node_ref.locator.as_bytes().to_vec();
-                conn.execute(
-                    "UPDATE _jazz_lv_node SET refs = refs - 1 WHERE locator = ?1",
-                    [&child],
-                )
+            conn.execute("DELETE FROM _jazz_lv_edge WHERE parent = ?1", [&locator])
                 .map_err(storage)?;
-                queue.push(child);
+            for child in children {
+                queue.push(child.node_ref.locator.as_bytes().to_vec());
             }
         }
     }
@@ -842,7 +1154,7 @@ mod tests {
         logical: &[u8],
     ) -> Vec<u8> {
         let prepared = lv::prepare(kind, logical).unwrap();
-        store(conn, chunks, &prepared).unwrap();
+        store(conn, chunks, &prepared, false).unwrap();
         chunked_cell(&prepared.value_ref).unwrap()
     }
 
@@ -865,7 +1177,7 @@ mod tests {
         if logical.len() > 10 {
             let (base, tail) = logical.split_at(logical.len() - 7);
             let prepared = lv::prepare(kind, base).unwrap();
-            store(conn, chunks, &prepared).unwrap();
+            store(conn, chunks, &prepared, false).unwrap();
             let lv::TailOutcome::Updated(appended) =
                 lv::append_tail(&prepared.value_ref, tail.to_vec()).unwrap()
             else {
@@ -992,5 +1304,78 @@ mod tests {
         while reclaim(&conn, &chunks, 3).unwrap() > 0 {}
         assert_eq!(count("SELECT count(*) FROM _jazz_lv_node"), 0);
         assert_eq!(count("SELECT count(*) FROM _jazz_lv_reclaim"), 0);
+    }
+
+    #[test]
+    fn admission_checks_descriptors_against_their_tree() {
+        let (conn, chunks) = chunks();
+        let body = text(6, 300_000);
+        let built = lv::prepare(LargeValueKind::String, &body).unwrap();
+        // Pushed by a client: stored under receipts, never validated here.
+        for chunk in &built.staged_chunks {
+            receive_pushed(
+                &conn,
+                &chunks,
+                &request_of(&chunk.node_ref),
+                chunk.encoded.clone(),
+                0,
+            )
+            .unwrap();
+        }
+        let mut forged = built.value_ref.clone();
+        forged.byte_length += 1;
+        assert!(admit(&conn, &chunks, &forged).is_err(), "dishonest metrics");
+        admit(&conn, &chunks, &built.value_ref).unwrap();
+        // Once validated, the root's base is trusted and checked directly.
+        assert!(admit(&conn, &chunks, &forged).is_err());
+        let appended = match lv::append_tail(&built.value_ref, b"!".to_vec()).unwrap() {
+            lv::TailOutcome::Updated(value) => value,
+            other => panic!("{other:?}"),
+        };
+        admit(&conn, &chunks, &appended).unwrap();
+
+        // A tree with a node missing is refused.
+        let other = lv::prepare(LargeValueKind::String, &text(7, 300_000)).unwrap();
+        for chunk in other.staged_chunks.iter().skip(1) {
+            receive_pushed(
+                &conn,
+                &chunks,
+                &request_of(&chunk.node_ref),
+                chunk.encoded.clone(),
+                0,
+            )
+            .unwrap();
+        }
+        assert!(admit(&conn, &chunks, &other.value_ref).is_err());
+    }
+
+    #[test]
+    fn expired_receipts_release_unreferenced_pushes() {
+        let (conn, chunks) = chunks();
+        let built = lv::prepare(LargeValueKind::String, &text(8, 300_000)).unwrap();
+        for chunk in &built.staged_chunks {
+            receive_pushed(
+                &conn,
+                &chunks,
+                &request_of(&chunk.node_ref),
+                chunk.encoded.clone(),
+                1_000,
+            )
+            .unwrap();
+        }
+        let count = || {
+            conn.query_row("SELECT count(*) FROM _jazz_lv_node", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let pushed = count();
+        assert!(pushed > 2);
+        expire_receipts(&conn, 999).unwrap();
+        while reclaim(&conn, &chunks, 64).unwrap() > 0 {}
+        assert_eq!(count(), pushed, "receipts still hold the nodes");
+        expire_receipts(&conn, 1_000).unwrap();
+        while reclaim(&conn, &chunks, 64).unwrap() > 0 {}
+        assert_eq!(count(), 0, "nothing referenced them");
     }
 }

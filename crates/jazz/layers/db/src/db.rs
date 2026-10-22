@@ -1703,7 +1703,7 @@ impl Inner {
         }
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
-        crate::large::store(&self.conn, &self.chunks, &prepared)?;
+        crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
         Ok(Sql::Text(crate::large::chunked_cell(&prepared.value_ref)?))
     }
 
@@ -1726,11 +1726,18 @@ impl Inner {
             .iter()
             .find(|prepared| prepared.value_ref.root == large.root)
         {
-            crate::large::store(&self.conn, &self.chunks, prepared)?;
-        } else if !crate::large::root_is_local(&self.conn, large)? {
-            return Err(unsupported(
-                "writing a large value whose chunks this store does not hold",
-            ));
+            crate::large::store(&self.conn, &self.chunks, prepared, self.client.is_some())?;
+        } else if self.client.is_none() {
+            // An authority admits a descriptor only over a complete, honest
+            // tree. A replica's edits build on trees its upstream holds,
+            // which it may have only partly fetched.
+            if !crate::large::root_is_local(&self.conn, large)? {
+                return Err(rejected(format!(
+                    "`{}`: the large value's chunks were not uploaded",
+                    column.name
+                )));
+            }
+            crate::large::admit(&self.conn, &self.chunks, large)?;
         }
         Ok(Sql::Text(crate::large::chunked_cell(large)?))
     }
