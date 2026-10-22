@@ -143,6 +143,16 @@ pub(crate) fn author_part(column: &str) -> Option<(&'static str, &'static str)> 
     })
 }
 
+/// The create stamp an update stamp falls back to. A version written once
+/// stores its update stamp as NULL instead of a copy of the create stamp.
+pub(crate) fn elided_as(stored: &str) -> Option<&'static str> {
+    match stored {
+        "$updatedAt" => Some("$createdAt"),
+        "$updatedBy" => Some("$createdBy"),
+        _ => None,
+    }
+}
+
 fn stored_provenance_columns() -> Vec<Column> {
     STORED_PROVENANCE
         .iter()
@@ -339,7 +349,13 @@ impl Table {
             "_b, "
         };
         for (n, index) in table.indexes.iter().enumerate() {
-            let keys: Vec<String> = index.iter().map(|c| quote(c)).collect();
+            let keys: Vec<String> = index
+                .iter()
+                .map(|c| match elided_as(c) {
+                    Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
+                    None => quote(c),
+                })
+                .collect();
             sql.push_str(&format!(
                 "CREATE INDEX {} ON {name}({lead}{}, id);\n",
                 quote(&format!("{}__ix{n}", table.name)),

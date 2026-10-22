@@ -1159,10 +1159,10 @@ impl<'a> Ctx<'a> {
                 "relation column {column:?} does not exist"
             )));
         }
-        Ok(if column.column == "id" {
-            format!("{}.id", src.alias)
-        } else {
-            format!("{}.{}", src.alias, quote(&column.column))
+        Ok(match &src.table {
+            Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
+            None if column.column == "id" => format!("{}.id", src.alias),
+            None => format!("{}.{}", src.alias, quote(&column.column)),
         })
     }
 
@@ -1376,9 +1376,12 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
     }
     if let Some((stored, part)) = crate::values::author_part(column) {
         return Ok(format!(
-            "(SELECT {part} FROM _jazz_authors WHERE n = {alias}.{})",
-            quote(stored)
+            "(SELECT {part} FROM _jazz_authors WHERE n = {})",
+            stored_sql(alias, stored)
         ));
+    }
+    if crate::values::elided_as(column).is_some() {
+        return Ok(stored_sql(alias, column));
     }
     if table.column(column).is_none() {
         if column.starts_with("$createdBy") || column.starts_with("$updatedBy") {
@@ -1392,6 +1395,19 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
         )));
     }
     Ok(format!("{alias}.{}", quote(column)))
+}
+
+/// A stored provenance column; an update stamp left NULL reads as the
+/// create stamp it equals.
+fn stored_sql(alias: &str, stored: &str) -> String {
+    match crate::values::elided_as(stored) {
+        Some(created) => format!(
+            "COALESCE({alias}.{}, {alias}.{})",
+            quote(stored),
+            quote(created)
+        ),
+        None => format!("{alias}.{}", quote(stored)),
+    }
 }
 
 fn and(parts: &[String]) -> String {

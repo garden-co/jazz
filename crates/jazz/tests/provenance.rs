@@ -291,7 +291,13 @@ fn author_codes_never_leave_their_database() {
         },
     ))
     .unwrap();
-    let select = Query::from("notes").select(["body", "$createdBy.identity.subject"]);
+    let select = Query::from("notes").select([
+        "body",
+        "$createdAt",
+        "$updatedAt",
+        "$createdBy.identity.subject",
+        "$updatedBy.identity.subject",
+    ]);
     let prepared = client.prepare_query(&select).unwrap();
     let _live = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     for _ in 0..6 {
@@ -305,10 +311,20 @@ fn author_codes_never_leave_their_database() {
         let authors: BTreeMap<RowUuid, String> = rows
             .iter()
             .map(|row| {
-                (
-                    row.row_uuid(),
-                    subject_cell(row, "$createdBy.identity.subject"),
-                )
+                // Never updated: the update stamp reads as the create stamp
+                // on both sides of the link.
+                assert_eq!(
+                    u64_cell(row, "$updatedAt"),
+                    u64_cell(row, "$createdAt"),
+                    "{name}"
+                );
+                let subject = subject_cell(row, "$createdBy.identity.subject");
+                assert_eq!(
+                    subject_cell(row, "$updatedBy.identity.subject"),
+                    subject,
+                    "{name}"
+                );
+                (row.row_uuid(), subject)
             })
             .collect();
         assert_eq!(

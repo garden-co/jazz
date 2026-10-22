@@ -951,7 +951,25 @@ impl Inner {
 
     /// Images carry authors by their identity parts: codes are local to
     /// one database, so they never leave it.
+    /// An update stamp stored as NULL is sent as the create stamp it
+    /// equals.
     fn resolve_authors(&self, image: &mut Image) -> Result<(), Error> {
+        for i in 0..image.cells.len() {
+            let Some(created) = crate::values::elided_as(&image.cells[i].0) else {
+                continue;
+            };
+            if !matches!(image.cells[i].1, Cell::Null) {
+                continue;
+            }
+            let stamp = image
+                .cells
+                .iter()
+                .find(|(name, _)| name == created)
+                .map(|(_, cell)| cell.clone());
+            if let Some(stamp) = stamp {
+                image.cells[i].1 = stamp;
+            }
+        }
         let mut cells = Vec::with_capacity(image.cells.len() + 2);
         for (name, cell) in std::mem::take(&mut image.cells) {
             if name != "$createdBy" && name != "$updatedBy" {
@@ -1000,6 +1018,19 @@ impl Inner {
                 _ => Sql::Null,
             };
             cells.push((stored.to_owned(), code));
+        }
+        // An update stamp equal to the create stamp is stored as NULL.
+        let stamps: BTreeMap<String, Sql> = cells
+            .iter()
+            .filter(|(name, _)| name == "$createdAt" || name == "$createdBy")
+            .cloned()
+            .collect();
+        for (name, value) in &mut cells {
+            if let Some(created) = crate::values::elided_as(name)
+                && stamps.get(created) == Some(value)
+            {
+                *value = Sql::Null;
+            }
         }
         Ok(cells)
     }

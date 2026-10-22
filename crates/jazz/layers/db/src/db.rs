@@ -1759,7 +1759,8 @@ impl Inner {
             values.push(value);
         }
         let stamp = self.stamp()?;
-        for (name, value) in stamp.created().into_iter().chain(stamp.updated()) {
+        // The update stamp stays NULL until the row is updated.
+        for (name, value) in stamp.created() {
             names.push(quote(name));
             values.push(value);
         }
