@@ -1563,6 +1563,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-permissioned-resources-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
 name = "jazz-example-poster-shop-benchmark"
 version = "0.1.0"
 dependencies = [

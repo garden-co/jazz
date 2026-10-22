@@ -712,6 +712,11 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
     })
 }
 
+/// The image filter for one row version. `+_seq` keeps the planner on
+/// the row-id index: after a bulk commit every row shares one `_seq`, and
+/// the `_seq` index would scan them all for each lookup.
+const ID_AT_SEQ: &str = "id = ?1 AND +_seq = ?2";
+
 // ---- stored images ----------------------------------------------------------
 
 impl Inner {
@@ -2137,12 +2142,8 @@ impl Db {
                         if !cache.contains_key(&key) {
                             let id = row.id.0.as_bytes().to_vec();
                             let seq = row.seq as i64;
-                            let found = inner.images_where(
-                                &row.table,
-                                false,
-                                "id = ?1 AND _seq = ?2",
-                                &[&id, &seq],
-                            )?;
+                            let found =
+                                inner.images_where(&row.table, false, ID_AT_SEQ, &[&id, &seq])?;
                             cache.insert(key.clone(), found);
                         }
                         if unchanged {
@@ -2360,19 +2361,10 @@ impl Db {
                 for row in &rows {
                     let rid = row.id.0.as_bytes().to_vec();
                     let seq = row.seq as i64;
-                    let mut found = inner.images_where(
-                        &query.table,
-                        false,
-                        "id = ?1 AND _seq = ?2",
-                        &[&rid, &seq],
-                    )?;
+                    let mut found =
+                        inner.images_where(&query.table, false, ID_AT_SEQ, &[&rid, &seq])?;
                     if found.is_empty() {
-                        found = inner.images_where(
-                            &query.table,
-                            true,
-                            "id = ?1 AND _seq = ?2",
-                            &[&rid, &seq],
-                        )?;
+                        found = inner.images_where(&query.table, true, ID_AT_SEQ, &[&rid, &seq])?;
                     }
                     images.extend(found);
                 }

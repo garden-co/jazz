@@ -27,7 +27,7 @@ members = [
   # "examples/docs/todo-server-rs",
   "examples/stage-plan/benchmarks",
   "examples/band-book/benchmarks",
-  #TODO "examples/permissioned-resources/benchmarks",
+  "examples/permissioned-resources/benchmarks",
   "examples/big-label/benchmarks",
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
