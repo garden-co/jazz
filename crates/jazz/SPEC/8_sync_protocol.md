@@ -198,6 +198,20 @@ baseline, frozen fresh rather than appended to v5, is:
   sources consume admitted current winners; history sources consume all admitted
   content versions.
 
+Two result-identity encodings change with history reads. Neither is persisted,
+so neither needs a storage migration:
+
+- `ResultKey` is version 2 (SPEC 6 §6.4.1): the leading version byte is `2`, and
+  after the union-arm records the key carries one `has_transaction:u8` flag per
+  source occurrence, root first and then each joined source in order. Each flag
+  set to 1 is followed by that source version's `tx_time:u64be | tx_node:16`;
+  a flag of 0 marks a current source. Version 1 keys are rejected.
+  `fixtures/result-key.json` pins a history root key (`key`) and a key whose
+  root and joined source are both history versions (`joined_key`).
+- `OutputOccurrenceId` serializes as its `ResultKey` bytes
+  (`#[serde(from/into = "ResultKey")]`) instead of the postcard two-field
+  `(root, joined)` pair. The `ResultMemberEntry::TypedRow` variant is removed.
+
 Clients, relays and Core servers must upgrade together; there is no v5 decoder
 or migration. The storage boundary moves with it (SPEC 2 §2.7.1).
 
