@@ -1806,7 +1806,12 @@ async fn include_deleted_subscription_follows_access_row_revocation_and_deletion
 /// Alice reads `$deletedAt`/`$deletedBy` only for the deleted task she may
 /// read. The hidden deleted task's deletion metadata stays hidden on the
 /// current table, including through a deletion-time filter, and on history,
-/// for remote and local-first reads and for a history subscription.
+/// for remote and local-first reads and for history and current
+/// subscriptions. Bob both created and deleted each task, so the deletion
+/// metadata must decode to his author and a time no earlier than creation.
+/// No deletion witness of the hidden task reaches alice's client: a local
+/// inspection under carol's identity, which may read the hidden task, finds
+/// nothing.
 /// bob -> delete readable and hidden tasks -> server policy -> alice
 #[tokio::test(flavor = "current_thread")]
 async fn deletion_metadata_respects_read_policy() {
@@ -1814,17 +1819,23 @@ async fn deletion_metadata_respects_read_policy() {
         .run_until(async {
             use jazz::query::{in_list, is_null, not};
             use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+            const ALICE: &str = "alice-deletion-metadata";
+            const CAROL: &str = "carol-deletion-metadata";
             let schema = SchemaBuilder::new()
                 .table(
                     TableSchema::builder("tasks")
                         .column("title", ColumnType::Text)
-                        .column("visible", ColumnType::Boolean)
+                        .column("reader", ColumnType::Text)
                         .policies(
                             TablePolicies::new()
                                 .with_select(PolicyExpr::Cmp {
-                                    column: "visible".into(),
+                                    column: "reader".into(),
                                     op: CmpOp::Eq,
-                                    value: PolicyValue::Literal(Value::Boolean(true)),
+                                    value: PolicyValue::SessionRef(vec![
+                                        "user".into(),
+                                        "identity".into(),
+                                        "subject".into(),
+                                    ]),
                                 })
                                 .with_insert(PolicyExpr::True)
                                 .with_update(Some(PolicyExpr::True), PolicyExpr::True)
@@ -1834,18 +1845,19 @@ async fn deletion_metadata_respects_read_policy() {
                 .build();
             let (server, bob) = backend(schema.clone()).await;
             let mut rows = Vec::new();
-            for (title, visible) in [("readable", true), ("hidden", false)] {
+            for (title, reader) in [("readable", ALICE), ("hidden", CAROL)] {
                 let (row, _, tx) = bob
-                    .insert("tasks", row_input!("title" => title, "visible" => visible))
+                    .insert("tasks", row_input!("title" => title, "reader" => reader))
                     .unwrap();
                 settled(&bob, tx).await;
                 settled(&bob, bob.delete("tasks", row).unwrap()).await;
                 rows.push(row);
             }
+            let (readable, hidden) = (rows[0], rows[1]);
             let alice = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema)
-                .with_user_id("alice-deletion-metadata")
+                .with_user_id(ALICE)
                 .ready_on("tasks", Duration::from_secs(30))
                 .connect()
                 .await;
@@ -1864,34 +1876,77 @@ async fn deletion_metadata_respects_read_policy() {
                         .map(|row| lit(jazz::groove::records::Value::Uuid(*row.uuid()))),
                 )
             };
-            let current = Query::from("tasks")
-                .filter(not(is_null(col("$deletedAt"))))
-                .select(["title", "$deletedAt", "$deletedBy"]);
-            let history = Query::from("history.tasks").filter(ids()).select([
+            let columns = [
                 "title",
+                "$createdBy",
+                "$createdAt",
                 "$deletedAt",
                 "$deletedBy",
-            ]);
+            ];
+            let current = Query::from("tasks")
+                .filter(not(is_null(col("$deletedAt"))))
+                .select(columns);
+            let history = Query::from("history.tasks").filter(ids()).select(columns);
+            fn assert_readable_deletion(get: impl Fn(&str) -> Option<Value>, what: &str) {
+                assert_eq!(get("title"), Some(Value::Text("readable".into())), "{what}");
+                let created_by = get("$createdBy").expect("selected $createdBy");
+                assert_ne!(created_by, Value::Null, "{what}");
+                assert_eq!(
+                    get("$deletedBy"),
+                    Some(created_by),
+                    "{what}: bob created and deleted the task"
+                );
+                let Some(Value::Timestamp(created_at)) = get("$createdAt") else {
+                    panic!("{what}: $createdAt is a timestamp: {:?}", get("$createdAt"));
+                };
+                let Some(Value::Timestamp(deleted_at)) = get("$deletedAt") else {
+                    panic!("{what}: $deletedAt is a timestamp: {:?}", get("$deletedAt"));
+                };
+                assert!(deleted_at >= created_at, "{what}");
+            }
             for tier in [ReadTier::Remote, ReadTier::LocalFirst] {
                 for query in [current.clone(), history.clone()] {
                     let found = alice.query_with_opts(query, opts(tier)).await.unwrap();
                     assert_eq!(found.len(), 1, "{tier:?} reveals only the readable task");
-                    assert_eq!(found[0].get("title"), Some(&Value::Text("readable".into())));
-                    assert!(found[0].get("$deletedAt").is_some());
-                    assert!(found[0].get("$deletedBy").is_some());
+                    assert_eq!(found[0].key.row_id(), Some(readable));
+                    assert_readable_deletion(
+                        |name| found[0].get(name).cloned(),
+                        &format!("{tier:?} read"),
+                    );
                 }
             }
-            let mut stream = alice
-                .subscribe_with_opts(history, opts(ReadTier::Remote))
-                .await
-                .unwrap();
-            let added = next(&mut stream).await.added;
-            assert_eq!(added.len(), 1);
-            assert_eq!(
-                added[0].row.get("title"),
-                Some(&Value::Text("readable".into()))
-            );
-            drop(stream);
+            for query in [history, current] {
+                let mut stream = alice
+                    .subscribe_with_opts(query, opts(ReadTier::Remote))
+                    .await
+                    .unwrap();
+                let added = next(&mut stream).await.added;
+                assert_eq!(added.len(), 1);
+                assert_eq!(added[0].id.row_id(), Some(readable));
+                assert_readable_deletion(|name| added[0].row.get(name).cloned(), "subscription");
+                drop(stream);
+            }
+
+            // Carol may read the hidden task, so a local inspection under her
+            // identity would expose any of its witnesses alice's reads stored.
+            let carol_cache = alice.for_session(Session::new(jazz_server::TEST_JWT_ISSUER, CAROL));
+            for query in [
+                Query::from("tasks").select(["title", "$deletedAt", "$deletedBy"]),
+                Query::from("history.tasks").filter(ids()).select([
+                    "title",
+                    "$deletedAt",
+                    "$deletedBy",
+                ]),
+            ] {
+                let cached = carol_cache
+                    .query_with_opts(query, opts(ReadTier::LocalOnly))
+                    .await
+                    .unwrap();
+                assert!(
+                    cached.iter().all(|row| row.key.row_id() != Some(hidden)),
+                    "the hidden task's deletion witness never reaches alice: {cached:?}"
+                );
+            }
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
         })

@@ -993,7 +993,7 @@ under the include-deleted read policy; the covered input carries the
 authority's deletion bit, which keeps deleted rows out of the subscriber's
 visible-current join and include witnesses, but published subscription rows
 are not marked deleted. Subscription deletion state is exposed through the
-`$deletedAt`/`$deletedBy` columns instead (#4182). Deleting, restoring or
+`$deletedAt`/`$deletedBy` columns instead (below). Deleting, restoring or
 revoking access to a row updates the subscription like any other change: a
 restoration replaces the deleted row with the live one, and a row whose read
 policy no longer holds, including because its granting row was deleted, leaves
