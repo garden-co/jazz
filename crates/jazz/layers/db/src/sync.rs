@@ -313,11 +313,14 @@ pub enum SyncMessage {
     // client → server
     /// `since`: a resumed subscription the client held settled through
     /// that seq; its opening ships only rows changed after it.
+    /// `include_deleted`: the result also lists deleted rows (the root's),
+    /// which ship as their deleted current versions.
     Subscribe {
         id: u64,
         query: Query,
         binding: BTreeMap<String, Value>,
         since: Option<u64>,
+        include_deleted: bool,
     },
     Unsubscribe {
         id: u64,
@@ -335,6 +338,7 @@ pub enum SyncMessage {
         query: Query,
         binding: BTreeMap<String, Value>,
         at: Option<u64>,
+        include_deleted: bool,
     },
     Commit {
         node: [u8; 16],
@@ -438,6 +442,7 @@ pub(crate) struct Remote {
     refs: usize,
     query: Query,
     binding: BTreeMap<String, Value>,
+    include_deleted: bool,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// The server seq this query's result was last settled through.
     through: Option<u64>,
@@ -496,8 +501,8 @@ pub(crate) struct Client {
     arrived: bool,
 }
 
-fn remote_key(query: &Query, binding: &BTreeMap<String, Value>) -> String {
-    format!("{query:?}{binding:?}")
+fn remote_key(query: &Query, binding: &BTreeMap<String, Value>, include_deleted: bool) -> String {
+    format!("{query:?}{binding:?}{include_deleted}")
 }
 
 /// Whether a read may wait for the server: a live link needs the own
@@ -566,6 +571,10 @@ pub(crate) struct Session {
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
     outbox: Vec<SyncMessage>,
+    /// Evictions answering a `Hold`: they describe the state the client
+    /// declared, so they go out before any row this tick ships (a resumed
+    /// subscription may ship a row's newer version).
+    stale: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
     /// The versions this tick's accepted commits from the client wrote:
@@ -608,6 +617,7 @@ impl Session {
             identity,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
+            stale: Vec::new(),
             touched: BTreeSet::new(),
             committed: Vec::new(),
             support: BTreeMap::new(),
@@ -637,6 +647,7 @@ impl Session {
     fn idle(&self) -> bool {
         self.touched.is_empty()
             && self.outbox.is_empty()
+            && self.stale.is_empty()
             && self.resume.is_empty()
             && self
                 .subs
@@ -1867,6 +1878,7 @@ impl Db {
                     query: r.query.clone(),
                     binding: r.binding.clone(),
                     since: r.through,
+                    include_deleted: r.include_deleted,
                 }
             })
             .collect();
@@ -2086,10 +2098,14 @@ impl Db {
     }
 
     /// Attach a remote query (refcounted per query and binding).
-    pub(crate) fn attach_remote(&self, prepared: &PreparedQuery) -> Option<Rc<StdCell<bool>>> {
+    pub(crate) fn attach_remote(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+    ) -> Option<Rc<StdCell<bool>>> {
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
-        let key = remote_key(&prepared.query, &prepared.binding);
+        let key = remote_key(&prepared.query, &prepared.binding, include_deleted);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some(remote.answered.clone());
@@ -2102,6 +2118,7 @@ impl Db {
             query: prepared.query.clone(),
             binding: prepared.binding.clone(),
             since: None,
+            include_deleted,
         });
         client.remote.insert(
             key.clone(),
@@ -2110,6 +2127,7 @@ impl Db {
                 refs: 1,
                 query: prepared.query.clone(),
                 binding: prepared.binding.clone(),
+                include_deleted,
                 answered: answered.clone(),
                 through: None,
                 resumed: false,
@@ -2119,12 +2137,17 @@ impl Db {
         Some(answered)
     }
 
-    pub(crate) fn detach_remote(&self, query: &Query, binding: &BTreeMap<String, Value>) {
+    pub(crate) fn detach_remote(
+        &self,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
+        include_deleted: bool,
+    ) {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return;
         };
-        let key = remote_key(query, binding);
+        let key = remote_key(query, binding, include_deleted);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -2148,6 +2171,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
+        include_deleted: bool,
         deadline: Option<Instant>,
     ) -> Option<u64> {
         let id = {
@@ -2164,6 +2188,7 @@ impl Db {
                 query: prepared.query.clone(),
                 binding: prepared.binding.clone(),
                 at,
+                include_deleted,
             });
             id
         };
@@ -3146,7 +3171,7 @@ impl Db {
                     )));
                 }
             }
-            let mut out = Vec::new();
+            let mut out = std::mem::take(&mut inner.sessions[index].stale);
             if !history_seqs.is_empty() {
                 out.push(SyncMessage::Origins {
                     commits: inner.origins(&history_seqs)?,
@@ -3209,6 +3234,7 @@ impl Db {
                 query,
                 binding,
                 since,
+                include_deleted,
             } => {
                 let prepared = db.prepare_query_bound(&query, binding)?;
                 let windowed = query.limit.is_some() || query.offset > 0;
@@ -3217,7 +3243,10 @@ impl Db {
                 let (queue, group) = inner.subscribe_member(
                     &prepared,
                     policy,
-                    ReadSpec::default(),
+                    ReadSpec {
+                        include_deleted,
+                        ..ReadSpec::default()
+                    },
                     SettledBy::Always,
                 )?;
                 inner.sessions[index]
@@ -3262,8 +3291,11 @@ impl Db {
                         current.insert((id, key), (seq, deleted, can));
                     }
                     for ((id, key), seq) in declared {
+                        // A deleted version the client already holds stays
+                        // (includeDeleted reads list it); a deletion it
+                        // missed is an eviction.
                         match current.get(&(id, key.clone())) {
-                            Some(&(now, false, can)) => {
+                            Some(&(now, deleted, can)) if !deleted || (now == seq && can) => {
                                 watch.insert(wk((
                                     stored.clone(),
                                     "id".to_owned(),
@@ -3284,7 +3316,7 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
                 session.touched.extend(touched);
-                session.outbox.extend(evict);
+                session.stale.extend(evict);
             }
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
@@ -3305,6 +3337,7 @@ impl Db {
                 query,
                 binding,
                 at,
+                include_deleted,
             } => {
                 let prepared = db.prepare_query_bound(&query, binding)?;
                 let mut inner = db.inner();
@@ -3316,6 +3349,7 @@ impl Db {
                     .to_owned();
                 let read = ReadSpec {
                     cut: at.map(Cut::at),
+                    include_deleted,
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
@@ -3796,12 +3830,6 @@ impl Db {
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
         if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
-            // A fetch reads the authority's live rows only.
-            if opts.include_deleted && is_history_table(&query.table) {
-                return Err(crate::values::unsupported(
-                    "includeDeleted on synced history reads",
-                ));
-            }
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
                 (_, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => Some(Some(
@@ -3811,7 +3839,8 @@ impl Db {
             };
             if let Some(deadline) = wait {
                 Self::remote_shape(&prepared.query)?;
-                self.fetch(&prepared, None, deadline).await;
+                self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
+                    .await;
             }
         }
         let roots = self

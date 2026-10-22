@@ -160,7 +160,7 @@ fn options_objects_decode_as_the_typescript_runtime_sends_them() {
     }))
     .unwrap();
     assert_eq!(read.tier, ReadTier::LocalOnly);
-    assert!(read.include_deleted);
+    assert!(read.read_view.include_deleted);
     // Only a local-first read waits for its first remote load.
     assert_eq!(read.first_load, jazz::db::FirstLoad::Deliver);
     assert!(

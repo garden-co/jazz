@@ -286,7 +286,6 @@ fn open_chat_query(db: &BenchDb) -> PreparedQuery {
 fn subscription_opts() -> ReadOpts {
     ReadOpts {
         tier: ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

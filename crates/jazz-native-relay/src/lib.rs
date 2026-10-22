@@ -6671,7 +6671,7 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
         .ok_or_else(|| failure("expected object".to_owned()))?;
     let mut first_load_remote_wait_ms = None;
     for (key, item) in object {
-        if item.is_null() {
+        if item.is_null() || key == "include_deleted" {
             continue;
         }
         if key == "first_load_remote_wait_ms" {
@@ -6704,6 +6704,14 @@ fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
             .unwrap_or_else(|| item.clone());
     }
     let mut opts: ReadOpts = serde_json::from_value(value).map_err(|e| failure(e.to_string()))?;
+    if let Some(include_deleted) = object
+        .get("include_deleted")
+        .filter(|value| !value.is_null())
+    {
+        opts.read_view.include_deleted = include_deleted
+            .as_bool()
+            .ok_or_else(|| failure("include_deleted must be a boolean".to_owned()))?;
+    }
     // A local-first read's server-wait timeout. `Remote` reads ignore it.
     if let Some(timeout_ms) = first_load_remote_wait_ms
         && opts.tier == jazz::db::ReadTier::LocalFirst

@@ -246,9 +246,6 @@ impl Inner {
         read: ReadSpec,
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
-        if read.include_deleted && is_history_table(&prepared.query.table) {
-            return Err(unsupported("includeDeleted on history subscriptions"));
-        }
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
