@@ -85,13 +85,13 @@ fn configured_wasm_log_level() -> tracing::Level {
         )
         .ok()
         .and_then(|value| value.as_string());
-        return match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        match value.as_deref().map(str::to_ascii_lowercase).as_deref() {
             Some("error") => tracing::Level::ERROR,
             Some("info") => tracing::Level::INFO,
             Some("debug") => tracing::Level::DEBUG,
             Some("trace") => tracing::Level::TRACE,
             _ => tracing::Level::WARN,
-        };
+        }
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
