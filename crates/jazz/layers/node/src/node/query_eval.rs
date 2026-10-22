@@ -1874,6 +1874,7 @@ where
             }
             occurrences.push((
                 source_request.source,
+                source_request.visibility,
                 RecordDescriptor::new_with_fields(fields),
             ));
         }
@@ -1899,12 +1900,17 @@ where
                 },
             );
         }
-        for (occurrence, descriptor) in occurrences {
+        for (occurrence, visibility, descriptor) in occurrences {
             let shared = &sources[&self
                 .scope_physical_table(request.reads.primary.read_schema, &occurrence.table)?];
             let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
             if !crate::schema::history::is_history_table(&occurrence.table) {
                 graph = graph.filter(PredicateExpr::eq("covered_is_current", Value::Bool(true)));
+                // An include-deleted root shares this input with joins and
+                // includes of the same table, which still see live rows only.
+                if visibility == RowVisibility::Visible {
+                    graph = graph.filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(false)));
+                }
             }
             if shared.descriptor != descriptor {
                 // Select compiler-owned carriers while preserving their logical

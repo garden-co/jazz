@@ -1063,7 +1063,7 @@ where
             if opts.read_view.include_deleted {
                 return Err(Error::new(
                     ErrorCode::Query,
-                    "branch views do not support include_deleted yet",
+                    "branch views and snapshots do not support include_deleted yet",
                 ));
             }
             let snapshot = match authorization_mode {
