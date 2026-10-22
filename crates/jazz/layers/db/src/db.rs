@@ -49,7 +49,7 @@ use crate::values::{
 pub use sync::{
     Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireTransport, WireTransportAdapter, duplex,
+    Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
