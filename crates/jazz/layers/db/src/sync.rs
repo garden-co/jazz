@@ -2353,9 +2353,7 @@ impl Db {
         }
         let mark = inner.changed.borrow().len();
         let applied = inner.apply_as(&op, who, seq).map(drop);
-        let undone = inner
-            .conn
-            .execute_batch("ROLLBACK TO advise; RELEASE advise");
+        let undone = inner.rollback_savepoint("advise");
         inner.changed.borrow_mut().truncate(mark);
         match (applied, undone) {
             (_, Err(_)) => PermissionAdvice::Unknown,
@@ -2387,10 +2385,7 @@ impl Db {
                 .execute_batch("RELEASE sync_tick")
                 .map_err(storage)?;
         } else {
-            inner
-                .conn
-                .execute_batch("ROLLBACK TO sync_tick; RELEASE sync_tick")
-                .map_err(storage)?;
+            inner.rollback_savepoint("sync_tick").map_err(storage)?;
         }
         drop(inner);
         applied?;
@@ -2638,12 +2633,14 @@ impl Db {
                 .execute_batch("SAVEPOINT replay")
                 .map_err(storage)?;
             let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
-            let end = if replayed.is_ok() {
-                "RELEASE replay"
+            if replayed.is_ok() {
+                inner
+                    .conn
+                    .execute_batch("RELEASE replay")
+                    .map_err(storage)?;
             } else {
-                "ROLLBACK TO replay; RELEASE replay"
-            };
-            inner.conn.execute_batch(end).map_err(storage)?;
+                inner.rollback_savepoint("replay").map_err(storage)?;
+            }
         }
         let client = inner.client.as_mut().expect("client");
         client.shadow = shadow
@@ -3521,8 +3518,7 @@ impl Db {
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop));
             if let Err(error) = applied {
                 inner
-                    .conn
-                    .execute_batch("ROLLBACK TO upload; RELEASE upload")
+                    .rollback_savepoint("upload")
                     .map_err(|e| (storage(e), Vec::new()))?;
                 inner.changed.borrow_mut().truncate(mark);
                 let rows = mentioned(&inner);
