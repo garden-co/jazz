@@ -13,8 +13,12 @@ use super::{
 };
 
 pub(super) fn compare_optional_values(left: Option<Value>, right: Option<Value>) -> Ordering {
+    compare_optional_value_refs(left.as_ref(), right.as_ref())
+}
+
+fn compare_optional_value_refs(left: Option<&Value>, right: Option<&Value>) -> Ordering {
     match (left, right) {
-        (Some(left), Some(right)) => compare_order_values(&left, &right),
+        (Some(left), Some(right)) => compare_order_values(left, right),
         (None, Some(_)) => Ordering::Less,
         (Some(_), None) => Ordering::Greater,
         (None, None) => Ordering::Equal,
@@ -42,25 +46,51 @@ pub(super) fn sort_aggregate_rows<T>(
     row: impl Fn(&T) -> &CurrentRow,
     tie_break: impl Fn(&T, &T) -> Ordering,
 ) -> Result<(), Error> {
+    let group_column = query
+        .aggregate
+        .as_ref()
+        .and_then(|aggregate| aggregate.group_by.as_deref());
+    if group_column.is_none() && query.order_by.is_empty() {
+        rows.sort_by(tie_break);
+        return Ok(());
+    }
+    // Reuse an explicit group term's decoded slot, even when it is descending.
+    let group_index = group_column.map(|column| {
+        query
+            .order_by
+            .iter()
+            .position(|order| order.column == column)
+            .unwrap_or(query.order_by.len())
+    });
     let mut keys = rows
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let values = query
-                .order_by
-                .iter()
-                .map(|order| aggregate_row_cell(row(item), &order.column))
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut values = Vec::with_capacity(
+                query.order_by.len() + usize::from(group_index == Some(query.order_by.len())),
+            );
+            for order in &query.order_by {
+                values.push(aggregate_row_cell(row(item), &order.column)?);
+            }
+            if let Some(column) = group_column.filter(|_| group_index == Some(values.len())) {
+                values.push(aggregate_row_cell(row(item), column)?);
+            }
             Ok((index, values))
         })
         .collect::<Result<Vec<_>, Error>>()?;
     keys.sort_by(|(left_index, left), (right_index, right)| {
         for ((left, right), order) in left.iter().zip(right).zip(&query.order_by) {
-            let ordering = compare_optional_values(left.clone(), right.clone());
+            let ordering = compare_optional_value_refs(left.as_ref(), right.as_ref());
             let ordering = match order.direction {
                 crate::query::OrderDirection::Asc => ordering,
                 crate::query::OrderDirection::Desc => ordering.reverse(),
             };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+        }
+        if let Some(index) = group_index {
+            let ordering = compare_optional_value_refs(left[index].as_ref(), right[index].as_ref());
             if ordering != Ordering::Equal {
                 return ordering;
             }

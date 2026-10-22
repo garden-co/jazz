@@ -782,7 +782,9 @@ key encoding where that type is a valid key part (groove ch. 2). A grouped query
 whose group key contains a type without a specified stable order must be rejected
 until that type's ordering is specified. If an explicit `order_by` is applied to
 grouped output and multiple groups tie on the user order terms, the group key is
-the stable tie-breaker.
+the stable tie-breaker. Opaque synthetic row and occurrence identities identify
+groups but do not define their order. Apply this logical ordering before the
+grouped output's `offset` and `limit`.
 
 Ordering is part of the delivered result, not a presentation hint. Initial
 snapshots, reset-result-set `ViewUpdate`s, maintained subscription deltas, and
