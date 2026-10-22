@@ -31,10 +31,7 @@ fn schema() -> Schema {
 }
 
 fn filtered() -> Query {
-    Query::from("tasks").filter(eq(
-        col("done"),
-        lit(jazz::groove::records::Value::Bool(false)),
-    ))
+    Query::from("tasks").filter(eq(col("done"), lit(jazz::records::Value::Bool(false))))
 }
 
 async fn local_rows(client: &JazzClient, query: Query) -> Vec<(ObjectId, Vec<Value>)> {

@@ -2095,6 +2095,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-testkit"
+version = "0.1.0"
+dependencies = [
+ "jazz",
+ "jazz-native-transport",
+ "jazz-server",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zstd",
+]
+
+[[package]]
 name = "jazz-types"
 version = "0.1.0"
 dependencies = [
