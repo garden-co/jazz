@@ -447,6 +447,9 @@ impl Inner {
         for reach in &query.reachable {
             structural.insert(stored(&reach.access_table)?);
             structural.insert(stored(&reach.edge_table)?);
+            if let Some(seed) = &reach.seed {
+                structural.insert(stored(&seed.table)?);
+            }
         }
         // Policy evidence pinned by a session equality.
         let mut pinned: HashMap<String, Option<(String, String)>> = HashMap::new();

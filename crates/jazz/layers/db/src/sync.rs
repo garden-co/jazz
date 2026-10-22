@@ -682,6 +682,36 @@ pub(crate) enum Support {
         outer: String,
         nested: Vec<Support>,
     },
+    /// The edges of a gather from the row's `frontier` value: edge rows
+    /// whose `member` holds it, then transitively from each edge's
+    /// `parent`. The depth bound is the client's to apply.
+    Reach {
+        frontier: String,
+        edges: String,
+        member: String,
+        parent: String,
+    },
+}
+
+/// Whether a reachability traversal is a gather the replica can evaluate
+/// from the result and its edges ([`Support::Reach`]): seeded by rows of
+/// the root table that are themselves in the result (no filter after the
+/// gather), reaching root rows by id.
+fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
+    via.seed.as_ref().is_some_and(|seed| {
+        seed.table == query.table && seed.user_column.is_none() && seed.team_column == "id"
+    }) && via.access_table == query.table
+        && via.access_row_column == "id"
+        && via.access_team_column == "id"
+        && via.access_filters.is_empty()
+        && query.filters.is_empty()
+}
+
+/// The edge table of a [`Support::Reach`], by stored names.
+struct Reach<'a> {
+    edges: &'a str,
+    member: &'a str,
+    parent: &'a str,
 }
 
 /// A watch as a 64-bit hash: per-session checks stay a few integer probes
@@ -925,6 +955,15 @@ impl Inner {
             });
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
+        for via in &query.reachable {
+            let edges = self.schema.table(&via.edge_table)?;
+            support.push(Support::Reach {
+                frontier: table.stored_name(&via.access_team_column).to_owned(),
+                edges: edges.stored.clone(),
+                member: edges.stored_name(&via.edge_member_column).to_owned(),
+                parent: edges.stored_name(&via.edge_parent_column).to_owned(),
+            });
+        }
         Ok(support)
     }
 
@@ -1015,6 +1054,22 @@ impl Inner {
     ) -> Result<(), Error> {
         for item in support {
             let (table, column, value, nested) = match item {
+                Support::Reach {
+                    frontier,
+                    edges,
+                    member,
+                    parent,
+                } => {
+                    if let Some(value) = image_cell(image, frontier) {
+                        let reach = Reach {
+                            edges,
+                            member,
+                            parent,
+                        };
+                        self.follow_edges(&reach, value, identity, out, watch, held)?;
+                    }
+                    continue;
+                }
                 Support::Include { column, target } => match image_cell(image, column) {
                     Some(value @ Sql::Blob(_)) => (target, "id", value, &[][..]),
                     _ => continue,
@@ -1070,6 +1125,63 @@ impl Inner {
                     out.push(found.clone());
                 }
                 self.follow_support(nested, &found, identity, out, watch, held)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Ship the readable edges of a gather from `value` and, transitively,
+    /// from their parents, watching each frontier value so later edges
+    /// reach the replica. A watched value was followed already: cycles end.
+    fn follow_edges(
+        &self,
+        reach: &Reach<'_>,
+        value: Sql,
+        identity: Option<AuthorSubject>,
+        out: &mut Vec<Image>,
+        watch: &mut HashSet<u64>,
+        held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
+    ) -> Result<(), Error> {
+        let mut frontier = vec![value];
+        while let Some(value) = frontier.pop() {
+            if matches!(value, Sql::Null) {
+                continue;
+            }
+            let key = (
+                reach.edges.to_owned(),
+                reach.member.to_owned(),
+                watch_key(&value),
+            );
+            if !watch.insert(wk(key)) {
+                continue;
+            }
+            let filter = if reach.member == "id" {
+                "id = ?1".to_owned()
+            } else {
+                format!("{} = ?1", quote(reach.member))
+            };
+            for found in self.images_where(reach.edges, false, &filter, &[&value])? {
+                let row = RowUuid::from_bytes(found.id);
+                let can = readable(self, reach.edges, row, &found.key, identity)?;
+                if identity.is_some() {
+                    held.entry(reach.edges.to_owned())
+                        .or_default()
+                        .insert((row, found.key.clone()), can);
+                }
+                if !can {
+                    continue;
+                }
+                if let Some(parent) = image_cell(&found, reach.parent) {
+                    frontier.push(parent);
+                }
+                let unwatched = watch.insert(wk((
+                    reach.edges.to_owned(),
+                    "id".to_owned(),
+                    watch_key(&Sql::Blob(found.id.to_vec())),
+                )));
+                if unwatched {
+                    out.push(found);
+                }
             }
         }
         Ok(())
@@ -2113,7 +2225,7 @@ impl Db {
     /// partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
         let other_tables = !query.joins.is_empty()
-            || !query.reachable.is_empty()
+            || !query.reachable.iter().all(|via| gather_shaped(query, via))
             || !query.inherits.is_empty()
             || query
                 .includes
