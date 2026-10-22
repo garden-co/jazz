@@ -990,7 +990,6 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members() {
     };
     let local_opts = ReadOpts {
         tier: crate::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     };
     assert_eq!(

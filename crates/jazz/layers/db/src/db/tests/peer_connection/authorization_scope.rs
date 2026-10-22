@@ -2144,6 +2144,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             .supporting_rows
             .added_rows_mut()
             .push(crate::protocol::SupportingRow {
+                is_current: true,
                 physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
                 version_table: "todos".to_owned().into(),
                 row: row(1),
@@ -2201,6 +2202,7 @@ fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_reten
     let shape = Query::from("todos").validate(&schema).unwrap();
     let oversized_opts = RegisterShapeOptions {
         read_view: ReadViewSpec {
+            include_deleted: false,
             source: ReadViewSourceSpec::Snapshot {
                 snapshot: SnapshotRef {
                     owner: NodeUuid::from_bytes([0x98; 16]),

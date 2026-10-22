@@ -490,7 +490,7 @@ fn partial_node_snapshot_advances_from_authoritative_settled_through() {
     assert_eq!(base.global_base, GlobalTime(2));
     assert_eq!(base.dots, vec![TxId::new(TxTime::new(13, 0), node(9))]);
     let rows = reader
-        .projected_snapshot_current_rows("todos", schema().version_id(), &base)
+        .projected_snapshot_current_rows("todos", schema().version_id(), &base, false)
         .resolve()
         .unwrap();
     assert_eq!(rows.len(), 2);

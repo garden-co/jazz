@@ -95,9 +95,45 @@ describe.each(["direct", "mergeable", "serializable"] as const)(
   },
 );
 
+describe.each(["mergeable", "serializable"] as const)("%s include-deleted reads", (kind) => {
+  it("reads deleted content through the durable owner", async () => {
+    const todo = await db
+      .insert(app.todos, { title: "retained", done: false })
+      .wait({ tier: "local" });
+    await db.delete(app.todos, todo.id).wait({ tier: "local" });
+    const tx = kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
+    try {
+      const query = app.todos.where({ id: todo.id });
+      expect(await tx.one(query.includeDeleted())).toEqual(todo);
+      expect(await tx.one(query)).toBeNull();
+    } finally {
+      await tx.rollback();
+    }
+  });
+});
+
 describe("db serializable transaction reads browser integration", () => {
   beforeEach(async () => {
     await db.all(app.todos);
+  });
+
+  it("keeps deleted content at the snapshot cut after restoration", async () => {
+    const todo = await db
+      .insert(app.todos, { title: "before deletion", done: false })
+      .wait({ tier: "local" });
+    await db.delete(app.todos, todo.id).wait({ tier: "local" });
+    const tx = db.beginSerializableTransaction();
+    try {
+      await db
+        .restore(app.todos, todo.id, { title: "restored", done: false })
+        .wait({ tier: "local" });
+      const query = app.todos.where({ id: todo.id });
+      expect(await tx.one(query.includeDeleted())).toEqual(todo);
+      expect(await tx.one(query)).toBeNull();
+      expect(await db.one(query)).toEqual({ ...todo, title: "restored" });
+    } finally {
+      await tx.rollback();
+    }
   });
 
   it("anchors a read-only transaction snapshot when begin is called", async () => {

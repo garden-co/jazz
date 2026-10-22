@@ -10,6 +10,15 @@ use super::*;
 use crate::node::query_engine::{CoverageScope, InheritedContribution};
 use crate::query::{RelationProjectExpr, RelationQuery, RelationRowIdRef, relation_scope};
 
+pub(super) fn flat_join_source_id(table: &str, index: usize, alias: &str) -> SourceId {
+    SourceId {
+        table: table.to_owned(),
+        path: SourcePath {
+            components: vec![SourceRole::Alias(format!("flat_join:{index}:{alias}"))],
+        },
+    }
+}
+
 pub(super) fn root_source_id(table: &str) -> SourceId {
     SourceId {
         table: table.to_owned(),
@@ -549,9 +558,9 @@ fn root_equality_literal(
 pub(super) fn select_current_access_path(
     table: &TableSchema,
     equalities: &BTreeMap<String, Value>,
-) -> Option<CurrentAccessPath> {
+) -> Option<SourceAccessPath> {
     if let Some(value) = equalities.get("id").cloned() {
-        return Some(CurrentAccessPath::PrimaryKey(vec![value]));
+        return Some(SourceAccessPath::PrimaryKey(vec![value]));
     }
     let mut probes = Vec::new();
     for column in table.global_current_indexed_columns() {
@@ -563,7 +572,7 @@ pub(super) fn select_current_access_path(
         }
     }
     let (column, prefix) = probes.first()?.clone();
-    Some(CurrentAccessPath::Index {
+    Some(SourceAccessPath::Index {
         column,
         order_column: None,
         reverse: false,
@@ -584,7 +593,7 @@ pub(super) fn select_composite_leading_equality_access_path(
     table: &TableSchema,
     equalities: &BTreeMap<String, Value>,
     covered: &str,
-) -> Option<CurrentAccessPath> {
+) -> Option<SourceAccessPath> {
     table.composite_indexes.iter().find_map(|columns| {
         let [first, second] = columns.as_slice() else {
             return None;
@@ -593,7 +602,7 @@ pub(super) fn select_composite_leading_equality_access_path(
             return None;
         }
         let value = equalities.get(first)?.clone();
-        Some(CurrentAccessPath::Index {
+        Some(SourceAccessPath::Index {
             column: first.clone(),
             order_column: Some(second.clone()),
             reverse: false,
@@ -1062,10 +1071,10 @@ fn normalize_operand_with_target_type_and_flat_join_alias(
         Operand::Column(column) if column == "id" => {
             NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
         }
-        Operand::Column(column) => match provenance_field(column) {
-            Some(field) => NormalizedValueRef::Provenance {
+        Operand::Column(column) => match crate::schema::magic::MagicColumn::parse(column) {
+            Some(column) => NormalizedValueRef::Magic {
                 source: source.clone(),
-                field,
+                column,
             },
             None => NormalizedValueRef::SourceField {
                 source: source.clone(),
@@ -1109,17 +1118,22 @@ pub(super) fn operand_column_type(
     let Operand::Column(column) = operand else {
         return Ok(None);
     };
-    if let Some(field) = provenance_field(column) {
-        return Ok(Some(match field {
-            ProvenanceField::CreatedAt | ProvenanceField::UpdatedAt => ColumnType::U64,
-            ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => RowAuthor::value_type(),
-        }));
+    if let Some(column) =
+        crate::schema::magic::MagicColumn::parse(column).filter(|column| column.is_provenance())
+    {
+        return Ok(Some(column.value_type().clone()));
     }
     if column == "id" {
         return Ok(Some(ColumnType::Uuid));
     }
-    Ok(table_schema(schema, &source.table)?
-        .columns
+    let history;
+    let columns = if let Some(table) = crate::schema::history::history_source_table(&source.table) {
+        history = crate::schema::history::HistoryRelationSchema::new(table_schema(schema, table)?);
+        history.columns()
+    } else {
+        &table_schema(schema, &source.table)?.columns
+    };
+    Ok(columns
         .iter()
         .find(|candidate| candidate.name == *column)
         .map(|column| column.column_type.clone()))
@@ -1171,16 +1185,6 @@ pub(super) fn coerce_literal_for_column_type(value: Value, column_type: &ColumnT
         ))),
         (value, ColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
         (value, _) => value,
-    }
-}
-
-fn provenance_field(column: &str) -> Option<ProvenanceField> {
-    match column {
-        "$createdAt" => Some(ProvenanceField::CreatedAt),
-        "$createdBy" => Some(ProvenanceField::CreatedBy),
-        "$updatedAt" => Some(ProvenanceField::UpdatedAt),
-        "$updatedBy" => Some(ProvenanceField::UpdatedBy),
-        _ => None,
     }
 }
 
@@ -1333,7 +1337,7 @@ where
     let mut sources = BTreeSet::new();
     let mut paths = Vec::new();
     let root_source = root_source_id(root_table);
-    let root_schema = node.table_in_schema_ref(root_table, schema_version)?;
+    let root_schema = node.table_in_schema(root_table, schema_version)?;
     let explicit_root_segments = includes
         .iter()
         .filter_map(|include| include.path.split('.').next())
@@ -2984,6 +2988,27 @@ where
             .schema_for_version(shape.schema_version())
             .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let query = shape.query();
+        let schema: &RuntimeSchema = schema;
+        let mut virtual_schema = std::borrow::Cow::Borrowed(schema);
+        for table in std::iter::once(&query.table).chain(
+            query
+                .flat_join
+                .iter()
+                .flat_map(|join| join.sources.iter().map(|source| &source.table)),
+        ) {
+            if crate::schema::history::is_history_table(&table)
+                && !virtual_schema
+                    .tables
+                    .iter()
+                    .any(|entry| &entry.name == table)
+            {
+                virtual_schema
+                    .to_mut()
+                    .tables
+                    .push(self.table_in_schema(table, shape.schema_version())?);
+            }
+        }
+        let schema = virtual_schema.as_ref();
         if let Some(relation) = &query.relation
             && crate::query::relation_union_parts(&relation.rel).is_some()
         {
@@ -3244,12 +3269,7 @@ where
                     .as_deref()
                     .unwrap_or(join.table.as_str())
                     .to_owned();
-                let source = SourceId {
-                    table: join.table.clone(),
-                    path: SourcePath {
-                        components: vec![SourceRole::Alias(format!("flat_join:{index}:{name}"))],
-                    },
-                };
+                let source = flat_join_source_id(&join.table, index, &name);
                 let source_node = RowSetNodeId(format!("flat_join:{index}:source"));
                 nodes.insert(
                     source_node.clone(),

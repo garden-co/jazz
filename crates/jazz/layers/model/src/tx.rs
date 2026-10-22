@@ -444,6 +444,12 @@ pub struct TxId {
 }
 
 impl TxId {
+    /// Groove descriptor for the portable `(time, node UUID)` transaction identity.
+    pub fn value_type() -> groove::records::ValueType {
+        use groove::records::ValueType;
+        ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid])
+    }
+
     /// Construct a transaction id.
     pub fn new(time: TxTime, node: NodeUuid) -> Self {
         Self { time, node }
@@ -513,10 +519,7 @@ impl RejectionReason {
                     EnumCase::new("causality_violation", RecordDescriptor::default()),
                     EnumCase::new(
                         "cascade",
-                        RecordDescriptor::new([(
-                            "root",
-                            ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid]),
-                        )]),
+                        RecordDescriptor::new([("root", TxId::value_type())]),
                     ),
                     EnumCase::new(
                         "malformed_commit",

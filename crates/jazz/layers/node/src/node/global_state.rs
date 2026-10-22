@@ -133,6 +133,7 @@ where
         let left = moved
             .into_iter()
             .map(|(row, tx)| crate::protocol::SupportingRow {
+                is_current: true,
                 physical_table,
                 version_table: table.to_owned().into(),
                 row,

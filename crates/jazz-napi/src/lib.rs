@@ -4013,9 +4013,6 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     if let Some(tier) = optional_json_string_prop(&value, "tier")? {
         opts.tier = core_read_tier_from_str(&tier)?;
     }
-    if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
-        opts.include_deleted = include_deleted;
-    }
     // A local-first read's server-wait timeout. `Remote` reads ignore it.
     if let Some(timeout_ms) = optional_json_wait_ms_prop(&value, "first_load_remote_wait_ms")?
         && opts.tier == jazz::db::ReadTier::LocalFirst
@@ -4029,6 +4026,9 @@ fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOp
     {
         opts.read_view = serde_json::from_value::<CoreReadViewSpec>(read_view.clone())
             .map_err(|error| napi::Error::from_reason(format!("invalid read_view: {error}")))?;
+    }
+    if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
+        opts.read_view.include_deleted = include_deleted;
     }
     Ok(opts)
 }

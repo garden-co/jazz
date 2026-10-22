@@ -3260,6 +3260,61 @@ async fn record_values_canonicalize_delta_identity_and_are_rejected_as_arrangeme
     );
 }
 
+/// The shared projection operator must propagate null at any parent depth and
+/// avoid adding another nullable wrapper to an already-nullable leaf. This
+/// lower-level test covers nested record shapes beyond Jazz's fixed author shape.
+#[futures_test::test]
+async fn record_field_projection_propagates_nullable_parents() {
+    let mut runtime = IvmRuntime::new(albums_schema()).unwrap();
+    let storage = Rc::new(MemoryStorage::new(&["albums"]).unwrap());
+    let optional = |value| Value::Nullable(Some(Box::new(value)));
+    let leaf = RecordDescriptor::new([("label", ValueType::Nullable(Box::new(ValueType::String)))]);
+    let parent = RecordDescriptor::new([(
+        "child",
+        ValueType::Nullable(Box::new(ValueType::Record(Box::new(leaf)))),
+    )]);
+    let source = RecordDescriptor::new([(
+        "root",
+        ValueType::Nullable(Box::new(ValueType::Record(Box::new(parent)))),
+    )]);
+    let record = |descriptor: RecordDescriptor, value| {
+        Value::Record(OwnedRecord::new(
+            descriptor.create(&[value]).unwrap(),
+            descriptor,
+        ))
+    };
+    for (input, expected) in [
+        (Value::Nullable(None), Value::Nullable(None)),
+        (
+            optional(record(parent, Value::Nullable(None))),
+            Value::Nullable(None),
+        ),
+        (
+            optional(record(
+                parent,
+                optional(record(leaf, Value::Nullable(None))),
+            )),
+            Value::Nullable(None),
+        ),
+        (
+            optional(record(
+                parent,
+                optional(record(leaf, optional(Value::String("present".into())))),
+            )),
+            optional(Value::String("present".into())),
+        ),
+    ] {
+        let graph = GraphBuilder::inline_records(source, [source.create(&[input]).unwrap()])
+            .project_fields([ProjectField::record_field(
+                "root",
+                ["child", "label"],
+                "label",
+            )]);
+        let result = runtime.query_snapshot(graph, &storage).await.unwrap();
+        assert_eq!(result.to_values().unwrap(), vec![(vec![expected], 1)]);
+    }
+}
+
 // Internal coverage is needed here because correct output alone cannot detect
 // decoding copied fields, allocating per-row records, or losing batch sharing.
 #[test]

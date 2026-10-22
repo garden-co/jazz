@@ -375,3 +375,108 @@ async fn query_subscriptions_support_qualified_wildcards_after_join() {
 
 mod joins;
 mod recursion;
+
+/// Alice's graph query builds tuple values across a join and preserves required
+/// values. Missing required metadata fails the query instead of dropping rows.
+/// This Groove-level test covers the projection contract used by history sources.
+#[futures_test::test]
+async fn graph_tuple_and_required_projections_preserve_values_and_errors() {
+    use crate::ivm::{FieldRef, ProjectExpr, ProjectField};
+    use crate::records::FieldIdentity;
+
+    let storage = MemoryStorage::new(&["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("first".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    let field = |name: &str, expression| ProjectField {
+        expression,
+        output_name: name.to_owned(),
+        output_identity: FieldIdentity::Name(name.to_owned()),
+    };
+    let graph = GraphBuilder::join(
+        GraphBuilder::table("albums"),
+        GraphBuilder::table("albums"),
+        ["id"],
+        ["id"],
+    )
+    .project_fields([
+        field(
+            "version",
+            ProjectExpr::Tuple(vec![FieldRef::name("left.id"), FieldRef::name("right.id")]),
+        ),
+        field("required", ProjectExpr::Nullable(FieldRef::name("left.id"))),
+    ])
+    .project_fields([
+        ProjectField::named("version"),
+        field(
+            "required",
+            ProjectExpr::Required(FieldRef::name("required")),
+        ),
+    ]);
+    let rows = database
+        .query_graph(graph.clone())
+        .await
+        .unwrap()
+        .to_values()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![(
+            vec![
+                Value::Tuple(vec![Value::U64(1), Value::U64(1)]),
+                Value::U64(1)
+            ],
+            1
+        )]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("second".to_owned())],
+    );
+    database.commit_batch(batch).await.unwrap();
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let invalid_tuple = GraphBuilder::table("albums").project_fields([field(
+        "version",
+        ProjectExpr::Tuple(vec![FieldRef::name("title")]),
+    )]);
+    let error = database.query_graph(invalid_tuple).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("tuple members must be fixed-width"),
+        "{error}"
+    );
+
+    let missing = GraphBuilder::table("albums")
+        .project_fields([ProjectField::null_typed(
+            "required",
+            crate::records::ValueType::U64.nullable(),
+        )])
+        .project_fields([field(
+            "required",
+            ProjectExpr::Required(FieldRef::name("required")),
+        )]);
+    let error = database.query_graph(missing).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("required projection value is missing"),
+        "{error}"
+    );
+}

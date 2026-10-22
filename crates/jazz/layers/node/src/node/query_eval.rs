@@ -50,19 +50,19 @@ use super::query_engine::{
     OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
     PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
     ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
-    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramCompilation,
-    QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView, RequestedReadSet,
-    RequestedSourceStage, ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef,
-    RowIdRef, RowProjection, RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId,
-    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
-    SchemaProjection, SortDirection as NormalizedSortDirection, SourceAuthorizationRequest,
-    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceMetadataFields,
-    SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
-    SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
-    UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
-    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
-    claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
-    right_field, route_param_field, table_user_column_field, user_column_field,
+    QueryAuthorizationMode, QueryProgram, QueryProgramCompilation, QueryProgramRequest,
+    QueryReadSet, ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage,
+    ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
+    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
+    SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
+    SourceGraphPreparer, SourceId, SourceLookup, SourceMetadataFields, SourceMetadataRequirement,
+    SourcePath, SourceRequest, SourceRequirements, SourceResolutionError, SourceRole,
+    SourceRowShape, StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn,
+    ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column,
+    aggregate_output_field, authorized_deletion_preimage_source_request, claim_param_field,
+    claim_path_from_param_field, left_field, query_program_source_requests, right_field,
+    route_param_field, table_user_column_field, user_column_field,
 };
 use crate::object::{ObjectId, OutputOccurrenceId};
 #[cfg(test)]
@@ -255,6 +255,7 @@ enum CurrentQueryProgramOutput {
     MaintainedView,
 }
 
+mod history;
 mod read_sources;
 
 use read_sources::*;
@@ -370,23 +371,17 @@ where
             .map_err(|report| query_capability_error(&report))?
             .into_iter()
             .filter(|source_request| {
-                source_request.visibility == RowVisibility::Visible
-                    && matches!(
-                        request.reads.primary.sources.get(&source_request.source),
-                        Some(SourceExpr::SettledBindingView { .. })
-                    )
+                matches!(
+                    request.reads.primary.sources.get(&source_request.source),
+                    Some(SourceExpr::SettledBindingView { .. })
+                )
             })
             .map(|source_request| source_request.source.table)
             .collect::<BTreeSet<_>>();
-        tables
-            .into_iter()
-            .map(|table| {
-                Ok((
-                    self.scope_physical_table(request.reads.primary.read_schema, &table)?,
-                    table.into(),
-                ))
-            })
-            .collect()
+        self.scope_tables(
+            request.reads.primary.read_schema,
+            tables.iter().map(String::as_str),
+        )
     }
 
     async fn compile_current_query_program(
@@ -538,7 +533,7 @@ where
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
-    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, CurrentAccessPath>), Error> {
+    ) -> Result<(QueryProgramRequest, BTreeMap<SourceId, SourceAccessPath>), Error> {
         // A branch view's layers are masked before their predicates (SPEC 4
         // §4.7), so an index bounds each of its content layers for a one-shot
         // read as much as for a maintained one.
@@ -564,7 +559,7 @@ where
             access_paths.extend(
                 self.query_program_access_paths(&request, true)?
                     .into_iter()
-                    .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+                    .filter(|(_, path)| matches!(path, SourceAccessPath::Index { .. })),
             );
         }
         Ok((request, access_paths))
@@ -578,6 +573,7 @@ where
         identity: AuthorSubject,
         settled_binding_view: Option<BindingViewKey>,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request(
             shape,
@@ -585,7 +581,7 @@ where
             tier,
             identity,
             CurrentQueryProgramOutput::AppRows,
-            &ReadViewSpec::default(),
+            read_view,
             settled_binding_view,
             authorization_mode,
         )?;
@@ -634,7 +630,7 @@ where
         if access_paths.contains_key(&root) {
             return Ok(None);
         }
-        access_paths.insert(root.clone(), CurrentAccessPath::PrimaryKeyPage { cap });
+        access_paths.insert(root.clone(), SourceAccessPath::PrimaryKeyPage { cap });
         let (register, exhausted) = self
             .bounded_deletion_register_for_uuid_page(shape, cap)
             .await?;
@@ -841,7 +837,7 @@ where
             binding,
             HydrationLifetime::FirstResult,
         )?;
-        let Some(CurrentAccessPath::Index {
+        let Some(SourceAccessPath::Index {
             column,
             order_column,
             reverse,
@@ -898,10 +894,10 @@ where
     async fn bounded_deletion_register_for_ordered_page(
         &mut self,
         shape: &ValidatedQuery,
-        path: &CurrentAccessPath,
+        path: &SourceAccessPath,
         cap: usize,
     ) -> Result<(GraphBuilder, bool), Error> {
-        let CurrentAccessPath::Index {
+        let SourceAccessPath::Index {
             column,
             order_column: Some(order_column),
             reverse,
@@ -1075,7 +1071,7 @@ where
             return Ok(None);
         }
         let paths = self.one_shot_access_paths(shape, binding, DurabilityTier::Global)?;
-        let Some(CurrentAccessPath::Index {
+        let Some(SourceAccessPath::Index {
             column,
             intersections,
             ..
@@ -1177,7 +1173,7 @@ where
         tier: DurabilityTier,
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<QueryProgram, Error> {
         let request = self.current_query_program_request_with_inline_binding_source(
@@ -1201,6 +1197,9 @@ where
         identity: AuthorSubject,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
+        if shape.query().uses_history() {
+            return Err(history::unsupported("history relations at a snapshot cut"));
+        }
         self.catalogue
             .catalogue_schemas
             .get(&shape.schema_version())
@@ -1322,7 +1321,7 @@ where
         let access_paths = if let Some(row) = physical_row {
             BTreeMap::from([(
                 root_source_id(&shape.query().table),
-                CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
+                SourceAccessPath::PrimaryKey(vec![Value::Uuid(row.0)]),
             )])
         } else {
             self.one_shot_access_paths(shape, binding, tier)?
@@ -1479,6 +1478,14 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
+        if shape.query().uses_history() {
+            if !matches!(
+                output,
+                CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::MaintainedView
+            ) {
+                return Err(history::unsupported("structured history results"));
+            }
+        }
         let policy = self.query_program_policy_context(identity);
         let requested_shape_id = shape.shape_id();
         // Linked shapes carry read-policy alternatives so a trusted serving
@@ -1513,7 +1520,8 @@ where
             && tier == DurabilityTier::Local
             && read_view.is_default()
             && matches!(output, CurrentQueryProgramOutput::MaintainedView);
-        let use_prepared_binding_source = (!client_local || client_local_prepared)
+        let use_prepared_binding_source = !shape.query().uses_history()
+            && (!client_local || client_local_prepared)
             && !force_inline_binding_source
             && self.can_use_prepared_current_query_plan(shape)
             && settled_binding_view.is_none()
@@ -1531,7 +1539,11 @@ where
         } else {
             (shape, binding)
         };
-        let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let mut input_shape = if read_view.include_deleted {
+            self.normalized_include_deleted_row_set_shape(shape, binding)?
+        } else {
+            self.normalized_row_set_shape(shape, binding)?
+        };
         let settled_view_matches_query_window = settled_binding_view.is_some_and(|binding_view| {
             // A cold receiver is compiled before RegisterShape is processed.
             // Its exact requested shape already identifies the input window;
@@ -1638,7 +1650,7 @@ where
                 .schema
         };
         let root_has_read_policy = self
-            .table_in_schema_ref(&shape.query().table, shape.schema_version())?
+            .table_in_schema(&shape.query().table, shape.schema_version())?
             .read_policy
             .is_some();
         let storage_backed_result_materialization = matches!(output, CurrentQueryProgramOutput::MaintainedView)
@@ -1766,6 +1778,7 @@ where
             identity,
             false,
             QueryAuthorizationMode::TrustedServing,
+            &ReadViewSpec::default(),
             None,
         )
         .await
@@ -1788,6 +1801,7 @@ where
             identity,
             false,
             QueryAuthorizationMode::ClientLocal,
+            &ReadViewSpec::default(),
             None,
         )
         .await
@@ -1819,9 +1833,6 @@ where
         for source_request in query_program_source_requests(request)
             .map_err(|report| query_capability_error(&report))?
         {
-            if source_request.visibility != RowVisibility::Visible {
-                continue;
-            }
             let Some(expression) = request.reads.primary.sources.get(&source_request.source) else {
                 continue;
             };
@@ -1838,7 +1849,8 @@ where
                 continue;
             }
             let table = self.table_in_schema_ref(
-                &source_request.source.table,
+                crate::schema::history::history_source_table(&source_request.source.table)
+                    .unwrap_or(&source_request.source.table),
                 request.reads.primary.read_schema,
             )?;
             let metadata =
@@ -1848,38 +1860,76 @@ where
                     &table, &metadata,
                 );
             table_metadata
-                .entry(source_request.source.table.clone())
+                .entry(table.name.clone())
                 .or_default()
                 .extend(metadata);
-            occurrences.push((source_request.source, descriptor));
+            // Include-deleted occurrences keep the authority's deletion bit so
+            // a covered deleted image materializes as a deleted row.
+            let mut fields = descriptor.fields().to_vec();
+            if source_request.visibility == RowVisibility::IncludeDeleted {
+                fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
+            }
+            if crate::schema::history::is_history_table(&source_request.source.table) {
+                fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
+            }
+            occurrences.push((
+                source_request.source,
+                source_request.visibility,
+                RecordDescriptor::new_with_fields(fields),
+            ));
         }
         for (table_name, metadata) in table_metadata {
-            let table = self.table_in_schema_ref(&table_name, request.reads.primary.read_schema)?;
+            let stored_name =
+                crate::schema::history::history_source_table(&table_name).unwrap_or(&table_name);
+            let table = self.table_in_schema_ref(stored_name, request.reads.primary.read_schema)?;
             let descriptor =
                 read_sources::current_row_descriptor_with_hidden_source_fields_for_current_storage(
                     &table, &metadata,
                 );
+            let mut fields = descriptor.fields().to_vec();
+            fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
+            fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
+            let descriptor = RecordDescriptor::new_with_fields(fields);
             let id = self.database.allocate_input_source(descriptor.clone());
             sources.insert(
                 self.scope_physical_table(request.reads.primary.read_schema, &table_name)?,
                 maintained_views::CoveredInputSource {
                     id,
                     descriptor,
-                    table: table_name.into(),
+                    table: stored_name.to_owned().into(),
                 },
             );
         }
-        for (occurrence, descriptor) in occurrences {
+        for (occurrence, visibility, descriptor) in occurrences {
             let shared = &sources[&self
                 .scope_physical_table(request.reads.primary.read_schema, &occurrence.table)?];
             let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
+            if !crate::schema::history::is_history_table(&occurrence.table) {
+                graph = graph.filter(PredicateExpr::eq("covered_is_current", Value::Bool(true)));
+                // An include-deleted root shares this input with joins and
+                // includes of the same table, which still see live rows only.
+                if visibility == RowVisibility::Visible {
+                    graph = graph.filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(false)));
+                }
+            }
             if shared.descriptor != descriptor {
-                graph = graph.project(
-                    descriptor
-                        .fields()
-                        .iter()
-                        .map(|field| field.name.clone().expect("covered input fields are named")),
-                );
+                // Select compiler-owned carriers while preserving their logical
+                // identities. An app column named `created_by` must not shadow
+                // the provenance carrier with that stored name.
+                graph = graph.project_fields(descriptor.fields().iter().map(|field| {
+                    ProjectField {
+                        expression: groove::ivm::ProjectExpr::Field(
+                            groove::ivm::FieldRef::stored_name(
+                                field.name.clone().expect("covered input fields are named"),
+                            ),
+                        ),
+                        output_name: field.name.clone().expect("covered input fields are named"),
+                        output_identity: field
+                            .identity
+                            .clone()
+                            .expect("covered input fields have identities"),
+                    }
+                }));
             }
             runtime_sources.insert(occurrence.clone(), graph);
             runtime_source_descriptors.insert(occurrence, descriptor);
@@ -1899,7 +1949,7 @@ where
     async fn compile_client_one_shot_with_covered_inputs(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         result_schema_version: SchemaVersionId,
         read_view: &ReadViewSpec,
         authority_result_key: &AuthorityResultKey,
@@ -2008,12 +2058,14 @@ where
             identity,
             true,
             authorization_mode,
+            &ReadViewSpec::default(),
             None,
         )
         .await
     }
 
-    async fn query_rows_with_options_for_identity(
+    #[doc(hidden)]
+    pub async fn query_rows_with_options_for_identity(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2022,6 +2074,7 @@ where
         identity: AuthorSubject,
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
+        read_view: &ReadViewSpec,
         mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
         let phase_started = profile.as_ref().map(|_| Instant::now());
@@ -2033,21 +2086,22 @@ where
                     tier,
                     identity,
                     authorization_mode,
-                    &ReadViewSpec::default(),
+                    read_view,
                 )
                 .await?;
             let query = shape.query();
-            self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
-            self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
+            self.finalize_query_rows(query, shape.schema_version(), &mut rows, None)?;
             return Ok(rows);
         }
-        if authorization_mode == QueryAuthorizationMode::TrustedServing
+        if read_view.is_default()
+            && authorization_mode == QueryAuthorizationMode::TrustedServing
             && tier == DurabilityTier::Global
             && let Some(rows) = self.try_uuid_page_probe(shape, binding, identity).await?
         {
             return Ok(rows);
         }
-        if authorization_mode == QueryAuthorizationMode::TrustedServing
+        if read_view.is_default()
+            && authorization_mode == QueryAuthorizationMode::TrustedServing
             && tier == DurabilityTier::Global
             && let Some(rows) = self
                 .try_ordered_page_probe(shape, binding, identity)
@@ -2057,14 +2111,7 @@ where
         }
         let client_settled_binding_view = (authorization_mode
             == QueryAuthorizationMode::ClientLocal)
-            .then(|| {
-                self.client_settled_binding_view_for_query(
-                    shape,
-                    binding,
-                    tier,
-                    &ReadViewSpec::default(),
-                )
-            })
+            .then(|| self.client_settled_binding_view_for_query(shape, binding, tier, read_view))
             .flatten();
         let settled_binding_view = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => {
@@ -2137,7 +2184,7 @@ where
                 tier,
                 identity,
                 CurrentQueryProgramOutput::AppRows,
-                &ReadViewSpec::default(),
+                read_view,
                 settled_binding_view,
                 authorization_mode,
             )?;
@@ -2152,7 +2199,7 @@ where
                     request,
                     access_paths,
                     shape.schema_version(),
-                    &ReadViewSpec::default(),
+                    read_view,
                     authority_result_key,
                 )
                 .await?
@@ -2169,6 +2216,7 @@ where
                 identity,
                 settled_binding_view,
                 authorization_mode,
+                read_view,
             )
             .await?
         };
@@ -2289,18 +2337,15 @@ where
         )))
     }
 
-    /// Materialize one-shot current rows and expose the canonical public
-    /// result. Passing no profile keeps the ordinary read path clock-free.
-    fn materialize_and_finalize_query_rows(
+    /// Decode and normalize rows while retaining ordering fields. Sorting and
+    /// public projection belong to the caller's finalization boundary.
+    fn materialize_query_rows(
         &mut self,
         query: &crate::query::Query,
-        schema_version: SchemaVersionId,
         table_schema: &TableSchema,
         app_output: &AppRowSchema,
         deltas: &RecordDeltas,
-        mut profile: Option<&mut QueryReadProfile>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let phase_started = profile.as_ref().map(|_| Instant::now());
         let mut rows = if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(query, app_output, deltas)?
         } else if query.flat_join.is_some() {
@@ -2322,7 +2367,13 @@ where
             for (record, weight) in deltas.iter() {
                 if weight > 0 {
                     let row = decode_current_row(&self.authors, table_schema, record)?;
-                    rows.push(self.materialize_current_row(table_schema, row)?);
+                    let row = self.materialize_current_row(table_schema, row)?;
+                    let count = usize::try_from(weight).map_err(|_| {
+                        Error::InvalidStoredValue(
+                            "query result multiplicity exceeds addressable memory",
+                        )
+                    })?;
+                    rows.extend(std::iter::repeat_n(row, count));
                 }
             }
             rows
@@ -2350,24 +2401,51 @@ where
         {
             normalize_public_current_rows(query, table_schema, &mut rows)?;
         }
+        Ok(rows)
+    }
+
+    /// Materialize one-shot current rows and expose the canonical public
+    /// result. Passing no profile keeps the ordinary read path clock-free.
+    fn materialize_and_finalize_query_rows(
+        &mut self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        table_schema: &TableSchema,
+        app_output: &AppRowSchema,
+        deltas: &RecordDeltas,
+        mut profile: Option<&mut QueryReadProfile>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let phase_started = profile.as_ref().map(|_| Instant::now());
+        let mut rows = self.materialize_query_rows(query, table_schema, app_output, deltas)?;
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
             profile.decode_materialize = started.elapsed();
         }
 
+        self.finalize_query_rows(query, schema_version, &mut rows, profile)?;
+        Ok(rows)
+    }
+
+    fn finalize_query_rows(
+        &self,
+        query: &crate::query::Query,
+        schema_version: SchemaVersionId,
+        rows: &mut Vec<CurrentRow>,
+        mut profile: Option<&mut QueryReadProfile>,
+    ) -> Result<(), Error> {
         let phase_started = profile.as_ref().map(|_| Instant::now());
-        self.finish_engine_query_rows_in_schema(query, schema_version, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, schema_version, rows)?;
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
             profile.finish_rows = started.elapsed();
         }
 
         let phase_started = profile.as_ref().map(|_| Instant::now());
         if query.flat_join.is_none() && query.array_subqueries.is_empty() {
-            self.apply_projection_in_schema(query, schema_version, &mut rows)?;
+            self.apply_projection_in_schema(query, schema_version, rows)?;
         }
         if let (Some(started), Some(profile)) = (phase_started, profile.as_mut()) {
             profile.apply_projection = started.elapsed();
         }
-        Ok(rows)
+        Ok(())
     }
 
     async fn query_rows_with_options_for_identity_profiled(
@@ -2389,6 +2467,7 @@ where
                 identity,
                 false,
                 QueryAuthorizationMode::TrustedServing,
+                &ReadViewSpec::default(),
                 Some(&mut profile),
             )
             .await?;
@@ -2778,8 +2857,7 @@ where
         let table = if query.aggregate.is_some() {
             self.query_output_table(query, lowered_shape.schema_version())?
         } else {
-            self.table_in_schema_ref(&query.table, lowered_shape.schema_version())?
-                .clone()
+            self.table_in_schema(&query.table, lowered_shape.schema_version())?
         };
         let binding = lowered_shape.bind(BTreeMap::new())?;
         let program = self
@@ -2798,7 +2876,14 @@ where
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
             .await
             .map_err(Error::Groove)?;
-        if query.aggregate.is_some() {
+        if query.uses_history() {
+            self.materialize_query_rows(
+                query,
+                &table,
+                &materialization_app_row_schema(None, Some(&program))?,
+                &deltas,
+            )
+        } else if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(
                 query,
                 &materialization_app_row_schema(None, Some(&program))?,
@@ -3262,7 +3347,7 @@ where
             .clone();
         let access_paths = BTreeMap::from([(
             root_source_id(&shape.query().table),
-            CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
+            SourceAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
         )]);
         let program = self
             .compile_current_query_program_with_access_paths(
@@ -4152,6 +4237,7 @@ where
             None,
             None,
             PreparedClaimBindingMode::Strict,
+            CurrentQueryProgramOutput::MaintainedView,
             false,
             progress_waker,
         )
@@ -4263,6 +4349,7 @@ where
                 settled_binding_view,
                 Some(authority_result_key.clone()),
                 PreparedClaimBindingMode::Strict,
+                CurrentQueryProgramOutput::MaintainedView,
                 false,
                 progress_waker,
             )
@@ -4430,6 +4517,7 @@ where
             None,
             None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
+            CurrentQueryProgramOutput::MaintainedView,
             false,
             progress_waker,
         )
@@ -4464,6 +4552,7 @@ where
         settled_binding_view: Option<BindingViewKey>,
         settled_authority_result_key: Option<AuthorityResultKey>,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
+        output: CurrentQueryProgramOutput,
         pending_overlay: bool,
         progress_waker: Option<&std::task::Waker>,
     ) -> Result<
@@ -4521,7 +4610,7 @@ where
             &binding,
             tier,
             identity,
-            CurrentQueryProgramOutput::MaintainedView,
+            output,
             read_view,
             settled_binding_view,
             authorization_mode,
@@ -4721,8 +4810,21 @@ where
         // coordinate follows the row's authored schema across a table rename.
         let mut witness_table_names = BTreeMap::new();
         for logical_name in tables.keys() {
+            let stored_name =
+                crate::schema::history::history_source_table(&logical_name).unwrap_or(logical_name);
+            if stored_name != logical_name {
+                let physical_table = *maintained
+                    .physical_tables
+                    .get(&stored_name.to_owned().into())
+                    .ok_or(Error::InvalidStoredValue(
+                        "history source has no physical table identity",
+                    ))?;
+                maintained
+                    .physical_tables
+                    .insert(logical_name.clone().into(), physical_table);
+            }
             let table_id =
-                self.physical_table_id_for_schema(shape.schema_version(), logical_name)?;
+                self.physical_table_id_for_schema(shape.schema_version(), stored_name)?;
             for (schema_id, mapping) in &self.catalogue.physical_mappings {
                 let Some(alias) = self.catalogue.schema_version_aliases.get(schema_id) else {
                     continue;
@@ -5079,7 +5181,30 @@ fn normalize_public_current_rows(
     let columns = table
         .columns
         .iter()
+        // Normalize only columns retained by the terminal projection. Missing
+        // unselected metadata must not be recreated as application cells.
+        .filter(|column| {
+            query.aggregate.is_some()
+                || query.select.as_ref().is_none_or(|selected| {
+                    selected.contains(&column.name)
+                        || query
+                            .order_by
+                            .iter()
+                            .any(|order| order.column == column.name)
+                })
+        })
         .map(|column| column.name.clone())
+        .chain(
+            query
+                .select
+                .iter()
+                .flatten()
+                .filter(|column| {
+                    (column.as_str() == "$deletedAt" || column.starts_with("$deletedBy"))
+                        || AuthorSubject::metadata_path(column).is_some()
+                })
+                .cloned(),
+        )
         .collect::<Vec<_>>();
     for row in rows {
         *row = if let Some(aggregate) = &query.aggregate {
@@ -5144,13 +5269,9 @@ fn apply_query_window(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
 }
 
 fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
-    if let Some(ty) = AuthorSubject::metadata_type(column) {
-        return Some(ty);
-    }
-    match column {
-        "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
-        _ => None,
-    }
+    crate::schema::magic::MagicColumn::parse(column)
+        .filter(|column| column.is_provenance())
+        .map(|column| column.value_type())
 }
 
 fn is_magic_current_column(column: &str) -> bool {

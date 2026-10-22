@@ -29,6 +29,11 @@ use crate::query::{claim, col, eq};
 
 pub use crate::model::public_schema_convert::SchemaConversionError;
 
+/// Query-only descriptors for virtual history relations.
+pub mod history;
+/// Query-only public computed columns.
+pub mod magic;
+
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");

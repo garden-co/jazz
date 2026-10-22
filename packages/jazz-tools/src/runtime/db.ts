@@ -1,3 +1,4 @@
+import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
@@ -370,7 +371,7 @@ function normalizeBranchSelector(
   input: Branch,
   scope: "table" | "schema",
 ): BranchSelector {
-  const table = schema[tableName];
+  const table = resolveQueryTable(schema, tableName);
   if (!table) throw new Error(`Unknown table "${tableName}".`);
   const tableColumns = table.branchBy ?? [];
   const expected =
@@ -561,11 +562,25 @@ function cloneActiveQuerySubscriptionTrace(
 }
 
 function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string): WasmSchema {
-  if (preferredSchema[tableName]) {
+  if (resolveQueryTable(preferredSchema, tableName)) {
     return preferredSchema;
   }
 
   throw new Error(`Query schema is missing table "${tableName}".`);
+}
+
+function normalizeQueryOptions(
+  schema: WasmSchema,
+  table: string,
+  options?: InternalDbQueryOptions,
+) {
+  return normalizeViewOptions(schema, table, options) ?? {};
+}
+
+function assertWritableTable(table: { readonly _table: string }): void {
+  if (isHistoryTable(table._table)) {
+    throw new Error(`History table "${table._table}" is read-only`);
+  }
 }
 
 /** Apply the table's input transforms, then encode `data` as the write record for `operation`. */
@@ -1646,6 +1661,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * once it's committed.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
+    assertWritableTable(table);
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
@@ -1695,6 +1711,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Init,
     options?: RestoreOptions,
   ): T {
+    assertWritableTable(table);
     this.bindTable(table);
     const { values, value } = this.prepareCreation(table, data, id, "Restore");
     const client = this.resolveClient(table._schema);
@@ -1756,6 +1773,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): void {
+    assertWritableTable(table);
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
@@ -1812,6 +1830,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Record<string, unknown>,
     options?: UpdateOptions & { applyDiffs?: object },
   ): void {
+    assertWritableTable(table);
     this.bindTable(table);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
@@ -1909,6 +1928,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): void {
+    assertWritableTable(table);
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("delete");
@@ -2574,6 +2594,7 @@ export class Db {
    * @returns Write result containing the inserted row
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
     const transformedData = table._columnTransforms
@@ -2626,6 +2647,7 @@ export class Db {
     data: StreamingInit,
     options?: StreamingInsertOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectIncompleteDependencies(table, ordinaryData, [column]);
@@ -2669,6 +2691,7 @@ export class Db {
     data: StreamingUpdate,
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectIncompleteDependencies(table, ordinaryData, [column]);
@@ -2710,6 +2733,7 @@ export class Db {
     data: StreamingUpdate,
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     rejectIncompleteDependencies(table, ordinaryData, [column]);
@@ -2756,6 +2780,7 @@ export class Db {
     data: Init,
     options?: RestoreOptions,
   ): WriteResult<T> {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const transformedData = table._columnTransforms
       ? transformInputColumns(table, data, { id }, true)
@@ -2803,6 +2828,7 @@ export class Db {
     data: Partial<Init>,
     options?: UpdateOptions,
   ): WriteHandle {
+    assertWritableTable(table);
     return this.prepareMutation(table, id, data as Record<string, unknown>, "Upsert", options);
   }
 
@@ -2942,6 +2968,7 @@ export class Db {
     data: Record<string, unknown>,
     options?: UpdateOptions & { applyDiffs?: object },
   ): WriteHandle {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
@@ -2968,6 +2995,7 @@ export class Db {
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const context = this.getAccessContext();
     const result = runAfterPreparation(client, () =>
@@ -3181,7 +3209,7 @@ export class Db {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
     const prepared = prepareTransformRead(query, builtQuery, outputTable);
-    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
+    const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
     const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getAccessContext();
@@ -3300,7 +3328,7 @@ export class Db {
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
-    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
+    const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;

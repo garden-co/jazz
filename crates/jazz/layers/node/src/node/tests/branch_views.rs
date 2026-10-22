@@ -314,6 +314,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     .unwrap();
 
     let read_view = crate::protocol::ReadViewSpec {
+        include_deleted: false,
         source: crate::protocol::ReadViewSourceSpec::BranchView {
             head: head.clone(),
             base: Some(crate::protocol::BranchViewBase::Current(base)),
@@ -1999,6 +2000,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
         let binding = shape.bind(BTreeMap::new()).unwrap();
         let branch_column = schema.tables[0].branch_by[0].clone();
         let view = crate::protocol::ReadViewSpec {
+            include_deleted: false,
             source: crate::protocol::ReadViewSourceSpec::BranchView {
                 head: BranchSelector::new([(branch_column, Value::Uuid(workspace))]),
                 base: None,

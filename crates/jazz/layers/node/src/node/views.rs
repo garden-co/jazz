@@ -226,15 +226,21 @@ fn content_row_members_for_bundle(
         .iter()
         .filter(|member| member.as_row().is_some())
         .map(|member| {
-            member.as_row().ok_or(Error::InvalidStoredValue(match member {
-                ResultMemberEntry::Row(_) | ResultMemberEntry::TypedRow { .. } => context,
+            let (table, row, tx) = member.as_row().ok_or(Error::InvalidStoredValue(match member {
+                ResultMemberEntry::Row(_) => context,
                 ResultMemberEntry::Synthetic { .. } => {
                     "synthetic result members require typed payload facts before row bundle shipping"
                 }
                 ResultMemberEntry::PathTuple { .. } => {
                     "path tuple result members require typed payload facts before row bundle shipping"
                 }
-            }))
+            }))?;
+            // Virtual history outputs refer to ordinary stored versions. Use
+            // their base table for immutable bodies and visibility witnesses,
+            // including restore-only events needed by local-first readers.
+            let table = crate::schema::history::history_source_table(&table)
+                .map(|name| name.to_owned().into()).unwrap_or(table);
+            Ok((table, row, tx))
         })
         .collect()
 }
@@ -268,7 +274,10 @@ pub fn single_table_scalar_query(query: &crate::query::Query) -> bool {
             Predicate::EnumMatch { .. } => false,
         }
     }
-    query.filters.iter().all(predicate)
+    // Current-row reconciliation is keyed by row UUID; history needs its
+    // full occurrence identity and stays on the maintained relational path.
+    !query.uses_history()
+        && query.filters.iter().all(predicate)
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.policy_branches.is_empty()
@@ -729,6 +738,7 @@ where
         schema: SchemaVersionId,
         table: &str,
     ) -> Result<crate::ids::GlobalPhysicalTableId, Error> {
+        let table = crate::schema::history::history_source_table(&table).unwrap_or(table);
         self.catalogue
             .physical_mappings
             .get(&schema)
@@ -737,6 +747,25 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "scope physical table mapping missing",
             ))
+    }
+
+    pub(super) fn scope_tables<'a>(
+        &self,
+        schema: SchemaVersionId,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<CompiledScopeTables, Error> {
+        let mut tables = CompiledScopeTables::new();
+        for name in names {
+            let physical = self.scope_physical_table(schema, name)?;
+            tables.insert(
+                physical,
+                crate::schema::history::history_source_table(&name)
+                    .unwrap_or(name)
+                    .to_owned()
+                    .into(),
+            );
+        }
+        Ok(tables)
     }
 
     pub(super) fn scope_logical_table(
@@ -813,15 +842,23 @@ where
             }) else {
                 return Err(invalid());
             };
+            let replacement_coordinate = |input: &SupportingRow| {
+                let coordinate = CoveredInputCoordinate::from(input);
+                if input.is_current {
+                    coordinate.row_coordinate()
+                } else {
+                    coordinate
+                }
+            };
             let moved = changed
                 .iter()
                 .chain(left)
-                .map(CoveredInputCoordinate::from)
+                .map(replacement_coordinate)
                 .collect::<BTreeSet<_>>();
             let mut rows = state
                 .covered_input_versions
                 .iter()
-                .filter(|(coordinate, _)| !moved.contains(*coordinate))
+                .filter(|(_, row)| !moved.contains(&replacement_coordinate(row)))
                 .map(|(_, row)| row.clone())
                 .collect::<Vec<_>>();
             rows.extend(changed.iter().cloned());
@@ -934,8 +971,12 @@ where
         // authoritative node store when shipping a newly admitted member.
         // Keep callers' explicit fallback flag for the legacy cases that
         // already use it.
+        // History witnesses use the virtual query schema (including magic
+        // columns). Ship their exact authored storage images, addressed by
+        // the already-authorized supporting row and transaction.
         let allow_storage_witness_fallback = allow_storage_witness_fallback
-            || maintained_facts.uses_storage_backed_result_materialization();
+            || maintained_facts.uses_storage_backed_result_materialization()
+            || shape.query().uses_history();
         let supporting_update = supporting_update.unwrap_or_else(|| {
             crate::protocol::SupportingRowsUpdate::snapshot(
                 maintained_facts.supporting_rows().cloned().collect(),
@@ -1084,7 +1125,7 @@ where
                 // require this transaction, while other siblings remain private.
                 tx_versions_cache
                     .entry(tx_id)
-                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id))
+                    .or_insert_with(|| maintained_facts.publication_versions_by_tx(tx_id))
                     .extend(versions.into_iter().filter(|version| !version.is_deleted()));
                 wanted_add_rows_by_tx
                     .entry(tx_id)
@@ -1137,7 +1178,7 @@ where
             }
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
-                .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
+                .or_insert_with(|| maintained_facts.publication_versions_by_tx(*tx_id));
             // These checks only need content-witness presence, not a selected
             // version. Index once rather than decoding row identities while
             // scanning the transaction twice for every requested row. Keep
@@ -1148,10 +1189,24 @@ where
                 .filter(|version| !version.is_deleted())
                 .map(|version| (version.table().to_owned(), version.row_uuid()))
                 .collect::<BTreeSet<_>>();
+            let deletion_coordinates = tx_versions
+                .iter()
+                .filter(|version| version.is_deleted())
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
             let mut needs_storage_fallback = false;
             for (entry_table, row_uuid) in wanted_rows {
                 let coordinate = (entry_table.clone(), *row_uuid);
-                if content_coordinates.contains(&coordinate) {
+                // Supporting membership can name a deletion register alone.
+                // Only an actual result member requires a content witness.
+                if content_coordinates.contains(&coordinate)
+                    || (deletion_coordinates.contains(&coordinate)
+                        && !result_add_coordinates.contains(&(
+                            entry_table.as_str(),
+                            *row_uuid,
+                            *tx_id,
+                        )))
+                {
                     continue;
                 }
                 let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);
@@ -1537,7 +1592,7 @@ where
                 .collect::<BTreeSet<_>>();
             let tx_versions = tx_versions_cache
                 .entry(tx_id)
-                .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
+                .or_insert_with(|| maintained_facts.publication_versions_by_tx(tx_id));
             if winners.iter().any(|(_, _, winner, _)| {
                 !maintained_view_tx_versions_contain_winner(tx_versions, winner)
             }) {
@@ -2099,6 +2154,35 @@ where
                         }
                     };
                     if adding {
+                        // Each register has at most one admitted current winner,
+                        // alongside any number of exact historical versions.
+                        if row.is_current {
+                            let base = coordinate.row_coordinate();
+                            let changed = changes
+                                .range(base.clone()..)
+                                .take_while(|(key, _)| key.row_coordinate() == base)
+                                .any(|(key, value)| {
+                                    key != &coordinate
+                                        && value.as_ref().is_some_and(|row| row.is_current)
+                                });
+                            let retained = !*cleared
+                                && state.is_some_and(|state| {
+                                    state
+                                        .covered_input_versions
+                                        .range(base.clone()..)
+                                        .take_while(|(key, _)| key.row_coordinate() == base)
+                                        .any(|(key, row)| {
+                                            key != &coordinate
+                                                && row.is_current
+                                                && !changes.contains_key(key)
+                                        })
+                                });
+                            if changed || retained {
+                                return Err(invalid(
+                                    "scope addition conflicts with a retained current row version",
+                                ));
+                            }
+                        }
                         if let Some(retained) = current {
                             return Err(invalid(&format!(
                                 "scope addition duplicates a retained physical coordinate \

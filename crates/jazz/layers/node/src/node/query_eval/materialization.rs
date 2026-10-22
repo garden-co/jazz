@@ -172,10 +172,19 @@ where
         table: TableSchema,
         deltas: groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let deleted_field_idx = current_row_fields(&table).len();
         let mut rows = Vec::new();
         for (record, weight) in deltas.iter() {
             if weight > 0 {
+                // Version metadata can precede the deletion marker. Resolve its
+                // stored name instead of assuming the ordinary row's field count.
+                let deleted_field_idx = record
+                    .descriptor()
+                    .fields()
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some("__jazz_deleted"))
+                    .ok_or(Error::InvalidStoredValue(
+                        "include-deleted query result is missing its deletion marker",
+                    ))?;
                 let deleted = record.get_bool(deleted_field_idx)?;
                 let row = decode_current_row(&self.authors, &table, record)?;
                 let row = self.materialize_current_row(&table, row)?;
@@ -304,7 +313,8 @@ where
             .await?;
         if let Some(row) = &mut row {
             if let Some(columns) = local.relation_projection_for_member(member)? {
-                let table = self.table(local.result_table.as_str())?.clone();
+                let table =
+                    self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
                 *row = row.project_relation(&table, columns)?;
                 Self::bind_app_row_schema_fields(
                     row,
@@ -351,7 +361,8 @@ where
         // membership witness continues to identify the exact immutable
         // version across a rename.  Payloads and application rows, however,
         // are interpreted in this subscription's read schema.
-        let table = self.table(local.result_table.as_str())?.clone();
+        let table =
+            self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -480,7 +491,8 @@ where
         };
         // See the non-cached path above: the entry label is canonical while
         // the materialized row belongs to the subscription read schema.
-        let table = self.table(local.result_table.as_str())?.clone();
+        let table =
+            self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -1236,7 +1248,7 @@ where
             )?;
             return Ok(());
         }
-        let table = self.table_in_schema_ref(&query.table, schema_version)?;
+        let table = self.table_in_schema(&query.table, schema_version)?;
         rows.sort_by(|left, right| {
             for order in &query.order_by {
                 let ordering = compare_optional_values(
@@ -1265,7 +1277,7 @@ where
         let Some(columns) = &query.select else {
             return Ok(());
         };
-        let table = self.table_in_schema_ref(&query.table, schema_version)?;
+        let table = self.table_in_schema(&query.table, schema_version)?;
         for row in rows {
             *row = row.project(&table, columns)?;
         }
@@ -1303,11 +1315,11 @@ where
                 // relation aliases and are checked against their own schema.
                 continue;
             }
-            let table = self.table_in_schema_ref(row.table(), shape.schema_version())?;
+            let table = self.table_in_schema(row.table(), shape.schema_version())?;
             let projection = (index < snapshot.root_count && row.table() == query.table)
                 .then_some(query.select.as_deref())
                 .flatten();
-            if !current_row_has_required_subscription_cells(row, table, projection) {
+            if !current_row_has_required_subscription_cells(row, &table, projection) {
                 return Ok(false);
             }
         }
@@ -1404,7 +1416,8 @@ where
             )?;
         }
         if local.result_relation_projections.is_some() {
-            let table = self.table(local.result_table.as_str())?.clone();
+            let table =
+                self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
             let schema = local.terminal_schemas.direct_app_row_schema()?;
             for (row, occurrence) in rows.iter_mut().zip(&root_occurrence_ids) {
                 if let Some(columns) = local.relation_projection_for_occurrence(occurrence)? {
@@ -1413,7 +1426,8 @@ where
                 }
             }
         } else if let Some(columns) = &local.result_relation_projection {
-            let table = self.table(local.result_table.as_str())?.clone();
+            let table =
+                self.table_in_schema(local.result_table.as_str(), local.result_schema_version)?;
             let schema = local.terminal_schemas.direct_app_row_schema()?;
             for row in &mut rows {
                 *row = row.project_relation(&table, columns)?;

@@ -651,7 +651,6 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         &query,
         ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     )
@@ -775,7 +774,6 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
         &query,
         ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     )

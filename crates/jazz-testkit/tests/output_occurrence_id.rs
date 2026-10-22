@@ -302,7 +302,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             );
             let encoded = serde_json::to_vec(&self_key).expect("serialize result key");
             let wire: Vec<u8> = serde_json::from_slice(&encoded).expect("inspect opaque key bytes");
-            assert_eq!(wire.first(), Some(&1), "result key wire format is versioned");
+            assert_eq!(wire.first(), Some(&2), "result key encoding is versioned");
             assert_eq!(
                 serde_json::from_slice::<ResultKey>(&encoded).expect("deserialize result key"),
                 self_key,

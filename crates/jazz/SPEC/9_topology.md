@@ -59,7 +59,8 @@ Wire protocol v5 introduced the same compact core durability tags, and v6
 The Rust tools facade encodes `Local=0`, `GlobalServer=1`. These byte-level
 contracts are pinned independently; serializers' default ordering is not the
 compatibility contract. Read-view keys use `JRVK` version 2 because their tier
-byte changed with this release.
+byte changed with this release; include-deleted read views use version 3, which
+appends the include-deleted flag (SPEC 6 §6.5).
 
 Upgrade clients, native bindings, and servers together. Earlier persistent
 roots cannot be opened by this release; retaining the files does not make them

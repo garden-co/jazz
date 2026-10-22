@@ -3371,8 +3371,6 @@ pub enum ReadTier {
 pub struct ReadOpts {
     /// Read semantics; execution resolves coverage durability separately.
     pub tier: ReadTier,
-    /// Include current rows whose deletion winner is `Deleted`.
-    pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an empty, unsettled opening. Host read-option state
@@ -3385,7 +3383,6 @@ impl Default for ReadOpts {
     fn default() -> Self {
         Self {
             tier: ReadTier::LocalFirst,
-            include_deleted: false,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
         }
@@ -3403,7 +3400,7 @@ impl ReadOpts {
 
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
-        self.read_view = ReadViewSpec::branch_view(head, base);
+        self.read_view.source = ReadViewSourceSpec::BranchView { head, base };
         self
     }
 }
@@ -3537,8 +3534,8 @@ fn remote_subscription_tier(
     tier.max(upstream_durability_floor)
 }
 
-fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.read_view.is_default() {
+fn ensure_current_read_source(opts: &ReadOpts) -> Result<(), Error> {
+    if matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
         return Ok(());
     }
     Err(Error::new(
@@ -3562,31 +3559,54 @@ fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     ))
 }
 
-fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.include_deleted {
+/// Include-deleted subscriptions support the current source, any snapshot
+/// (transaction reads register as snapshot subscriptions), or any source of a
+/// history query. Branch views of current tables reject the flag until they are
+/// specified and tested (SPEC 6 §6.6). Plain one-shot reads are narrower: they
+/// reject every non-current source of a current-table query with the flag.
+fn ensure_supported_include_deleted_read_view(
+    read_view: &ReadViewSpec,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    if read_view.include_deleted
+        && !query_uses_history
+        && matches!(read_view.source, ReadViewSourceSpec::BranchView { .. })
+    {
         return Err(Error::new(
             ErrorCode::Query,
-            "live subscriptions do not support include_deleted yet",
+            "branch views do not support include_deleted yet",
         ));
     }
-    ensure_supported_read_view(opts)
+    Ok(())
 }
 
-fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
+fn ensure_supported_subscription_read_opts(
+    opts: &ReadOpts,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    ensure_supported_read_view(opts)?;
+    ensure_supported_include_deleted_read_view(&opts.read_view, query_uses_history)
+}
+
+fn ensure_supported_register_shape_read_view(
+    opts: &RegisterShapeOptions,
+    query_uses_history: bool,
+) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
         ..ReadOpts::default()
     };
-    ensure_supported_read_view(&read_opts)
+    ensure_supported_subscription_read_opts(&read_opts, query_uses_history)
 }
 
 fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
+    query_uses_history: bool,
     local_receiver: bool,
     peer_role: PeerRole,
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
-    ensure_supported_register_shape_read_view(opts)?;
+    ensure_supported_register_shape_read_view(opts, query_uses_history)?;
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
@@ -6326,7 +6346,9 @@ fn apply_maintained_update_to_snapshot(
                 let candidates = snapshot_index
                     .roots
                     .keys_unordered()
-                    .filter(|candidate| candidate.canonical_bytes().get(..16) == root_bytes)
+                    .filter(|candidate| {
+                        Some(candidate.root_source().uuid().as_bytes().as_slice()) == root_bytes
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 match candidates.as_slice() {
@@ -6918,7 +6940,7 @@ fn terminal_subscription_output_row(
             format!("invalid terminal root key: {error}"),
         )
     })?;
-    if occurrence_id.canonical_bytes().get(..16) != Some(row_uuid.as_bytes()) {
+    if occurrence_id.root_source().uuid() != &row_uuid {
         return Err(Error::new(
             ErrorCode::Protocol,
             "terminal root payload key does not match its addressed result",
@@ -6999,7 +7021,7 @@ where
     else {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     };
-    if shape.query().flat_join.is_none() {
+    if shape.query().flat_join.is_none() && !shape.query().uses_history() {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     }
     let materialized = crate::local_executor::block_on(
@@ -7071,16 +7093,22 @@ where
 
 #[doc(hidden)]
 pub fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    let root = ObjectId::from_uuid(row.row_uuid().0);
+    use crate::node::query_engine::SourceOccurrenceKey;
+    let root = row
+        .raw_field(&SourceOccurrenceKey::joined_field(0))
+        .map(|value| SourceOccurrenceKey::decode_value(value).expect("valid root occurrence"))
+        .unwrap_or_else(|| {
+            crate::object::SourceOccurrenceId::current(ObjectId::from_uuid(row.row_uuid().0))
+        });
     let mut joined = Vec::new();
     for position in 1.. {
-        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
-        else {
+        let Some(value) = row.raw_field(&SourceOccurrenceKey::joined_field(position)) else {
             break;
         };
-        joined.push(ObjectId::from_uuid(row_id));
+        joined.push(SourceOccurrenceKey::decode_value(value).expect("valid joined occurrence"));
     }
-    OutputOccurrenceId::new(root, joined)
+    OutputOccurrenceId::from_source_occurrences(root, joined, [])
+        .expect("source occurrences without union arms")
 }
 
 fn subscription_outputs_with_occurrence_sidecar(
@@ -7101,8 +7129,7 @@ fn subscription_outputs_with_occurrence_sidecar(
         .zip(occurrence_ids)
         .enumerate()
         .map(|(index, (row, occurrence_id))| {
-            let bytes = occurrence_id.canonical_bytes();
-            if bytes.get(..16) != Some(row.row_uuid().0.as_bytes()) {
+            if occurrence_id.root_source().uuid() != &row.row_uuid().0 {
                 return Err(Error::new(
                     ErrorCode::Protocol,
                     "maintained root occurrence sidecar root does not match row",
