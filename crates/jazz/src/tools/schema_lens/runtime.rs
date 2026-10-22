@@ -1,9 +1,9 @@
 //! Lower public catalogue lenses to the runtime vocabulary.
 use super::{Lens, LensOp};
 use crate::protocol::{LensOp as CoreLensOp, MigrationLens, TableLens};
+use crate::records::Value as CoreValue;
 use crate::schema::JazzSchema;
 use crate::tools::public_schema::{Schema, TableName, Value};
-use groove::records::Value as CoreValue;
 use std::collections::BTreeMap;
 
 pub fn compile_lens(

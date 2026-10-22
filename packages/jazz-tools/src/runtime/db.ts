@@ -42,7 +42,6 @@ import {
   ExclusiveWriteResult,
   WriteResult,
   JazzClient,
-  type AuthUpdate,
   withTransactionAdmission,
   type MutationErrorEvent,
   WriteHandle,
@@ -73,6 +72,7 @@ import {
 } from "./runtime-source.js";
 import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
+import { resolveQueryOutputTable } from "./query-output-table.js";
 import {
   applyColumnTransforms,
   createRowTransformer,
@@ -82,7 +82,10 @@ import {
 import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
 import { writeRow } from "./write-row.js";
 import {
+  ComputedReadState,
+  MissingComputedDependency,
   columnTransformDependencies,
+  computedColumnValues,
   dependencyContext,
   storedDependencyValues,
   type ColumnTransform,
@@ -126,7 +129,6 @@ import { notifyLocalWrite } from "./local-write-observer.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
-  type BuiltRelation,
   type NormalizedBuiltQuery,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
@@ -597,69 +599,6 @@ function cloneActiveQuerySubscriptionTrace(
   };
 }
 
-function resolveHopOutputTable(
-  schema: WasmSchema,
-  startTable: string,
-  hops: readonly string[],
-): string {
-  if (hops.length === 0) {
-    return startTable;
-  }
-  const relations = analyzeRelations(schema);
-  let currentTable = startTable;
-  for (const hopName of hops) {
-    const candidates = relations.get(currentTable) ?? [];
-    const relation = candidates.find((candidate) => candidate.name === hopName);
-    if (!relation) {
-      throw new Error(`Unknown relation "${hopName}" on table "${currentTable}"`);
-    }
-    currentTable = relation.toTable;
-  }
-  return currentTable;
-}
-
-function resolveBuiltRelationOutputTable(schema: WasmSchema, relation: BuiltRelation): string {
-  if (relation.union) {
-    const first = relation.union.inputs[0];
-    if (!first) {
-      throw new Error("union(...) requires at least one relation.");
-    }
-    const firstTable = resolveBuiltRelationOutputTable(schema, first.input);
-    for (const input of relation.union.inputs.slice(1)) {
-      const inputTable = resolveBuiltRelationOutputTable(schema, input.input);
-      if (inputTable !== firstTable) {
-        throw new Error("union(...) requires all relations to output the same table.");
-      }
-    }
-    return firstTable;
-  }
-
-  const seedTable = relation.gather?.seed
-    ? resolveBuiltRelationOutputTable(schema, relation.gather.seed)
-    : relation.table;
-  if (!seedTable) {
-    throw new Error("gather(...) seed relation is missing table metadata.");
-  }
-  const hops = relation.hops ?? [];
-  return hops.length > 0 ? resolveHopOutputTable(schema, seedTable, hops) : seedTable;
-}
-
-function resolveBuiltQueryOutputTable(
-  schema: WasmSchema,
-  builtQuery: ReturnType<typeof normalizeBuiltQuery>,
-): string {
-  if (builtQuery.gather?.seed) {
-    const gatherTable = resolveBuiltRelationOutputTable(schema, builtQuery.gather.seed);
-    return builtQuery.hops.length > 0
-      ? resolveHopOutputTable(schema, gatherTable, builtQuery.hops)
-      : gatherTable;
-  }
-
-  return builtQuery.hops.length > 0
-    ? resolveHopOutputTable(schema, builtQuery.table, builtQuery.hops)
-    : builtQuery.table;
-}
-
 function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string): WasmSchema {
   if (preferredSchema[tableName]) {
     return preferredSchema;
@@ -1029,6 +968,7 @@ function prepareTransformRead<T>(
   query: QueryBuilder<T>,
   built: NormalizedBuiltQuery,
   outputTable: string,
+  computedState?: ComputedReadState,
 ) {
   const outputTransforms = resolveOutputColumnTransforms(query, built.table, outputTable);
   const outputIncludes =
@@ -1046,6 +986,8 @@ function prepareTransformRead<T>(
         ? applyPartialValueSelections(row, built.partialSelect)
         : row;
     return {
+      computedState: undefined,
+      version: 0,
       physical: outputIncludes === built.includes ? built : { ...built, includes: outputIncludes },
       decode,
       finish,
@@ -1068,23 +1010,36 @@ function prepareTransformRead<T>(
     let visibleTransforms: ColumnTransformMap | undefined;
     let dependencies: Set<string> | undefined;
     let hidden: string[] | undefined;
+    let computed: string[] | undefined;
+    const addDependency = (dependency: string) => {
+      if (transforms?.[dependency]?.computed) return;
+      (dependencies ??= new Set()).add(dependency);
+      if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
+        if (physical === select) physical = [...select];
+        physical.push(dependency);
+        (hidden ??= []).push(dependency);
+      }
+      if (Object.hasOwn(partial, dependency)) {
+        if (partial === partialSelect) partial = { ...partialSelect };
+        delete partial[dependency];
+      }
+    };
+    if (transforms && select.some((column) => transforms[column]?.computed))
+      physical = select.filter((column) => !transforms[column]?.computed);
     if (transforms)
       for (const column of selectAll ? Object.keys(transforms) : select) {
         if (!Object.hasOwn(transforms, column)) continue;
         (visibleTransforms ??= {})[column] = transforms[column]!;
-        for (const dependency of transforms[column]!.dependsOn ?? []) {
-          (dependencies ??= new Set()).add(dependency);
-          if (!selectAll && dependency !== "id" && !physical.includes(dependency)) {
-            if (physical === select) physical = [...select];
-            physical.push(dependency);
-            (hidden ??= []).push(dependency);
-          }
-          if (Object.hasOwn(partial, dependency)) {
-            if (partial === partialSelect) partial = { ...partialSelect };
-            delete partial[dependency];
-          }
+        if (transforms[column]!.computed) {
+          computedState ??= new ComputedReadState();
+          (computed ??= []).push(column);
+          for (const dependency of computedState.storedColumns(transforms, column))
+            addDependency(dependency);
+        } else {
+          for (const dependency of transforms[column]!.dependsOn ?? []) addDependency(dependency);
         }
       }
+    if (!selectAll && !physical.length) physical = ["id"];
     let preparedIncludes = includes;
     const finishIncludes: Array<
       [string, (row: Record<string, unknown>) => Record<string, unknown>]
@@ -1118,12 +1073,25 @@ function prepareTransformRead<T>(
       finish:
         visibleTransforms || hasPartial || finishIncludes.length
           ? (row: Record<string, unknown>): Record<string, unknown> => {
-              const stored = visibleTransforms
-                ? storedDependencyValues(dependencyColumns, row)
+              const stored = computed
+                ? { ...row }
+                : visibleTransforms
+                  ? storedDependencyValues(dependencyColumns, row)
+                  : undefined;
+              const appValues = computed
+                ? computedColumnValues(transforms!, computed, stored!, computedState, partial)
                 : undefined;
               const result = hasPartial ? applyPartialValueSelections(row, partialSelect) : row;
               if (visibleTransforms)
-                applyColumnTransforms(result, visibleTransforms, excluded, stored);
+                applyColumnTransforms(
+                  result,
+                  visibleTransforms,
+                  excluded,
+                  stored,
+                  appValues,
+                  hasPartial ? partialSelect : undefined,
+                );
+              if (computed) for (const column of computed) result[column] = appValues!.get(column);
               for (const [name, finish] of finishIncludes) {
                 const value = result[name];
                 if (Array.isArray(value))
@@ -1148,6 +1116,8 @@ function prepareTransformRead<T>(
     relations,
   );
   return {
+    computedState,
+    version: computedState?.version ?? 0,
     physical:
       prepared.select === built.select &&
       prepared.partialSelect === built.partialSelect &&
@@ -1165,6 +1135,44 @@ function prepareTransformRead<T>(
       ? (row: WasmRow) => prepared.finish!(decode(row)) as T
       : (decode as (row: WasmRow) => T),
   };
+}
+
+/** Retry only computations that discovered a missing field, preserving the caller's read scope. */
+async function finishComputedRead<T>(
+  query: QueryBuilder<T>,
+  built: NormalizedBuiltQuery,
+  outputTable: string,
+  prepared: ReturnType<typeof prepareTransformRead<T>>,
+  rows: WasmRow[],
+  read: (physical: NormalizedBuiltQuery) => Promise<WasmRow[]>,
+  decrypt?: TransactionRowDecoder,
+): Promise<T[]> {
+  for (;;) {
+    const results: T[] = [];
+    let missing: MissingComputedDependency | undefined;
+    // Visit every root before retrying so different rows' branches share a lookup.
+    const decoded = await decryptQueryRows(
+      query._schema,
+      outputTable,
+      rows.map((row) => prepared.decode(row) as Record<string, unknown>),
+      outputTable !== built.table ? {} : prepared.physical.includes,
+      query._columnTransformsByTable,
+      decrypt,
+    );
+    for (const row of decoded) {
+      try {
+        results.push(prepared.finish(row as T & Record<string, unknown>) as T);
+      } catch (error) {
+        if (!(error instanceof MissingComputedDependency)) throw error;
+        missing = error;
+      }
+    }
+    if (!missing) return results;
+    if (!prepared.computedState || prepared.computedState.version === prepared.version)
+      throw missing;
+    prepared = prepareTransformRead(query, built, outputTable, prepared.computedState);
+    rows = await read(prepared.physical);
+  }
 }
 type DbTransactionHandleBinding = {
   ownerClient: JazzClient;
@@ -1204,7 +1212,14 @@ function transformOutputColumns(
     return row;
   }
 
-  return applyColumnTransforms(row as Record<string, unknown>, source._columnTransforms);
+  const record = row as Record<string, unknown>;
+  const computed = columnTransformDependencies(source._columnTransforms).computedColumns;
+  const appValues = computed.length
+    ? computedColumnValues(source._columnTransforms, computed, record)
+    : undefined;
+  applyColumnTransforms(record, source._columnTransforms, [], undefined, appValues);
+  for (const column of computed) record[column] = appValues!.get(column);
+  return record;
 }
 
 function transformInputColumns(
@@ -1222,6 +1237,8 @@ function transformInputColumns(
   let hasTransform = false;
   let hasDependencies = false;
   for (const column in record) {
+    if (Object.hasOwn(record, column) && transforms[column]?.computed)
+      throw new TypeError(`Computed field "${column}" is read-only.`);
     if (!Object.hasOwn(record, column) || record[column] === undefined) continue;
     const transform = transforms[column];
     if (transform) {
@@ -1289,6 +1306,8 @@ function missingWriteDependencies(
   const { byColumn } = columnTransformDependencies(table._columnTransforms);
   let missing: Set<string> | undefined;
   for (const column of Object.keys(data)) {
+    if (table._columnTransforms[column]?.computed)
+      throw new TypeError(`Computed field "${column}" is read-only.`);
     if (data[column] === undefined) continue;
     for (const dependency of byColumn.get(column) ?? noWriteDependencies) {
       if (dependency !== "id" || id === undefined) {
@@ -1377,7 +1396,7 @@ function reserveRowId(): string {
 function hasDependentTransforms(table: TableProxy<any, any>): boolean {
   return (
     !!table._columnTransforms &&
-    columnTransformDependencies(table._columnTransforms).columns.length > 0
+    columnTransformDependencies(table._columnTransforms).hasWriteDependencies
   );
 }
 
@@ -2258,7 +2277,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    const values = writeRecord("Upsert", table, data);
+    writeRecord("Upsert", table, data);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
     this.prepareMutation(
@@ -2696,7 +2715,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     settlementMetadata: false | "with-rows" = false,
   ): Promise<T[] | SettledRows<T>> {
     this.bindQuery(query);
-    const { preparation, openTransactionId } = this.requireBinding("query");
+    const { preparation } = this.requireBinding("query");
     if (preparation.pending || preparation.failed) await preparation.drain();
     const client = this.resolveClient(query._schema);
     return readTransactionRows(
@@ -2855,9 +2874,8 @@ async function readTransactionRows<T>(
   const builderJson = query._build();
   const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
   const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
-  const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
+  const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
   const prepared = prepareTransformRead(query, builtQuery, outputTable);
-  const outputSchema = requireSchemaWithTable(query._schema, outputTable);
   // Transactions accept the same public options surface as Db. Lower before
   // reaching native options so JavaScript callers cannot smuggle runtime
   // controls (for example `localUpdates` or `openTransactionId`) through this
@@ -2877,23 +2895,31 @@ async function readTransactionRows<T>(
     readSession,
   );
   if (settlementMetadata === true) return result as unknown as RowSettlement[];
-  const settled =
+  let settled =
     settlementMetadata === "with-rows"
       ? (result as unknown as SettledRows<(typeof result)[number]>)
       : undefined;
   const rows = settled ? settled.rows : result;
-  const outputIncludes = outputTable !== builtQuery.table ? {} : prepared.physical.includes;
-  const rawRows = rows.map((row) => prepared.decode(row) as Record<string, unknown>);
-  const decryptedRows = await decryptQueryRows(
-    outputSchema,
+  const decoded = await finishComputedRead(
+    query,
+    builtQuery,
     outputTable,
-    rawRows,
-    outputIncludes,
-    query._columnTransformsByTable,
+    prepared,
+    rows,
+    async (physical) => {
+      const result = await queryClient.call(
+        client,
+        translateQuery(builderJson, planningSchema, physical),
+        { ...queryOptions, ...(!global && { openTransactionId }) },
+        readSession,
+      );
+      if (settlementMetadata === "with-rows") {
+        settled = result as unknown as SettledRows<(typeof result)[number]>;
+        return settled.rows;
+      }
+      return result;
+    },
     decrypt,
-  );
-  const decoded = decryptedRows.map(
-    (row) => prepared.finish(row as T & Record<string, unknown>) as T,
   );
   return settled ? { rows: decoded, settlements: settled.settlements } : decoded;
 }
@@ -2950,7 +2976,7 @@ function preparedTransactionScope(
     kind: "exclusive",
     upsert(table, id, data, options) {
       binding.resolveClient(table._schema);
-      const values = writeRecord("Upsert", table, data);
+      writeRecord("Upsert", table, data);
       io.upsertInternal(
         table._table,
         id,
@@ -4324,8 +4350,7 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
-    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
+    const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
     const prepared = prepareTransformRead(query, builtQuery, outputTable);
     const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
     const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
@@ -4337,17 +4362,20 @@ export class Db {
       context || usesRelationTraversal
         ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
         : await client.queryInternal(wasmQuery, queryOptions);
-    const outputIncludes = outputTable !== builtQuery.table ? {} : prepared.physical.includes;
-    const rawRows = rows.map((row) => prepared.decode(row) as Record<string, unknown>);
-    const decryptedRows = await decryptQueryRows(
-      query._schema,
+    return finishComputedRead(
+      query,
+      builtQuery,
       outputTable,
-      rawRows,
-      outputIncludes,
-      query._columnTransformsByTable,
+      prepared,
+      rows,
+      (physical) =>
+        client.queryInternal(
+          translateQuery(builderJson, planningSchema, physical),
+          queryOptions,
+          context?.readSession,
+        ),
       (table, encryptedRows) => decryptCellRows(this, query._schema, table, encryptedRows),
     );
-    return decryptedRows.map((row) => prepared.finish(row as T & Record<string, unknown>) as T);
   }
 
   /**
@@ -4443,12 +4471,11 @@ export class Db {
     const builderJson = query._build();
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
-    const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
+    const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
     if (hasEncryptedResults(query._schema, outputTable, builtQuery.includes))
       throw new Error("Unsupported encrypted query: subscriptions are not supported yet");
-    const prepared = prepareTransformRead(query, builtQuery, outputTable);
-    const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
-    const transform = prepared.transform;
+    let prepared = prepareTransformRead(query, builtQuery, outputTable);
+    let wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
@@ -4551,8 +4578,33 @@ export class Db {
     };
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       if (unsubscribed || terminalized || activeSubscription === null) return;
-      const typedDelta = manager.handleDelta(delta, transform);
-      deliver(typedDelta);
+      try {
+        deliver(manager.handleDelta(delta, prepared.transform));
+      } catch (error) {
+        if (
+          !(error instanceof MissingComputedDependency) ||
+          !prepared.computedState ||
+          prepared.computedState.version === prepared.version
+        )
+          throw error;
+        prepared = prepareTransformRead(query, builtQuery, outputTable, prepared.computedState);
+        wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
+        retireNativeSubscription(activeSubscription);
+        const replacement = createSubscriptionGeneration();
+        manager.clear();
+        bufferedDeltas.length = 0;
+        this.unregisterActiveQuerySubscriptionTrace(traceId);
+        traceId = this.registerActiveQuerySubscriptionTrace(
+          wasmQuery,
+          builtQuery.table,
+          queryOptions,
+        );
+        // Native initial snapshots may arrive synchronously. Defer the next
+        // generation to avoid recursive installation as new inputs are found.
+        queueMicrotask(() => {
+          if (!this.shutdownPromise) startNativeSubscription(replacement);
+        });
+      }
     };
     const startNativeSubscription = (
       subscription: NativeSubscription,
@@ -4624,7 +4676,7 @@ export class Db {
         ? null
         : subscription;
     };
-    const traceId = this.registerActiveQuerySubscriptionTrace(
+    let traceId = this.registerActiveQuerySubscriptionTrace(
       wasmQuery,
       builtQuery.table,
       queryOptions,

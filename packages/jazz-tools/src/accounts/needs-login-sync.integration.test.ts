@@ -8,7 +8,6 @@ import { createJazzAppOwner, type JazzApp } from "../session/app.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { accountRegistryUrl } from "./context.js";
 import { prepareAccountManager } from "./persistence.js";
-import { settleAccountSelection } from "./selection-durability.js";
 
 const app = s.defineApp({ carts: s.table({ item: s.string() }, {}) });
 const permissions = s.definePermissions(app, ({ policy }) => {
@@ -69,7 +68,7 @@ describe("a manual-mode app after a reload (#4061)", () => {
       const storage = browserStorage();
       const firstVisit = await accountManager(appId, server.url, storage);
       await firstVisit.loginOrRegisterJWT(issuer.jwtForUser("shopper"));
-      await settleAccountSelection(firstVisit);
+      await firstVisit.settleSelection();
 
       // Reload: a manual-mode app (no managed auth) reopens the account at once.
       const accounts = await accountManager(appId, server.url, storage);
