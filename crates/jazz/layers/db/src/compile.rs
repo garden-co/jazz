@@ -648,31 +648,7 @@ impl<'a> Ctx<'a> {
             wheres.push(self.reachable(reachable, table, alias)?);
         }
         for join in &query.joins {
-            if !join.nested_joins.is_empty() || !join.correlated_filters.is_empty() {
-                return Err(unsupported("nested or correlated join filters on SQLite"));
-            }
-            let target = self.table(&join.table)?;
-            let j = self.alias("j");
-            let mut conds = vec![format!("{j}._del = 0")];
-            match join.target {
-                JoinTarget::Uncorrelated => {}
-                JoinTarget::Column | JoinTarget::RowId => {
-                    let source = join.source_column.as_deref().unwrap_or("id");
-                    conds.push(format!(
-                        "{} = {}",
-                        column_sql(target, &j, &join.on_column)?,
-                        column_sql(table, alias, source)?
-                    ));
-                }
-            }
-            for filter in &join.filters {
-                conds.push(self.predicate(filter, target, &j)?);
-            }
-            wheres.push(format!(
-                "EXISTS (SELECT 1 FROM {} AS {j} WHERE {})",
-                self.source(target)?,
-                conds.join(" AND ")
-            ));
+            wheres.push(self.join_exists(join, table, alias)?);
         }
         for include in &query.includes {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -1153,6 +1129,83 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// A junction traversal from the row of `table` at `alias`: some live
+    /// row of the joined table matches its correlations and filters, is
+    /// readable by the session, and satisfies its nested joins in turn.
+    fn join_exists(
+        &mut self,
+        join: &crate::query::JoinVia,
+        table: &Table,
+        alias: &str,
+    ) -> Result<String, Error> {
+        let target = self.table(&join.table)?;
+        let j = self.alias("j");
+        let mut conds = vec![format!("{j}._del = 0")];
+        if let Some(session) = self.policy {
+            conds.push(self.read_policy(target, &j, session)?);
+        }
+        match join.target {
+            JoinTarget::Uncorrelated => {
+                if join.source_lookup.is_some() || !join.correlated_filters.is_empty() {
+                    return Err(query_error(
+                        "an uncorrelated join takes no source lookup or correlations",
+                    ));
+                }
+            }
+            JoinTarget::Column | JoinTarget::RowId => {
+                let source = match &join.source_lookup {
+                    // The value the join matches is a column of the row
+                    // the source row references.
+                    Some(lookup) => {
+                        let referenced = self.table(&lookup.table)?;
+                        let l = self.alias("l");
+                        let mut found = vec![
+                            format!("{l}._del = 0"),
+                            format!(
+                                "{l}.id = {}",
+                                column_sql(table, alias, &lookup.row_id_source_column)?
+                            ),
+                        ];
+                        if let Some(session) = self.policy {
+                            found.push(self.read_policy(referenced, &l, session)?);
+                        }
+                        format!(
+                            "(SELECT {} FROM {} AS {l} WHERE {})",
+                            column_sql(referenced, &l, &lookup.value_column)?,
+                            self.source(referenced)?,
+                            found.join(" AND ")
+                        )
+                    }
+                    None => {
+                        column_sql(table, alias, join.source_column.as_deref().unwrap_or("id"))?
+                    }
+                };
+                conds.push(format!(
+                    "{} = {source}",
+                    column_sql(target, &j, &join.on_column)?
+                ));
+            }
+        }
+        for correlation in &join.correlated_filters {
+            conds.push(format!(
+                "{} = {}",
+                column_sql(target, &j, &correlation.join_column)?,
+                column_sql(table, alias, &correlation.source_column)?
+            ));
+        }
+        for filter in &join.filters {
+            conds.push(self.predicate(filter, target, &j)?);
+        }
+        for nested in &join.nested_joins {
+            conds.push(self.join_exists(nested, target, &j)?);
+        }
+        Ok(format!(
+            "EXISTS (SELECT 1 FROM {} AS {j} WHERE {})",
+            self.source(target)?,
+            conds.join(" AND ")
+        ))
+    }
+
     /// Root rows an access edge grants to a team reachable from the seed.
     /// The closure is `WITH RECURSIVE` over effective edge rows: `UNION`
     /// dedupes, so a fixpoint terminates on cycles; a depth bound carries
@@ -1175,6 +1228,9 @@ impl<'a> Ctx<'a> {
                 let seeds = self.table(&seed.table)?;
                 let s = self.alias("s");
                 let mut conds = vec![format!("{s}._del = 0")];
+                if let Some(session) = self.policy {
+                    conds.push(self.read_policy(seeds, &s, session)?);
+                }
                 match (&seed.user_column, &seed.user_claim) {
                     (None, None) => {}
                     (Some(column), Some(claim)) => {
@@ -1207,6 +1263,9 @@ impl<'a> Ctx<'a> {
         };
         let e = self.alias("e");
         let mut step = vec![format!("{e}._del = 0")];
+        if let Some(session) = self.policy {
+            step.push(self.read_policy(edges, &e, session)?);
+        }
         for filter in &via.edge_filters {
             step.push(self.predicate(filter, edges, &e)?);
         }
@@ -1241,6 +1300,9 @@ impl<'a> Ctx<'a> {
                 column_sql(access, &a, &via.access_team_column)?
             ),
         ];
+        if let Some(session) = self.policy {
+            conds.push(self.read_policy(access, &a, session)?);
+        }
         for filter in &via.access_filters {
             conds.push(self.predicate(filter, access, &a)?);
         }

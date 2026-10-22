@@ -707,6 +707,15 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
         && query.filters.is_empty()
 }
 
+/// Whether a junction traversal's witnesses can ship as [`Support::Array`]
+/// children of the row it starts from: it correlates with a column of that
+/// row (not a referenced row's), at every level.
+fn join_followable(join: &crate::query::JoinVia) -> bool {
+    join.target != crate::query::JoinTarget::Uncorrelated
+        && join.source_lookup.is_none()
+        && join.nested_joins.iter().all(join_followable)
+}
+
 /// The edge table of a [`Support::Reach`], by stored names.
 struct Reach<'a> {
     edges: &'a str,
@@ -955,6 +964,7 @@ impl Inner {
             });
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
+        support.extend(self.join_support(table, &query.joins)?);
         for via in &query.reachable {
             let edges = self.schema.table(&via.edge_table)?;
             support.push(Support::Reach {
@@ -982,6 +992,29 @@ impl Inner {
                 inner: child.stored_name(&array.inner_column).to_owned(),
                 outer: parent.stored_name(&array.outer_column).to_owned(),
                 nested: self.array_support(child, &array.nested_arrays)?,
+            });
+        }
+        Ok(support)
+    }
+
+    /// The support of junction traversals from rows of `parent`: every
+    /// readable row of the joined table correlated with the parent row
+    /// (the client applies the join's filters), and its nested joins'.
+    fn join_support(
+        &self,
+        parent: &crate::values::Table,
+        joins: &[crate::query::JoinVia],
+    ) -> Result<Vec<Support>, Error> {
+        let mut support = Vec::with_capacity(joins.len());
+        for join in joins {
+            let target = self.schema.table(&join.table)?;
+            support.push(Support::Array {
+                table: target.stored.clone(),
+                inner: target.stored_name(&join.on_column).to_owned(),
+                outer: parent
+                    .stored_name(join.source_column.as_deref().unwrap_or("id"))
+                    .to_owned(),
+                nested: self.join_support(target, &join.nested_joins)?,
             });
         }
         Ok(support)
@@ -2264,12 +2297,13 @@ impl Db {
     }
 
     /// Remote reads ship the query's rows plus its supporting rows (single
-    /// hop includes, one level of array subqueries); the client evaluates
-    /// locally. Other shapes that read further tables (joins, relation
-    /// filters, multi-hop includes, nested arrays, aggregates) would see a
-    /// partial replica, so they are refused explicitly.
+    /// hop includes, array subqueries, junction traversals, gathers); the
+    /// client evaluates locally. Other shapes that read further tables
+    /// (uncorrelated traversals or ones through a referenced row, gathers
+    /// filtered after the gather, multi-hop includes, aggregates) would see
+    /// a partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
-        let other_tables = !query.joins.is_empty()
+        let other_tables = !query.joins.iter().all(join_followable)
             || !query.reachable.iter().all(|via| gather_shaped(query, via))
             || !query.inherits.is_empty()
             || query
