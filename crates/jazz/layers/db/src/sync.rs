@@ -1913,7 +1913,6 @@ impl Db {
                 }
             })
             .collect();
-        let resuming = client.remote.values().any(|r| r.resumed);
         let shadowed: Vec<(String, [u8; 16], Vec<u8>, u64)> = client
             .shadow
             .iter()
@@ -1934,12 +1933,15 @@ impl Db {
         let version = *inner.owner.jazz.version_id().as_bytes();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
-        if resuming {
-            let mut rows = shadowed;
-            match inner.held_versions() {
-                Ok(held) => rows.extend(held),
-                Err(_) => rows.clear(),
-            }
+        // Every settled row the replica holds, whether or not a live query
+        // still reads it: the new session watches them, so a later change
+        // (a deletion, lost access) still reaches the cached copy.
+        let mut rows = shadowed;
+        match inner.held_versions() {
+            Ok(held) => rows.extend(held),
+            Err(_) => rows.clear(),
+        }
+        if !rows.is_empty() {
             // Held rows name tables as this store's schema does.
             let names = inner.owner.clone();
             let rows = rows

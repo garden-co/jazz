@@ -498,6 +498,11 @@ impl JazzClient {
             state: RefCell::new(State::default()),
         });
 
+        if connector.is_none() {
+            // Still a replica: its writes queue for upload, so a store opened
+            // without a server keeps them for the first one it connects to.
+            shared.db.set_remote_link_hint(RemoteLinkHint::NoServer);
+        }
         if let Some(connector) = connector {
             let wake = work.clone();
             let request = NativeTransportRequest {
