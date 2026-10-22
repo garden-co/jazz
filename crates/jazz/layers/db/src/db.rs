@@ -431,6 +431,29 @@ impl Stamp {
 
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
+/// Run a script of statements one at a time. SQLite's statement length
+/// limit applies to the whole text handed to one prepare, and schema DDL
+/// outgrows Durable Object SQLite's 100 KB.
+fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
+    let mut start = 0;
+    for (end, _) in script.match_indices(';') {
+        let statement = &script[start..=end];
+        let text = std::ffi::CString::new(statement)
+            .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
+        // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads it.
+        // A `;` inside a trigger body or a literal leaves it incomplete.
+        if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
+            conn.execute_batch(statement).map_err(storage)?;
+            start = end + 1;
+        }
+    }
+    let rest = &script[start..];
+    if !rest.trim().is_empty() {
+        conn.execute_batch(rest).map_err(storage)?;
+    }
+    Ok(())
+}
+
 fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
@@ -473,6 +496,10 @@ impl Db {
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
+        #[cfg(feature = "durable-object-limits")]
+        crate::durable_object_limits::apply(&conn);
+        #[cfg(feature = "sql-trace")]
+        crate::sql_trace::install(&conn);
         conn.execute_batch(crate::large::DDL).map_err(storage)?;
         // Nodes a transaction writes stay cached until it ends: until then
         // the reader connection cannot see them.
@@ -484,10 +511,11 @@ impl Db {
         let rolled_back = chunks.clone();
         conn.rollback_hook(Some(move || rolled_back.unpin()));
         let fresh: i64 = conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_jazz_%'", [], |r| r.get(0))
+            // Durable Object SQLite keeps its own `_cf_*` tables in the file.
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
             .map_err(storage)?;
         if fresh == 0 {
-            conn.execute_batch(&schema.ddl()).map_err(storage)?;
+            execute_script(&conn, &schema.ddl())?;
         }
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         // The commit seq resumes after the newest stored version.
@@ -1111,7 +1139,7 @@ impl Db {
                     }
                 }
             }
-            inner.conn.execute_batch(&ddl).map_err(storage)?;
+            execute_script(&inner.conn, &ddl)?;
             let schema = Schema::new(&publication.version.schema);
             // The lens already added the columns; record them physically.
             let _ = inner.physical.union(&schema)?;
@@ -1611,17 +1639,16 @@ impl Inner {
         let mut out = Vec::new();
         for chunk in ids.chunks(500) {
             let mut params = base.to_vec();
-            let first = params.len() + 1;
-            params.extend(chunk.iter().map(|id| Sql::Blob(id.to_vec())));
-            let marks: Vec<String> = (first..first + chunk.len())
-                .map(|i| format!("?{i}"))
-                .collect();
+            params.push(crate::compile::json_ids(
+                chunk.iter().map(|id| id.as_slice()),
+            ));
             let sql = format!(
-                "SELECT a.id, a._b, a._seq, a._del, COALESCE({condition}, 0) FROM {} AS a WHERE a.id IN ({})",
+                "SELECT a.id, a._b, a._seq, a._del, COALESCE({condition}, 0) FROM {} AS a \
+                 WHERE a.id IN (SELECT unhex(value) FROM json_each(?{}))",
                 quote(&table.name),
-                marks.join(", ")
+                params.len()
             );
-            let mut statement = self.conn.prepare(&sql).map_err(storage)?;
+            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let rows = statement
                 .query_map(params_from_iter(params.iter()), |r| {
                     let id: Vec<u8> = r.get(0)?;
@@ -2695,7 +2722,7 @@ impl Db {
             }
             let logical = Schema::new(&schema);
             let ddl = inner.physical.union(&logical)?;
-            inner.conn.execute_batch(&ddl).map_err(storage)?;
+            execute_script(&inner.conn, &ddl)?;
             inner
                 .views
                 .entry(SchemaViewId::for_schema(&schema))

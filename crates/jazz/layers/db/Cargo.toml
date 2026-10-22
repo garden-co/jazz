@@ -12,6 +12,13 @@ testing = [
   "jazz-model/testing",
   "jazz-protocol/testing",
 ]
+# Log every statement to the file named by JAZZ_SQL_TRACE, for checking the
+# SQL against restricted SQLite hosts (Durable Objects).
+sql-trace = []
+# Run on SQLite with Cloudflare Durable Objects' limits (bound parameters,
+# statement length, expression depth, ...), to find SQL that would fail
+# there. See `durable_object_limits.rs`.
+durable-object-limits = ["rusqlite/limits"]
 
 [dependencies]
 jazz-types.workspace = true

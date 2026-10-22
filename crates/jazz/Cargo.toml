@@ -10,6 +10,10 @@ autobenches = false
 # transport and compression capabilities explicitly.
 default = []
 runtime = ["jazz-model/runtime"]
+# See jazz-db's `sql-trace`.
+sql-trace = ["jazz-db/sql-trace"]
+# See jazz-db's `durable-object-limits`.
+durable-object-limits = ["jazz-db/durable-object-limits"]
 testing = [
   "runtime",
   "jazz-types/testing",

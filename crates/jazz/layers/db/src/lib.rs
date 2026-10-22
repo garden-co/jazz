@@ -30,8 +30,12 @@ mod tools {
 
 pub mod compile;
 pub mod db;
+#[cfg(feature = "durable-object-limits")]
+mod durable_object_limits;
 pub(crate) mod large;
 pub mod options;
+#[cfg(feature = "sql-trace")]
+mod sql_trace;
 pub mod values;
 
 /// Structured read results.
