@@ -25,6 +25,10 @@ enum Watch {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GroupKey {
+    /// The renamed tables and columns of the schema naming the rows:
+    /// versions on either side of a rename compile to the same SQL but
+    /// label rows differently.
+    renames: String,
     sql: String,
     params: String,
     /// Set only when the SQL depends on the identity's session.
@@ -45,6 +49,8 @@ struct Member {
 pub(super) struct Group {
     key: GroupKey,
     prepared: PreparedQuery,
+    /// The root table's stored name, which changed rows name.
+    root: String,
     identity: Option<AuthorSubject>,
     read: ReadSpec,
     pub(super) rows: Vec<CurrentRow>,
@@ -241,6 +247,7 @@ impl Inner {
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
             identity: session_used.then(|| format!("{identity:?}")),
@@ -284,7 +291,13 @@ impl Inner {
             Err(error) => return Err(error),
         };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
-        let recheck = recheckable(&prepared.query, &read, &compiled);
+        let root = prepared
+            .schema
+            .as_ref()
+            .unwrap_or(&self.owner)
+            .stored_table(&prepared.query.table)?
+            .to_owned();
+        let recheck = recheckable(&prepared.query, &root, &read, &compiled);
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
         let queue: Queue = Rc::new(RefCell::new(if awaiting {
@@ -299,6 +312,7 @@ impl Inner {
         let handle = Rc::new(RefCell::new(Group {
             key,
             prepared: prepared.clone(),
+            root,
             identity,
             read,
             rows,
@@ -342,11 +356,12 @@ impl Inner {
             let Some(target) = root.references.get(column) else {
                 continue;
             };
-            if *target != query.table
+            let target = schema.stored_table(target)?;
+            if target != root.stored
                 && !others.contains(target)
                 && compiled.projection.iter().any(|(name, _)| name == column)
             {
-                out.push((target.clone(), column.to_owned()));
+                out.push((target.to_owned(), column.to_owned()));
             }
         }
         Ok(out)
@@ -377,13 +392,15 @@ impl Inner {
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        // Watches name stored tables and columns: changed rows do.
+        let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
         // columns, so a key on a branch column would miss base changes.
         let keyable = |table: &str, column: &str| {
             read.view.is_none()
                 || schema
-                    .table(table)
-                    .is_ok_and(|t| !t.branch_by.iter().any(|c| c == column))
+                    .by_stored(table)
+                    .is_some_and(|t| !t.branch_by.iter().any(|c| t.stored_name(c) == column))
         };
         let query = &prepared.query;
         let root = schema.table(&query.table)?;
@@ -391,24 +408,29 @@ impl Inner {
         // reachability): these always watch the whole table.
         let mut structural = BTreeSet::new();
         for join in &query.joins {
-            structural.insert(join.table.clone());
+            structural.insert(stored(&join.table)?);
         }
-        fn arrays(out: &mut BTreeSet<String>, list: &[crate::query::ArraySubquery]) {
+        fn arrays(
+            out: &mut BTreeSet<String>,
+            list: &[crate::query::ArraySubquery],
+            stored: &dyn Fn(&str) -> Result<String, Error>,
+        ) -> Result<(), Error> {
             for array in list {
-                out.insert(array.table.clone());
-                arrays(out, &array.nested_arrays);
+                out.insert(stored(&array.table)?);
+                arrays(out, &array.nested_arrays, stored)?;
             }
+            Ok(())
         }
-        arrays(&mut structural, &query.array_subqueries);
+        arrays(&mut structural, &query.array_subqueries, &stored)?;
         for include in &query.includes {
             let column = include.path.split('.').next().unwrap_or_default();
             if let Some(target) = root.references.get(column) {
-                structural.insert(target.clone());
+                structural.insert(stored(target)?);
             }
         }
         for reach in &query.reachable {
-            structural.insert(reach.access_table.clone());
-            structural.insert(reach.edge_table.clone());
+            structural.insert(stored(&reach.access_table)?);
+            structural.insert(stored(&reach.edge_table)?);
         }
         // Policy evidence pinned by a session equality.
         let mut pinned: HashMap<String, Option<(String, String)>> = HashMap::new();
@@ -419,7 +441,10 @@ impl Inner {
                 _ => pinned.clear(),
             }
         }
-        if pinned.contains_key(&root.name) {
+        // Policies name tables and columns as the schema they come from.
+        let policies = schema.policy_schema();
+        let mut pinned = stored_pins(policies, pinned);
+        if pinned.contains_key(&root.stored) {
             pinned.clear();
         }
         // A read policy that requires `column = session value` of the row
@@ -430,22 +455,28 @@ impl Inner {
             .and_then(|session| {
                 root.policy(Operation::Select)
                     .and_then(|p| row_pin(p, &session))
+            })
+            .and_then(|(column, value)| {
+                let governing = policies.by_stored(&root.stored)?;
+                Some((governing.stored_name(&column).to_owned(), value))
             });
         let mut watches = Vec::new();
-        let root_key = if structural.contains(&root.name) {
+        let root_key = if structural.contains(&root.stored) {
             None
         } else {
-            root_key(query, &prepared.binding).or(policy_root_key)
+            root_key(query, &prepared.binding)
+                .map(|(column, value)| (root.stored_name(&column).to_owned(), value))
+                .or(policy_root_key)
         }
-        .filter(|(column, _)| keyable(&root.name, column));
+        .filter(|(column, _)| keyable(&root.stored, column));
         watches.push(match root_key {
-            Some((column, value)) => Watch::Key(root.name.clone(), column, value),
-            None => Watch::Table(root.name.clone()),
+            Some((column, value)) => Watch::Key(root.stored.clone(), column, value),
+            None => Watch::Table(root.stored.clone()),
         });
         let mut reads = compiled.tables.clone();
         reads.extend(structural.iter().cloned());
         for table in reads {
-            if table == root.name {
+            if table == root.stored {
                 continue;
             }
             watches.push(match pinned.get(&table) {
@@ -478,7 +509,7 @@ impl Inner {
                     continue;
                 };
                 let group = group.borrow();
-                let root = group.prepared.query.table == table;
+                let root = group.root == table;
                 let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
                 let columns: Vec<&String> = group
                     .includes
@@ -892,7 +923,8 @@ impl Inner {
         if rows.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let table = &self.schema.tables[&group.prepared.query.table];
+        let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
+        let table = schema.tables.get(&group.prepared.query.table)?;
         // By id alone a branched table's row is ambiguous.
         if !table.branch_by.is_empty() {
             return None;
@@ -906,7 +938,7 @@ impl Inner {
         }
         let sql = format!(
             "SELECT t.id{columns} FROM {} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each(?1))",
-            quote(&table.name)
+            quote(&table.stored)
         );
         let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
@@ -1096,7 +1128,7 @@ impl Group {
 /// aggregates, windows), outside branch views and cuts, whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
-fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
+fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
     query.offset == 0
         && query.aggregate.is_none()
         && query.joins.is_empty()
@@ -1108,7 +1140,7 @@ fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
         && read.view.is_none()
         && read.cut.is_none()
         && !compiled.aggregate
-        && compiled.sql.matches(&quote(&query.table)).count() == 1
+        && compiled.sql.matches(&quote(root)).count() == 1
 }
 
 /// Whether every order column of a query is among its shown columns.
@@ -1352,6 +1384,39 @@ pub(super) fn policy_pins(
         // Everything else reads only the protected row (and the session).
         _ => true,
     }
+}
+
+/// Policy pins (see [`policy_pins`]) by stored table and column. A table
+/// the schema does not know stays unpinned (it is watched whole).
+/// `schema`'s tables and columns named other than they are stored, in a
+/// canonical text form (empty without renames).
+fn renames(schema: &Schema) -> String {
+    let mut out = String::new();
+    for table in schema.tables.values() {
+        let columns = table.columns.iter().filter(|c| c.name != c.stored);
+        if table.name == table.stored && columns.clone().next().is_none() {
+            continue;
+        }
+        out.push_str(&format!("{:?}={:?}:", table.name, table.stored));
+        for column in columns {
+            out.push_str(&format!("{:?}={:?},", column.name, column.stored));
+        }
+        out.push(';');
+    }
+    out
+}
+
+pub(super) fn stored_pins(
+    schema: &Schema,
+    pins: HashMap<String, Option<(String, String)>>,
+) -> HashMap<String, Option<(String, String)>> {
+    pins.into_iter()
+        .filter_map(|(table, pin)| {
+            let table = schema.table(&table).ok()?;
+            let pin = pin.map(|(column, value)| (table.stored_name(&column).to_owned(), value));
+            Some((table.stored.clone(), pin))
+        })
+        .collect()
 }
 
 /// `column = session value` required of the protected row itself: the

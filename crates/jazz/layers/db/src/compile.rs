@@ -290,13 +290,13 @@ impl<'a> Ctx<'a> {
     /// they are; for rows changed since, the newest superseded image at or
     /// before the cut stands in. Rows created after the cut have neither.
     fn rows(&mut self, table: &Table, columns: &str) -> String {
-        let name = quote(&table.name);
+        let name = quote(&table.stored);
         let Some(cut) = self.cut else {
             return name;
         };
         let seq = self.bind(Sql::Integer(cut.seq as i64));
         let own = self.bind(Sql::Integer(cut.own as i64));
-        let history = quote(&format!("{}__h", table.name));
+        let history = quote(&format!("{}__h", table.stored));
         let h_columns = columns
             .replace("rid, ", "")
             .split(", ")
@@ -321,12 +321,12 @@ impl<'a> Ctx<'a> {
         // physical (unioned) table.
         let mut columns = "rid, id, _b, _seq, _del".to_owned();
         for column in table.stored() {
-            columns.push_str(&format!(", {}", quote(&column.name)));
+            columns.push_str(&format!(", {}", quote(&column.stored)));
         }
         let view = self.view.clone().filter(|_| !table.branch_by.is_empty());
         let Some(view) = view else {
             if self.cut.is_none() {
-                return Ok(quote(&table.name));
+                return Ok(quote(&table.stored));
             }
             return Ok(self.rows(table, &columns));
         };
@@ -349,7 +349,7 @@ impl<'a> Ctx<'a> {
                             };
                             inherited.push_str(&format!(", {term}"));
                         }
-                        None => inherited.push_str(&format!(", m.{}", quote(&column.name))),
+                        None => inherited.push_str(&format!(", m.{}", quote(&column.stored))),
                     }
                 }
                 let base = self.bind(Sql::Blob(table.selector_key(&base)?));
@@ -388,9 +388,12 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// A table by this schema's name for it; its stored name joins the
+    /// dependencies.
     fn table(&mut self, name: &str) -> Result<&'a Table, Error> {
-        self.tables.insert(name.to_owned());
-        self.schema.table(name)
+        let table = self.schema.table(name)?;
+        self.tables.insert(table.stored.clone());
+        Ok(table)
     }
 
     // ---- root queries ---------------------------------------------------
@@ -601,7 +604,7 @@ impl<'a> Ctx<'a> {
                 wheres.push(format!(
                     "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND {i}._del = 0)",
                     self.source(target)?,
-                    quote(column)
+                    quote(table.stored_name(column))
                 ));
             }
         }
@@ -913,12 +916,32 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        match table.policy(operation) {
+        self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
             None => Ok("0".to_owned()),
             Some(policy) => {
-                self.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
+                ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        }
+        })
+    }
+
+    /// Compile a policy of `table` under the schema whose names its policies
+    /// use (see [`Schema::policies_from`]); its SQL reads the same stored
+    /// rows either way.
+    fn under_policy_schema(
+        &mut self,
+        table: &Table,
+        body: impl FnOnce(&mut Self, &Table) -> Result<String, Error>,
+    ) -> Result<String, Error> {
+        let Some(current) = self.schema.policies_from.as_deref() else {
+            return body(self, table);
+        };
+        let Some(governing) = current.by_stored(&table.stored) else {
+            return Ok("0".to_owned());
+        };
+        let own = std::mem::replace(&mut self.schema, current);
+        let result = body(self, governing);
+        self.schema = own;
+        result
     }
 
     /// A specific policy clause (e.g. UPDATE's WITH CHECK) at `alias`.
@@ -932,12 +955,12 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        match policy {
+        self.under_policy_schema(table, |ctx, table| match policy {
             None => Ok("0".to_owned()),
             Some(policy) => {
-                self.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
+                ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        }
+        })
     }
 
     fn policy_value(
@@ -1095,7 +1118,7 @@ impl<'a> Ctx<'a> {
                 format!(
                     "EXISTS (SELECT 1 FROM {} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
                     self.source(target)?,
-                    quote(via_column)
+                    quote(table.stored_name(via_column))
                 )
             }
             PolicyExpr::InheritsReferencing {
@@ -1525,7 +1548,7 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
             table.name
         )));
     }
-    Ok(format!("{alias}.{}", quote(column)))
+    Ok(format!("{alias}.{}", quote(table.stored_name(column))))
 }
 
 /// A stored provenance column; an update stamp left NULL reads as the
@@ -1675,8 +1698,8 @@ impl Ctx<'_> {
             {
                 Term::Large(LargeColumn {
                     cell: sql,
-                    table: table.name.clone(),
-                    column: column.to_owned(),
+                    table: table.stored.clone(),
+                    column: col.stored.clone(),
                     kind: crate::large::kind(col),
                 })
             }
