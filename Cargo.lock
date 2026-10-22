@@ -1997,6 +1997,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-native-transport"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "hex",
+ "jazz",
+ "jazz-benchmark-guard",
+ "jazz-server",
+ "postcard",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-otel"
 version = "0.1.0"
 dependencies = [

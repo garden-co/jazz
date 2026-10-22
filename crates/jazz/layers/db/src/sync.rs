@@ -103,10 +103,7 @@ pub fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
 }
 
 /// A byte-frame transport (a socket).
-pub trait WireTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError>;
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>>;
-}
+pub use crate::wire::WireTransport;
 
 /// Frames messages with postcard over a byte transport.
 pub struct WireTransportAdapter<W>(W);
