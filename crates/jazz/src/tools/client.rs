@@ -97,6 +97,11 @@ struct Shared {
     work: Arc<Notify>,
     /// Bumped after every tick; waiters re-poll on each change.
     progress: watch::Sender<u64>,
+    /// True while a test holds the upstream detached; the keeper neither
+    /// keeps nor re-opens a link until it turns false.
+    upstream_paused: watch::Sender<bool>,
+    /// No server is configured, so nothing can confirm a write past Local.
+    serverless: bool,
     state: RefCell<State>,
 }
 
@@ -346,10 +351,17 @@ async fn keep_upstream(
     mut attached: Option<NativeTransportTerminalFuture>,
 ) {
     let mut delay = RECONNECT_BASE_DELAY;
+    let mut paused = match shared.upgrade() {
+        Some(shared) => shared.upstream_paused.subscribe(),
+        None => return,
+    };
     loop {
         let terminal = match attached.take() {
             Some(terminal) => terminal,
             None => {
+                if paused.wait_for(|paused| !*paused).await.is_err() {
+                    return;
+                }
                 {
                     let Some(shared) = shared.upgrade() else {
                         return;
@@ -380,8 +392,13 @@ async fn keep_upstream(
                 }
             }
         };
-        let stopped = terminal.await;
-        tracing::debug!(?stopped, "jazz client upstream stopped");
+        tokio::select! {
+            stopped = terminal => {
+                tracing::debug!(?stopped, "jazz client upstream stopped");
+            }
+            // A test detached the link; dropping its terminal closes it.
+            _ = paused.wait_for(|paused| *paused) => {}
+        }
         let Some(shared) = shared.upgrade() else {
             return;
         };
@@ -468,6 +485,8 @@ impl JazzClient {
             schema: context.schema.clone(),
             work: work.clone(),
             progress,
+            upstream_paused: watch::channel(false).0,
+            serverless: connector.is_none(),
             state: RefCell::new(State::default()),
         });
 
@@ -675,12 +694,11 @@ impl JazzClient {
         Err(JazzError::Write(
             match state.closed_transactions.get(&transaction_id) {
                 Some(ClosedTransaction::Committed) => {
-                    format!("transaction {transaction_id} is already committed")
+                    format!("open transaction {transaction_id} is already committed")
                 }
-                Some(ClosedTransaction::RolledBack) => {
-                    format!("transaction {transaction_id} is already rolled back")
-                }
-                None => format!("transaction {transaction_id} is not open"),
+                Some(ClosedTransaction::RolledBack) | None => format!(
+                    "open transaction {transaction_id} has already been completed or was never opened"
+                ),
             },
         ))
     }
@@ -806,11 +824,15 @@ impl JazzClient {
         let rows = if let Some(transaction_id) = self.open_transaction()? {
             let prepared = self.prepare(&read)?;
             let db = self.db()?;
-            crate::db::block_on(
-                db.serializable_tx_ref(transaction_id)
-                    .all_prepared(&prepared),
-            )
-            .map_err(|error| JazzError::Query(error.to_string()))?
+            // A client's serializable read hydrates from the authority,
+            // which needs ticks to answer.
+            self.shared
+                .settle(
+                    db.serializable_tx_ref(transaction_id)
+                        .all_prepared(&prepared),
+                )
+                .await?
+                .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
             || matches!(opts.first_load, FirstLoad::WaitForRemote { timeout_ms } if timeout_ms > 0)
         {
@@ -1211,6 +1233,11 @@ impl JazzClient {
             DurabilityTier::Local => CoreDurabilityTier::Local,
             DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
         };
+        if self.shared.serverless && core_tier > CoreDurabilityTier::Local {
+            return Err(JazzError::Write(format!(
+                "{tier:?} durability is unreachable: this client has no server"
+            )));
+        }
         let db = self.db()?;
         self.shared
             .settle(db.wait_for_transaction(seq, core_tier))
@@ -1302,6 +1329,7 @@ impl JazzClient {
     }
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
+        self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
         self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
         detached
@@ -1320,10 +1348,16 @@ impl JazzClient {
             .map_err(|_| JazzError::Sync(format!("timed out waiting for {tier:?}")))?
     }
 
+    /// Let the keeper open a fresh link for the preserved client state and
+    /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        Err(JazzError::Connection(
-            "reattaching a detached test link is not supported yet on SQLite".to_owned(),
-        ))
+        if !self.shared.upstream_paused.send_replace(false) {
+            return Ok(false);
+        }
+        self.shared
+            .until(|| self.shared.state.borrow().upstream.is_some().then_some(()))
+            .await?;
+        Ok(true)
     }
 }
 
