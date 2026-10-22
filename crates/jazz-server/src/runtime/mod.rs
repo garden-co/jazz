@@ -124,6 +124,9 @@ const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// such as expiring staged large-value chunks.
 const IDLE_TICK: Duration = Duration::from_secs(1);
 
+/// Inbound messages one session may have applied per engine tick.
+const INBOUND_MESSAGES_PER_TICK: usize = 16;
+
 /// The runtime catalogue's key in its sidecar store.
 const CATALOGUE_KEY: &[u8] = b"runtime-catalogue:v1";
 
@@ -619,6 +622,8 @@ struct OwnerSession {
 struct SessionQueues {
     inbound: RefCell<VecDeque<SyncMessage>>,
     outbound: RefCell<VecDeque<SyncMessage>>,
+    /// Inbound messages the engine may still take this tick.
+    budget: std::cell::Cell<usize>,
 }
 
 /// The engine's side of one session.
@@ -631,7 +636,13 @@ impl Transport for SessionTransport {
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.0.inbound.borrow_mut().pop_front()
+        let budget = self.0.budget.get();
+        if budget == 0 {
+            return None;
+        }
+        let message = self.0.inbound.borrow_mut().pop_front()?;
+        self.0.budget.set(budget - 1);
+        Some(message)
     }
 }
 
@@ -865,7 +876,14 @@ impl Owner {
 
     fn run(mut self, jobs: std_mpsc::Receiver<Job>, tick_queued: &AtomicBool) {
         loop {
-            match jobs.recv_timeout(IDLE_TICK) {
+            // Inbound work left over from a budgeted tick runs next, after
+            // any jobs that arrived meanwhile.
+            let wait = if self.inbound_pending() {
+                Duration::ZERO
+            } else {
+                IDLE_TICK
+            };
+            match jobs.recv_timeout(wait) {
                 Ok(job) => {
                     job(&mut self);
                     while let Ok(job) = jobs.try_recv() {
@@ -935,8 +953,20 @@ impl Owner {
         }
     }
 
-    /// One engine tick, then every session's output up to its budget.
+    fn inbound_pending(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|session| !session.queues.inbound.borrow().is_empty())
+    }
+
+    /// One engine tick, then every session's output up to its budget. Each
+    /// session's inbound messages are taken a bounded number per tick, so a
+    /// large batch gets its first answers out early and other sessions are
+    /// served between its parts.
     fn tick(&mut self) {
+        for session in self.sessions.values() {
+            session.queues.budget.set(INBOUND_MESSAGES_PER_TICK);
+        }
         if let Err(error) = block_on(self.db.tick()) {
             tracing::error!(%error, "server runtime tick failed");
         }

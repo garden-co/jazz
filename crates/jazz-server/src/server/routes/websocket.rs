@@ -795,6 +795,24 @@ async fn handle_ws_connection(
                 return;
             }
         };
+    // The relay tier is designed but not built on SQLite: refuse a valid
+    // relay request for good rather than as a retryable failure.
+    if matches!(
+        link_admission,
+        ServerLinkAdmission::ScopeIsolatedClientRelay { .. }
+    ) {
+        send_ws_error(
+            &mut socket,
+            WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::Never,
+                "scope-isolated client relays are not supported yet on SQLite",
+            ),
+        )
+        .await;
+        let _ = socket.close().await;
+        return;
+    }
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,
@@ -2066,6 +2084,38 @@ mod tests {
         );
     }
 
+    /// The relay tier is not built on SQLite: a negotiated relay request is
+    /// refused with a final, explicit error.
+    async fn expect_ws_relay_not_supported_yet(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) {
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY)
+                .into(),
+        ))
+        .await
+        .expect("send client relay hello");
+        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("wait for relay refusal")
+            .expect("server response")
+            .expect("server websocket result");
+        let WsMessage::Binary(response) = response else {
+            panic!("expected binary relay refusal, got {response:?}");
+        };
+        let frames: Vec<Vec<u8>> = postcard::from_bytes(&response).expect("decode refusal batch");
+        match decode_frame(&frames[0]).expect("decode refusal") {
+            WireFrame::Error(WireError {
+                code: WireErrorCode::UnsupportedFeature,
+                retry: WireRetry::Never,
+                message,
+            }) => assert!(message.contains("not supported yet"), "{message}"),
+            other => panic!("expected relay refusal, got {other:?}"),
+        }
+    }
+
     async fn oversized_ws_prelude_never_reaches_admission(message: WsMessage, url: String) {
         let (mut ws, _) = connect_async(url).await.expect("connect websocket");
         // The server may enforce the cap before the oversized send finishes.
@@ -2208,12 +2258,11 @@ mod tests {
                 WsMessage::Binary(json.into_bytes().into())
             };
             ws.send(message).await.expect("send writer prelude");
-            let features = if entry["requested_link"] == "scope_isolated_client_relay" {
-                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+            if entry["requested_link"] == "scope_isolated_client_relay" {
+                expect_ws_relay_not_supported_yet(&mut ws).await;
             } else {
-                0
-            };
-            expect_ws_server_hello(&mut ws, features).await;
+                expect_ws_server_hello(&mut ws, 0).await;
+            }
         }
     }
 
@@ -2783,10 +2832,8 @@ mod tests {
         postcard::from_bytes(&bytes).unwrap_or_default()
     }
 
-    /// Unlike the transport pump's optional poll, setup has an explicit
-    /// protocol obligation: a successfully admitted query session must first
-    /// receive the authority catalogue. Wait for that required reply using the
-    /// route test's normal bounded-settlement deadline.
+    /// Unlike the transport pump's optional poll, wait for a reply the server
+    /// owes, using the route test's normal bounded-settlement deadline.
     async fn receive_required_ws_encoded_frames(
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -4062,17 +4109,13 @@ mod tests {
 
         let mut sockets_a = Vec::with_capacity(WS_PER_IDENTITY_CONNECTION_CAP);
         for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
-            let mut socket = open_negotiated_ws_session(addr_a, &state_a, identity).await;
-            let _ = receive_required_ws_encoded_frames(&mut socket).await;
-            sockets_a.push(socket);
+            sockets_a.push(open_negotiated_ws_session(addr_a, &state_a, identity).await);
         }
         let mut oldest_a = sockets_a.remove(0);
 
         // This admission must succeed without evicting the oldest socket on
         // the other ServerState.
-        let mut session_b = open_negotiated_ws_session(addr_b, &state_b, identity).await;
-        let _ = receive_required_ws_encoded_frames(&mut session_b).await;
-        let _session_b = session_b;
+        let _session_b = open_negotiated_ws_session(addr_b, &state_b, identity).await;
 
         let ping = vec![0x4a, 0x4b, 0x4c];
         oldest_a
