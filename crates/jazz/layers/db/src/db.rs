@@ -11,7 +11,7 @@ use crate::protocol::{
     SchemaVersion,
 };
 use crate::query::Query;
-use crate::records::{Value, ValueType};
+use crate::records::Value;
 use crate::schema::JazzSchema;
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
@@ -31,6 +31,9 @@ use crate::tools::{CmpOp, PolicyExpr};
 #[path = "fanout.rs"]
 mod fanout;
 pub use fanout::FanoutStats;
+#[path = "large_ops.rs"]
+mod large_ops;
+pub use large_ops::{JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice};
 #[path = "sync.rs"]
 pub(crate) mod sync;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
@@ -291,6 +294,9 @@ struct Inner {
     conn: Connection,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
+    /// Nodes a large-value edit consolidated, stored when the edited cell
+    /// is bound inside the write's transaction.
+    pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
     /// The schema the current operation runs under: the owner's, or the
     /// schema view's that issued it.
     schema: Rc<Schema>,
@@ -490,6 +496,7 @@ impl Db {
             inner: Rc::new(RefCell::new(Inner {
                 conn,
                 chunks,
+                pending_nodes: Vec::new(),
                 schema: owner.clone(),
                 owner,
                 physical: schema,
@@ -1686,6 +1693,7 @@ impl Inner {
         let logical = match inner {
             Value::String(text) => text.as_bytes(),
             Value::Bytes(bytes) => bytes.as_slice(),
+            Value::Large(large) => return self.bind_large(column, large),
             _ => return Self::bind_value(value),
         };
         if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
@@ -1697,6 +1705,34 @@ impl Inner {
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
         crate::large::store(&self.conn, &self.chunks, &prepared)?;
         Ok(Sql::Text(crate::large::chunked_cell(&prepared.value_ref)?))
+    }
+
+    /// A chunked value written by reference: an edit's consolidated tree
+    /// (stored now, inside the write's transaction), or a tree whose nodes
+    /// this store already holds.
+    fn bind_large(
+        &self,
+        column: &crate::values::Column,
+        large: &jazz_types::large_values::LargeValueRef,
+    ) -> Result<Sql, Error> {
+        if !crate::large::large_capable(column) || large.kind != crate::large::kind(column) {
+            return Err(rejected(format!(
+                "`{}` does not hold {:?} large values",
+                column.name, large.kind
+            )));
+        }
+        if let Some(prepared) = self
+            .pending_nodes
+            .iter()
+            .find(|prepared| prepared.value_ref.root == large.root)
+        {
+            crate::large::store(&self.conn, &self.chunks, prepared)?;
+        } else if !crate::large::root_is_local(&self.conn, large)? {
+            return Err(unsupported(
+                "writing a large value whose chunks this store does not hold",
+            ));
+        }
+        Ok(Sql::Text(crate::large::chunked_cell(large)?))
     }
 
     /// Every stored column of `table`, including ones only other schema
@@ -3155,149 +3191,6 @@ impl Db {
         Ok(ExclusiveTx {
             tx: self.exclusive_tx_ref(id),
             committed: false,
-        })
-    }
-}
-
-// ---- byte-valued cells ---------------------------------------------------
-//
-// String and bytes cells are stored inline, so these are conveniences over
-// ordinary reads and writes: a range read slices the readable cell, an append
-// rewrites it, and a streamed insert reads the source to the end first.
-
-impl Db {
-    fn readable_cell_bytes(
-        &self,
-        table: &str,
-        row: RowUuid,
-        column: &str,
-    ) -> Result<Vec<u8>, Error> {
-        let query = Query::from(table).filter(crate::query::eq(
-            crate::query::col("id"),
-            crate::query::lit(Value::Uuid(row.0)),
-        ));
-        let prepared = self.prepare_query(&query)?;
-        let current = self
-            .read(&prepared)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| rejected(format!("row {row:?} of {table} is not readable")))?;
-        let value = current
-            .cells
-            .iter()
-            .find(|(name, _)| name == column)
-            .ok_or_else(|| rejected(format!("{table} has no column {column}")))?
-            .1
-            .clone();
-        let mut value = value.unwrap_or(Value::Nullable(None));
-        while let Value::Nullable(inner) = value {
-            value = match inner {
-                Some(inner) => *inner,
-                None => return Ok(Vec::new()),
-            };
-        }
-        match value {
-            Value::Bytes(bytes) => Ok(bytes),
-            Value::String(text) => Ok(text.into_bytes()),
-            _ => Err(rejected(format!(
-                "{table}.{column} is not a string or bytes column"
-            ))),
-        }
-    }
-
-    pub async fn read_value_range(
-        &self,
-        table: &str,
-        row: RowUuid,
-        column: &str,
-        range: std::ops::Range<u64>,
-    ) -> Result<Vec<u8>, Error> {
-        let bytes = self.readable_cell_bytes(table, row, column)?;
-        let len = bytes.len() as u64;
-        if range.start > range.end || range.end > len {
-            return Err(rejected(format!(
-                "range {range:?} is outside {table}.{column} ({len} bytes)"
-            )));
-        }
-        Ok(bytes[range.start as usize..range.end as usize].to_vec())
-    }
-
-    pub async fn append_value(
-        &self,
-        table: &str,
-        row: RowUuid,
-        column: &str,
-        bytes: Vec<u8>,
-    ) -> Result<WriteHandle, Error> {
-        let mut current = self.readable_cell_bytes(table, row, column)?;
-        current.extend_from_slice(&bytes);
-        let value = self.byte_cell_value(table, column, current)?;
-        self.update(
-            table,
-            row,
-            BTreeMap::from([(column.to_owned(), value)]),
-            UpdateOptions::default(),
-        )
-        .await
-    }
-
-    pub async fn insert_streaming_value_with_id<R: std::io::Read>(
-        &self,
-        table: &str,
-        row: RowUuid,
-        mut cells: BTreeMap<String, Value>,
-        column: &str,
-        mut reader: R,
-    ) -> Result<WriteHandle, Error> {
-        let mut bytes = Vec::new();
-        reader
-            .read_to_end(&mut bytes)
-            .map_err(|error| rejected(format!("reading {table}.{column}: {error}")))?;
-        cells.insert(
-            column.to_owned(),
-            self.byte_cell_value(table, column, bytes)?,
-        );
-        self.insert(
-            table,
-            cells,
-            InsertOptions {
-                row_id: Some(row),
-                ..Default::default()
-            },
-        )
-        .await
-    }
-
-    /// The cell value for `bytes` in a string or bytes column, wrapped for a
-    /// nullable column.
-    fn byte_cell_value(&self, table: &str, column: &str, bytes: Vec<u8>) -> Result<Value, Error> {
-        let schema = self.inner().schema.clone();
-        let t = schema.table(table)?;
-        let col = t
-            .columns
-            .iter()
-            .find(|c| c.name == column)
-            .ok_or_else(|| rejected(format!("{table} has no column {column}")))?;
-        let (inner_ty, nullable) = match &col.ty {
-            ValueType::Nullable(inner) => (inner.as_ref(), true),
-            ty => (ty, false),
-        };
-        let value = match inner_ty {
-            ValueType::String => Value::String(
-                String::from_utf8(bytes)
-                    .map_err(|_| rejected(format!("{table}.{column} needs UTF-8")))?,
-            ),
-            ValueType::Bytes => Value::Bytes(bytes),
-            _ => {
-                return Err(rejected(format!(
-                    "{table}.{column} is not a string or bytes column"
-                )));
-            }
-        };
-        Ok(if nullable {
-            Value::Nullable(Some(Box::new(value)))
-        } else {
-            value
         })
     }
 }

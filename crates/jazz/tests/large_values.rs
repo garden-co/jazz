@@ -8,7 +8,10 @@ mod common;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, JsonSetEdit, LargeValueUpdate,
+    LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, contains, eq, lit};
 use jazz::records::Value;
@@ -27,8 +30,11 @@ fn config(indexed: bool) -> DbConfig {
     if indexed {
         docs = docs.index_only(["body"]);
     }
+    let notes = TableSchemaBuilder::new("notes")
+        .column("doc", ColumnType::Json { schema: None })
+        .policies(allow_all_policies());
     DbConfig::new(
-        compile_schema(&SchemaBuilder::new().table(docs).build()),
+        compile_schema(&SchemaBuilder::new().table(docs).table(notes).build()),
         DbIdentity {
             node: NodeUuid::from_bytes([3; 16]),
             author: AuthorSubject::SYSTEM,
@@ -318,4 +324,320 @@ fn large_columns_never_reach_sqlite_text_functions() {
             assert!(!lower.contains(builtin), "{builtin} in {sql}");
         }
     }
+}
+
+fn body(db: &Db, n: u8) -> String {
+    let prepared = db
+        .prepare_query(&Query::from("docs").filter(eq(col("id"), lit(Value::Uuid(row(n).0)))))
+        .unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    match cell(&rows[0], "body") {
+        Value::String(text) => text,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn range_reads_slice_chunked_and_inline_cells() {
+    let db = db();
+    let body = text(30, LARGE);
+    let blob: Vec<u8> = (0..LARGE).map(|n| (n * 7 % 251) as u8).collect();
+    insert(&db, 1, &body, &blob);
+    insert(&db, 2, "short", b"tiny");
+    for range in [0..10, 70_000..70_100, (LARGE - 5) as u64..LARGE as u64] {
+        let (from, to) = (range.start as usize, range.end as usize);
+        let got = block_on(db.read_value_range("docs", row(1), "blob", range.clone())).unwrap();
+        assert_eq!(got, blob[from..to]);
+        let got = block_on(db.read_value_range("docs", row(1), "body", range.clone())).unwrap();
+        assert_eq!(got, body.as_bytes()[from..to]);
+    }
+    assert_eq!(
+        block_on(db.read_value_range("docs", row(2), "blob", 1..3)).unwrap(),
+        b"in"
+    );
+    assert!(block_on(db.read_value_range("docs", row(1), "blob", 0..LARGE as u64 + 1)).is_err());
+
+    // UTF-16 ranges count code units: each emoji is two.
+    let emoji = format!("{}{}", "\u{1F600}".repeat(40_000), text(31, 1000));
+    block_on(db.update(
+        "docs",
+        row(2),
+        BTreeMap::from([("body".to_owned(), Value::String(emoji.clone()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let units: Vec<u16> = emoji.encode_utf16().collect();
+    let got = block_on(db.read_text_utf16_range("docs", row(2), "body", 79_990..80_010)).unwrap();
+    assert_eq!(got, String::from_utf16(&units[79_990..80_010]).unwrap());
+    assert!(
+        block_on(db.read_text_utf16_range("docs", row(2), "body", 1..4)).is_err(),
+        "a boundary inside a surrogate pair fails"
+    );
+}
+
+#[test]
+fn appends_extend_the_edit_tail_until_consolidation() {
+    let db = db();
+    let mut expected = text(32, LARGE);
+    insert(&db, 1, &expected, b"");
+    block_on(db.tick()).unwrap();
+    let (nodes, _) = db.large_value_nodes_for_test().unwrap();
+    for n in 0..8 {
+        let suffix = format!("<{n}>");
+        block_on(db.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+        expected.push_str(&suffix);
+    }
+    let (after, _) = db.large_value_nodes_for_test().unwrap();
+    assert_eq!(after, nodes, "a tail append writes no chunks");
+    assert_eq!(body(&db, 1), expected);
+    // The appended value compares and contains as its logical bytes.
+    assert_eq!(
+        ids(
+            &db,
+            Query::from("docs").filter(eq(col("body"), lit(Value::String(expected.clone()))))
+        ),
+        vec![row(1)]
+    );
+    assert_eq!(
+        ids(
+            &db,
+            Query::from("docs").filter(contains(col("body"), lit(Value::String("<6><7>".into()))))
+        ),
+        vec![row(1)]
+    );
+    // Past the tail's bound the value is consolidated into new nodes.
+    for n in 8..80 {
+        let suffix = format!("[{n}]");
+        block_on(db.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+        expected.push_str(&suffix);
+    }
+    let (after, _) = db.large_value_nodes_for_test().unwrap();
+    assert!(
+        after > nodes,
+        "consolidation wrote new nodes: {nodes} -> {after}"
+    );
+    assert_eq!(body(&db, 1), expected);
+}
+
+#[test]
+fn an_inline_value_grown_past_the_threshold_is_chunked() {
+    let db = db();
+    let start = text(33, 60 * 1024);
+    insert(&db, 1, &start, b"");
+    assert_eq!(db.large_value_nodes_for_test().unwrap().1, 0);
+    let more = text(34, 10 * 1024);
+    block_on(db.append_value("docs", row(1), "body", more.clone().into_bytes())).unwrap();
+    assert_eq!(db.large_value_nodes_for_test().unwrap().1, 1);
+    assert_eq!(body(&db, 1), format!("{start}{more}"));
+}
+
+#[test]
+fn splices_edit_chunked_values_in_place() {
+    let db = db();
+    let mut expected = text(35, LARGE).into_bytes();
+    insert(&db, 1, std::str::from_utf8(&expected).unwrap(), b"");
+    for n in 0..100_u64 {
+        let at = (n * 2_903) % (expected.len() as u64 - 10);
+        let insert = format!("({n})").into_bytes();
+        block_on(db.splice_value(
+            "docs",
+            row(1),
+            "body",
+            LargeValueUpdateSplice {
+                at,
+                delete: 3,
+                insert: insert.clone(),
+            },
+            Default::default(),
+        ))
+        .unwrap();
+        expected.splice(at as usize..at as usize + 3, insert);
+    }
+    assert_eq!(body(&db, 1).into_bytes(), expected);
+    assert!(
+        block_on(db.splice_value(
+            "docs",
+            row(1),
+            "body",
+            LargeValueUpdateSplice {
+                at: 0,
+                delete: 1,
+                insert: vec![0xFF],
+            },
+            Default::default(),
+        ))
+        .is_err(),
+        "a splice that breaks UTF-8 is rejected"
+    );
+    assert_eq!(
+        body(&db, 1).into_bytes(),
+        expected,
+        "and leaves the row unchanged"
+    );
+}
+
+#[test]
+fn partial_updates_splice_utf16_pages_and_set_json_members() {
+    let db = db();
+    let text16 = format!("{}{}", "é\u{1F600}".repeat(30_000), "tail");
+    insert(&db, 1, &text16, b"");
+    let units: Vec<u16> = text16.encode_utf16().collect();
+    block_on(db.update_with_large_value_mutations(
+        "docs",
+        row(1),
+        BTreeMap::new(),
+        vec![LargeValueUpdate::Splice {
+            column: "body".into(),
+            within: LargeValueUpdatePage::TextUtf16 { from: 30, to: 60 },
+            splices: vec![
+                LargeValueUpdateSplice {
+                    at: 0,
+                    delete: 3,
+                    insert: b"AB".to_vec(),
+                },
+                LargeValueUpdateSplice {
+                    at: 2,
+                    delete: 1,
+                    insert: "\u{1F680}".as_bytes().to_vec(),
+                },
+            ],
+        }],
+        Default::default(),
+    ))
+    .unwrap();
+    let mut edited: Vec<u16> = units[..30].to_vec();
+    edited.extend("AB".encode_utf16());
+    edited.extend("\u{1F680}".encode_utf16());
+    // "AB" replaced units 30..33; the second splice then replaced the
+    // unit after "AB", which was unit 33 of the original.
+    edited.extend(&units[34..]);
+    assert_eq!(body(&db, 1), String::from_utf16(&edited).unwrap());
+
+    let items: Vec<serde_json::Value> = (0..4000)
+        .map(|n| serde_json::json!({ "n": n, "label": text(n, 20) }))
+        .collect();
+    let doc = serde_json::json!({ "items": items, "title": "draft" }).to_string();
+    assert!(doc.len() > 64 * 1024);
+    block_on(db.insert(
+        "notes",
+        BTreeMap::from([("doc".to_owned(), Value::String(doc))]),
+        InsertOptions {
+            row_id: Some(row(9)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(db.update_with_large_value_mutations(
+        "notes",
+        row(9),
+        BTreeMap::new(),
+        vec![LargeValueUpdate::JsonSet {
+            column: "doc".into(),
+            edits: vec![
+                JsonSetEdit {
+                    at: "/title".into(),
+                    value: serde_json::json!("final"),
+                },
+                JsonSetEdit {
+                    at: "/items/2/n".into(),
+                    value: serde_json::json!(-2),
+                },
+            ],
+        }],
+        Default::default(),
+    ))
+    .unwrap();
+    let read =
+        |pointer: &str| block_on(db.read_json_pointer("notes", row(9), "doc", pointer)).unwrap();
+    assert_eq!(read("/title"), Some(serde_json::json!("final")));
+    assert_eq!(read("/items/2/n"), Some(serde_json::json!(-2)));
+    assert_eq!(read("/items/3999/n"), Some(serde_json::json!(3999)));
+    assert_eq!(read("/missing"), None);
+    assert!(
+        block_on(db.update_with_large_value_mutations(
+            "notes",
+            row(9),
+            BTreeMap::new(),
+            vec![LargeValueUpdate::JsonSet {
+                column: "doc".into(),
+                edits: vec![JsonSetEdit {
+                    at: "/nope/deeper".into(),
+                    value: serde_json::json!(1),
+                }],
+            }],
+            Default::default(),
+        ))
+        .is_err(),
+        "missing parents are never created"
+    );
+}
+
+#[test]
+fn streaming_inserts_chunk_as_they_read() {
+    let db = db();
+    let blob: Vec<u8> = (0..LARGE * 3).map(|n| (n * 13 % 253) as u8).collect();
+    block_on(db.insert_streaming_value_with_id(
+        "docs",
+        row(1),
+        BTreeMap::from([("body".to_owned(), Value::String("streamed".into()))]),
+        "blob",
+        std::io::Cursor::new(blob.clone()),
+    ))
+    .unwrap();
+    let (nodes, roots) = db.large_value_nodes_for_test().unwrap();
+    assert!(nodes > 4);
+    assert_eq!(roots, 1);
+    assert_eq!(
+        block_on(db.read_value_range("docs", row(1), "blob", 500_000..500_100)).unwrap(),
+        blob[500_000..500_100]
+    );
+
+    // A failed insert spends its receipt; the streamed tree is reclaimed.
+    assert!(
+        block_on(db.insert_streaming_value_with_id(
+            "docs",
+            row(2),
+            BTreeMap::from([("nonexistent".to_owned(), Value::String("x".into()))]),
+            "blob",
+            std::io::Cursor::new(blob.clone()),
+        ))
+        .is_err()
+    );
+    for _ in 0..8 {
+        block_on(db.tick()).unwrap();
+    }
+    assert_eq!(db.large_value_nodes_for_test().unwrap(), (nodes, roots));
+}
+
+#[test]
+fn a_file_store_streams_edits_and_reads_back_after_reopening() {
+    let path = scratch("stream-edit");
+    let blob: Vec<u8> = (0..LARGE * 2).map(|n| (n * 31 % 241) as u8).collect();
+    let mut expected = text(40, LARGE);
+    {
+        let db = block_on(Db::open_at(config(false), &path, FileOptions::default())).unwrap();
+        block_on(db.insert_streaming_value_with_id(
+            "docs",
+            row(1),
+            BTreeMap::from([("body".to_owned(), Value::String(expected.clone()))]),
+            "blob",
+            std::io::Cursor::new(blob.clone()),
+        ))
+        .unwrap();
+        for n in 0..70 {
+            let suffix = format!("+{n}");
+            block_on(db.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+            expected.push_str(&suffix);
+        }
+        assert_eq!(
+            block_on(db.read_value_range("docs", row(1), "blob", 300_000..300_050)).unwrap(),
+            blob[300_000..300_050]
+        );
+    }
+    let db = block_on(Db::open_at(config(false), &path, FileOptions::default())).unwrap();
+    assert_eq!(body(&db, 1), expected);
+    assert_eq!(
+        block_on(db.read_value_range("docs", row(1), "blob", 0..blob.len() as u64)).unwrap(),
+        blob
+    );
 }

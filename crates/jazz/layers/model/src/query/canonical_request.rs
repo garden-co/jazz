@@ -553,7 +553,7 @@ fn validate_binding_value(value: &Value) -> Result<(), QueryError> {
             record.descriptor().clone(),
         )))?,
         // U48 is an engine-owned stamp width, never a public query binding.
-        Value::Enum(_) | Value::U48(_) => {
+        Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
             return Err(QueryError::OperandTypeMismatch);
         }
         _ => {}
@@ -639,7 +639,7 @@ fn value_type(value: &Value) -> Result<ColumnType, QueryError> {
             validate_public_column_type(&column_type)?;
             Ok(column_type)
         }
-        Value::Enum(_) | Value::U48(_) => Err(QueryError::OperandTypeMismatch),
+        Value::Enum(_) | Value::Large(_) | Value::U48(_) => Err(QueryError::OperandTypeMismatch),
     }
 }
 
@@ -748,6 +748,16 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             put_bytes(bytes, value.record().raw());
         }
         Value::U48(value) => put_tagged(bytes, 19, &value.to_be_bytes()),
+        Value::Large(value) => {
+            bytes.push(18);
+            bytes.push(match value.kind {
+                jazz_types::large_values::LargeValueKind::Bytes => 0,
+                jazz_types::large_values::LargeValueKind::String => 1,
+                jazz_types::large_values::LargeValueKind::Json => 2,
+            });
+            bytes.push(value.format_version);
+            bytes.extend_from_slice(&value.logical_hash.0);
+        }
     }
 }
 
