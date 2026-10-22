@@ -1980,6 +1980,12 @@ impl Db {
         let mut link = client.hint.get();
         link.detached = true;
         client.hint.set(link);
+        // Nothing settles at the server's tier while detached: a
+        // subscription (or one opened meanwhile) is held until the next
+        // upstream answers it again.
+        for remote in client.remote.values() {
+            remote.answered.set(false);
+        }
         true
     }
 

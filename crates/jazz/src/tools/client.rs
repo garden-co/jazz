@@ -137,6 +137,9 @@ struct Forwarder {
     cancellation: oneshot::Receiver<()>,
     /// The rows the public stream holds, in order.
     rows: Vec<SubscriptionOutputRow>,
+    /// It asks for the server's answer and this client has no server:
+    /// every delivery stays pending.
+    unsettleable: bool,
 }
 
 impl Shared {
@@ -221,9 +224,14 @@ impl Shared {
                         added,
                         updated,
                         removed,
+                        settled,
                         ..
                     } => match forwarder.delta(&self.schema, reset, added, updated, removed) {
-                        Ok(delta) => SubscriptionStreamItem::Delta(delta),
+                        // Not yet settled at the tier the subscription asked for.
+                        Ok(delta) => SubscriptionStreamItem::Delta(OrderedRowDelta {
+                            pending: !settled || forwarder.unsettleable,
+                            ..delta
+                        }),
                         Err(error) => SubscriptionStreamItem::Rejected {
                             reason: SubscriptionRejectReason::UnsupportedShapeCapability {
                                 detail: error.to_string(),
@@ -776,6 +784,7 @@ impl JazzClient {
                 "subscriptions in a transaction are not supported".to_owned(),
             ));
         }
+        let unsettleable = self.shared.serverless && opts.tier != ReadTier::LocalOnly;
         let stream = self.open_core_subscription(&with_history_identity(&query), opts)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let (cancel, cancellation) = oneshot::channel();
@@ -785,6 +794,7 @@ impl JazzClient {
             sender,
             cancellation,
             rows: Vec::new(),
+            unsettleable,
         });
         self.shared.ensure_driven();
         self.shared.tick_soon();
