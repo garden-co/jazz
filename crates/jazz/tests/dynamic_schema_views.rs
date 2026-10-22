@@ -486,7 +486,7 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
     futures::executor::block_on(async {
         let owner = open_owner(empty_schema()).await;
         let batch = OpenTransactionId::new();
-        owner.begin_exclusive(batch).await.unwrap();
+        owner.begin_serializable(batch).await.unwrap();
         let view = owner.register_schema_view(schema("direct")).await.unwrap();
         let row = RowUuid::from_bytes([7; 16]);
         view.insert(
@@ -502,21 +502,21 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
 
         let prepared = view.prepare_query(&view.table("items")).unwrap();
         assert!(
-            view.exclusive_tx_ref(batch)
+            view.serializable_tx_ref(batch)
                 .all_prepared(&prepared)
                 .await
                 .unwrap()
                 .is_empty()
         );
-        owner.abandon_exclusive_handle(batch).unwrap();
+        owner.abandon_serializable_handle(batch).unwrap();
         assert_eq!(view.read(&prepared).unwrap().len(), 1);
     });
 }
 
-/// Local-only runtimes enforce the same exclusive parent invariant before a
+/// Local-only runtimes enforce the same serializable parent invariant before a
 /// commit can resolve at Local durability; no remote authority is required.
 #[test]
-fn exclusive_view_commit_rejects_concurrent_local_row_change() {
+fn serializable_view_commit_rejects_concurrent_local_row_change() {
     futures::executor::block_on(async {
         let owner = open_owner(empty_schema()).await;
         let view = owner.register_schema_view(schema("base")).await.unwrap();
@@ -533,8 +533,8 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
         .unwrap();
 
         let batch = OpenTransactionId::new();
-        owner.begin_exclusive(batch).await.unwrap();
-        let tx = view.exclusive_tx_ref(batch);
+        owner.begin_serializable(batch).await.unwrap();
+        let tx = view.serializable_tx_ref(batch);
         assert!(tx.read("items", row).await.unwrap().is_some());
         view.update(
             "items",
@@ -553,7 +553,7 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
         .await
         .unwrap();
 
-        let error = owner.commit_exclusive_handle(batch).await.unwrap_err();
+        let error = owner.commit_serializable_handle(batch).await.unwrap_err();
         assert_eq!(
             error.to_string(),
             "(transaction_conflict): row visible parent changed since transaction write was staged"
