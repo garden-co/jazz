@@ -197,7 +197,6 @@ fn owner_predicate_query() -> Query {
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

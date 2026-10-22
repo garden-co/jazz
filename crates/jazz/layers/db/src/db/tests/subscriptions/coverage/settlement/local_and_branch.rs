@@ -209,23 +209,253 @@ fn subscription_executes_its_selected_authorization_mode() {
     );
 }
 
+/// Alice's deleted todo remains readable through both client-local and trusted
+/// include-deleted subscriptions, while ordinary reads exclude it.
 #[test]
-fn include_deleted_fails_closed_on_live_subscription_apis() {
-    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let query = db.table("todos");
-    let prepared_query = prepared(&db, &query);
+fn include_deleted_subscriptions_return_deleted_rows_on_both_public_apis() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x36; 16]);
+    let db = open_db(0x36, alice, &schema);
+    let row_id = row(0x36);
+    db.insert(
+        "todos",
+        cells("deleted todo", false, alice),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete("todos", row_id, Default::default()).unwrap();
+    let prepared_query = prepared(&db, &Query::from("todos"));
+    assert!(
+        block_on(db.all(&prepared_query, ReadOpts::default()))
+            .unwrap()
+            .is_empty()
+    );
     let opts = ReadOpts {
-        include_deleted: true,
+        read_view: crate::protocol::ReadViewSpec {
+            include_deleted: true,
+            ..Default::default()
+        },
         ..ReadOpts::default()
     };
+    let expected = block_on(db.all(&prepared_query, opts.clone())).unwrap();
+    assert_eq!(row_ids(&expected), vec![row_id]);
+    assert!(expected[0].is_deleted());
 
-    assert_unsupported_subscription_include_deleted(expect_error(doctest_support::block_on(
-        db.subscribe(&prepared_query, opts.clone()),
-    )));
-    assert_unsupported_subscription_include_deleted(expect_error(doctest_support::block_on(
-        db.subscribe_for_identity(&prepared_query, opts.clone(), db.identity.author),
-    )));
+    let mut client = block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
+    let mut trusted = block_on(db.subscribe_for_identity(&prepared_query, opts, alice)).unwrap();
+    for subscription in [&mut client, &mut trusted] {
+        let rows = opened_rows(block_on(subscription.next_raw()).unwrap());
+        assert_eq!(row_ids(&rows), vec![row_id]);
+        assert_eq!(
+            rows[0].cell(&schema.tables()[0], "title"),
+            Some(Value::String("deleted todo".to_owned()))
+        );
+    }
+}
 
-    let rows = doctest_support::block_on(db.all(&prepared_query, opts)).unwrap();
-    assert!(rows.is_empty());
+/// Include-deleted subscriptions of a regular table reject branch views, like
+/// include-deleted one-shot reads, with a typed "not supported yet" error
+/// before any registration.
+#[test]
+fn include_deleted_subscriptions_reject_branch_views() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0x38; 16]);
+    let db = open_db(0x38, alice, &schema);
+    let opts = ReadOpts {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::BranchView {
+                head: crate::protocol::BranchSelector::new([(
+                    "branch",
+                    Value::String("draft".to_owned()),
+                )]),
+                base: None,
+            },
+            include_deleted: true,
+        },
+        ..ReadOpts::default()
+    };
+    let error = expect_error(prepared_subscribe(&db, &Query::from("todos"), opts));
+    assert_eq!(error.code, ErrorCode::Query);
+    assert_eq!(
+        error.message,
+        "branch views do not support include_deleted yet"
+    );
+}
+
+/// Alice's remote include-deleted subscription receives her deleted todo's
+/// content from the authority's covered input, and a restoration replaces it
+/// with the restored content.
+/// alice --insert/delete--> core --covered deleted row--> alice --restore--> core
+#[test]
+fn remote_include_deleted_subscription_delivers_deleted_rows_and_restorations() {
+    let schema = schema();
+    let table = &schema.tables()[0];
+    let alice = AuthorSubject::for_test_bytes([0x37; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x37, alice, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, alice);
+    let pump = || {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    };
+
+    let row_id = row(0x37);
+    let inserted = client
+        .insert(
+            "todos",
+            cells("deleted todo", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    pump();
+    block_on(inserted.wait(DurabilityTier::Global)).unwrap();
+    let deleted = client.delete("todos", row_id, Default::default()).unwrap();
+    pump();
+    block_on(deleted.wait(DurabilityTier::Global)).unwrap();
+
+    let opts = ReadOpts {
+        read_view: crate::protocol::ReadViewSpec {
+            include_deleted: true,
+            ..Default::default()
+        },
+        ..global_subscribe_opts()
+    };
+    let mut subscription = prepared_subscribe(&client, &Query::from("todos"), opts).unwrap();
+    pump();
+    let mut snapshot = snapshot_from_event(next_settled_opening(&mut subscription));
+    assert_eq!(row_ids(&snapshot.rows), vec![row_id]);
+    assert_eq!(
+        snapshot.rows[0].cell(table, "title"),
+        Some(Value::String("deleted todo".to_owned()))
+    );
+
+    let restored = client
+        .restore(
+            "todos",
+            row_id,
+            Some(cells("restored todo", false, alice)),
+            Default::default(),
+        )
+        .unwrap();
+    pump();
+    block_on(restored.wait(DurabilityTier::Global)).unwrap();
+    pump();
+    while let Some(event) = subscription.try_next_event() {
+        apply_subscription_event(&mut snapshot, event);
+    }
+    assert_eq!(row_ids(&snapshot.rows), vec![row_id]);
+    assert_eq!(
+        snapshot.rows[0].cell(table, "title"),
+        Some(Value::String("restored todo".to_owned()))
+    );
+}
+
+/// An include-deleted read widens only its root: a same-table include still
+/// resolves visible-current rows. Alice's remote include-deleted subscription
+/// of tasks with their `children` returns the deleted child as a root row, but
+/// its live parent's children must not list it, even though the authority
+/// shipped that deleted child in the covered input of the same table.
+/// alice --insert parent and children, delete one child--> core
+/// core --covered tasks (deleted child included)--> alice subscription
+#[test]
+fn remote_include_deleted_subscription_same_table_include_ignores_deleted_rows() {
+    use crate::model::test_support::AllowAll;
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .column("title", PublicColumnType::Text)
+                    .nullable_fk_column("parent", "tasks"),
+            )
+            .allow_all(),
+    );
+    let alice = AuthorSubject::for_test_bytes([0x3a; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let client = open_db(0x3a, alice, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::local_executor::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, alice);
+    let pump = || {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+    };
+
+    let parent = row(0x3a);
+    let deleted_child = row(0x3b);
+    let live_child = row(0x3c);
+    for (row_id, title, parent) in [
+        (parent, "parent", None),
+        (deleted_child, "deleted child", Some(parent)),
+        (live_child, "live child", Some(parent)),
+    ] {
+        let inserted = client
+            .insert(
+                "tasks",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String(title.to_owned())),
+                    (
+                        "parent".to_owned(),
+                        parent.map_or(Value::Nullable(None), |parent: RowUuid| {
+                            Value::Nullable(Some(Box::new(Value::Uuid(parent.0))))
+                        }),
+                    ),
+                ]),
+                crate::db::InsertOptions {
+                    row_id: Some(row_id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        pump();
+        block_on(inserted.wait(DurabilityTier::Global)).unwrap();
+    }
+    let deleted = client
+        .delete("tasks", deleted_child, Default::default())
+        .unwrap();
+    pump();
+    block_on(deleted.wait(DurabilityTier::Global)).unwrap();
+
+    let query = Query::from("tasks")
+        .array_subquery(ArraySubquery::new("children", "tasks", "parent", "id").select(["title"]));
+    // The ordinary subscription is the reference for the parent's children.
+    let mut ordinary = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    pump();
+    let reference = snapshot_from_event(next_settled_opening(&mut ordinary));
+    assert_eq!(
+        terminal_nested_text_values(&reference, parent, "children", "title"),
+        vec!["live child".to_owned()]
+    );
+
+    let mut subscription = prepared_subscribe(
+        &client,
+        &query,
+        ReadOpts {
+            read_view: crate::protocol::ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
+            ..global_subscribe_opts()
+        },
+    )
+    .unwrap();
+    pump();
+    let snapshot = snapshot_from_event(next_settled_opening(&mut subscription));
+    let mut roots = row_ids(&snapshot.rows[..snapshot.root_count]);
+    roots.sort();
+    assert_eq!(roots, vec![parent, deleted_child, live_child]);
+    assert_eq!(
+        terminal_nested_text_values(&snapshot, parent, "children", "title"),
+        vec!["live child".to_owned()],
+        "a same-table include must not list the deleted root row"
+    );
 }

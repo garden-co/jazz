@@ -576,7 +576,7 @@ where
             && prepared.shape().query().array_subqueries.is_empty()
             && coverage_tier >= DurabilityTier::Global
             && (opts.read_view.is_default() || prepared.shape().query().uses_history())
-            && !opts.include_deleted;
+            && !opts.read_view.include_deleted;
         if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if coverage_tier == DurabilityTier::Local {
                 Some(attach_coverage(&prepared, coverage_tier, None).await?)
@@ -685,8 +685,12 @@ where
         // here, before anything is hydrated.
         let source_queries = match open_tx {
             Some(open_tx) if exclusive_snapshot_read => {
-                self.exclusive_source_hydration_queries(open_tx, &prepared, opts.include_deleted)
-                    .await?
+                self.exclusive_source_hydration_queries(
+                    open_tx,
+                    &prepared,
+                    opts.read_view.include_deleted,
+                )
+                .await?
             }
             _ => Vec::new(),
         };
@@ -973,7 +977,6 @@ where
     ///
     /// let opts = ReadOpts {
     ///     tier: jazz::db::ReadTier::LocalOnly,
-    ///     include_deleted: false,
     ///     ..ReadOpts::default()
     /// };
     /// let todos = db.prepare_query(&db.table("todos"))?;
@@ -1049,7 +1052,7 @@ where
                         tier,
                         None,
                         author,
-                        opts.include_deleted,
+                        opts.read_view.include_deleted,
                         authorization_mode,
                         &opts.read_view,
                         None,
@@ -1057,10 +1060,10 @@ where
                     .await
                     .map_err(Into::into);
             }
-            if opts.include_deleted {
+            if opts.read_view.include_deleted {
                 return Err(Error::new(
                     ErrorCode::Query,
-                    "branch views do not support include_deleted yet",
+                    "branch views and snapshots do not support include_deleted yet",
                 ));
             }
             let snapshot = match authorization_mode {
@@ -1091,7 +1094,7 @@ where
                 .take(snapshot.root_count)
                 .collect());
         }
-        match (opts.include_deleted, authorization_mode) {
+        match (opts.read_view.include_deleted, authorization_mode) {
             (true, mode) => {
                 node.query_rows_including_deleted_in_authorization_mode(
                     &prepared.shape,
@@ -1272,7 +1275,7 @@ where
     ) -> Result<RelationSnapshot, Error> {
         self.await_open_schema_for_coverage(coverage_tier).await?;
         ensure_supported_read_view(opts)?;
-        if opts.include_deleted {
+        if opts.read_view.include_deleted {
             return Err(Error::new(
                 ErrorCode::Query,
                 "relation snapshots do not support include_deleted yet",
@@ -1327,7 +1330,7 @@ where
     ) -> Result<RelationSnapshot, Error> {
         self.await_open_schema_for_coverage(read_coverage_tier(&opts))
             .await?;
-        ensure_default_read_view(&opts)?;
+        ensure_current_read_source(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
         // The relation terminal already emits the requested aliases and row
         // identity. Re-projecting those rows against the physical source

@@ -532,7 +532,6 @@ fn tagged_row(namespace: u64, value: u64) -> RowUuid {
 fn local_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

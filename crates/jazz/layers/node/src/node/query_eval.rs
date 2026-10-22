@@ -371,11 +371,10 @@ where
             .map_err(|report| query_capability_error(&report))?
             .into_iter()
             .filter(|source_request| {
-                source_request.visibility == RowVisibility::Visible
-                    && matches!(
-                        request.reads.primary.sources.get(&source_request.source),
-                        Some(SourceExpr::SettledBindingView { .. })
-                    )
+                matches!(
+                    request.reads.primary.sources.get(&source_request.source),
+                    Some(SourceExpr::SettledBindingView { .. })
+                )
             })
             .map(|source_request| source_request.source.table)
             .collect::<BTreeSet<_>>();
@@ -1540,7 +1539,11 @@ where
         } else {
             (shape, binding)
         };
-        let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let mut input_shape = if read_view.include_deleted {
+            self.normalized_include_deleted_row_set_shape(shape, binding)?
+        } else {
+            self.normalized_row_set_shape(shape, binding)?
+        };
         let settled_view_matches_query_window = settled_binding_view.is_some_and(|binding_view| {
             // A cold receiver is compiled before RegisterShape is processed.
             // Its exact requested shape already identifies the input window;
@@ -1830,9 +1833,6 @@ where
         for source_request in query_program_source_requests(request)
             .map_err(|report| query_capability_error(&report))?
         {
-            if source_request.visibility != RowVisibility::Visible {
-                continue;
-            }
             let Some(expression) = request.reads.primary.sources.get(&source_request.source) else {
                 continue;
             };
@@ -1863,7 +1863,16 @@ where
                 .entry(table.name.clone())
                 .or_default()
                 .extend(metadata);
-            occurrences.push((source_request.source, descriptor));
+            // Include-deleted occurrences keep the authority's deletion bit so
+            // a covered deleted image materializes as a deleted row.
+            let descriptor = if source_request.visibility == RowVisibility::IncludeDeleted {
+                let mut fields = descriptor.fields().to_vec();
+                fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
+                RecordDescriptor::new_with_fields(fields)
+            } else {
+                descriptor
+            };
+            occurrences.push((source_request.source, source_request.visibility, descriptor));
         }
         for (table_name, metadata) in table_metadata {
             let stored_name =
@@ -1874,6 +1883,7 @@ where
                     &table, &metadata,
                 );
             let mut fields = descriptor.fields().to_vec();
+            fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
             fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
             let descriptor = RecordDescriptor::new_with_fields(fields);
             let id = self.database.allocate_input_source(descriptor.clone());
@@ -1886,12 +1896,17 @@ where
                 },
             );
         }
-        for (occurrence, descriptor) in occurrences {
+        for (occurrence, visibility, descriptor) in occurrences {
             let shared = &sources[&self
                 .scope_physical_table(request.reads.primary.read_schema, &occurrence.table)?];
             let mut graph = GraphBuilder::input_source(shared.id, shared.descriptor.clone());
             if !crate::schema::history::is_history_table(&occurrence.table) {
                 graph = graph.filter(PredicateExpr::eq("covered_is_current", Value::Bool(true)));
+                // An include-deleted root shares this input with joins and
+                // includes of the same table, which still see live rows only.
+                if visibility == RowVisibility::Visible {
+                    graph = graph.filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(false)));
+                }
             }
             if shared.descriptor != descriptor {
                 // Select compiler-owned carriers while preserving their logical

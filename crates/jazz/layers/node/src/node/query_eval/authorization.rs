@@ -1171,30 +1171,6 @@ where
         })
     }
 
-    pub(super) fn table_read_policy_authorization_request(
-        &mut self,
-        policy_schema_version: SchemaVersionId,
-        table_name: &str,
-        identity: AuthorSubject,
-        param_binding_mode: ParamBindingMode,
-        tier: DurabilityTier,
-        binding_source_shape: Option<String>,
-        binding_user_params: BTreeMap<String, ColumnType>,
-        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
-    ) -> Result<QueryProgramRequest, Error> {
-        self.table_read_policy_authorization_request_with_root_visibility(
-            policy_schema_version,
-            table_name,
-            identity,
-            param_binding_mode,
-            tier,
-            binding_source_shape,
-            binding_user_params,
-            binding_claim_params,
-            false,
-        )
-    }
-
     pub(super) fn table_read_policy_authorization_request_at(
         &self,
         policy_schema_version: SchemaVersionId,
@@ -1291,30 +1267,9 @@ where
         })
     }
 
-    pub(super) fn table_read_policy_authorization_request_for_include_deleted(
-        &mut self,
-        policy_schema_version: SchemaVersionId,
-        table_name: &str,
-        identity: AuthorSubject,
-        tier: DurabilityTier,
-        binding_source_shape: Option<String>,
-        binding_user_params: BTreeMap<String, ColumnType>,
-        binding_claim_params: BTreeMap<String, ProgramClaimParam>,
-    ) -> Result<QueryProgramRequest, Error> {
-        self.table_read_policy_authorization_request_with_root_visibility(
-            policy_schema_version,
-            table_name,
-            identity,
-            ParamBindingMode::InlineAllReachableSeeds,
-            tier,
-            binding_source_shape,
-            binding_user_params,
-            binding_claim_params,
-            true,
-        )
-    }
-
-    fn table_read_policy_authorization_request_with_root_visibility(
+    /// Visibility applies only to the protected root. Policy dependencies
+    /// retain their own visibility, so deleted grants do not authorize access.
+    pub(super) fn table_read_policy_authorization_request(
         &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
@@ -1324,8 +1279,9 @@ where
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
         binding_claim_params: BTreeMap<String, ProgramClaimParam>,
-        include_deleted_root: bool,
+        root_visibility: RowVisibility,
     ) -> Result<QueryProgramRequest, Error> {
+        let include_deleted_root = root_visibility == RowVisibility::IncludeDeleted;
         let cache_key = ReadPolicyAuthorizationRequestCacheKey {
             policy_schema_version,
             table_name: table_name.to_owned(),
@@ -2354,6 +2310,7 @@ mod authorization_scope_compiler_tests {
                 None,
                 BTreeMap::new(),
                 BTreeMap::new(),
+                RowVisibility::Visible,
             )
             .unwrap();
         let pause = pause_policy_proof_compilation_for_test();
