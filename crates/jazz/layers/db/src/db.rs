@@ -2741,7 +2741,7 @@ enum BatchKind {
     /// On a client the snapshot is pinned by the first read that reaches
     /// the authority (the authority's state then), or stays the replica's
     /// known cut when the first read answers offline.
-    Exclusive {
+    Serializable {
         snapshot: u64,
         reads: Vec<ReadRecord>,
         pinned: bool,
@@ -2868,7 +2868,7 @@ pub struct TxRef<'a> {
 }
 
 pub type MergeableTxRef<'a> = TxRef<'a>;
-pub type ExclusiveTxRef<'a> = TxRef<'a>;
+pub type SerializableTxRef<'a> = TxRef<'a>;
 
 impl Db {
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
@@ -2878,7 +2878,7 @@ impl Db {
     /// A serializable transaction: snapshot reads, validated at commit.
     /// On a client the snapshot is the server seq the replica is known
     /// complete through.
-    pub async fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
+    pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
         let snapshot = {
             let inner = self.inner.borrow();
             inner
@@ -2888,7 +2888,7 @@ impl Db {
         };
         self.begin(
             id,
-            BatchKind::Exclusive {
+            BatchKind::Serializable {
                 snapshot,
                 reads: Vec::new(),
                 pinned: !self.is_client(),
@@ -2915,7 +2915,7 @@ impl Db {
         TxRef { db: self, id }
     }
 
-    pub fn exclusive_tx_ref(&self, id: OpenTransactionId) -> TxRef<'_> {
+    pub fn serializable_tx_ref(&self, id: OpenTransactionId) -> TxRef<'_> {
         TxRef { db: self, id }
     }
 
@@ -2928,7 +2928,7 @@ impl Db {
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
     }
 
-    pub fn abandon_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
+    pub fn abandon_serializable_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.abandon_transaction_handle(id)
     }
 
@@ -2951,9 +2951,12 @@ impl Db {
     /// catches phantoms: rows that entered or left a predicate or window).
     /// The check and the apply run under one store borrow, so nothing can
     /// commit in between.
-    pub async fn commit_exclusive_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
+    pub async fn commit_serializable_handle(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
-        let BatchKind::Exclusive {
+        let BatchKind::Serializable {
             snapshot, reads, ..
         } = &batch.kind
         else {
@@ -3067,7 +3070,7 @@ impl Db {
         let mut ops = batch.ops.clone();
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
-            BatchKind::Exclusive { snapshot, .. } => Some(*snapshot),
+            BatchKind::Serializable { snapshot, .. } => Some(*snapshot),
         };
         if let Some(op) = extra {
             ops.push((inner.schema.clone(), op));
@@ -3106,7 +3109,7 @@ impl Db {
     fn record_read(&self, id: OpenTransactionId, prepared: &PreparedQuery) -> Result<(), Error> {
         let mut inner = self.inner();
         let Some(Batch {
-            kind: BatchKind::Exclusive { snapshot, .. },
+            kind: BatchKind::Serializable { snapshot, .. },
             ..
         }) = inner.batches.get(&id)
         else {
@@ -3121,7 +3124,7 @@ impl Db {
         };
         let rows = versions(&inner.run(prepared, None, &read)?);
         if let Some(Batch {
-            kind: BatchKind::Exclusive { reads, .. },
+            kind: BatchKind::Serializable { reads, .. },
             ..
         }) = inner.batches.get_mut(&id)
         {
@@ -3197,7 +3200,7 @@ impl TxRef<'_> {
         let snapshot = match self.db.inner.borrow().batches.get(&self.id) {
             Some(Batch {
                 kind:
-                    BatchKind::Exclusive {
+                    BatchKind::Serializable {
                         snapshot, pinned, ..
                     },
                 ..
@@ -3212,7 +3215,7 @@ impl TxRef<'_> {
             let through = self.db.fetch(prepared, at, None).await;
             if let Some(Batch {
                 kind:
-                    BatchKind::Exclusive {
+                    BatchKind::Serializable {
                         snapshot, pinned, ..
                     },
                 ..
@@ -3277,14 +3280,14 @@ impl Db {
     }
 }
 
-/// An owned serializable transaction (`Db::exclusive_tx`). Reads and writes
+/// An owned serializable transaction (`Db::serializable_tx`). Reads and writes
 /// go through the `TxRef` it derefs to; dropping it uncommitted abandons it.
-pub struct ExclusiveTx<'a> {
+pub struct SerializableTx<'a> {
     tx: TxRef<'a>,
     committed: bool,
 }
 
-impl<'a> std::ops::Deref for ExclusiveTx<'a> {
+impl<'a> std::ops::Deref for SerializableTx<'a> {
     type Target = TxRef<'a>;
 
     fn deref(&self) -> &TxRef<'a> {
@@ -3292,9 +3295,9 @@ impl<'a> std::ops::Deref for ExclusiveTx<'a> {
     }
 }
 
-impl ExclusiveTx<'_> {
+impl SerializableTx<'_> {
     pub async fn commit(mut self) -> Result<TxReceipt, Error> {
-        let receipt = self.tx.db.commit_exclusive_handle(self.tx.id).await;
+        let receipt = self.tx.db.commit_serializable_handle(self.tx.id).await;
         // A failed commit has already taken the batch, so there is nothing
         // left to abandon either way.
         self.committed = true;
@@ -3302,7 +3305,7 @@ impl ExclusiveTx<'_> {
     }
 }
 
-impl Drop for ExclusiveTx<'_> {
+impl Drop for SerializableTx<'_> {
     fn drop(&mut self) {
         if !self.committed {
             let _ = self.tx.db.abandon_transaction_handle(self.tx.id);
@@ -3311,11 +3314,11 @@ impl Drop for ExclusiveTx<'_> {
 }
 
 impl Db {
-    pub async fn exclusive_tx(&self) -> Result<ExclusiveTx<'_>, Error> {
+    pub async fn serializable_tx(&self) -> Result<SerializableTx<'_>, Error> {
         let id = OpenTransactionId::new();
-        self.begin_exclusive(id).await?;
-        Ok(ExclusiveTx {
-            tx: self.exclusive_tx_ref(id),
+        self.begin_serializable(id).await?;
+        Ok(SerializableTx {
+            tx: self.serializable_tx_ref(id),
             committed: false,
         })
     }

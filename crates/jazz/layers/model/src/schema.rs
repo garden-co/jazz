@@ -1242,7 +1242,7 @@ pub fn global_current_composite_index_name(columns: &[String]) -> String {
 /// (SPEC 2 §2.8):
 ///
 /// - fields needed only until the transaction has a seq or a rejection
-///   (`permission_subject` and the exclusive read evidence) in
+///   (`permission_subject` and the serializable read evidence) in
 ///   `jazz_pending_transactions`, deleted by the batch that settles it;
 /// - calculated-merge and branch-write provenance, which grows with the number
 ///   of writes, in `jazz_tx_provenance`, so status reads never copy it;

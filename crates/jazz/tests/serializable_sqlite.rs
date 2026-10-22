@@ -71,7 +71,7 @@ fn a_phantom_entering_a_predicate_read_conflicts() {
     seat(&db, 1, "A", false);
     seat(&db, 2, "A", false);
     let tx = OpenTransactionId::new();
-    block_on(db.begin_exclusive(tx)).unwrap();
+    block_on(db.begin_serializable(tx)).unwrap();
     let taken_in_a = db
         .prepare_query(
             &db.table("seats")
@@ -80,7 +80,7 @@ fn a_phantom_entering_a_predicate_read_conflicts() {
         )
         .unwrap();
     assert!(
-        block_on(db.exclusive_tx_ref(tx).all_prepared(&taken_in_a))
+        block_on(db.serializable_tx_ref(tx).all_prepared(&taken_in_a))
             .unwrap()
             .is_empty()
     );
@@ -91,14 +91,14 @@ fn a_phantom_entering_a_predicate_read_conflicts() {
         Default::default(),
     ))
     .unwrap();
-    block_on(db.exclusive_tx_ref(tx).update(
+    block_on(db.serializable_tx_ref(tx).update(
         "seats",
         RowUuid::from_bytes([1; 16]),
         take(true),
         Default::default(),
     ))
     .unwrap();
-    let error = block_on(db.commit_exclusive_handle(tx)).unwrap_err();
+    let error = block_on(db.commit_serializable_handle(tx)).unwrap_err();
     assert_eq!(error.code, ErrorCode::TransactionConflict);
     assert_eq!(
         error.to_string(),
@@ -114,12 +114,12 @@ fn an_unrelated_concurrent_write_commits() {
     seat(&db, 1, "A", false);
     seat(&db, 3, "B", false);
     let tx = OpenTransactionId::new();
-    block_on(db.begin_exclusive(tx)).unwrap();
+    block_on(db.begin_serializable(tx)).unwrap();
     let room_a = db
         .prepare_query(&db.table("seats").filter(eq(col("room"), lit("A"))))
         .unwrap();
     assert_eq!(
-        block_on(db.exclusive_tx_ref(tx).all_prepared(&room_a))
+        block_on(db.serializable_tx_ref(tx).all_prepared(&room_a))
             .unwrap()
             .len(),
         1
@@ -131,14 +131,14 @@ fn an_unrelated_concurrent_write_commits() {
         Default::default(),
     ))
     .unwrap();
-    block_on(db.exclusive_tx_ref(tx).update(
+    block_on(db.serializable_tx_ref(tx).update(
         "seats",
         RowUuid::from_bytes([1; 16]),
         take(true),
         Default::default(),
     ))
     .unwrap();
-    block_on(db.commit_exclusive_handle(tx)).unwrap();
+    block_on(db.commit_serializable_handle(tx)).unwrap();
     let all = db
         .prepare_query(&db.table("seats").filter(eq(col("taken"), lit(true))))
         .unwrap();
@@ -153,7 +153,7 @@ fn snapshot_reads_see_history_images_and_own_writes() {
     seat(&db, 1, "A", false);
     seat(&db, 2, "A", false);
     let tx = OpenTransactionId::new();
-    block_on(db.begin_exclusive(tx)).unwrap();
+    block_on(db.begin_serializable(tx)).unwrap();
     // After the snapshot: seat 1 changes twice, seat 4 appears, seat 2 is deleted.
     block_on(db.update(
         "seats",
@@ -175,7 +175,7 @@ fn snapshot_reads_see_history_images_and_own_writes() {
     let ordered = db
         .prepare_query(&db.table("seats").order_by("room", OrderDirection::Asc))
         .unwrap();
-    let rows = block_on(db.exclusive_tx_ref(tx).all_prepared(&ordered)).unwrap();
+    let rows = block_on(db.serializable_tx_ref(tx).all_prepared(&ordered)).unwrap();
     let seen: Vec<(RowUuid, Option<Value>)> = rows
         .iter()
         .map(|row| (row.row_uuid(), row.cell(&schema().tables[0], "room")))
@@ -195,7 +195,7 @@ fn snapshot_reads_see_history_images_and_own_writes() {
     );
 
     seat(&db, 5, "Q", false);
-    let tx_ref = db.exclusive_tx_ref(tx);
+    let tx_ref = db.serializable_tx_ref(tx);
     block_on(tx_ref.insert(
         "seats",
         BTreeMap::from([
@@ -214,7 +214,7 @@ fn snapshot_reads_see_history_images_and_own_writes() {
             .unwrap()
             .is_none()
     );
-    db.abandon_exclusive_handle(tx).unwrap();
+    db.abandon_serializable_handle(tx).unwrap();
     // Seats 1, 4 and 5; seat 2 is deleted and seat 6 was abandoned.
     assert_eq!(db.read(&ordered).unwrap().len(), 3);
 }

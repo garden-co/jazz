@@ -102,7 +102,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
         }
         // The snapshot sees row 0 as "i0"; then it changes.
         let open = OpenTransactionId::new();
-        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.begin_serializable(open)).unwrap();
         block_on(db.update(
             "items",
             row(0),
@@ -110,7 +110,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
             Default::default(),
         ))
         .unwrap();
-        db.abandon_exclusive_handle(open).unwrap();
+        db.abandon_serializable_handle(open).unwrap();
         block_on(db.insert("items", item(99), Default::default()))
             .unwrap()
             .mergeable_tx_id()
@@ -123,7 +123,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
     assert_eq!(next, before + 1, "the commit seq continues");
     // History survived: an as-of read of the superseded image.
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let first = db
         .prepare_query(
             &Query::from("items")
@@ -131,12 +131,12 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
                 .limit(1),
         )
         .unwrap();
-    let rows = block_on(db.exclusive_tx_ref(open).all_prepared(&first)).unwrap();
+    let rows = block_on(db.serializable_tx_ref(open).all_prepared(&first)).unwrap();
     assert_eq!(
         rows[0].cells().find(|(n, _)| *n == "label").unwrap().1,
         Some(&Value::String("changed".to_owned()))
     );
-    db.abandon_exclusive_handle(open).unwrap();
+    db.abandon_serializable_handle(open).unwrap();
 }
 
 const CHILD: &str = "JAZZ_SQLITE_CRASH_CHILD";
