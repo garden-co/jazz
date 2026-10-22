@@ -2056,9 +2056,9 @@ mod tests {
         let frames: Vec<Vec<u8>> =
             postcard::from_bytes(&response).expect("decode server hello batch");
         assert_eq!(frames.len(), 1);
-        let WireFrame::Hello(server_hello) = decode_frame(&frames[0]).expect("decode server hello")
-        else {
-            panic!("expected server WireFrame::Hello");
+        let server_hello = match decode_frame(&frames[0]).expect("decode server hello") {
+            WireFrame::Hello(hello) => hello,
+            other => panic!("expected server WireFrame::Hello, got {other:?}"),
         };
         assert_eq!(
             server_hello.features, features,

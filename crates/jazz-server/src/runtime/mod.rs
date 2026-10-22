@@ -18,13 +18,15 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::Duration;
 
+use crate::kv::SqliteKv;
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, SubscriberId, SyncMessage, Transport, TransportError,
     block_on, lens_column_defaults,
 };
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::{
-    CatalogueSnapshot, CurrentWriteSchema, MigrationLens, PhysicalIdentityManifest, SchemaVersion,
+    CatalogueSnapshot, CurrentWriteSchema, MigrationLens, PhysicalIdentityManifest,
+    SchemaLineagePublication, SchemaVersion,
 };
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -99,7 +101,8 @@ pub enum ServerLinkAdmission {
     #[default]
     OrdinarySession,
     /// Host-verified SYSTEM authority credential permitting scoped query
-    /// delegation. Not supported yet on SQLite.
+    /// delegation. On SQLite it is served as a trusted SYSTEM link; the sync
+    /// protocol cannot express a delegated scope yet.
     AuthorityQueryDelegate,
     /// A durable relay for exactly the one session authenticated by this
     /// connection. Not supported yet on SQLite.
@@ -120,6 +123,9 @@ const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
 const IDLE_TICK: Duration = Duration::from_secs(1);
+
+/// The runtime catalogue's key in its sidecar store.
+const CATALOGUE_KEY: &[u8] = b"runtime-catalogue:v1";
 
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
 /// Defaults for new columns, keyed by (table, column).
@@ -202,6 +208,15 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
+        Self::start(schema, storage, role, false)
+    }
+
+    fn start(
+        schema: JazzSchema,
+        storage: StorageConfig,
+        role: NodeRole,
+        any_stored_catalogue: bool,
+    ) -> Result<Self, String> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
@@ -213,7 +228,7 @@ impl ServerRuntimeHandle {
         let join = thread::Builder::new()
             .name("jazz-server-runtime".to_owned())
             .spawn(move || {
-                let owner = match Owner::open(schema, &storage) {
+                let owner = match Owner::open(schema, &storage, any_stored_catalogue) {
                     Ok(owner) => {
                         let _ = started_tx.send(Ok(()));
                         owner
@@ -249,7 +264,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start_with_storage_config(schema, storage, role)
+        Self::start(schema, storage, role, true)
     }
 
     /// Subscribe to activity notices.
@@ -275,10 +290,9 @@ impl ServerRuntimeHandle {
         link_admission: ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
         match link_admission {
-            ServerLinkAdmission::OrdinarySession => {}
-            ServerLinkAdmission::AuthorityQueryDelegate => {
-                return Err("authority query delegation is not supported yet on SQLite".into());
-            }
+            // The SQLite sync protocol has no per-query delegated scope yet,
+            // so an authority link is served as the trusted SYSTEM link it is.
+            ServerLinkAdmission::OrdinarySession | ServerLinkAdmission::AuthorityQueryDelegate => {}
             ServerLinkAdmission::ScopeIsolatedClientRelay { .. } => {
                 return Err("client relays are not supported yet on SQLite".into());
             }
@@ -414,11 +428,17 @@ impl ServerRuntimeHandle {
         &self,
         schema: JazzSchema,
         lens: MigrationLens,
-        _new_tables: Vec<String>,
-        _dropped_tables: Vec<String>,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
     ) -> Result<SchemaVersionId, String> {
-        self.run(move |owner| owner.catalogue.publish(schema, lens))
-            .await
+        self.run(move |owner| {
+            let id = owner
+                .catalogue
+                .publish(schema, lens, new_tables, dropped_tables)?;
+            owner.catalogue.persist()?;
+            Ok(id)
+        })
+        .await
     }
 
     /// Whether `schema` is admitted.
@@ -623,6 +643,8 @@ struct Catalogue {
     defaults: BTreeMap<SchemaVersionId, ColumnDefaults>,
     activated: Vec<JazzSchema>,
     snapshot: CatalogueSnapshot,
+    /// Where `snapshot` is kept between runs, beside a file store.
+    store: Option<SqliteKv>,
 }
 
 impl Catalogue {
@@ -633,6 +655,7 @@ impl Catalogue {
             lenses: BTreeSet::new(),
             defaults: BTreeMap::new(),
             activated: vec![genesis.clone()],
+            store: None,
             snapshot: CatalogueSnapshot {
                 genesis_physical_identities: PhysicalIdentityManifest::allocate(genesis),
                 schemas: vec![version.clone()],
@@ -649,16 +672,79 @@ impl Catalogue {
         &mut self,
         schema: JazzSchema,
         lens: MigrationLens,
+        new_tables: Vec<String>,
+        dropped_tables: Vec<String>,
     ) -> Result<SchemaVersionId, String> {
         let defaults = lens_column_defaults(&lens).map_err(|error| error.to_string())?;
-        if !self.schemas.contains_key(&lens.source) {
+        let Some(source) = self.schemas.get(&lens.source).cloned() else {
             return Err("lens source schema is not admitted".to_owned());
-        }
+        };
         let id = schema.version_id();
+        if !self.snapshot.schemas.iter().any(|version| version.id == id) {
+            let publication = SchemaLineagePublication::author_from_prior_with_history(
+                &source,
+                &self.identities(lens.source)?,
+                self.history(),
+                SchemaVersion::new(schema.clone()),
+                lens.clone(),
+                new_tables,
+                dropped_tables,
+            )
+            .map_err(str::to_owned)?;
+            let sequence = self
+                .snapshot
+                .lineages
+                .iter()
+                .map(|(seq, _)| *seq)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            self.snapshot.lineages.push((sequence, publication));
+            self.snapshot
+                .schemas
+                .push(SchemaVersion::new(schema.clone()));
+        }
         self.defaults.entry(id).or_default().extend(defaults);
         self.lenses.insert(lens.id);
         self.schemas.entry(id).or_insert(schema);
         Ok(id)
+    }
+
+    /// The physical identities `schema` was published with.
+    fn identities(&self, schema: SchemaVersionId) -> Result<PhysicalIdentityManifest, String> {
+        if let Some((_, publication)) = self
+            .snapshot
+            .lineages
+            .iter()
+            .find(|(_, publication)| publication.schema.id == schema)
+        {
+            return Ok(publication.physical_identities.clone());
+        }
+        if self.snapshot.schemas.first().map(|version| version.id) == Some(schema) {
+            return Ok(self.snapshot.genesis_physical_identities.clone());
+        }
+        Err("lens source schema has no published identities".to_owned())
+    }
+
+    fn history(&self) -> Vec<PhysicalIdentityManifest> {
+        std::iter::once(self.snapshot.genesis_physical_identities.clone())
+            .chain(
+                self.snapshot
+                    .lineages
+                    .iter()
+                    .map(|(_, publication)| publication.physical_identities.clone()),
+            )
+            .collect()
+    }
+
+    /// Keep the snapshot for the next run of a file store.
+    fn persist(&self) -> Result<(), String> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let bytes = postcard::to_allocvec(&self.snapshot)
+            .map_err(|error| format!("encode runtime catalogue: {error}"))?;
+        store.write_many(&[(CATALOGUE_KEY.to_vec(), bytes)])
     }
 
     fn defaults_for(&self, schema: SchemaVersionId) -> ColumnDefaults {
@@ -714,31 +800,67 @@ fn with_permissions(
 }
 
 impl Owner {
-    fn open(schema: JazzSchema, storage: &StorageConfig) -> Result<Self, String> {
-        let catalogue = Catalogue::new(&schema);
-        let db = match storage {
-            StorageConfig::InMemory => block_on(Db::open(config(schema))),
+    /// Open the store. A file store also reopens the catalogue it admitted
+    /// before: its genesis schema opens the store and every later schema is
+    /// activated again (each a no-op on the stored tables), so the catalogue
+    /// and its lineage survive restarts. `schema` starts a fresh catalogue
+    /// only when the store has none, or (unless `any_stored_catalogue`) none
+    /// that admits it.
+    fn open(
+        schema: JazzSchema,
+        storage: &StorageConfig,
+        any_stored_catalogue: bool,
+    ) -> Result<Self, String> {
+        let (db, store, stored) = match storage {
+            StorageConfig::InMemory => (block_on(Db::open(config(schema.clone()))), None, None),
             StorageConfig::SQLite { path } => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
                 }
-                block_on(Db::open_at(
-                    config(schema),
+                let store = SqliteKv::open(&path.with_extension("catalogue.sqlite"))?;
+                let stored = match store.get(CATALOGUE_KEY)? {
+                    Some(bytes) => Some(
+                        postcard::from_bytes::<CatalogueSnapshot>(&bytes)
+                            .map_err(|error| format!("decode runtime catalogue: {error}"))?,
+                    ),
+                    None => None,
+                }
+                .filter(|snapshot| {
+                    any_stored_catalogue
+                        || snapshot
+                            .schemas
+                            .iter()
+                            .any(|version| version.id == schema.version_id())
+                });
+                let genesis = match &stored {
+                    Some(snapshot) => deployment_steps(snapshot)?.remove(0).0,
+                    None => schema.clone(),
+                };
+                let db = block_on(Db::open_at(
+                    config(genesis),
                     path,
                     FileOptions {
                         synchronous_full: true,
                         ..FileOptions::default()
                     },
-                ))
+                ));
+                (db, Some(store), stored)
             }
-        }
-        .map_err(|error| format!("open server store: {error}"))?;
-        Ok(Self {
+        };
+        let db = db.map_err(|error| format!("open server store: {error}"))?;
+        let mut owner = Self {
             db,
             sessions: HashMap::new(),
-            catalogue,
-        })
+            catalogue: Catalogue::new(&schema),
+        };
+        if let Some(snapshot) = stored {
+            owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
+            owner.apply_snapshot(snapshot)?;
+        }
+        owner.catalogue.store = store;
+        owner.catalogue.persist()?;
+        Ok(owner)
     }
 
     fn run(mut self, jobs: std_mpsc::Receiver<Job>, tick_queued: &AtomicBool) {
@@ -858,21 +980,28 @@ impl Owner {
         let id = schema.version_id();
         let defaults = self.catalogue.defaults_for(id);
         let selected = with_permissions(&schema, permissions)?;
-        block_on(self.db.activate_schema_with_defaults(selected, &defaults))
-            .map_err(|error| error.to_string())?;
+        block_on(
+            self.db
+                .activate_schema_with_defaults(selected.clone(), &defaults),
+        )
+        .map_err(|error| error.to_string())?;
         self.catalogue
             .schemas
             .entry(id)
             .or_insert_with(|| schema.clone());
-        self.catalogue.activated.push(schema.clone());
+        self.catalogue.activated.push(schema);
+        // The snapshot carries the write schema with its installed policies.
         let snapshot = &mut self.catalogue.snapshot;
-        if !snapshot.schemas.iter().any(|version| version.id == id) {
-            snapshot.schemas.push(SchemaVersion::new(schema));
+        let selected = SchemaVersion::new(selected);
+        match snapshot.schemas.iter_mut().find(|version| version.id == id) {
+            Some(version) => *version = selected,
+            None => snapshot.schemas.push(selected),
         }
         snapshot.current_write_schema = CurrentWriteSchema {
             revision,
             schema: id,
         };
+        self.catalogue.persist()?;
         Ok(id)
     }
 
@@ -893,9 +1022,17 @@ impl Owner {
         for (_, publication) in &snapshot.lineages {
             for predecessor in &publication.predecessors {
                 self.catalogue.lenses.insert(predecessor.lens.id);
+                self.catalogue
+                    .defaults
+                    .entry(publication.schema.id)
+                    .or_default()
+                    .extend(
+                        lens_column_defaults(&predecessor.lens)
+                            .map_err(|error| error.to_string())?,
+                    );
             }
         }
         self.catalogue.snapshot = snapshot;
-        Ok(())
+        self.catalogue.persist()
     }
 }
