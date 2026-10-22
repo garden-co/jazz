@@ -4,9 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
-use jazz::db::ConnectionSessionContext;
-#[cfg(test)]
-use jazz::db::WireTransportAdapter;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
@@ -196,7 +193,6 @@ pub struct WebSocketTransport {
     terminal_publisher: Arc<Mutex<Option<oneshot::Sender<NativeTransportTerminal>>>>,
     protocol_version: u16,
     features: u64,
-    session_context: Option<ConnectionSessionContext>,
 }
 
 /// Tokio/TLS WebSocket implementation selected by native process and binding
@@ -208,8 +204,6 @@ pub struct NativeWebSocketConnector;
 impl NativeTransportConnector for NativeWebSocketConnector {
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
-            let permits_delegated_sessions = request.peer_identity == AuthorSubject::SYSTEM
-                && (request.auth.backend_secret.is_some() || request.auth.admin_secret.is_some());
             let mut transport = WebSocketTransport::connect_with_link(
                 request.server_url,
                 request.app_id,
@@ -220,15 +214,12 @@ impl NativeTransportConnector for NativeWebSocketConnector {
             )
             .await
             .map_err(native_connect_error)?;
-            let (protocol_version, features, session_context) =
-                transport.negotiated_transport_metadata();
+            let (protocol_version, features) = transport.negotiated_transport_metadata();
             let terminal = transport.take_terminal_future();
             Ok(ConnectedNativeTransport {
                 transport: Box::new(transport),
                 protocol_version,
                 features,
-                session_context,
-                permits_delegated_sessions,
                 terminal,
             })
         })
@@ -450,7 +441,7 @@ impl WebSocketTransport {
             .map_err(WebSocketClientError::Send)?;
 
         let server_hello = receive_server_hello(&mut ws, deadline).await?;
-        let mut negotiated = negotiate_wire(&server_hello, current_wire_features())
+        let negotiated = negotiate_wire(&server_hello, current_wire_features())
             .map_err(WebSocketClientError::Negotiation)?;
         if requested_link == NativeTransportLink::ScopeIsolatedClientRelay
             && negotiated.features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY == 0
@@ -460,24 +451,6 @@ impl WebSocketTransport {
             )
             .into());
         }
-        // Receipt semantics require an admitted authority endpoint, not merely
-        // a feature bit from a legacy hello.
-        if server_hello.authority.is_none() {
-            negotiated.features &= !jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS;
-        }
-        let session_context =
-            if negotiated.features & jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0 {
-                server_hello
-                    .authority
-                    .map(|remote| ConnectionSessionContext {
-                        local: client_endpoint,
-                        remote: Some(remote),
-                        link_identity: peer_identity,
-                        negotiated_features: negotiated.features,
-                    })
-            } else {
-                None
-            };
 
         let (inbound_tx, inbound_rx) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
         let inbound = Arc::new(Mutex::new(inbound_rx));
@@ -513,13 +486,12 @@ impl WebSocketTransport {
             terminal_publisher,
             protocol_version: negotiated.protocol_version,
             features: negotiated.features,
-            session_context,
         })
     }
 
     /// Negotiated metadata authenticated during the websocket handshake.
-    pub fn negotiated_transport_metadata(&self) -> (u16, u64, Option<ConnectionSessionContext>) {
-        (self.protocol_version, self.features, self.session_context)
+    pub fn negotiated_transport_metadata(&self) -> (u16, u64) {
+        (self.protocol_version, self.features)
     }
 
     fn take_terminal_future(&mut self) -> NativeTransportTerminalFuture {
@@ -1198,93 +1170,16 @@ mod tests {
     }
 
     use super::*;
-    use jazz::db::Transport;
     use jazz::wire::WIRE_PROTOCOL_VERSION;
-    use std::collections::{BTreeMap, VecDeque};
 
-    #[derive(Clone)]
-    struct FrameSink {
-        outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
-        inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    }
-
-    impl WireTransport for FrameSink {
-        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-            self.outbound
-                .lock()
-                .expect("frame sink lock")
-                .push_back(frame);
-            Ok(())
-        }
-
-        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            self.inbound.lock().expect("frame source lock").pop_front()
-        }
-    }
-
-    fn valid_fragmented_wire_message_larger_than_ingress_budget() -> Vec<Vec<u8>> {
-        let frames = Arc::new(Mutex::new(VecDeque::new()));
-        let credits = Arc::new(Mutex::new(VecDeque::new()));
-        let received_frames = Arc::new(Mutex::new(VecDeque::new()));
-        let features = 0;
-        let mut sender = WireTransportAdapter::new(
-            FrameSink {
-                outbound: Arc::clone(&frames),
-                inbound: Arc::clone(&credits),
-            },
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        );
-        let mut receiver = WireTransportAdapter::new(
-            FrameSink {
-                outbound: credits,
-                inbound: Arc::clone(&received_frames),
-            },
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        );
-        let body = (0..(WS_CLIENT_MAX_QUEUED_BYTES + 1))
-            .map(|index| char::from((index % 251) as u8))
-            .collect::<String>();
-        let message = jazz::protocol::SyncMessage::SessionClaims {
-            identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::from([(
-                "catalogue_fixture".to_owned(),
-                jazz::groove::records::Value::String(body),
-            )]),
-        };
-        sender
-            .send(message.clone())
-            .expect("encode valid fragmented logical message");
-        let mut captured = Vec::new();
-        for _ in 0..1024 {
-            let turn = frames
-                .lock()
-                .expect("frame sink lock")
-                .drain(..)
-                .collect::<Vec<_>>();
-            received_frames.lock().unwrap().extend(turn.iter().cloned());
-            captured.extend(turn);
-            if let Some(received) = receiver
-                .try_recv_strict()
-                .expect("receive fragmented message")
-            {
-                assert_eq!(
-                    received, message,
-                    "credit-driven fragmentation preserves the full bootstrap"
-                );
-                assert!(captured.len() > 1, "message must be wire fragmented");
-                assert!(captured.iter().map(Vec::len).sum::<usize>() > WS_CLIENT_MAX_QUEUED_BYTES);
-                return captured;
-            }
-            assert_eq!(
-                sender.try_recv_strict().expect("apply receiver credits"),
-                None
-            );
-        }
-        panic!("credit-driven fragmented bootstrap must finish within bounded pump turns");
+    /// Frames, each within the physical cap, that together exceed the
+    /// ingress budget: an initial sync can arrive like this.
+    fn frames_larger_than_ingress_budget() -> Vec<Vec<u8>> {
+        let frame = MAX_WIRE_FRAME_BYTES / 2;
+        let count = WS_CLIENT_MAX_QUEUED_BYTES / frame + 2;
+        (0..count)
+            .map(|index| vec![(index % 251) as u8; frame])
+            .collect()
     }
 
     #[test]
@@ -1336,7 +1231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fragmented_bootstrap_larger_than_ingress_budget_streams_with_backpressure() {
+    async fn a_burst_larger_than_the_ingress_budget_streams_with_backpressure() {
         let (sender, mut receiver) = mpsc::channel::<InboundFrame>(1);
         let budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
         let consumer = tokio::spawn(async move {
@@ -1346,7 +1241,7 @@ mod tests {
             }
             received
         });
-        let frames = valid_fragmented_wire_message_larger_than_ingress_budget();
+        let frames = frames_larger_than_ingress_budget();
         let expected = frames.iter().map(Vec::len).sum::<usize>();
         for frame in frames {
             let budget_permit = Arc::clone(&budget)
@@ -1489,8 +1384,7 @@ mod tests {
                 })
                 .await;
             if supported {
-                let connected = connected.expect("supported scoped handshake");
-                assert!(!connected.permits_delegated_sessions);
+                connected.expect("supported scoped handshake");
             } else {
                 let error = match connected {
                     Ok(_) => panic!("missing scoped feature must fail closed"),
@@ -1548,7 +1442,6 @@ mod tests {
             terminal_publisher: Arc::new(Mutex::new(None)),
             protocol_version: WIRE_PROTOCOL_VERSION,
             features: 0,
-            session_context: None,
         };
         let frame = vec![0; MAX_WIRE_FRAME_BYTES];
         for _ in 0..(WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES / MAX_WIRE_FRAME_BYTES) {
