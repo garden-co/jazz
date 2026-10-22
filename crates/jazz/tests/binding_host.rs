@@ -199,6 +199,23 @@ fn writes_transactions_and_attribution_go_through_one_binding() {
         .unwrap();
     db.rollback_transaction(tx).unwrap();
     assert_eq!(titles(&db), ["two", "uno"]);
+
+    // A staged restore brings a deleted row back at commit.
+    db.delete("notes", &first.row_id.to_bytes(), &none())
+        .unwrap();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    db.restore_in_transaction(
+        tx,
+        "notes",
+        &first.row_id.to_bytes(),
+        &title("back"),
+        &none(),
+    )
+    .unwrap();
+    assert_eq!(titles(&db), ["two"]);
+    db.commit_transaction(tx, None).unwrap();
+    assert_eq!(titles(&db), ["back", "two"]);
     assert!(
         argument(db.begin_transaction(tx, "optimistic", None, None))
             .contains("unknown transaction kind")
