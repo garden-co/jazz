@@ -1102,16 +1102,18 @@ impl Db {
             .execute_batch("SAVEPOINT upload_local")
             .map_err(storage)?;
         let result = f();
-        let end = if result.is_ok() {
-            "RELEASE upload_local"
+        if result.is_ok() {
+            self.inner
+                .borrow()
+                .conn
+                .execute_batch("RELEASE upload_local")
+                .map_err(storage)?;
         } else {
-            "ROLLBACK TO upload_local; RELEASE upload_local"
-        };
-        self.inner
-            .borrow()
-            .conn
-            .execute_batch(end)
-            .map_err(storage)?;
+            self.inner
+                .borrow()
+                .rollback_savepoint("upload_local")
+                .map_err(storage)?;
+        }
         result
     }
 
@@ -1143,10 +1145,7 @@ impl Db {
                     (standalone && handle.seq == seq, handle)
                 }
                 Err(error) => {
-                    inner
-                        .conn
-                        .execute_batch("ROLLBACK TO w; RELEASE w")
-                        .map_err(storage)?;
+                    inner.rollback_savepoint("w").map_err(storage)?;
                     inner.changed.borrow_mut().truncate(mark);
                     return Err(error);
                 }
@@ -1204,10 +1203,7 @@ impl Db {
                     Some((seq, tables))
                 }
                 Err(_) => {
-                    inner
-                        .conn
-                        .execute_batch("ROLLBACK TO tx; RELEASE tx")
-                        .map_err(storage)?;
+                    inner.rollback_savepoint("tx").map_err(storage)?;
                     inner.changed.borrow_mut().clear();
                     None
                 }
@@ -2005,6 +2001,16 @@ impl Inner {
         }
     }
 
+    /// A rolled-back savepoint may remove interned authors and allow their
+    /// integer codes to be reused. Neither direction of the cache may outlive
+    /// that rollback, including speculative reads, advice and failed sync.
+    fn rollback_savepoint(&self, name: &str) -> rusqlite::Result<()> {
+        *self.authors.borrow_mut() = AuthorCodes::default();
+        let name = quote(name);
+        self.conn
+            .execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"))
+    }
+
     /// The interned code of an author's `(issuer, subject)`. Rows store this
     /// small integer instead of repeating both strings in every version;
     /// codes are local to this database and resolved back at egress.
@@ -2087,9 +2093,7 @@ impl Inner {
                 Ok(deleted)
             }
             Err(error) => {
-                let _ = self
-                    .conn
-                    .execute_batch("ROLLBACK TO reclaim; RELEASE reclaim");
+                let _ = self.rollback_savepoint("reclaim");
                 Err(error)
             }
         }
@@ -3450,10 +3454,7 @@ impl Db {
             let mark = inner.changed.borrow().len();
             let applied = inner.apply_with_edits(ops, &batch.edits, seq);
             if let Err(error) = applied {
-                inner
-                    .conn
-                    .execute_batch("ROLLBACK TO commit_batch; RELEASE commit_batch")
-                    .map_err(storage)?;
+                inner.rollback_savepoint("commit_batch").map_err(storage)?;
                 inner.changed.borrow_mut().truncate(mark);
                 return Err(error);
             }
@@ -3512,10 +3513,7 @@ impl Db {
                 }),
             )
         });
-        inner
-            .conn
-            .execute_batch("ROLLBACK TO overlay; RELEASE overlay")
-            .map_err(storage)?;
+        inner.rollback_savepoint("overlay").map_err(storage)?;
         inner.changed.borrow_mut().truncate(mark);
         result
     }
