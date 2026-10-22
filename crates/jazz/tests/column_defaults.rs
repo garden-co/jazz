@@ -341,6 +341,52 @@ fn core_restore_with_empty_content_yields_an_all_null_row() {
 }
 
 #[test]
+fn core_restore_applies_defaults_for_omitted_columns() {
+    let db = open_db();
+
+    jazz::block_on(db.insert(
+        "events",
+        cells([
+            ("title", Value::String("before".to_owned())),
+            ("status", Value::String("done".to_owned())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(9)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert row");
+    jazz::block_on(db.delete("events", row(9), Default::default())).expect("delete row");
+    // `title` has no default and is required; every other column is
+    // omitted and takes its default, as an insert would.
+    let missing =
+        jazz::block_on(db.restore("events", row(9), Some(BTreeMap::new()), Default::default()))
+            .expect_err("a required column without a default must be given");
+    assert!(missing.to_string().contains("`events.title` is required"));
+    jazz::block_on(db.restore(
+        "events",
+        row(9),
+        Some(cells([("title", Value::String("restored".to_owned()))])),
+        Default::default(),
+    ))
+    .expect("restore with defaults");
+
+    let stored = stored_row(&db, row(9));
+    assert_eq!(stored.get("count"), Some(&Value::I64(BIG_DEFAULT)));
+    assert_eq!(
+        stored.get("status"),
+        Some(&Value::String("queued".to_owned()))
+    );
+    assert_eq!(
+        stored.get("note"),
+        Some(&Value::Nullable(Some(Box::new(Value::String(
+            "default note".to_owned()
+        )))))
+    );
+    assert_eq!(stored.get("nullable_count"), Some(&Value::Nullable(None)));
+}
+
+#[test]
 fn core_insert_with_every_optional_json_column_omitted_yields_an_all_null_row() {
     let db = open_db();
 

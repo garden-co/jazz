@@ -2618,10 +2618,13 @@ impl Inner {
                 if table.branch_by.contains(&column.name) {
                     continue;
                 }
-                let value = match content.get(&column.name) {
-                    Some(value) => value.clone(),
-                    None if column.nullable() => Value::Nullable(None),
-                    None => {
+                // Restored content is a whole row: omitted columns take
+                // their defaults, as on insert.
+                let value = match (content.get(&column.name), &column.default) {
+                    (Some(value), _) => value.clone(),
+                    (None, Some(default)) => default.clone(),
+                    (None, None) if column.nullable() => Value::Nullable(None),
+                    (None, None) => {
                         return Err(rejected(format!(
                             "`{table_name}.{}` is required",
                             column.name
