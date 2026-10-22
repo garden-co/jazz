@@ -172,6 +172,9 @@ pub struct Image {
     pub key: Vec<u8>,
     pub seq: u64,
     pub deleted: bool,
+    /// Whether the version's commit wrote content (see `_c`): history
+    /// reads list only content versions.
+    pub content: bool,
     pub cells: Vec<(String, Cell)>,
 }
 
@@ -1080,6 +1083,7 @@ impl Inner {
                     key: Vec::new(),
                     seq: 0,
                     deleted: false,
+                    content: true,
                     cells: Vec::new(),
                 };
                 for (i, name) in names.iter().enumerate() {
@@ -1089,6 +1093,7 @@ impl Inner {
                         "_b" => image.key = r.get(i)?,
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
                         "_del" => image.deleted = r.get::<_, i64>(i)? != 0,
+                        "_c" => image.content = r.get::<_, i64>(i)? != 0,
                         _ => image
                             .cells
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
@@ -1211,12 +1216,14 @@ impl Inner {
             "_b".to_owned(),
             "_seq".to_owned(),
             "_del".to_owned(),
+            "_c".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
             Sql::Integer(image.seq as i64),
             Sql::Integer(image.deleted as i64),
+            Sql::Integer(image.content as i64),
         ];
         for (column, value) in self.stored_cells(image)? {
             names.push(quote(&column));
@@ -1353,7 +1360,8 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
-    CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));";
+    CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));\
+    CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);";
 
 type RowKey = (String, RowUuid, Vec<u8>);
 
@@ -1948,6 +1956,12 @@ impl Db {
     /// filters, multi-hop includes, nested arrays, aggregates) would see a
     /// partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
+        if crate::schema::history::is_history_table(&query.table) {
+            return Err(crate::values::unsupported(format!(
+                "a synced read of `{}`",
+                query.table
+            )));
+        }
         let other_tables = !query.joins.is_empty()
             || query.flat_join.is_some()
             || !query.reachable.is_empty()

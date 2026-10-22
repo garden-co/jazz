@@ -497,7 +497,12 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
             .map_err(storage)?;
         let columns = columns
             .into_iter()
-            .filter(|column| !matches!(column.as_str(), "rid" | "id" | "_b" | "_seq" | "_del"))
+            .filter(|column| {
+                !matches!(
+                    column.as_str(),
+                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c"
+                )
+            })
             .collect();
         tables.insert(name.clone(), Table::stored_only(name, columns));
     }
@@ -1504,7 +1509,16 @@ impl Inner {
         Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_history_origin(self.history_origin())
             .compile_query(&prepared.query, read.include_deleted)
+    }
+
+    /// The node history reads name this store's own commits by: set on the
+    /// authority only (see `compile::Ctx::history_origin`).
+    pub(crate) fn history_origin(&self) -> Option<[u8; 16]> {
+        self.client
+            .is_none()
+            .then(|| *self.identity.node.as_bytes())
     }
 
     fn run(
@@ -2185,8 +2199,8 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del{columns}) SELECT id, _b, _seq, _del{columns} FROM {} \
-             WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            "INSERT INTO {} (id, _b, _seq, _del, _c{columns}) SELECT id, _b, _seq, _del, _c{columns} \
+             FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored)
         );
@@ -2236,15 +2250,19 @@ impl Inner {
             )));
         };
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _seq, _del{columns}) SELECT id, ?1, ?2, _del{columns} FROM {source} \
-             WHERE id = ?3 AND _b = ?4",
+            "INSERT INTO {name} (id, _b, _seq, _del, _c{columns}) SELECT id, ?1, ?2, _del, 0{columns} \
+             FROM {source} WHERE id = ?3 AND _b = ?4",
             name = quote(&table.stored)
         );
         self.exec(&sql, rusqlite::params![to, seq as i64, id, from])
             .map_err(storage)?;
-        self.set_cells(table, row, to, head_cells, seq, None)
+        self.set_cells(table, row, to, head_cells, seq, None, false)
     }
 
+    /// Write cells (and the deletion flag) into a row's current version
+    /// at `seq`. `content` says whether the write authored content; a
+    /// version stays a content version once any write of its commit did.
+    #[allow(clippy::too_many_arguments)]
     fn set_cells(
         &self,
         table: &Table,
@@ -2253,8 +2271,17 @@ impl Inner {
         cells: &BTreeMap<String, Value>,
         seq: u64,
         deleted: Option<bool>,
+        content: bool,
     ) -> Result<(), Error> {
-        let mut sets = vec!["_seq = ?1".to_owned()];
+        // Right-hand sides read the row before this update: `_seq` is still
+        // the previous version's.
+        let mut sets = vec![
+            "_seq = ?1".to_owned(),
+            format!(
+                "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
+                content = content as u8
+            ),
+        ];
         let mut values = vec![Sql::Integer(seq as i64)];
         if let Some(deleted) = deleted {
             values.push(Sql::Integer(deleted as i64));
@@ -2446,7 +2473,15 @@ impl Inner {
                 }
                 self.snapshot(table, row, &key, seq)?;
                 // An upsert over a tombstone replaces it.
-                self.set_cells(table, row, &key, &cells, seq, deleted.then_some(false))?;
+                self.set_cells(
+                    table,
+                    row,
+                    &key,
+                    &cells,
+                    seq,
+                    deleted.then_some(false),
+                    true,
+                )?;
                 key
             }
             Located::Inherited {
@@ -2457,7 +2492,7 @@ impl Inner {
             } => {
                 self.authorize_patch(table, row, &from, &who, verb)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
-                self.set_cells(table, row, &to, &cells, seq, None)?;
+                self.set_cells(table, row, &to, &cells, seq, None, true)?;
                 to
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
@@ -2533,7 +2568,7 @@ impl Inner {
             } => {
                 check(self, &key)?;
                 self.snapshot(table, row, &key, seq)?;
-                self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true))?;
+                self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true), false)?;
             }
             // Deleting an inherited row is a head register: a head tombstone
             // that masks the base row.
@@ -2545,7 +2580,7 @@ impl Inner {
             } => {
                 check(self, &from)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
-                self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true))?;
+                self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true), false)?;
             }
             _ => {
                 return Err(rejected(format!(
@@ -2596,7 +2631,15 @@ impl Inner {
                 cells.insert(column.name.clone(), value);
             }
         }
-        self.set_cells(table, row, &key, &cells, seq, Some(false))?;
+        self.set_cells(
+            table,
+            row,
+            &key,
+            &cells,
+            seq,
+            Some(false),
+            content.is_some(),
+        )?;
         if let Who::Session(author) = who
             && !self.check(table, row, &key, author, Operation::Insert)?
         {
