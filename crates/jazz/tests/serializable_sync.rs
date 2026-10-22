@@ -1,5 +1,5 @@
 //! Serializable transactions between clients and the authority, modelled on
-//! Jazz's exclusive_snapshot_coverage invite-link scenarios: reads run at
+//! Jazz's serializable_snapshot_coverage invite-link scenarios: reads run at
 //! the transaction's snapshot on a partial replica (hydrated from the
 //! authority when online), and the authority re-runs every read at commit,
 //! so a stale or partial replica can cause a conflict but never a
@@ -207,30 +207,30 @@ impl Net {
     fn redeem(&self, i: usize, c: &str, single_use: bool, between: impl FnOnce()) -> Redeem {
         let db = self.db(i);
         let open = OpenTransactionId::new();
-        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.begin_serializable(open)).unwrap();
         let invite = db.prepare_query(&invite_query(c)).unwrap();
         let live = !self
-            .drive(db.exclusive_tx_ref(open).all_prepared(&invite))
+            .drive(db.serializable_tx_ref(open).all_prepared(&invite))
             .unwrap()
             .is_empty();
         let taken = single_use && {
             let members = db.prepare_query(&members_query(c)).unwrap();
             !self
-                .drive(db.exclusive_tx_ref(open).all_prepared(&members))
+                .drive(db.serializable_tx_ref(open).all_prepared(&members))
                 .unwrap()
                 .is_empty()
         };
         if !live || taken {
-            db.abandon_exclusive_handle(open).unwrap();
+            db.abandon_serializable_handle(open).unwrap();
             return Redeem::Invalid;
         }
         between();
         self.drive(
-            db.exclusive_tx_ref(open)
+            db.serializable_tx_ref(open)
                 .insert("members", code(c), Default::default()),
         )
         .unwrap();
-        let receipt = self.drive(db.commit_exclusive_handle(open)).unwrap();
+        let receipt = self.drive(db.commit_serializable_handle(open)).unwrap();
         match self.settle(i, receipt.0) {
             Ok(_) => Redeem::Joined,
             Err(error) => {
@@ -247,7 +247,7 @@ const OTHER: usize = 2;
 
 /// The backend never received the invite: the read hydrates at its snapshot.
 #[test]
-fn an_exclusive_read_sees_an_invite_the_backend_never_received() {
+fn a_serializable_read_sees_an_invite_the_backend_never_received() {
     let net = Net::new(3);
     net.write_invite(OWNER, "abc");
     net.unrelated_receipt(BACKEND);
@@ -323,21 +323,21 @@ fn an_offline_prepared_commit_succeeds_while_its_reads_hold() {
     net.go_offline(BACKEND);
     let db = net.db(BACKEND);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let invite = db.prepare_query(&invite_query("abc")).unwrap();
     assert_eq!(
-        block_on(db.exclusive_tx_ref(open).all_prepared(&invite))
+        block_on(db.serializable_tx_ref(open).all_prepared(&invite))
             .unwrap()
             .len(),
         1,
         "the replica answers offline"
     );
     block_on(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", code("abc"), Default::default()),
     )
     .unwrap();
-    let receipt = block_on(db.commit_exclusive_handle(open)).unwrap();
+    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
     net.go_online(BACKEND);
     assert!(net.settle(BACKEND, receipt.0).is_ok());
     assert_eq!(net.members("abc"), 2);
@@ -354,21 +354,21 @@ fn an_offline_prepared_redemption_of_a_revoked_invite_conflicts() {
     net.revoke(OWNER, invite);
     let db = net.db(BACKEND);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let prepared = db.prepare_query(&invite_query("abc")).unwrap();
     assert_eq!(
-        block_on(db.exclusive_tx_ref(open).all_prepared(&prepared))
+        block_on(db.serializable_tx_ref(open).all_prepared(&prepared))
             .unwrap()
             .len(),
         1,
         "stale replica"
     );
     block_on(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", code("abc"), Default::default()),
     )
     .unwrap();
-    let receipt = block_on(db.commit_exclusive_handle(open)).unwrap();
+    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
     net.go_online(BACKEND);
     let error = net.settle(BACKEND, receipt.0).unwrap_err();
     assert_eq!(error.code, ErrorCode::TransactionConflict);
@@ -396,30 +396,30 @@ fn an_offline_absence_guard_conflicts_when_the_invite_was_taken() {
     {
         let db = net.db(OTHER);
         let open = OpenTransactionId::new();
-        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.begin_serializable(open)).unwrap();
         for query in [invite_query("abc"), members_query("abc")] {
             let prepared = db.prepare_query(&query).unwrap();
-            net.drive(db.exclusive_tx_ref(open).all_prepared(&prepared))
+            net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
                 .unwrap();
         }
-        db.abandon_exclusive_handle(open).unwrap();
+        db.abandon_serializable_handle(open).unwrap();
     }
     net.go_offline(OTHER);
     assert_eq!(net.redeem(BACKEND, "abc", true, || {}), Redeem::Joined);
     let db = net.db(OTHER);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let members = db.prepare_query(&members_query("abc")).unwrap();
     // BACKEND's membership never reached OTHER's replica.
-    let seen = block_on(db.exclusive_tx_ref(open).all_prepared(&members))
+    let seen = block_on(db.serializable_tx_ref(open).all_prepared(&members))
         .unwrap()
         .len();
     block_on(
-        db.exclusive_tx_ref(open)
+        db.serializable_tx_ref(open)
             .insert("members", code("abc"), Default::default()),
     )
     .unwrap();
-    let receipt = block_on(db.commit_exclusive_handle(open)).unwrap();
+    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
     net.go_online(OTHER);
     assert_eq!(seen, 0);
     let error = net.settle(OTHER, receipt.0).unwrap_err();
@@ -439,20 +439,20 @@ fn an_offline_commit_from_a_genesis_snapshot_is_allowed() {
     net.go_offline(BACKEND);
     let db = net.db(BACKEND);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let prepared = db.prepare_query(&invite_query("abc")).unwrap();
     assert!(
-        block_on(db.exclusive_tx_ref(open).all_prepared(&prepared))
+        block_on(db.serializable_tx_ref(open).all_prepared(&prepared))
             .unwrap()
             .is_empty()
     );
-    block_on(db.exclusive_tx_ref(open).insert(
+    block_on(db.serializable_tx_ref(open).insert(
         "audit",
         BTreeMap::from([("note".to_owned(), Value::String("x".to_owned()))]),
         Default::default(),
     ))
     .unwrap();
-    let receipt = block_on(db.commit_exclusive_handle(open)).unwrap();
+    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
     net.go_online(BACKEND);
     assert!(net.settle(BACKEND, receipt.0).is_ok());
 }
@@ -486,26 +486,26 @@ fn racing_seat_bookings_never_double_book() {
             let db = net.db(i);
             let me = Value::String(format!("c{i}"));
             let open = OpenTransactionId::new();
-            block_on(db.begin_exclusive(open)).unwrap();
+            block_on(db.begin_serializable(open)).unwrap();
             let mine = db
                 .prepare_query(&Query::from("seats").filter(eq(col("holder"), lit(me.clone()))))
                 .unwrap();
             let free = db.prepare_query(&free).unwrap();
             let holds = !net
-                .drive(db.exclusive_tx_ref(open).all_prepared(&mine))
+                .drive(db.serializable_tx_ref(open).all_prepared(&mine))
                 .unwrap()
                 .is_empty();
             let seats = net
-                .drive(db.exclusive_tx_ref(open).all_prepared(&free))
+                .drive(db.serializable_tx_ref(open).all_prepared(&free))
                 .unwrap();
             if holds || seats.is_empty() {
-                db.abandon_exclusive_handle(open).unwrap();
+                db.abandon_serializable_handle(open).unwrap();
                 continue;
             }
             let seat = seats[(i + round) % seats.len()].row_uuid();
             let cells = BTreeMap::from([("holder".to_owned(), me)]);
             block_on(
-                db.exclusive_tx_ref(open)
+                db.serializable_tx_ref(open)
                     .update("seats", seat, cells, Default::default()),
             )
             .unwrap();
@@ -516,7 +516,9 @@ fn racing_seat_bookings_never_double_book() {
             .map(|(i, open)| {
                 (
                     i,
-                    block_on(net.db(i).commit_exclusive_handle(open)).unwrap().0,
+                    block_on(net.db(i).commit_serializable_handle(open))
+                        .unwrap()
+                        .0,
                 )
             })
             .collect();
