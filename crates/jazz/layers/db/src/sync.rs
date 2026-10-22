@@ -2107,7 +2107,6 @@ impl Db {
     /// partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
         let other_tables = !query.joins.is_empty()
-            || query.flat_join.is_some()
             || !query.reachable.is_empty()
             || !query.inherits.is_empty()
             || query
@@ -3043,6 +3042,19 @@ impl Db {
                     .get(&id)
                     .cloned()
                     .filter(|support| !support.is_empty());
+                // A flat join's joined sources, by stored table: their rows
+                // ship with each occurrence.
+                let joined_tables = match group.upgrade() {
+                    Some(group) => group
+                        .borrow()
+                        .query()
+                        .flat_join
+                        .iter()
+                        .flat_map(|flat| &flat.sources)
+                        .map(|source| names.stored_table(&source.table).map(str::to_owned))
+                        .collect::<Result<Vec<_>, Error>>()?,
+                    None => Vec::new(),
+                };
                 // Rows a resumed client already holds: not shipped, but
                 // their supporting rows are re-watched (and shipped if newer).
                 let mut held = Vec::new();
@@ -3057,6 +3069,10 @@ impl Db {
                         continue;
                     };
                     for row in added.iter().chain(updated.iter()) {
+                        for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
+                            let id = joined.0.as_bytes().to_vec();
+                            images.extend(inner.images_where(table, false, "id = ?1", &[&id])?);
+                        }
                         // A history row is a version of its source table.
                         let history = history_source_table(&row.table);
                         let table = names
@@ -3110,6 +3126,13 @@ impl Db {
                         )?;
                         for image in inner.images_where(table, false, "id = ?1", &[&id])? {
                             touched.insert((image.table.clone(), gone.row_uuid, image.key.clone()));
+                        }
+                        // A joined row may have left for its permissions.
+                        for (table, joined) in joined_tables.iter().zip(&gone.joined) {
+                            let id = joined.0.as_bytes().to_vec();
+                            for image in inner.images_where(table, false, "id = ?1", &[&id])? {
+                                touched.insert((image.table.clone(), *joined, image.key.clone()));
+                            }
                         }
                     }
                 }

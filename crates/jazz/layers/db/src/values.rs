@@ -953,6 +953,9 @@ pub struct CurrentRow {
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
     /// The declared type of each projected cell, shared by a read's rows.
     pub(crate) types: Arc<[ValueType]>,
+    /// A flat join's joined source rows in declared order, after the root
+    /// (`id`): with it, the row's occurrence. Empty for other reads.
+    pub(crate) joined: Arc<[RowUuid]>,
 }
 
 impl CurrentRow {
@@ -962,6 +965,12 @@ impl CurrentRow {
 
     pub fn table(&self) -> &str {
         &self.table
+    }
+
+    /// A flat join's joined source rows in declared order (the root is
+    /// [`Self::row_uuid`]); empty for other reads.
+    pub fn joined_rows(&self) -> &[RowUuid] {
+        &self.joined
     }
 
     pub fn is_deleted(&self) -> bool {
