@@ -1302,7 +1302,28 @@ impl Db {
         self.activate(schema, lenses)
     }
 
+    /// Admit `schema` without making it current: the stored tables grow to
+    /// hold it as [`Db::activate_schema_with_lenses`] would, and sessions
+    /// that declare it read and write by its names under the current
+    /// schema's policies.
+    pub async fn admit_schema_with_lenses(
+        &self,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+    ) -> Result<(), Error> {
+        self.admit(schema, lenses, false)
+    }
+
     fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
+        self.admit(schema, lenses, true)
+    }
+
+    fn admit(
+        &self,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+        make_current: bool,
+    ) -> Result<(), Error> {
         {
             let mut inner = self.inner();
             let version = schema.version_id();
@@ -1350,7 +1371,9 @@ impl Db {
             execute_script(&inner.conn, &ddl)?;
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &target)?;
-            inner.owner = Rc::new(target);
+            if make_current {
+                inner.owner = Rc::new(target);
+            }
             if !inner
                 .admitted
                 .iter()

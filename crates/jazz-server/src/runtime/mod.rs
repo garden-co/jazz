@@ -436,7 +436,15 @@ impl ServerRuntimeHandle {
         self.run(move |owner| {
             let id = owner
                 .catalogue
-                .publish(schema, lens, new_tables, dropped_tables)?;
+                .publish(schema.clone(), lens, new_tables, dropped_tables)?;
+            // Clients on the published version read and write by it before
+            // (and without) it becoming current.
+            block_on(
+                owner
+                    .db
+                    .admit_schema_with_lenses(schema, &owner.catalogue.lenses_for(id)),
+            )
+            .map_err(|error| error.to_string())?;
             owner.catalogue.persist()?;
             Ok(id)
         })
@@ -1073,6 +1081,23 @@ impl Owner {
                 self.catalogue
                     .admit_lens(publication.schema.id, predecessor.lens.clone());
             }
+        }
+        // Published versions that were never made current stay readable by
+        // the clients that declare them.
+        let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
+        lineages.sort_by_key(|(sequence, _)| *sequence);
+        for (_, publication) in lineages {
+            let id = publication.schema.id;
+            if self.catalogue.schemas.contains_key(&id) {
+                continue;
+            }
+            let schema = publication.schema.schema.clone();
+            block_on(
+                self.db
+                    .admit_schema_with_lenses(schema.clone(), &self.catalogue.lenses_for(id)),
+            )
+            .map_err(|error| error.to_string())?;
+            self.catalogue.schemas.insert(id, schema);
         }
         self.catalogue.snapshot = snapshot;
         self.catalogue.persist()
