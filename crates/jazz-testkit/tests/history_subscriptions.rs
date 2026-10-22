@@ -1571,10 +1571,7 @@ async fn include_deleted_subscription_fetches_current_content() {
                 .connect()
                 .await;
             let query = Query::from("tasks")
-                .filter(eq(
-                    col("id"),
-                    lit(jazz::groove::records::Value::Uuid(*row.uuid())),
-                ))
+                .filter(eq(col("id"), lit(jazz::records::Value::Uuid(*row.uuid()))))
                 .select(["title"]);
             let mut stream = alice
                 .subscribe_with_opts(
@@ -1867,7 +1864,7 @@ async fn deletion_metadata_respects_read_policy() {
                 in_list(
                     col("id"),
                     rows.iter()
-                        .map(|row| lit(jazz::groove::records::Value::Uuid(*row.uuid()))),
+                        .map(|row| lit(jazz::records::Value::Uuid(*row.uuid()))),
                 )
             };
             let columns = [
