@@ -544,6 +544,26 @@ fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
 
+/// The reason a policy rejects a write, leading its message (the code
+/// stays `WriteRejected`): authority rejections are reported by it.
+pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
+
+/// A write a policy rejects.
+fn denied(detail: impl std::fmt::Display) -> Error {
+    rejected(format!("{AUTHORIZATION_DENIED}: {detail}"))
+}
+
+impl Error {
+    /// Whether a policy rejected the write.
+    pub fn is_authorization_denied(&self) -> bool {
+        self.code == ErrorCode::WriteRejected
+            && self
+                .message
+                .strip_prefix(AUTHORIZATION_DENIED)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+    }
+}
+
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
@@ -2477,7 +2497,7 @@ impl Inner {
         if let Who::Session(author) = who
             && !self.check(table, row, &key, author, Operation::Insert)?
         {
-            return Err(rejected(format!(
+            return Err(denied(format_args!(
                 "INSERT policy denied the new row in `{table_name}`"
             )));
         }
@@ -2496,7 +2516,7 @@ impl Inner {
     ) -> Result<(), Error> {
         if let Who::Session(author) = who {
             if !self.check(table, row, key, *author, Operation::Select)? {
-                return Err(rejected(format!(
+                return Err(denied(format_args!(
                     "read policy denied {verb}: the target requires read permission"
                 )));
             }
@@ -2507,7 +2527,7 @@ impl Inner {
                 *author,
                 table.policies.update.using.as_ref(),
             )? {
-                return Err(rejected(format!(
+                return Err(denied(format_args!(
                     "{verb} policy (USING) denied the target row"
                 )));
             }
@@ -2587,7 +2607,7 @@ impl Inner {
                 table.policies.update.with_check.as_ref(),
             )?
         {
-            return Err(rejected(format!(
+            return Err(denied(format_args!(
                 "{verb} policy (WITH CHECK) denied the new row"
             )));
         }
@@ -2631,12 +2651,12 @@ impl Inner {
         let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
             if let Who::Session(author) = who {
                 if !inner.check(table, row, key, author, Operation::Select)? {
-                    return Err(rejected(
+                    return Err(denied(
                         "read policy denied DELETE: the target requires read permission",
                     ));
                 }
                 if !inner.check(table, row, key, author, Operation::Delete)? {
-                    return Err(rejected("DELETE policy denied the target row"));
+                    return Err(denied("DELETE policy denied the target row"));
                 }
             }
             Ok(())
@@ -2727,7 +2747,7 @@ impl Inner {
         if let Who::Session(author) = who
             && !self.check(table, row, &key, author, Operation::Insert)?
         {
-            return Err(rejected("RESTORE policy denied the restored row"));
+            return Err(denied("RESTORE policy denied the restored row"));
         }
         Ok(WriteHandle { row, seq })
     }

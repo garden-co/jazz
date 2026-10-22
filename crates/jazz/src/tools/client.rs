@@ -1254,9 +1254,18 @@ impl JazzClient {
             .await?
             .map(drop)
             .map_err(|error| {
-                JazzError::Write(format!(
-                    "transaction was rejected before reaching {tier:?} durability: {error}"
-                ))
+                // A policy rejection is reported by its reason, as the
+                // authority's verdict on the transaction.
+                if error.is_authorization_denied() {
+                    JazzError::Sync(format!(
+                        "transaction was rejected before reaching {tier:?} durability: {}",
+                        crate::db::AUTHORIZATION_DENIED
+                    ))
+                } else {
+                    JazzError::Write(format!(
+                        "transaction was rejected before reaching {tier:?} durability: {error}"
+                    ))
+                }
             })
     }
 
