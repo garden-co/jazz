@@ -429,6 +429,8 @@ impl Stamp {
     }
 }
 
+const STATEMENT_CACHE_CAPACITY: usize = 512;
+
 fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
@@ -470,6 +472,9 @@ impl Db {
         // The collation and functions must exist before any table that
         // uses them is created or written.
         let chunks = crate::large::Chunks::install(&conn, path)?;
+        // Statements are keyed per table and verb; the default 16 entries
+        // thrash as soon as a schema has a few tables.
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         conn.execute_batch(crate::large::DDL).map_err(storage)?;
         // Nodes a transaction writes stay cached until it ends: until then
         // the reader connection cannot see them.
@@ -1229,6 +1234,14 @@ impl MergeableTx<'_> {
 }
 
 impl Inner {
+    /// Runs a write through the statement cache. Writes to app tables
+    /// fire the large-value refcount triggers, so preparing one compiles
+    /// those trigger programs too; re-preparing per row dominated bulk
+    /// writes.
+    fn exec<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+        self.conn.prepare_cached(sql)?.execute(params)
+    }
+
     fn session(&self, author: AuthorSubject) -> Session {
         Session::for_author(
             author,
@@ -1613,12 +1626,11 @@ impl Inner {
         {
             return Ok(*code);
         }
-        self.conn
-            .execute(
-                "INSERT OR IGNORE INTO _jazz_authors (issuer, subject) VALUES (?1, ?2)",
-                rusqlite::params![issuer, subject],
-            )
-            .map_err(storage)?;
+        self.exec(
+            "INSERT OR IGNORE INTO _jazz_authors (issuer, subject) VALUES (?1, ?2)",
+            rusqlite::params![issuer, subject],
+        )
+        .map_err(storage)?;
         let code: i64 = self
             .conn
             .query_row(
@@ -1780,12 +1792,11 @@ impl Inner {
         );
         // An image written earlier in the same commit is not superseded
         // history: history holds committed images only.
-        self.conn
-            .execute(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, seq as i64],
-            )
-            .map_err(storage)?;
+        self.exec(
+            &sql,
+            rusqlite::params![row.0.as_bytes().to_vec(), key, seq as i64],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
@@ -1805,12 +1816,11 @@ impl Inner {
              WHERE id = ?3 AND _b = ?4",
             name = quote(&table.name)
         );
-        self.conn
-            .execute(
-                &sql,
-                rusqlite::params![to, seq as i64, row.0.as_bytes().to_vec(), from],
-            )
-            .map_err(storage)?;
+        self.exec(
+            &sql,
+            rusqlite::params![to, seq as i64, row.0.as_bytes().to_vec(), from],
+        )
+        .map_err(storage)?;
         self.set_cells(table, row, to, head_cells, seq, None)
     }
 
@@ -1849,8 +1859,7 @@ impl Inner {
             values.len() - 1,
             values.len()
         );
-        self.conn
-            .execute(&sql, params_from_iter(values.iter()))
+        self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         self.changed
             .borrow_mut()
@@ -1927,8 +1936,7 @@ impl Inner {
             names.join(", "),
             placeholders.join(", ")
         );
-        self.conn
-            .execute(&sql, params_from_iter(values.iter()))
+        self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         self.changed
             .borrow_mut()
