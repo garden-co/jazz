@@ -843,3 +843,58 @@ fn local_first_history_subscriptions_receive_accepted_versions() {
         ]
     );
 }
+
+/// Aggregates over history count and group every listed version, current
+/// and superseded, equal values included; a deleted row's versions drop
+/// out with it. Aggregates over the history metadata are refused.
+#[test]
+fn history_aggregates_summarize_every_version() {
+    let db = open(notes_schema(), NODE, AuthorSubject::SYSTEM);
+    insert(&db, row(1), "a");
+    update(&db, row(1), "a");
+    update(&db, row(1), "b");
+    insert(&db, row(2), "a");
+    let rows = |ids: &[u8]| {
+        Query::from("history.notes").filter(jazz::query::in_list(
+            col("id"),
+            ids.iter().map(|n| lit(Value::Uuid(row(*n).0))),
+        ))
+    };
+    let count = |query: Query| {
+        read(&db, &query.count(), ReadOpts::default())
+            .iter()
+            .map(|row| (cell(row, "title"), cell(row, "count")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(count(rows(&[1])), [(None, Some(Value::U64(3)))]);
+    // A repeated id contributes once.
+    assert_eq!(count(rows(&[1, 2, 1])), [(None, Some(Value::U64(4)))]);
+    assert_eq!(count(rows(&[])), [(None, Some(Value::U64(0)))]);
+    let grouped = read(
+        &db,
+        &rows(&[1, 2])
+            .count()
+            .group_by("title")
+            .order_by("title", OrderDirection::Asc),
+        ReadOpts::default(),
+    );
+    assert_eq!(
+        grouped
+            .iter()
+            .map(|row| (titles(std::slice::from_ref(row)), cell(row, "count")))
+            .collect::<Vec<_>>(),
+        [
+            (vec!["a".to_owned()], Some(Value::U64(3))),
+            (vec!["b".to_owned()], Some(Value::U64(1))),
+        ]
+    );
+
+    block_on(db.delete("notes", row(1), Default::default())).unwrap();
+    assert_eq!(count(rows(&[1, 2])), [(None, Some(Value::U64(1)))]);
+
+    let message = error_of(&db, &rows(&[2]).max("$acceptedAt"), ReadOpts::default());
+    assert!(
+        message.contains("aggregates over history metadata"),
+        "{message}"
+    );
+}
