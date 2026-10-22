@@ -4150,12 +4150,7 @@ pub(super) fn history_values_from_parts(
 /// History `base` value of `base`: null for an empty base, otherwise the
 /// enum case holding exactly the present parts.
 pub(super) fn base_value(base: RowBase) -> Value {
-    let records::ValueType::Nullable(inner) = crate::schema::history_base_storage_type() else {
-        unreachable!("history base is nullable")
-    };
-    let records::ValueType::Enum(schema) = *inner else {
-        unreachable!("history base is an enum")
-    };
+    let schema = crate::schema::history_base_enum_schema();
     let pending =
         |tx_id: TxId| Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)]);
     let (case, fields) = match (base.seq, base.pending) {
@@ -4192,12 +4187,7 @@ fn base_from_value(value: Option<Value>) -> Result<RowBase, Error> {
     let Value::Enum(value) = value else {
         return Err(Error::InvalidStoredValue("history base must be an enum"));
     };
-    let records::ValueType::Nullable(inner) = crate::schema::history_base_storage_type() else {
-        unreachable!("history base is nullable")
-    };
-    let records::ValueType::Enum(schema) = *inner else {
-        unreachable!("history base is an enum")
-    };
+    let schema = crate::schema::history_base_enum_schema();
     let case = schema.case(value.tag())?;
     let fields = case.payload.bind(value.record().raw()).to_values()?;
     let seq = |value: &Value| match value {

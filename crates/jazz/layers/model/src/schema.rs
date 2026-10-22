@@ -1337,14 +1337,22 @@ pub const BASE_FIELD: &str = "base";
 /// part.
 #[doc(hidden)]
 pub fn history_base_storage_type() -> GrooveColumnType {
-    let seq = || ("seq", GrooveColumnType::U64);
-    let pending = || {
-        (
-            "pending",
-            GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid]),
-        )
-    };
-    GrooveColumnType::Enum(Box::new(
+    GrooveColumnType::Enum(Box::new(history_base_enum_schema().clone())).nullable()
+}
+
+/// The enum schema of [`history_base_storage_type`], built once: every
+/// history write encodes its base through it and every read decodes it.
+#[doc(hidden)]
+pub fn history_base_enum_schema() -> &'static EnumSchema {
+    static SCHEMA: std::sync::OnceLock<EnumSchema> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let seq = || ("seq", GrooveColumnType::U64);
+        let pending = || {
+            (
+                "pending",
+                GrooveColumnType::Tuple(vec![GrooveColumnType::U64, GrooveColumnType::Uuid]),
+            )
+        };
         EnumSchema::new(
             "jazz_write_base",
             [
@@ -1360,9 +1368,8 @@ pub fn history_base_storage_type() -> GrooveColumnType {
             ],
         )
         .expect("fixed write base schema")
-        .with_system_registry(SystemVariantRegistry::write_base()),
-    ))
-    .nullable()
+        .with_system_registry(SystemVariantRegistry::write_base())
+    })
 }
 
 /// `base` case: only a settled seq.
