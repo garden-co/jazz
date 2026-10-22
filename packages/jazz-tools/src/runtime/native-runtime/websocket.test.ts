@@ -569,7 +569,7 @@ describe("websocket frame carrier", () => {
     }
   });
 
-  it("accepts the exact v6 Core advertisement for linear row-state history", async () => {
+  it("accepts the exact v6 Core advertisement for current and historical support", async () => {
     expect(WIRE_PROTOCOL_VERSION).toBe(6);
     const { carrier, socket } = carrierForTest();
     socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 6)]));

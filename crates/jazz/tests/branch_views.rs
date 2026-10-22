@@ -12,9 +12,9 @@ use jazz::protocol::{
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::time::GlobalTime;
 use jazz::tools::{
-    CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+    CmpOp, ColumnType, Operation, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies,
+    TableSchemaBuilder,
 };
 #[cfg(any())]
 use jazz_storage_rocksdb::RocksDbStorage;
@@ -57,20 +57,11 @@ fn selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, helper for Groove snapshot capture (dots)
 fn captured_branch_snapshot(db: &Db) -> SnapshotRef {
-    let mut capture = db.enqueue_capture_snapshot();
-    for _ in 0..128 {
-        db.tick().unwrap();
-        if let Some(result) = capture.try_recv().unwrap() {
-            return result.unwrap();
-        }
-    }
-    panic!("snapshot capture did not complete");
+    db.capture_snapshot().unwrap()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, Groove snapshot capture (dotted SnapshotRef)
-/// Alice captures pending local work before a later queued edit. Her frozen
+/// Alice captures her work before a later edit. Her frozen
 /// draft keeps Original; the live draft sees Changed, and copy-on-write only
 /// changes the draft. No authority or server acceptance is required.
 #[test]
@@ -89,7 +80,7 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
         )
         .unwrap()
         .row_uuid();
-    let mut capture = db.enqueue_capture_snapshot();
+    let snapshot = captured_branch_snapshot(&db);
     db.update(
         "todos",
         row,
@@ -103,15 +94,9 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
         },
     )
     .unwrap();
-    let snapshot = loop {
-        db.tick().unwrap();
-        if let Some(snapshot) = capture.try_recv().unwrap() {
-            break snapshot.unwrap();
-        }
-    };
     assert!(
-        !snapshot.dots.is_empty(),
-        "pending transactions are explicit availability witnesses"
+        snapshot.dots.is_empty(),
+        "a database without an upstream has nothing pending to name"
     );
     let snapshot = SnapshotRef::from_persisted(&snapshot.to_persisted()).unwrap();
     let frozen = ReadOpts::default().branch_view(
@@ -159,7 +144,6 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, Groove snapshot capture + RocksDB reopen
 /// Alice restores a captured reference with retained history after reopening
 /// her persistent database. Bob's empty store must refuse the same reference.
 #[test]
@@ -195,8 +179,6 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
             },
         )
         .unwrap();
-        db.wait_for_pending_writes(jazz::tx::DurabilityTier::Local)
-            .unwrap();
         reference
     };
     let snapshot = SnapshotRef::from_persisted(&persisted).unwrap();
@@ -232,7 +214,7 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
         block_on(bob.all(&query, opts))
             .unwrap_err()
             .to_string()
-            .contains("Snapshot history is unavailable")
+            .contains("newer than this replica's synced state")
     );
 }
 
@@ -386,14 +368,8 @@ fn open_history_complete_db_with_schema(schema: JazzSchema) -> Db {
     .unwrap()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, RocksDB-backed reopen helper
 fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .unwrap();
-    block_on(Db::open(
+    block_on(Db::open_at(
         DbConfig::new(
             schema.clone(),
             DbIdentity {
@@ -402,6 +378,8 @@ fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
             },
         )
         .with_id_source(SeededRowIdSource::new(10)),
+        &path.join("jazz.sqlite"),
+        jazz::db::FileOptions::default(),
     ))
     .unwrap()
 }
@@ -1356,7 +1334,6 @@ fn branch_column_reference_policy_controls_effective_reads() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, frozen snapshot bases need Groove snapshot capture
 #[test]
 fn frozen_base_applies_one_cut_to_policy_dependencies() {
     let schema = compile_schema(
@@ -1427,8 +1404,8 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .unwrap()
         .mergeable_tx_id();
     let cut = captured_branch_snapshot(&db);
-    assert_eq!(cut.owner, authored.node);
-    assert!(cut.local_base >= authored.time);
+    assert_eq!(cut.owner, NodeUuid::from_bytes([0xa9; 16]));
+    assert!(cut.global_base.0 >= authored);
     db.update(
         "branches",
         head_branch,
@@ -2312,31 +2289,23 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, builds a Groove dotted SnapshotRef from a tx id
 #[test]
 fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     let (db, schema) = open_db();
     let row = RowUuid::from_bytes([0x74; 16]);
     let base = selector(0x75);
     let head = selector(0x76);
-    let seeded = db
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
-            jazz::db::InsertOptions {
-                row_id: Some(row),
-                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .mergeable_tx_id();
-    let frozen = SnapshotRef {
-        owner: seeded.node,
-        global_base: GlobalTime(0),
-        local_base: seeded.time,
-        dots: Vec::new(),
-    };
+    db.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let frozen = captured_branch_snapshot(&db);
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let opts = ReadOpts::default().branch_view(
         head.clone(),
@@ -2426,6 +2395,156 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
         block_on(subscription.next_event()).unwrap(),
         SubscriptionEvent::Delta { reset: false, ref added, .. } if added.len() == 1
     ));
+}
+
+/// Bob owns a project in a branch, and a note in that branch is readable
+/// through it (`allowedTo.read("project")`). His history read in the branch
+/// must find the project in that same branch, as his current read does; an
+/// outsider without the project sees neither.
+#[test]
+#[ignore = "history relations on SQLite are being ported from #4166"]
+fn branch_history_checks_inherited_policy_evidence_in_the_branch() {
+    let owner_policy = PolicyExpr::Cmp {
+        column: "owner".to_owned(),
+        op: CmpOp::Eq,
+        value: PolicyValue::SessionRef(vec![
+            "user".to_owned(),
+            "identity".to_owned(),
+            "subject".to_owned(),
+        ]),
+    };
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("projects")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(owner_policy)
+                            .with_insert(PolicyExpr::True),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("branch_id", ColumnType::Uuid)
+                    .fk_column("project", "projects")
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::inherits(Operation::Select, "project"))
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let db = block_on(Db::open(
+        DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x81; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(3)),
+    ))
+    .unwrap();
+    let bob = AuthorSubject::for_test_bytes([0x82; 16]);
+    let outsider = AuthorSubject::for_test_bytes([0x83; 16]);
+    let project = RowUuid::from_bytes([0x84; 16]);
+    let note = RowUuid::from_bytes([0x85; 16]);
+    let draft =
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0x86; 16])))]);
+    let writes = [
+        db.insert(
+            "projects",
+            BTreeMap::from([("owner".to_owned(), Value::String(bob.principal_parts().1))]),
+            jazz::db::InsertOptions {
+                row_id: Some(project),
+                target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+        db.insert(
+            "notes",
+            BTreeMap::from([
+                ("project".to_owned(), Value::Uuid(project.0)),
+                ("title".to_owned(), Value::String("first".to_owned())),
+            ]),
+            jazz::db::InsertOptions {
+                row_id: Some(note),
+                target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+        db.update(
+            "notes",
+            note,
+            BTreeMap::from([("title".into(), Value::String("second".into()))]),
+            jazz::db::UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: draft.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    ];
+    // Accept the writes as this node's own authority, so remote reads see them.
+    for write in writes {
+        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
+            .unwrap();
+    }
+
+    let opts = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
+        ..Default::default()
+    }
+    .branch_view(draft, None);
+    let current = db
+        .prepare_query(&Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(note.0)))))
+        .unwrap();
+    assert_eq!(
+        block_on(db.all_for_identity(&current, opts.clone(), bob))
+            .unwrap()
+            .len(),
+        1,
+        "bob reads the note's current version through his project in the branch"
+    );
+    let history = db
+        .prepare_query(
+            &Query::from("history.notes")
+                .filter(eq(col("id"), lit(Value::Uuid(note.0))))
+                .order_by("$acceptedAt", OrderDirection::Asc),
+        )
+        .unwrap();
+    let versions = block_on(db.all_for_identity(&history, opts.clone(), bob)).unwrap();
+    assert_eq!(
+        versions
+            .iter()
+            .map(|version| {
+                version
+                    .cells()
+                    .find(|(name, _)| *name == "title")
+                    .and_then(|(_, value)| value.cloned())
+            })
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+            .map(|title| Some(Value::Nullable(Some(Box::new(Value::String(title.into()))))))
+            .to_vec(),
+        "the history gate must find the project in the same branch"
+    );
+    assert!(
+        block_on(db.all_for_identity(&history, opts, outsider))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 mod common;

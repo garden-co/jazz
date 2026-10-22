@@ -1,6 +1,6 @@
 //! Transaction, fate, durability, snapshot, and read-set vocabulary shared by
 //! the facade, node, and protocol layers. This module owns the semantic data
-//! structures for mergeable/exclusive transactions and authority outcomes; the
+//! structures for mergeable/serializable transactions and authority outcomes; the
 //! code that validates, stores, and syncs them lives in `jazz::node::ingest`,
 //! `jazz::node::open_tx`, and `jazz::protocol`. Merge and currency rules
 //! are grounded in `jazz/README.md`.
@@ -30,13 +30,13 @@ pub struct Transaction {
     /// flows use this to preserve user provenance while validating writes
     /// under a terminated request/session identity.
     pub permission_subject: Option<AuthorSubject>,
-    /// Exclusive transaction snapshot, if any.
+    /// Serializable transaction snapshot, if any.
     pub base_snapshot: Option<Snapshot>,
-    /// Exclusive point reads, if any.
+    /// Serializable point reads, if any.
     pub row_read_set: Option<Vec<RowRead>>,
-    /// Exclusive absent-row reads, if any.
+    /// Serializable absent-row reads, if any.
     pub absent_read_set: Option<Vec<AbsentRead>>,
-    /// Exclusive predicate reads, if any.
+    /// Serializable predicate reads, if any.
     pub predicate_read_set: Option<Vec<PredicateRead>>,
     /// Optional application metadata attached at commit time.
     pub user_metadata_json: Option<String>,
@@ -48,7 +48,7 @@ impl Transaction {
     /// Mergeable units need no read proof; exclusive units require every field.
     #[doc(hidden)]
     pub fn has_complete_exclusive_evidence(&self) -> bool {
-        self.kind != TxKind::Exclusive
+        self.kind != TxKind::Serializable
             || (self.base_snapshot.is_some()
                 && self.row_read_set.is_some()
                 && self.absent_read_set.is_some()
@@ -455,6 +455,12 @@ pub struct TxId {
 }
 
 impl TxId {
+    /// Groove descriptor for the portable `(time, node UUID)` transaction identity.
+    pub fn value_type() -> jazz_types::records::ValueType {
+        use jazz_types::records::ValueType;
+        ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid])
+    }
+
     /// Construct a transaction id.
     pub fn new(time: TxTime, node: NodeUuid) -> Self {
         Self { time, node }
@@ -473,8 +479,9 @@ impl TxId {
 pub enum TxKind {
     /// Mergeable transaction validated by CRDT-style merge rules.
     Mergeable,
-    /// Exclusive transaction validated by authority-side read sets.
-    Exclusive,
+    /// Serializable transaction validated by authority-side read sets.
+    #[serde(rename = "Exclusive")]
+    Serializable,
 }
 
 /// Fate assigned by the authority for a committed transaction.
@@ -495,8 +502,9 @@ pub enum RejectionReason {
     ClientClockTooFarAhead,
     /// Author or write policy rejected the transaction.
     AuthorizationDenied,
-    /// Exclusive validation detected a read/write conflict.
-    ExclusiveConflict,
+    /// Serializable validation detected a read/write conflict.
+    #[serde(rename = "ExclusiveConflict")]
+    SerializableConflict,
     /// A version timestamp was not strictly greater than every parent.
     CausalityViolation,
     /// Transaction was rejected because an ancestor was rejected.
@@ -523,10 +531,7 @@ impl RejectionReason {
                     EnumCase::new("causality_violation", RecordDescriptor::default()),
                     EnumCase::new(
                         "cascade",
-                        RecordDescriptor::new([(
-                            "root",
-                            ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid]),
-                        )]),
+                        RecordDescriptor::new([("root", TxId::value_type())]),
                     ),
                     EnumCase::new(
                         "malformed_commit",
@@ -545,7 +550,7 @@ impl RejectionReason {
         let (tag, fields) = match self {
             Self::ClientClockTooFarAhead => (0, vec![]),
             Self::AuthorizationDenied => (1, vec![]),
-            Self::ExclusiveConflict => (2, vec![]),
+            Self::SerializableConflict => (2, vec![]),
             Self::CausalityViolation => (3, vec![]),
             Self::Cascade { root } => (
                 4,
@@ -584,7 +589,7 @@ impl RejectionReason {
         match (value.tag(), fields.as_slice()) {
             (0, []) => Ok(Self::ClientClockTooFarAhead),
             (1, []) => Ok(Self::AuthorizationDenied),
-            (2, []) => Ok(Self::ExclusiveConflict),
+            (2, []) => Ok(Self::SerializableConflict),
             (3, []) => Ok(Self::CausalityViolation),
             (4, [root]) => Ok(Self::Cascade {
                 root: tx_id_from_value(root.clone()).map_err(|_| Error::NonCanonicalRecord)?,
@@ -947,8 +952,8 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Create an exclusive base snapshot.
-    pub fn exclusive_base(
+    /// Create a serializable base snapshot.
+    pub fn serializable_base(
         owner: NodeUuid,
         global_base: GlobalTime,
         local_base: TxTime,
@@ -963,7 +968,7 @@ impl Snapshot {
     }
 }
 
-/// Point read captured by an open exclusive transaction.
+/// Point read captured by an open serializable transaction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct RowRead {
     /// Table read.
@@ -974,7 +979,7 @@ pub struct RowRead {
     pub version: TxId,
 }
 
-/// Absent-row read captured by an open exclusive transaction.
+/// Absent-row read captured by an open serializable transaction.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct AbsentRead {
     /// Table read.
@@ -983,7 +988,7 @@ pub struct AbsentRead {
     pub row_uuid: RowUuid,
 }
 
-/// Predicate read captured by an open exclusive transaction.
+/// Predicate read captured by an open serializable transaction.
 ///
 /// M3 v0 records whole-table current-row reads as degenerate query shapes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -1006,7 +1011,7 @@ pub struct PredicateRead {
 }
 
 /// Canonical `jazz.aggregate-read-result.v1` bytes: the complete result of
-/// one exclusive aggregate read, one entry per output group.
+/// one serializable aggregate read, one entry per output group.
 ///
 /// The bytes are opaque at this layer; the node layer owns the encoder and the
 /// canonical decoder (`jazz::node::aggregate_read_result`). Two results are
@@ -1053,7 +1058,7 @@ jazz_types::define_record! {
 fn tx_kind_from_discriminant(value: u8) -> Result<TxKind, &'static str> {
     match value {
         0 => Ok(TxKind::Mergeable),
-        1 => Ok(TxKind::Exclusive),
+        1 => Ok(TxKind::Serializable),
         _ => Err("unknown tx kind"),
     }
 }
@@ -1111,7 +1116,7 @@ mod rejection_storage_tests {
         for (reason, expected) in [
             (RejectionReason::ClientClockTooFarAhead, vec![0]),
             (RejectionReason::AuthorizationDenied, vec![1]),
-            (RejectionReason::ExclusiveConflict, vec![2]),
+            (RejectionReason::SerializableConflict, vec![2]),
             (RejectionReason::CausalityViolation, vec![3]),
             (
                 RejectionReason::Cascade { root },
@@ -1390,7 +1395,7 @@ mod contribution_tests {
 // so the impls stay coherent once this layer is its own crate.
 jazz_types::impl_record_field_enum!(TxKind {
     TxKind::Mergeable = 0,
-    TxKind::Exclusive = 1,
+    TxKind::Serializable = 1,
 });
 // jazz.transaction-durability.v2: None=0, Local=1, Global=2.
 // The storage codec profile rejects earlier roots before these tags are read.

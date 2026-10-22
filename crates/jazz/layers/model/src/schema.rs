@@ -27,6 +27,9 @@ use crate::query::{claim, col, eq};
 
 pub use crate::model::public_schema_convert::SchemaConversionError;
 
+/// Query-only descriptors for virtual history relations.
+pub mod history;
+
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");
@@ -1262,8 +1265,9 @@ pub fn global_current_composite_index_name(columns: &[String]) -> String {
 /// cardinality, fate, seq and durability. Everything else lives beside it
 /// (SPEC 2 §2.8):
 ///
-/// - exclusive read evidence in `jazz_pending_transactions` (the historical
-///   table name), retained across acceptance and rejection in node-storage v3;
+/// - fields needed only until the transaction has a seq or a rejection
+///   (`permission_subject` and the serializable read evidence) in
+///   `jazz_pending_transactions`, deleted by the batch that settles it;
 /// - calculated-merge and branch-write provenance, which grows with the number
 ///   of writes, in `jazz_tx_provenance`, so status reads never copy it;
 /// - the rejection reason in one nullable record that costs a byte on every

@@ -21,6 +21,8 @@
 
 /// Poll ready-immediate database futures without an async runtime.
 pub use db::block_on;
+pub use jazz_db::binding_args;
+pub use jazz_db::binding_codec;
 pub use jazz_db::db;
 pub use jazz_db::result_tree;
 pub use jazz_model::model;
