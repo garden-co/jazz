@@ -990,6 +990,7 @@ impl JazzClient {
                 cells,
                 InsertOptions {
                     row_id,
+                    identity: self.write_identity()?,
                     ..Default::default()
                 },
             ))
@@ -1030,7 +1031,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                UpsertOptions::default(),
+                UpsertOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1069,7 +1074,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                UpdateOptions::default(),
+                UpdateOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1101,7 +1110,10 @@ impl JazzClient {
             crate::db::block_on(db.serializable_tx_ref(transaction_id).delete(
                 table,
                 row,
-                DeleteOptions::default(),
+                DeleteOptions {
+                    identity: self.write_identity()?,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1140,7 +1152,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                RestoreOptions::default(),
+                RestoreOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1167,12 +1183,9 @@ impl JazzClient {
     /// if every read and written row is unchanged since then. Staged writes
     /// are not visible to ordinary reads until the transaction commits.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        if !matches!(self.write_identity()?, WriteIdentity::Database) {
-            return Err(JazzError::Write(
-                "transactions with an explicit session or attribution are not supported yet"
-                    .to_owned(),
-            ));
-        }
+        // Each staged write carries this handle's identity (checked when
+        // staged, and named on the commit for the authority).
+        self.write_identity()?;
         let db = self.db()?;
         let mut transaction_id = OpenTransactionId::new();
         {
