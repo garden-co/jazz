@@ -119,7 +119,8 @@ fn provenance_orders_and_filters_and_cannot_be_written() {
         block_on(db.all(&newest, ReadOpts::default())).unwrap()[0].row_uuid(),
         row(3)
     );
-    let (_, subject) = AuthorSubject::SYSTEM.principal_parts();
+    // The database's own writes are the system at its node.
+    let (_, subject) = AuthorSubject::system_at(NodeUuid::from_bytes([3; 16])).principal_parts();
     let mine = db
         .prepare_query(&Query::from("notes").filter(eq(
             col("$createdBy.identity.subject"),
@@ -246,7 +247,7 @@ fn authors_are_interned_once_and_read_back_by_identity() {
         .unwrap();
     let rows = block_on(db.all(&by_two, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 50);
-    let (_, system) = AuthorSubject::SYSTEM.principal_parts();
+    let (_, system) = AuthorSubject::system_at(NodeUuid::from_bytes([3; 16])).principal_parts();
     for row in &rows {
         assert_eq!(subject_cell(row, "$createdBy.identity.subject"), subject);
         assert_eq!(subject_cell(row, "$updatedBy.identity.subject"), system);

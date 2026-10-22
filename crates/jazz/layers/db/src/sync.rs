@@ -1993,10 +1993,7 @@ impl Inner {
                 .cloned()
                 .map(from_wire)
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(author) = author
-                .as_deref()
-                .map(AuthorSubject::from_untrusted_canonical)
-            {
+            if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
                 ops.iter_mut().for_each(|op| op.attribute(author));
             }
@@ -3956,6 +3953,9 @@ fn commit_who(policy: Option<AuthorSubject>, author: Option<&str>) -> Result<Who
         .transpose()
         .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;
     match (policy, author) {
+        // A node's own writes (it names itself as the system at that node)
+        // over a session link are that session's: the link decides.
+        (Some(session), Some(AuthorSubject::SystemAt(_))) => Ok(Who::Session(session)),
         (Some(session), Some(author)) if author != session => Err(Error::new(
             ErrorCode::WriteRejected,
             "attribution requires a trusted serving node",
