@@ -54,13 +54,13 @@ const CURRENT_PHYSICAL_NATIVE_CORPUS_PACK_SHA256: &str =
 const CURRENT_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz.sqlite.gz.base64");
 const CURRENT_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
-    "21e15cd3dde5098e4b54a2fe0094a260a2193bb584df8318bc630096b78cd4f2";
+    "344136196525f3ca94809f5ea0af3bcef80d3550740a60594770b92fdf712980";
 const CURRENT_NATIVE_SQLITE_SHA256: &str =
-    "5aaa5c883eab6a3f8d93dcc43434b90e87df6a1a1343efe31b31b94a8ebc777a";
+    "6e8ef7f93bcd86d71cd1d703a6c694848b774b72fbf4a928d6270bdec7996017";
 const CURRENT_NATIVE_ROCKSDB_BASE64: &str =
     include_str!("../../../../../fixtures/current-native-jazz-rocksdb.tar.gz.base64");
 const CURRENT_NATIVE_ROCKSDB_SHA256: &str =
-    "d95882d3e1b147f86ac8c73106cd57b2b86898079db6e1a0edb09b64f852a04d";
+    "93365f9f67ee04b8b28b9504b6cee99d28a26e664d970eb4a337caa7023ded3f";
 const EPOCH_1_NATIVE_SQLITE_BASE64: &str =
     include_str!("../../../../../fixtures/epoch-1-native-jazz.sqlite.gz.base64");
 const EPOCH_1_NATIVE_SQLITE_ARCHIVE_SHA256: &str =
