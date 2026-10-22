@@ -384,3 +384,46 @@ fn projected_listing_does_not_confuse_public_and_storage_names() {
     );
     assert_eq!(rows[0].cell(&table, "notes"), None);
 }
+
+/// A local edit of a large cell is staged like any local write: the
+/// authority checks it on upload, so the store's author needs no local
+/// read grant on the row. A trusted session's edit is checked now.
+///
+/// bob ──append to a row bob cannot read (local staging)──► applied
+/// bob ──append as session bob──► NotObserved
+#[test]
+fn local_large_value_edits_are_staged_without_a_local_read_check() {
+    let policy = read_and_allow_all_writes(PolicyExpr::eq_literal(
+        "notes",
+        PublicValue::Text(large_notes("shared/")),
+    ));
+    let schema = files_schema(policy);
+    let table = table(&schema);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let db = open_db(schema, 0x81, bob);
+    let hidden = row(0x82);
+    let bytes = contents(0x82, 2);
+    insert_file(&db, hidden, "hidden", &large_notes("private/"), &bytes);
+
+    block_on(db.append_value(FILES, hidden, "contents", vec![1, 2, 3])).expect("local append");
+    let rows = block_on(db.all(&db.prepare_query(&Query::from(FILES)).unwrap(), opts())).unwrap();
+    let mut expected = bytes.clone();
+    expected.extend([1, 2, 3]);
+    assert_eq!(
+        rows[0].cell(&table, "contents"),
+        Some(Value::Bytes(expected))
+    );
+
+    let denied = block_on(db.append_value_with(
+        FILES,
+        hidden,
+        "contents",
+        vec![4],
+        jazz::db::UpdateOptions {
+            identity: jazz::db::WriteIdentity::Session(bob),
+            ..Default::default()
+        },
+    ))
+    .expect_err("a session edit of a row it cannot read");
+    assert_eq!(denied.code, ErrorCode::NotObserved);
+}
