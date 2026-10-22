@@ -1,23 +1,17 @@
 //! Resource limits the server process sizes itself against.
 //!
 //! The server runs inside a container with a hard memory limit; crossing it
-//! gets the process OOM-killed rather than any request failed. Fixed-size
-//! consumers such as the storage cache are therefore sized from that limit
-//! instead of from constants, so the same binary fits a 512 MiB pod and a
-//! 16 GiB host.
+//! gets the process OOM-killed rather than any request failed. The storage
+//! cache is therefore sized from that limit instead of from constants, so the
+//! same binary fits a 512 MiB pod and a 16 GiB host.
 
 use std::path::Path;
 
-/// Share of the process memory limit given to the RocksDB block cache, which
-/// also carries memtable reservations and index/filter blocks.
-const ROCKSDB_CACHE_SHARE_PERCENT: u64 = 15;
-const ROCKSDB_CACHE_MIN_BYTES: u64 = 32 * 1024 * 1024;
-const ROCKSDB_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
-/// Share of the process memory limit the resident buckets of stored
-/// arrangements may use while memory is plentiful.
-const CACHE_CEILING_SHARE_PERCENT: u64 = 25;
-/// Resident set size the arrangement budget governor steers toward, as a
-/// share of the process memory limit.
+/// Share of the process memory limit SQLite (its page caches, mostly) may
+/// use while memory is plentiful.
+const CACHE_CEILING_SHARE_PERCENT: u64 = 40;
+/// Resident set size the cache budget governor steers toward, as a share of
+/// the process memory limit.
 const RSS_TARGET_SHARE_PERCENT: u64 = 80;
 
 /// Limits the server process applies to itself.
@@ -27,11 +21,11 @@ pub struct ServerResourceLimits {
     pub max_websocket_connections: usize,
     /// Memory the process may use, or `None` when nothing limits it.
     pub memory_limit_bytes: Option<u64>,
-    /// Whether queries read arrangements of stored tables from storage by
-    /// key instead of holding them (on by default).
+    /// Accepted for older launch configurations; the SQLite store always
+    /// reads stored tables by key.
     pub stored_arrangements: bool,
-    /// The query cache budget while memory is plentiful, instead of a share
-    /// of the memory limit.
+    /// The storage cache budget while memory is plentiful, instead of a
+    /// share of the memory limit.
     pub query_cache_budget_bytes: Option<u64>,
 }
 
@@ -46,34 +40,13 @@ impl Default for ServerResourceLimits {
     }
 }
 
-impl ServerResourceLimits {
-    /// The RocksDB budget for this process: a fixed share of the memory
-    /// limit, clamped so small pods keep a usable cache and large hosts do
-    /// not grow it past the measured default.
-    pub fn rocksdb_memory_budget(&self) -> jazz_storage_rocksdb::RocksDbMemoryBudget {
-        let default = jazz_storage_rocksdb::RocksDbMemoryBudget::default();
-        let Some(limit) = self.memory_limit_bytes else {
-            return default;
-        };
-        let block_cache_bytes = (limit / 100 * ROCKSDB_CACHE_SHARE_PERCENT)
-            .clamp(ROCKSDB_CACHE_MIN_BYTES, ROCKSDB_CACHE_MAX_BYTES);
-        let block_cache_bytes = usize::try_from(block_cache_bytes).unwrap_or(usize::MAX);
-        jazz_storage_rocksdb::RocksDbMemoryBudget {
-            block_cache_bytes,
-            // Memtables are charged to the cache; keep them from crowding out
-            // data blocks in a small one.
-            write_buffer_bytes: default.write_buffer_bytes.min(block_cache_bytes / 4),
-        }
-    }
-}
-
-/// Steers the process-wide budget of stored arrangement buckets (see
-/// `groove::ivm::set_process_cache_budget`) from the process's resident
-/// set, trading memory for storage reads continuously:
+/// Steers the process-wide SQLite memory budget (see [`crate::storage_cache`])
+/// from the process's resident set, trading memory for storage reads
+/// continuously:
 ///
 /// - Over the RSS target, each step lowers the budget by an eighth, never
-///   below a floor, so queries read more buckets from storage.
-/// - Once the arrangements have evicted down to a lowered budget, the
+///   below a floor, so queries read more pages from disk.
+/// - Once SQLite has released memory down to a lowered budget, the
 ///   governor checks that RSS fell. If it did not, the memory is held
 ///   elsewhere and lowering further would only cost reads: the budget holds,
 ///   and grows back slowly while RSS stays flat, until RSS grows again.
@@ -89,12 +62,12 @@ pub struct CacheBudgetGovernor {
     lowered_at_rss: Option<u64>,
     /// The RSS at which lowering stopped moving RSS.
     unresponsive_at_rss: Option<u64>,
-    /// Steps spent waiting for arrangements to evict down to a lowered
+    /// Steps spent waiting for SQLite to release memory down to a lowered
     /// budget.
     waited_steps: u32,
 }
 
-/// Steps the governor waits for arrangements to evict down to a lowered
+/// Steps the governor waits for SQLite to release memory down to a lowered
 /// budget before judging whether lowering helped.
 const CACHE_EVICTION_WAIT_STEPS: u32 = 10;
 
@@ -153,7 +126,7 @@ impl CacheBudgetGovernor {
         self.budget
     }
 
-    /// Take one step given the process's resident set and the arrangements'
+    /// Take one step given the process's resident set and SQLite's
     /// resident bytes; returns the budget to set.
     pub fn step(&mut self, rss_bytes: u64, resident_bytes: usize) -> usize {
         let to_usize = |bytes: u64| usize::try_from(bytes).unwrap_or(usize::MAX);
@@ -198,7 +171,7 @@ impl CacheBudgetGovernor {
                 return self.budget;
             }
         }
-        // Lowering a budget the arrangements do not fill frees nothing, so
+        // Lowering a budget SQLite does not fill frees nothing, so
         // start from what they hold.
         let from = self.budget.min(resident_bytes);
         let lowered = from
@@ -321,7 +294,7 @@ mod tests {
         );
         assert_eq!(limits(None, Some(64 * MIB)).cache_budget_governor(), None);
         let governor = governor(1000);
-        assert_eq!(governor.ceiling_bytes() as u64, 1000 * MIB / 100 * 25);
+        assert_eq!(governor.ceiling_bytes() as u64, 1000 * MIB / 100 * 40);
         assert_eq!(governor.floor_bytes(), governor.ceiling_bytes() / 8);
         let configured = limits(Some(1000 * MIB), Some(64 * MIB))
             .cache_budget_governor()
@@ -360,11 +333,11 @@ mod tests {
         let mut governor = governor(1000);
         let ceiling = governor.ceiling_bytes();
         let rss = 1000 * MIB / 100 * 85;
-        // The first step lowers; evictions bring the arrangements down to
+        // The first step lowers; SQLite releases memory down to
         // it, but RSS stays where it was.
         let lowered = governor.step(rss, ceiling);
         assert!(lowered < ceiling);
-        // Before the arrangements evict, the governor waits.
+        // Before SQLite releases memory, the governor waits.
         assert_eq!(governor.step(rss, ceiling), lowered);
         // Evicted, RSS unmoved: the budget holds rather than collapsing.
         assert_eq!(governor.step(rss, lowered), lowered);
@@ -445,33 +418,5 @@ mod tests {
             budget = governor.step(target - 500 * MIB, budget);
         }
         assert_eq!(budget, ceiling);
-    }
-
-    #[test]
-    fn rocksdb_budget_scales_with_the_memory_limit() {
-        let budget = |limit: Option<u64>| {
-            ServerResourceLimits {
-                memory_limit_bytes: limit,
-                ..ServerResourceLimits::default()
-            }
-            .rocksdb_memory_budget()
-        };
-
-        assert_eq!(
-            budget(None),
-            jazz_storage_rocksdb::RocksDbMemoryBudget::default()
-        );
-        let one_gib = budget(Some(1024 * MIB));
-        assert_eq!(one_gib.block_cache_bytes as u64, 1024 * MIB / 100 * 15);
-        assert_eq!(one_gib.write_buffer_bytes as u64, 16 * MIB);
-
-        let small = budget(Some(128 * MIB));
-        assert_eq!(small.block_cache_bytes as u64, 32 * MIB);
-        assert_eq!(small.write_buffer_bytes as u64, 8 * MIB);
-
-        assert_eq!(
-            budget(Some(64 * 1024 * MIB)).block_cache_bytes as u64,
-            256 * MIB
-        );
     }
 }

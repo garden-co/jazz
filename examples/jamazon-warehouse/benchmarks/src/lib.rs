@@ -340,7 +340,11 @@ impl Fixture {
         quantity: i32,
     ) -> Result<PurchaseReceipt, &'static str> {
         block_on(async {
-            let tx = self.db.exclusive_tx().await.map_err(|_| "open purchase")?;
+            let tx = self
+                .db
+                .serializable_tx()
+                .await
+                .map_err(|_| "open purchase")?;
             let idempotency_lookup = self
                 .db
                 .prepare_query(
@@ -566,7 +570,7 @@ impl Fixture {
         }
     }
     pub fn customer_balance(&self) -> i32 {
-        let customer = block_on(self.db.exclusive_tx()).expect("open customer read");
+        let customer = block_on(self.db.serializable_tx()).expect("open customer read");
         let cells = block_on(customer.read("customers", self.customer))
             .expect("read customer")
             .expect("customer exists");
@@ -577,7 +581,7 @@ impl Fixture {
     }
     pub fn set_stock_on_hand_for_test(&self, on_hand: i32) {
         block_on(async {
-            let tx = self.db.exclusive_tx().await.expect("open stock update");
+            let tx = self.db.serializable_tx().await.expect("open stock update");
             tx.update(
                 "stock",
                 self.stock,
