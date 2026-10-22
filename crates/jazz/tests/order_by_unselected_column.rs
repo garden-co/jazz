@@ -1,3 +1,4 @@
+// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Ordering by a column that the query's `select` projects away (#3495).
 //!
 //! SQL semantics: an order key orders the result whether or not it is
@@ -8,14 +9,11 @@ use std::collections::BTreeMap;
 mod common;
 
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, ReadOpts, SubscriptionEvent,
-};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::CurrentRow;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SubscriptionEvent};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{ArraySubquery, OrderDirection, Query};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -42,11 +40,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> Db {
     let schema = schema();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x5e; 16]),
             author: AuthorSubject::SYSTEM,
@@ -296,11 +291,8 @@ fn float_literal_comparisons_match_numeric_order() {
         table = table.column(name, ColumnType::Double);
     }
     let schema = compile_schema(&SchemaBuilder::new().table(table).build());
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x6f; 16]),
             author: AuthorSubject::SYSTEM,

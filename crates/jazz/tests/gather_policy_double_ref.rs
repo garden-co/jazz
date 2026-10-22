@@ -1,3 +1,4 @@
+// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Recursive `gather` read policies over a same-table double-reference edge,
 //! evaluated by a history-complete (Global-tier) node for an admitted session.
 //!
@@ -19,10 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
     RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
@@ -209,11 +209,8 @@ fn schema(bound: RecursionBound) -> JazzSchema {
 
 fn open_global_node(bound: RecursionBound) -> Db {
     let schema = schema(bound);
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
         schema,
-        TestStorage::new(&family_refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x82; 16]),
             author: AuthorSubject::SYSTEM,

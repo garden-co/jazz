@@ -266,7 +266,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       includes: normalizeIncludeEntries(raw.includes),
       requireIncludes: raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
       select: normalizeSelect(raw.select),
-      partialSelect: normalizePartialSelect(raw.select),
+      partialSelect: normalizePartialSelect(raw.partialSelect ?? raw.select),
       orderBy: normalizeOrderBy(raw.orderBy),
       limit: typeof raw.limit === "number" ? raw.limit : undefined,
       offset: typeof raw.offset === "number" ? raw.offset : undefined,
@@ -308,7 +308,7 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
     throw new Error("QueryBuilder._build() must include a non-empty table.");
   }
 
-  const partialSelect = normalizePartialSelect(value.select);
+  const partialSelect = normalizePartialSelect(value.partialSelect ?? value.select);
   return {
     table: value.table,
     conditions: normalizeConditions(value.conditions),

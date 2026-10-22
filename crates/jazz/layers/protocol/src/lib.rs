@@ -19,9 +19,6 @@
 //! module here under its old path, so `jazz::protocol::SyncMessage` and
 //! `crate::protocol::SyncMessage` inside Jazz keep working.
 
-/// Re-export of the underlying groove crate.
-pub use groove;
-
 // The layers below, under the paths this crate's code already uses.
 use jazz_model::{model, query, schema, tx};
 #[cfg(test)]
@@ -33,6 +30,5 @@ pub mod authorization_scope;
 pub mod protocol;
 /// Protocol admission and semantic size limits.
 pub mod protocol_limits;
-pub mod storage_codec_profile;
 /// Versioned transport frames around the semantic sync protocol.
 pub mod wire;
