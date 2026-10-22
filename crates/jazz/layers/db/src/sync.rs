@@ -37,11 +37,19 @@ use std::rc::Rc;
 use std::task::Poll;
 use std::time::Instant;
 
+use jazz_types::large_values::chunks::ChunkRequest;
 use serde::{Deserialize, Serialize};
 
 use super::*;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 pub use crate::wire::TransportError;
+
+/// Wall-clock Unix ms.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
 
 /// Optimistic local seqs start here; every server seq is below it.
 pub const LOCAL_BASE: u64 = 1 << 62;
@@ -234,6 +242,51 @@ pub enum WireError {
     Other(String),
 }
 
+/// A large-value node named by its locator and the object hash it must
+/// match.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChunkRef {
+    pub locator: jazz_types::large_values::Locator,
+    pub hash: [u8; 32],
+}
+
+/// A large-value node's encoded bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChunk {
+    pub locator: jazz_types::large_values::Locator,
+    pub hash: [u8; 32],
+    #[serde(with = "serde_bytes")]
+    pub bytes: Vec<u8>,
+}
+
+impl WireChunkRef {
+    fn of(request: &ChunkRequest) -> Self {
+        Self {
+            locator: request.locator,
+            hash: request.object_hash,
+        }
+    }
+
+    fn request(&self) -> ChunkRequest {
+        ChunkRequest {
+            object_hash: self.hash,
+            locator: self.locator,
+        }
+    }
+}
+
+impl WireChunk {
+    fn request(&self) -> ChunkRequest {
+        ChunkRequest {
+            object_hash: self.hash,
+            locator: self.locator,
+        }
+    }
+}
+
+/// Encoded node bytes per `PushChunks` or `Chunks` message.
+const CHUNK_BATCH_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
@@ -268,7 +321,23 @@ pub enum SyncMessage {
         kind: WireKind,
         ops: Vec<WireOp>,
     },
+    /// Large-value nodes the client's descriptors name and it lacks
+    /// (pull by locator; holding the locator is the read capability).
+    ChunkRequests {
+        requests: Vec<WireChunkRef>,
+    },
+    /// Nodes of the client's new large values, sent ahead of the commit
+    /// that references them. The server holds them under a receipt until
+    /// the commit arrives or the receipt expires.
+    PushChunks {
+        nodes: Vec<WireChunk>,
+    },
     // server → client
+    /// Requested nodes, and the requests the server cannot answer.
+    Chunks {
+        nodes: Vec<WireChunk>,
+        missing: Vec<WireChunkRef>,
+    },
     Rows {
         images: Vec<Image>,
     },
@@ -359,6 +428,19 @@ pub(crate) struct Client {
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
     answers: HashMap<u64, Option<(u64, Vec<[u8; 16]>)>>,
+    /// Large-value nodes asked for and not yet answered.
+    requested: BTreeSet<ChunkRequest>,
+    /// Nodes to ask for on the next send.
+    wanted: BTreeSet<ChunkRequest>,
+    /// Inbound messages held, in order, until the chunks their rows'
+    /// indexed large values need have arrived.
+    held: VecDeque<SyncMessage>,
+    /// Nodes pushed for each unsettled commit.
+    pushed: HashMap<u64, Vec<jazz_types::large_values::Locator>>,
+    /// Requests the server could not answer; never asked again.
+    unavailable: BTreeSet<ChunkRequest>,
+    /// Chunks arrived this tick: results waiting for them run again.
+    arrived: bool,
 }
 
 fn remote_key(query: &Query, binding: &BTreeMap<String, Value>) -> String {
@@ -449,6 +531,11 @@ pub(crate) struct Session {
     /// False once the client disconnected or its transport failed; the
     /// slot holds nothing and is reused by the next subscriber.
     open: bool,
+    /// Pushed chunk bytes admitted in the current staging-policy window,
+    /// and when it started (the ingress rate limit).
+    ingress: (Instant, usize),
+    /// Inbound messages held back by the rate limit, in order.
+    backlog: VecDeque<SyncMessage>,
 }
 
 impl Session {
@@ -464,6 +551,8 @@ impl Session {
             resume: BTreeMap::new(),
             held: BTreeMap::new(),
             open: true,
+            ingress: (Instant::now(), 0),
+            backlog: VecDeque::new(),
         }
     }
 
@@ -1213,6 +1302,120 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 impl Inner {
+    /// Store requested nodes the server sent.
+    fn receive_chunks(
+        &mut self,
+        nodes: Vec<WireChunk>,
+        missing: Vec<WireChunkRef>,
+    ) -> Result<(), Error> {
+        let client = self.client.as_mut().expect("client");
+        let mut accepted = Vec::new();
+        for node in nodes {
+            let request = node.request();
+            // Only nodes this replica asked for, verified against the hash
+            // it learned from the parent or descriptor.
+            if client.requested.remove(&request) {
+                accepted.push((request, node.bytes));
+            }
+        }
+        for missing in missing {
+            let request = missing.request();
+            client.requested.remove(&request);
+            client.unavailable.insert(request);
+        }
+        client.arrived = true;
+        for (request, bytes) in accepted {
+            crate::large::install_fetched(&self.conn, &self.chunks, &request, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// The nodes `images` need before they are installed: every chunk of a
+    /// large value in an indexed column, so index maintenance never waits.
+    fn prefetch(&self, images: &[Image]) -> Result<Vec<ChunkRequest>, Error> {
+        let client = self.client.as_ref().expect("client");
+        let mut need = Vec::new();
+        for image in images {
+            let Ok(table) = self.physical.table(&image.table) else {
+                continue;
+            };
+            let indexed: BTreeSet<&str> =
+                table.indexes.iter().flatten().map(String::as_str).collect();
+            for (name, cell) in &image.cells {
+                let Cell::Text(raw) = cell else {
+                    continue;
+                };
+                if !indexed.contains(name.as_str()) {
+                    continue;
+                }
+                if let Ok(crate::large::Logical::Chunked(value)) = crate::large::logical(raw) {
+                    need.extend(
+                        crate::large::missing_frontier(&self.conn, &value)?
+                            .into_iter()
+                            .filter(|r| !client.unavailable.contains(r)),
+                    );
+                }
+            }
+        }
+        Ok(need)
+    }
+
+    /// The nodes a commit's large values need pushed first: (their
+    /// locators, the batches carrying them).
+    fn pushes_for(
+        &self,
+        commit: &SyncMessage,
+    ) -> Result<(Vec<jazz_types::large_values::Locator>, Vec<SyncMessage>), Error> {
+        let SyncMessage::Commit { ops, .. } = commit else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        fn large(value: &Value, out: &mut Vec<jazz_types::large_values::LargeValueRef>) {
+            match value {
+                Value::Large(value) => out.push((**value).clone()),
+                Value::Nullable(Some(inner)) => large(inner, out),
+                _ => {}
+            }
+        }
+        let mut values = Vec::new();
+        for op in ops {
+            let cells = match op {
+                WireOp::Insert { cells, .. }
+                | WireOp::Update { cells, .. }
+                | WireOp::Upsert { cells, .. } => Some(cells),
+                WireOp::Restore { cells, .. } => cells.as_ref(),
+                WireOp::Delete { .. } | WireOp::Move { .. } => None,
+            };
+            for value in cells.into_iter().flat_map(|cells| cells.values()) {
+                large(value, &mut values);
+            }
+        }
+        let mut locators = Vec::new();
+        let mut batches = Vec::new();
+        let mut batch = Vec::new();
+        let mut size = 0;
+        for value in &values {
+            for (request, bytes) in crate::large::unpushed(&self.conn, value)? {
+                locators.push(request.locator);
+                size += bytes.len();
+                batch.push(WireChunk {
+                    locator: request.locator,
+                    hash: request.object_hash,
+                    bytes,
+                });
+                if size >= CHUNK_BATCH_BYTES {
+                    batches.push(SyncMessage::PushChunks {
+                        nodes: std::mem::take(&mut batch),
+                    });
+                    size = 0;
+                }
+            }
+        }
+        if !batch.is_empty() {
+            batches.push(SyncMessage::PushChunks { nodes: batch });
+        }
+        Ok((locators, batches))
+    }
+
     fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
         let rows: Vec<(String, [u8; 16], Vec<u8>)> = rows
             .iter()
@@ -1418,6 +1621,12 @@ impl Client {
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
+            requested: BTreeSet::new(),
+            wanted: BTreeSet::new(),
+            held: VecDeque::new(),
+            pushed: HashMap::new(),
+            unavailable: BTreeSet::new(),
+            arrived: false,
         }
     }
 }
@@ -1482,6 +1691,9 @@ impl Db {
         let mut resend = client.sent.clone();
         resend.append(&mut client.unsent);
         client.unsent = resend;
+        // A new session answers nothing the old one was asked.
+        let asked = std::mem::take(&mut client.requested);
+        client.wanted.extend(asked);
         client.connection += 1;
         Upstream(client.connection)
     }
@@ -1787,6 +1999,14 @@ impl Db {
         drop(inner);
         applied?;
         self.notify();
+        let arrived = {
+            let mut inner = self.inner.borrow_mut();
+            let client = inner.client.as_mut().expect("client");
+            std::mem::take(&mut client.arrived)
+        };
+        if arrived {
+            self.inner.borrow().retry_awaiting();
+        }
         self.flush_settled();
         self.client_send()
     }
@@ -1806,7 +2026,28 @@ impl Db {
                     inbound.push(message);
                 }
             }
+            // Chunks are not ordered with rows; everything else is applied
+            // in arrival order, behind any message still held for chunks.
+            let mut queue = std::mem::take(&mut client.held);
             for message in inbound {
+                match message {
+                    SyncMessage::Chunks { nodes, missing } => {
+                        inner.receive_chunks(nodes, missing)?;
+                    }
+                    other => queue.push_back(other),
+                }
+            }
+            while let Some(message) = queue.pop_front() {
+                if let SyncMessage::Rows { images } = &message {
+                    let need = inner.prefetch(images)?;
+                    if !need.is_empty() {
+                        let client = inner.client.as_mut().expect("client");
+                        client.wanted.extend(need);
+                        queue.push_front(message);
+                        client.held = std::mem::take(&mut queue);
+                        break;
+                    }
+                }
                 match message {
                     SyncMessage::Rows { images } => {
                         for image in images {
@@ -1871,6 +2112,9 @@ impl Db {
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
                         client.fates.insert(tx, result.map_err(from_wire_error));
+                        if let Some(locators) = client.pushed.remove(&tx) {
+                            crate::large::mark_pushed(&inner.conn, &locators)?;
+                        }
                         inner.forget_pending(tx)?;
                         rebase = true;
                     }
@@ -1898,18 +2142,45 @@ impl Db {
 
     fn client_send(&self) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        let demand = inner.chunks.take_demand();
         let client = inner.client.as_mut().expect("client");
-        let Some(transport) = client.transport.as_mut() else {
+        client.wanted.extend(demand);
+        if client.transport.is_none() {
             return Ok(());
-        };
+        }
         let mut out = std::mem::take(&mut client.outbox);
+        let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
+            .into_iter()
+            .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
+            .collect();
+        for batch in wanted.chunks(256) {
+            client.requested.extend(batch.iter().cloned());
+            out.push(SyncMessage::ChunkRequests {
+                requests: batch.iter().map(WireChunkRef::of).collect(),
+            });
+        }
         let commits = std::mem::take(&mut client.unsent);
+        // Each commit's new large-value nodes go ahead of it.
+        let mut pushes = Vec::with_capacity(commits.len());
+        for commit in &commits {
+            pushes.push(inner.pushes_for(commit)?);
+        }
+        let client = inner.client.as_mut().expect("client");
+        let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
             if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { tx: a, .. }, SyncMessage::Commit { tx: b, .. }) if a == b)) {
                 client.sent.push(commit.clone());
             }
         }
-        out.extend(commits);
+        for (commit, (locators, batches)) in commits.into_iter().zip(pushes) {
+            if let SyncMessage::Commit { tx, .. } = &commit
+                && !locators.is_empty()
+            {
+                client.pushed.insert(*tx, locators);
+            }
+            out.extend(batches);
+            out.push(commit);
+        }
         for message in out {
             transport
                 .send(message)
@@ -2064,6 +2335,7 @@ impl Db {
         if sessions == 0 {
             return Ok(());
         }
+        crate::large::expire_receipts(&self.inner.borrow().conn, now_ms())?;
         for index in 0..sessions {
             let inbound: Vec<SyncMessage> = {
                 let mut inner = self.inner.borrow_mut();
@@ -2071,9 +2343,35 @@ impl Db {
                 if !session.open {
                     continue;
                 }
-                std::iter::from_fn(|| session.transport.try_recv()).collect()
+                let mut inbound = std::mem::take(&mut session.backlog);
+                inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
+                inbound.into()
             };
-            for message in inbound {
+            let mut inbound: VecDeque<SyncMessage> = inbound.into();
+            while let Some(message) = inbound.pop_front() {
+                if let SyncMessage::PushChunks { nodes } = &message {
+                    let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
+                    let mut inner = self.inner.borrow_mut();
+                    let policy = inner.staging;
+                    let session = &mut inner.sessions[index];
+                    if session.ingress.0.elapsed()
+                        >= std::time::Duration::from_millis(policy.window_ms)
+                    {
+                        session.ingress = (Instant::now(), 0);
+                    }
+                    // Over the staging policy's budget: this push and
+                    // everything after it wait for a later window, so its
+                    // commit still follows it. A first push larger than the
+                    // whole budget is let through rather than held forever.
+                    if session.ingress.1 > 0
+                        && (session.ingress.1 + bytes) as u64 > policy.incoming_bytes_per_window
+                    {
+                        inbound.push_front(message);
+                        session.backlog = inbound;
+                        break;
+                    }
+                    session.ingress.1 += bytes;
+                }
                 self.serve(index, message)?;
             }
         }
@@ -2523,6 +2821,59 @@ impl Db {
                     through,
                     result,
                 });
+            }
+            SyncMessage::ChunkRequests { requests } => {
+                let mut inner = self.inner.borrow_mut();
+                let mut replies = Vec::new();
+                let mut nodes = Vec::new();
+                let mut missing = Vec::new();
+                let mut size = 0;
+                for request in requests {
+                    match crate::large::node(&inner.conn, &request.locator)? {
+                        Some((hash, bytes)) if hash.as_slice() == request.hash => {
+                            size += bytes.len();
+                            nodes.push(WireChunk {
+                                locator: request.locator,
+                                hash: request.hash,
+                                bytes,
+                            });
+                            if size >= CHUNK_BATCH_BYTES {
+                                replies.push(SyncMessage::Chunks {
+                                    nodes: std::mem::take(&mut nodes),
+                                    missing: Vec::new(),
+                                });
+                                size = 0;
+                            }
+                        }
+                        _ => missing.push(request),
+                    }
+                }
+                replies.push(SyncMessage::Chunks { nodes, missing });
+                inner.sessions[index].outbox.extend(replies);
+            }
+            SyncMessage::PushChunks { nodes } => {
+                let inner = self.inner.borrow();
+                let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+                let expires = now_ms().saturating_add(max_age);
+                inner
+                    .conn
+                    .execute_batch("SAVEPOINT jazz_lv_push")
+                    .map_err(storage)?;
+                for node in nodes {
+                    // A node that fails authentication is dropped; a commit
+                    // that needs it is then rejected for missing chunks.
+                    let _ = crate::large::receive_pushed(
+                        &inner.conn,
+                        &inner.chunks,
+                        &node.request(),
+                        node.bytes,
+                        expires,
+                    );
+                }
+                inner
+                    .conn
+                    .execute_batch("RELEASE jazz_lv_push")
+                    .map_err(storage)?;
             }
             other => return Err(unsupported(format!("server received {other:?}"))),
         }
