@@ -1,3 +1,4 @@
+import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
@@ -460,7 +461,7 @@ function normalizeBranchSelector(
   input: Branch,
   scope: "table" | "schema",
 ): BranchSelector {
-  const table = schema[tableName];
+  const table = resolveQueryTable(schema, tableName);
   if (!table) throw new Error(`Unknown table "${tableName}".`);
   const tableColumns = table.branchBy ?? [];
   const expected =
@@ -651,11 +652,25 @@ function cloneActiveQuerySubscriptionTrace(
 }
 
 function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string): WasmSchema {
-  if (preferredSchema[tableName]) {
+  if (resolveQueryTable(preferredSchema, tableName)) {
     return preferredSchema;
   }
 
   throw new Error(`Query schema is missing table "${tableName}".`);
+}
+
+function normalizeQueryOptions(
+  schema: WasmSchema,
+  table: string,
+  options?: InternalDbQueryOptions,
+) {
+  return normalizeViewOptions(schema, table, options) ?? {};
+}
+
+function assertWritableTable(table: { readonly _table: string }): void {
+  if (isHistoryTable(table._table)) {
+    throw new Error(`History table "${table._table}" is read-only`);
+  }
 }
 
 /** Apply the table's input transforms, then encode `data` as the write record for `operation`. */
@@ -1993,6 +2008,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * once it's committed.
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
+    assertWritableTable(table);
     const previousBatch = this.encryptedInsertBatch;
     this.encryptedInsertBatch = undefined;
     const recipients = scopeRecipients(table, options);
@@ -2424,6 +2440,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Init,
     options?: RestoreOptions,
   ): T {
+    assertWritableTable(table);
     this.bindTable(table);
     if (encryptedSchemas.get(table._schema)?.tables.has(table._table)) {
       const transformedData = transformInputColumns(table, data, { id }, true);
@@ -2489,6 +2506,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Partial<Init>,
     options?: UpsertOptions,
   ): void {
+    assertWritableTable(table);
     const recipients = scopeRecipients(table, options);
     const encryption = encryptedSchemas.get(table._schema);
     if (encryption?.scopes.has(table._table)) {
@@ -2646,6 +2664,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     data: Record<string, unknown>,
     options?: UpdateOptions & { applyDiffs?: object },
   ): void {
+    assertWritableTable(table);
     const previousBatch = this.encryptedUpdateBatch;
     this.encryptedUpdateBatch = undefined;
     this.bindTable(table);
@@ -3007,6 +3026,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * once it's committed.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): void {
+    assertWritableTable(table);
     this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("delete");
@@ -4326,6 +4346,7 @@ export class Db {
    * @returns Write result containing the inserted row
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
+    assertWritableTable(table);
     scopeRecipients(table, options);
     const client = this.getClient(table._schema);
     const encryption = encryptedSchemas.get(table._schema);
@@ -4827,6 +4848,7 @@ export class Db {
     data: StreamingInit,
     options?: StreamingInsertOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    assertWritableTable(table);
     if (encryptedSchemas.get(table._schema)?.tables.has(table._table)) {
       const result = await this.streamingTransaction((plan) =>
         plan.insertStreaming(table, data, options),
@@ -4876,6 +4898,7 @@ export class Db {
     data: StreamingUpdate,
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    assertWritableTable(table);
     const encryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
     if (
       encryption &&
@@ -4930,6 +4953,7 @@ export class Db {
     data: StreamingUpdate,
     options?: UpdateOptions,
   ): Promise<WriteHandle<{ id: string }>> {
+    assertWritableTable(table);
     if (encryptedSchemas.get(table._schema)?.tables.has(table._table)) {
       const result = await this.streamingTransaction((plan) =>
         plan.upsertStreaming(table, id, data, options),
@@ -4982,6 +5006,7 @@ export class Db {
     data: Init,
     options?: RestoreOptions,
   ): WriteResult<T> {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     if (encryptedSchemas.get(table._schema)?.tables.has(table._table)) {
       return this.preparedWrite("mergeable", client, (tx) => tx.restore(table, id, data, options));
@@ -5032,6 +5057,7 @@ export class Db {
     data: Partial<Init>,
     options?: UpsertOptions,
   ): WriteHandle {
+    assertWritableTable(table);
     scopeRecipients(table, options);
     const client = this.getClient(table._schema);
     const encryption = encryptedSchemas.get(table._schema);
@@ -5182,6 +5208,7 @@ export class Db {
     data: Record<string, unknown>,
     options?: UpdateOptions & { applyDiffs?: object },
   ): WriteHandle {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const diffs = options?.applyDiffs;
     const encrypted = encryptedSchemas.get(table._schema)?.tables.get(table._table);
@@ -5223,6 +5250,7 @@ export class Db {
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
+    assertWritableTable(table);
     const client = this.getClient(table._schema);
     const context = this.getAccessContext();
     const result = runAfterPreparation(client, () =>
@@ -5445,7 +5473,7 @@ export class Db {
     const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const prepared = prepareTransformRead(query, builtQuery, outputTable);
-    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
+    const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
     const equality = encryptedSchemas.has(query._schema)
       ? await prepareEqualityQuery(this, query, builderJson)
       : undefined;
@@ -5687,7 +5715,7 @@ export class Db {
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
-    const queryOptions = normalizeViewOptions(query._schema, builtQuery.table, options) ?? {};
+    const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;

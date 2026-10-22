@@ -1782,7 +1782,7 @@ mod tests {
         );
     }
 
-    /// Persisted exclusive predicate reads store canonical binding bytes and
+    /// Persisted serializable predicate reads store canonical binding bytes and
     /// decode them back (garden-co/jazz#3663). Every decodable tag must
     /// round-trip to the same bytes, and anything else is refused.
     #[test]
