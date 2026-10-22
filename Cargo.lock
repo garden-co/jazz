@@ -1502,6 +1502,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-band-book-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-band-chat-benchmark"
 version = "0.1.0"
 dependencies = [
@@ -1509,6 +1521,17 @@ dependencies = [
  "jazz",
  "jazz-benchmark-guard",
  "uuid",
+]
+
+[[package]]
+name = "jazz-example-big-label-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -1556,6 +1579,16 @@ dependencies = [
  "jazz",
  "jazz-benchmark-guard",
  "serde_json",
+]
+
+[[package]]
+name = "jazz-example-wequencer-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "tempfile",
 ]
 
 [[package]]

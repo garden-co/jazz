@@ -2,7 +2,6 @@
 //! app-prefixed because the examples page matches results by exact name;
 //! `metadata.ts` documents each timed iteration. Former names: see README.
 
-use jazz::groove::storage::MemoryStorage;
 use jazz_example_stage_plan_benchmark::board::crew_dashboard::FanoutFixture;
 use jazz_example_stage_plan_benchmark::board::{Fixture as BoardFixture, ResumeFixture};
 use jazz_example_stage_plan_benchmark::tasks::Fixture as TaskListFixture;

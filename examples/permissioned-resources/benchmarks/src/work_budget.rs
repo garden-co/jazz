@@ -1,5 +1,4 @@
 //! Diagnostic storage boundary counts; never use instrumented timing as baseline.
-use jazz::groove::storage::*;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 thread_local! {

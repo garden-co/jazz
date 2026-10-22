@@ -83,11 +83,8 @@ fn connect(upstream: &Db, downstream: &Db, author: AuthorSubject, relay: bool) {
     }
 }
 fn open(schema: &JazzSchema, tag: u8, author: AuthorSubject, core: bool) -> Db {
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let config = DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs).unwrap(),
         DbIdentity {
             node: NodeUuid::from_bytes([tag; 16]),
             author,
@@ -287,7 +284,7 @@ impl FanoutFixture {
                         for row in added.into_iter().chain(updated) {
                             let (descriptor, bytes) = row.row.encoded_record();
                             let record =
-                                jazz::groove::records::BorrowedRecord::new(bytes, descriptor);
+                                jazz::records::BorrowedRecord::new(bytes, descriptor);
                             let Value::String(title) = record.get("title").expect("title") else {
                                 panic!("title type")
                             };

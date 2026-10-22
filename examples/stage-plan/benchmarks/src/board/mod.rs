@@ -16,8 +16,7 @@ use jazz::db::{
     PeerIoPump, PreparedQuery, ReadOpts, ReadTier, RestoreOptions, ResumeCursor, SubscriptionEvent,
     SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
+use jazz::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -151,8 +150,6 @@ impl WireTransport for ByteDuplexTransport {
 impl Fixture<MemoryStorage> {
     pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
         let schema = schema(false);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         Self::new(
             tasks,
             comments,
@@ -173,8 +170,6 @@ impl Fixture<MemoryStorage> {
 
     pub fn memory_policy_update(tasks: usize, comments: usize, activity_events: usize) -> Self {
         let schema = schema(true);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         Self::new(
             tasks,
             comments,
@@ -513,8 +508,6 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
 impl Fixture<RocksDbStorage> {
     pub fn rocksdb(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
         let schema = schema(false);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let dir = tempfile::tempdir().expect("create W1 RocksDB benchmark directory");
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &family_refs, Durability::WalNoSync)
@@ -541,8 +534,6 @@ impl Fixture<RocksDbStorage> {
 impl Fixture<SqliteStorage> {
     pub fn sqlite(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
         let schema = schema(false);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let dir = tempfile::tempdir().expect("create W1 SQLite benchmark directory");
         let storage = SqliteStorage::open_with_durability(
             dir.path().join("board.sqlite"),
@@ -921,7 +912,6 @@ fn open_db<S: OrderedKvStorage + ReopenableStorage + 'static>(
 ) -> Db {
     block_on(Db::open(DbConfig::new(
         schema,
-        storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x71; 16]),
             author: AuthorSubject::SYSTEM,
@@ -931,11 +921,8 @@ fn open_db<S: OrderedKvStorage + ReopenableStorage + 'static>(
 }
 
 fn open_memory_node(schema: JazzSchema, node: u8, history_complete: bool) -> Db {
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let config = DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author: AuthorSubject::SYSTEM,

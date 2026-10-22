@@ -11,7 +11,6 @@
 //! cargo bench -p jazz-example-stage-plan-benchmark --bench nightly
 //! ```
 
-use jazz::groove::storage::MemoryStorage;
 use jazz_example_stage_plan_benchmark::board::Fixture;
 use jazz_example_stage_plan_benchmark::tasks::Fixture as TaskListFixture;
 use jazz_storage_rocksdb::RocksDbStorage;

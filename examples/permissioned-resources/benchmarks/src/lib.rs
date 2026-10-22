@@ -20,10 +20,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, InitialSyncFlushCadence, Node, ReadOpts, SeededRowIdSource,
     SubscriptionEvent, SubscriptionStream, Transport,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::{
-    BoxedStorage, MemoryStorage, OrderedKvStorage, OwnedWriteOperation, ScanRequest, collect_scan,
-};
+use jazz::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
@@ -2742,8 +2739,6 @@ fn open_receiver_storage(path: &Path, schema: &JazzSchema) -> BoxedStorage {
     if storage_mode() == "rocks" {
         BoxedStorage::new(open_storage(path, schema))
     } else {
-        let families = schema.column_families();
-        let names = families.iter().map(String::as_str).collect::<Vec<_>>();
         BoxedStorage::new(MemoryStorage::new(&names).unwrap())
     }
 }
@@ -2754,8 +2749,6 @@ fn copy_seed_to_memory(source: &RocksDbStorage) -> MemoryStorage {
     let families = source
         .column_family_names()
         .expect("RocksDB enumerates families");
-    let names = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let memory = MemoryStorage::new(&names).unwrap();
     for family in families {
         let entries = block_on(collect_scan(
             block_on(source.scan(ScanRequest::prefix(family.clone(), Vec::new()))).unwrap(),
@@ -2783,8 +2776,6 @@ fn copy_seed_to_memory(source: &RocksDbStorage) -> MemoryStorage {
 }
 
 fn open_storage(path: &std::path::Path, schema: &JazzSchema) -> RocksDbStorage {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     RocksDbStorage::open_with_durability(path, &refs, Durability::WalNoSync).unwrap()
 }
 

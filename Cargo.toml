@@ -26,9 +26,9 @@ members = [
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
   #TODO "examples/stage-plan/benchmarks",
-  #TODO "examples/band-book/benchmarks",
+  "examples/band-book/benchmarks",
   #TODO "examples/permissioned-resources/benchmarks",
-  #TODO "examples/big-label/benchmarks",
+  "examples/big-label/benchmarks",
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
@@ -36,7 +36,7 @@ members = [
   "examples/world-tour/benchmarks",
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
-  #TODO "examples/wequencer/benchmarks",
+  "examples/wequencer/benchmarks",
 ]
 exclude = [
   "examples/todo-server-rs",

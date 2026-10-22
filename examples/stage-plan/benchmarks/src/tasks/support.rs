@@ -6,7 +6,6 @@ use jazz::groove::db::{
     CommitMetrics, StorageReadBucket, StorageReadMetrics, StorageWriteBucket, StorageWriteMetrics,
 };
 use jazz::groove::ivm::{RuntimeStats, TickMetrics};
-use jazz::groove::storage::{OrderedKvStorage, ReopenableStorage};
 use jazz::node::{
     NodeState, PublicationOutcome, PublishedTransaction, QueryEngineReadMetrics, SyncMetrics,
 };

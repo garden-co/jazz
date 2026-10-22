@@ -302,6 +302,10 @@ struct Inner {
     identity: DbIdentity,
     /// Provenance for the write being applied (set by `apply_as`).
     writer: Option<Stamp>,
+    /// The commit seq and time of the last local stamp: writes of one commit
+    /// share a time, and later commits get strictly later ones, so
+    /// `$createdAt` orders this node's writes even within one millisecond.
+    last_stamp: (u64, i64),
     ids: Box<dyn RowIdSource>,
     seq: u64,
     claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
@@ -473,6 +477,7 @@ impl Db {
                 batches: HashMap::new(),
                 identity: config.identity,
                 writer: None,
+                last_stamp: (0, 0),
                 ids: config
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
@@ -2470,9 +2475,16 @@ impl Inner {
             Who::Session(author) => author,
             Who::Local => self.identity.author,
         };
-        let at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
+        let (last_seq, last_at) = self.last_stamp;
+        let at = if seq == last_seq {
+            last_at
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            now.max(last_at + 1)
+        };
+        self.last_stamp = (seq, at);
         self.writer = Some(Stamp {
             at,
             author: author.principal_parts(),

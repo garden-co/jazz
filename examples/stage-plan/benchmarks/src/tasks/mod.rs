@@ -117,8 +117,6 @@ fn publish(
     }
 }
 fn receiver(schema: &JazzSchema, peer: &PeerState) -> NodeState {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let mut node = open(schema, MemoryStorage::new(&refs).unwrap(), 2);
     let (shape, _, mut key) = support::table_subscription(schema, "tasks", peer.identity());
     let opts = RegisterShapeOptions {
@@ -229,7 +227,7 @@ pub struct Fixture<S: OrderedKvStorage + ReopenableStorage + 'static> {
     foreground: Option<NodeState>,
     peer: PeerState,
     changed: usize,
-    read_result: Vec<jazz::node::CurrentRow>,
+    read_result: Vec<jazz::db::CurrentRow>,
     storage: Box<dyn FnMut() -> S>,
 }
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
@@ -442,9 +440,7 @@ impl Fixture<RocksDbStorage> {
             jazz_benchmark_guard::refuse_contaminated_measurement();
         }
         let dir = tempfile::tempdir().unwrap();
-        let cfs = schema().column_families();
         Self::seeded("rocksdb_wal", count, move || {
-            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap()
         })
     }
@@ -462,9 +458,7 @@ impl Fixture<SqliteStorage> {
             jazz_benchmark_guard::refuse_contaminated_measurement();
         }
         let dir = tempfile::tempdir().unwrap();
-        let cfs = schema().column_families();
         Self::seeded("sqlite_wal", count, move || {
-            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
             SqliteStorage::open_with_durability(
                 dir.path().join("tasks.sqlite"),
                 &refs,
@@ -536,13 +530,9 @@ fn run_fixture(count: usize, percent: usize) {
             .unwrap(),
     );
     let schema = schema();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let memory = MemoryStorage::new(&refs).unwrap();
     run("memory", count, percent, move || memory.clone());
     let dir = tempfile::tempdir().unwrap();
     run("rocksdb_wal", count, percent, move || {
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
         RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap()
     });
 }
@@ -615,9 +605,6 @@ mod tests {
     fn updates_return_current_rows_before_reopen() {
         for sequential in [false, true] {
             let schema = schema();
-            let cfs = schema.column_families();
-            let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-            let memory = MemoryStorage::new(&refs).unwrap();
             let mut f = Fixture::seeded("memory", 10, move || memory.clone());
             f.reopen();
             f.verify();
@@ -634,9 +621,6 @@ mod tests {
     #[test]
     fn sequential_reopen_preserves_exact_rows() {
         let schema = schema();
-        let cfs = schema.column_families();
-        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let memory = MemoryStorage::new(&refs).unwrap();
         let mut f = Fixture::seeded("memory", 10, move || memory.clone());
         f.reopen();
         f.sequential_update(9);
