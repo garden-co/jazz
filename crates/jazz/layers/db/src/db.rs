@@ -199,28 +199,40 @@ struct ReadSpec {
 }
 
 impl ReadSpec {
-    fn of(opts: &ReadOpts) -> Result<Self, Error> {
+    fn of(opts: &ReadOpts, inner: &Inner) -> Result<Self, Error> {
+        let mut cut = None;
         let view = match &opts.read_view.source {
             ReadViewSourceSpec::Current => None,
-            ReadViewSourceSpec::BranchView { head, base } => Some(View {
-                head: head.clone(),
-                base: match base {
-                    None => None,
-                    Some(BranchViewBase::Current(base)) => Some(base.clone()),
-                    Some(BranchViewBase::Snapshot { .. }) => {
-                        return Err(unsupported("frozen snapshot bases on SQLite"));
-                    }
-                },
-            }),
-            ReadViewSourceSpec::Snapshot { .. } => {
-                return Err(unsupported("snapshot reads on SQLite"));
+            ReadViewSourceSpec::BranchView { head, base } => {
+                let (base, base_cut) = match base {
+                    None => (None, None),
+                    Some(BranchViewBase::Current(base)) => (Some(base.clone()), None),
+                    Some(BranchViewBase::Snapshot { branch, snapshot }) => (
+                        Some(branch.clone()),
+                        Some(inner.resolve_snapshot(snapshot)?),
+                    ),
+                };
+                Some(View {
+                    head: head.clone(),
+                    base,
+                    base_cut,
+                })
+            }
+            ReadViewSourceSpec::Snapshot { snapshot } => {
+                cut = Some(inner.resolve_snapshot(snapshot)?);
+                None
             }
         };
         Ok(Self {
             include_deleted: opts.include_deleted,
             view,
-            cut: None,
+            cut,
         })
+    }
+
+    /// Reads a frozen state: answered locally, never fetched.
+    fn frozen(&self) -> bool {
+        self.cut.is_some() || self.view.as_ref().is_some_and(|v| v.base_cut.is_some())
     }
 }
 
@@ -772,7 +784,8 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::of(&opts)?)
+        let inner = self.inner();
+        inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
@@ -785,8 +798,8 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner()
-            .run(prepared, Some(identity), &ReadSpec::of(&opts)?)
+        let inner = self.inner();
+        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
     }
 
     pub async fn all_result_tree(
@@ -795,7 +808,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
-        let roots = inner.run(prepared, None, &ReadSpec::of(&opts)?)?;
+        let roots = inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)?;
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
             tree.push(inner.node(
@@ -846,12 +859,14 @@ impl Db {
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        let read = ReadSpec::of(&opts)?;
+        let read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
-        if client && opts.tier != ReadTier::LocalOnly {
+        // A frozen read is answered from the replica alone.
+        let remote_read = client && opts.tier != ReadTier::LocalOnly && !read.frozen();
+        if remote_read {
             Self::remote_shape(&prepared.query)?;
         }
-        let remote = if client && opts.tier != ReadTier::LocalOnly {
+        let remote = if remote_read {
             self.attach_remote(prepared)
         } else {
             None
@@ -1420,7 +1435,7 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
-            .with_cut(read.cut)
+            .with_cut(read.cut.clone())
             .compile_query(&prepared.query, read.include_deleted)
     }
 
@@ -1633,6 +1648,71 @@ impl Inner {
         }
     }
 
+    /// [`Inner::existing`] as of `cut` (the current row when `None`): the
+    /// newest version the cut sees, current or superseded.
+    fn existing_at(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<&Cut>,
+    ) -> Result<Option<(u64, bool)>, Error> {
+        let current = self.existing(table, row, key)?;
+        let Some(cut) = cut else {
+            return Ok(current);
+        };
+        if let Some((seq, _)) = current
+            && cut.sees(seq)
+        {
+            return Ok(current);
+        }
+        let Some(version) = self.version_at(table, row, key, cut)? else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            quote(&format!("{table}__h"))
+        );
+        let deleted: i64 = self
+            .conn
+            .query_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key, version as i64],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        Ok(Some((version, deleted != 0)))
+    }
+
+    /// The newest superseded version of a row that `cut` sees.
+    fn version_at(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        cut: &Cut,
+    ) -> Result<Option<u64>, Error> {
+        let extra = cut
+            .extra
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND (_seq <= ?3 OR _seq IN ({extra}))",
+            quote(&format!("{table}__h"))
+        );
+        let version: Option<i64> = self
+            .conn
+            .query_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq as i64],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        Ok(version.map(|v| v as u64))
+    }
+
     /// Resolve which stored row a patch-style write addresses.
     fn locate(&self, table: &Table, row: RowUuid, target: &Target) -> Result<Located, Error> {
         let at = |key: Vec<u8>, cells: BTreeMap<String, Value>| -> Result<Located, Error> {
@@ -1666,7 +1746,7 @@ impl Inner {
                 table.selector_key(selector)?,
                 table.selector_cells(selector)?,
             ),
-            Target::View { head, base } => {
+            Target::View { head, base, at } => {
                 let head_key = table.selector_key(head)?;
                 let head_cells = if table.branch_by.is_empty() {
                     BTreeMap::new()
@@ -1683,12 +1763,14 @@ impl Inner {
                 if let Some(base) = base {
                     let base_key = table.selector_key(base)?;
                     if base_key != head_key
-                        && let Some((_, false)) = self.existing(&table.name, row, &base_key)?
+                        && let Some((_, false)) =
+                            self.existing_at(&table.name, row, &base_key, at.as_ref())?
                     {
                         return Ok(Located::Inherited {
                             from: base_key,
                             to: head_key,
                             head_cells,
+                            at: at.clone(),
                         });
                     }
                 }
@@ -2045,6 +2127,7 @@ impl Inner {
     }
 
     /// Copy-on-write: materialize an inherited base row into the head.
+    #[allow(clippy::too_many_arguments)]
     fn copy_on_write(
         &self,
         table: &Table,
@@ -2052,19 +2135,39 @@ impl Inner {
         from: &[u8],
         to: &[u8],
         head_cells: &BTreeMap<String, Value>,
+        at: Option<&Cut>,
         seq: u64,
     ) -> Result<(), Error> {
         let columns = self.columns_list(table);
+        let id = row.0.as_bytes().to_vec();
+        // A frozen base is copied as it was at the cut.
+        let source = match at {
+            None => Some(quote(&table.name)),
+            Some(cut) => match self.existing(&table.name, row, from)? {
+                Some((current, _)) if cut.sees(current) => Some(quote(&table.name)),
+                _ => self
+                    .version_at(&table.name, row, from, cut)?
+                    .map(|version| {
+                        format!(
+                            "(SELECT * FROM {} WHERE _seq = {version})",
+                            quote(&format!("{}__h", table.name))
+                        )
+                    }),
+            },
+        };
+        let Some(source) = source else {
+            return Err(rejected(format!(
+                "row {row:?} did not exist in the frozen base of `{}`",
+                table.name
+            )));
+        };
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _seq, _del{columns}) SELECT id, ?1, ?2, _del{columns} FROM {name} \
+            "INSERT INTO {name} (id, _b, _seq, _del{columns}) SELECT id, ?1, ?2, _del{columns} FROM {source} \
              WHERE id = ?3 AND _b = ?4",
             name = quote(&table.name)
         );
-        self.exec(
-            &sql,
-            rusqlite::params![to, seq as i64, row.0.as_bytes().to_vec(), from],
-        )
-        .map_err(storage)?;
+        self.exec(&sql, rusqlite::params![to, seq as i64, id, from])
+            .map_err(storage)?;
         self.set_cells(table, row, to, head_cells, seq, None)
     }
 
@@ -2272,9 +2375,10 @@ impl Inner {
                 from,
                 to,
                 head_cells,
+                at,
             } => {
                 self.authorize_patch(table, row, &from, &who, verb)?;
-                self.copy_on_write(table, row, &from, &to, &head_cells, seq)?;
+                self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &cells, seq, None)?;
                 to
             }
@@ -2359,9 +2463,10 @@ impl Inner {
                 from,
                 to,
                 head_cells,
+                at,
             } => {
                 check(self, &from)?;
-                self.copy_on_write(table, row, &from, &to, &head_cells, seq)?;
+                self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true))?;
             }
             _ => {
@@ -2430,6 +2535,8 @@ enum Target {
     View {
         head: BranchSelector,
         base: Option<BranchSelector>,
+        /// A frozen base's cut.
+        at: Option<Cut>,
     },
 }
 
@@ -2441,19 +2548,24 @@ impl Target {
         }
     }
 
-    fn of(target: &WriteTarget) -> Result<Self, Error> {
+    fn of(target: &WriteTarget, inner: &Inner) -> Result<Self, Error> {
         Ok(match target {
             WriteTarget::Root => Self::Root,
-            WriteTarget::BranchView { head, base } => Self::View {
-                head: head.clone(),
-                base: match base {
-                    None => None,
-                    Some(BranchViewBase::Current(base)) => Some(base.clone()),
-                    Some(BranchViewBase::Snapshot { .. }) => {
-                        return Err(unsupported("writes over frozen snapshot bases on SQLite"));
-                    }
-                },
-            },
+            WriteTarget::BranchView { head, base } => {
+                let (base, at) = match base {
+                    None => (None, None),
+                    Some(BranchViewBase::Current(base)) => (Some(base.clone()), None),
+                    Some(BranchViewBase::Snapshot { branch, snapshot }) => (
+                        Some(branch.clone()),
+                        Some(inner.resolve_snapshot(snapshot)?),
+                    ),
+                };
+                Self::View {
+                    head: head.clone(),
+                    base,
+                    at,
+                }
+            }
         })
     }
 }
@@ -2469,6 +2581,8 @@ enum Located {
         from: Vec<u8>,
         to: Vec<u8>,
         head_cells: BTreeMap<String, Value>,
+        /// A frozen base's cut.
+        at: Option<Cut>,
     },
     Absent {
         cells: BTreeMap<String, Value>,
@@ -2974,12 +3088,17 @@ impl Inner {
                 self.insert(&t, c, o.row_id, &Target::exact(&o.target), who, seq)
             }
             StagedOp::Update(t, r, c, o) => {
-                self.update(&t, r, c, &Target::of(&o.target)?, who, seq)
+                let target = Target::of(&o.target, self)?;
+                self.update(&t, r, c, &target, who, seq)
             }
             StagedOp::Upsert(t, r, c, o) => {
-                self.upsert(&t, r, c, &Target::of(&o.target)?, who, seq)
+                let target = Target::of(&o.target, self)?;
+                self.upsert(&t, r, c, &target, who, seq)
             }
-            StagedOp::Delete(t, r, o) => self.delete(&t, r, &Target::of(&o.target)?, who, seq),
+            StagedOp::Delete(t, r, o) => {
+                let target = Target::of(&o.target, self)?;
+                self.delete(&t, r, &target, who, seq)
+            }
             StagedOp::Restore(t, r, c, o) => {
                 self.restore(&t, r, c, &Target::exact(&o.target), who, seq)
             }
@@ -3230,9 +3349,15 @@ impl Db {
             .execute_batch("SAVEPOINT overlay")
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
-        let result = inner
-            .apply_all(&ops, own)
-            .and_then(|()| read(&inner, snapshot.map(|seq| Cut { seq, own })));
+        let result = inner.apply_all(&ops, own).and_then(|()| {
+            read(
+                &inner,
+                snapshot.map(|seq| Cut {
+                    own,
+                    ..Cut::at(seq)
+                }),
+            )
+        });
         inner
             .conn
             .execute_batch("ROLLBACK TO overlay; RELEASE overlay")
@@ -3265,10 +3390,7 @@ impl Db {
             return Ok(());
         };
         let read = ReadSpec {
-            cut: Some(Cut {
-                seq: *snapshot,
-                own: 0,
-            }),
+            cut: Some(Cut::at(*snapshot)),
             ..ReadSpec::default()
         };
         let rows = versions(&inner.run(prepared, None, &read)?);

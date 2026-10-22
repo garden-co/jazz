@@ -12,7 +12,6 @@ use jazz::protocol::{
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::time::GlobalTime;
 use jazz::tools::{
     CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
 };
@@ -57,20 +56,11 @@ fn selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, helper for Groove snapshot capture (dots)
 fn captured_branch_snapshot(db: &Db) -> SnapshotRef {
-    let mut capture = db.enqueue_capture_snapshot();
-    for _ in 0..128 {
-        db.tick().unwrap();
-        if let Some(result) = capture.try_recv().unwrap() {
-            return result.unwrap();
-        }
-    }
-    panic!("snapshot capture did not complete");
+    db.capture_snapshot().unwrap()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, Groove snapshot capture (dotted SnapshotRef)
-/// Alice captures pending local work before a later queued edit. Her frozen
+/// Alice captures her work before a later edit. Her frozen
 /// draft keeps Original; the live draft sees Changed, and copy-on-write only
 /// changes the draft. No authority or server acceptance is required.
 #[test]
@@ -89,7 +79,7 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
         )
         .unwrap()
         .row_uuid();
-    let mut capture = db.enqueue_capture_snapshot();
+    let snapshot = captured_branch_snapshot(&db);
     db.update(
         "todos",
         row,
@@ -103,15 +93,9 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
         },
     )
     .unwrap();
-    let snapshot = loop {
-        db.tick().unwrap();
-        if let Some(snapshot) = capture.try_recv().unwrap() {
-            break snapshot.unwrap();
-        }
-    };
     assert!(
-        !snapshot.dots.is_empty(),
-        "pending transactions are explicit availability witnesses"
+        snapshot.dots.is_empty(),
+        "a database without an upstream has nothing pending to name"
     );
     let snapshot = SnapshotRef::from_persisted(&snapshot.to_persisted()).unwrap();
     let frozen = ReadOpts::default().branch_view(
@@ -159,7 +143,6 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, Groove snapshot capture + RocksDB reopen
 /// Alice restores a captured reference with retained history after reopening
 /// her persistent database. Bob's empty store must refuse the same reference.
 #[test]
@@ -195,8 +178,6 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
             },
         )
         .unwrap();
-        db.wait_for_pending_writes(jazz::tx::DurabilityTier::Local)
-            .unwrap();
         reference
     };
     let snapshot = SnapshotRef::from_persisted(&persisted).unwrap();
@@ -232,7 +213,7 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
         block_on(bob.all(&query, opts))
             .unwrap_err()
             .to_string()
-            .contains("Snapshot history is unavailable")
+            .contains("newer than this replica's synced state")
     );
 }
 
@@ -386,14 +367,8 @@ fn open_history_complete_db_with_schema(schema: JazzSchema) -> Db {
     .unwrap()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, RocksDB-backed reopen helper
 fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .unwrap();
-    block_on(Db::open(
+    block_on(Db::open_at(
         DbConfig::new(
             schema.clone(),
             DbIdentity {
@@ -402,6 +377,8 @@ fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
             },
         )
         .with_id_source(SeededRowIdSource::new(10)),
+        &path.join("jazz.sqlite"),
+        jazz::db::FileOptions::default(),
     ))
     .unwrap()
 }
@@ -1356,7 +1333,6 @@ fn branch_column_reference_policy_controls_effective_reads() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, frozen snapshot bases need Groove snapshot capture
 #[test]
 fn frozen_base_applies_one_cut_to_policy_dependencies() {
     let schema = compile_schema(
@@ -1427,8 +1403,8 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .unwrap()
         .mergeable_tx_id();
     let cut = captured_branch_snapshot(&db);
-    assert_eq!(cut.owner, authored.node);
-    assert!(cut.local_base >= authored.time);
+    assert_eq!(cut.owner, NodeUuid::from_bytes([0xa9; 16]));
+    assert!(cut.global_base.0 >= authored);
     db.update(
         "branches",
         head_branch,
@@ -2312,31 +2288,23 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, builds a Groove dotted SnapshotRef from a tx id
 #[test]
 fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     let (db, schema) = open_db();
     let row = RowUuid::from_bytes([0x74; 16]);
     let base = selector(0x75);
     let head = selector(0x76);
-    let seeded = db
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
-            jazz::db::InsertOptions {
-                row_id: Some(row),
-                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .mergeable_tx_id();
-    let frozen = SnapshotRef {
-        owner: seeded.node,
-        global_base: GlobalTime(0),
-        local_base: seeded.time,
-        dots: Vec::new(),
-    };
+    db.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let frozen = captured_branch_snapshot(&db);
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let opts = ReadOpts::default().branch_view(
         head.clone(),
