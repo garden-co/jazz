@@ -11,7 +11,7 @@ use crate::protocol::{
     SchemaVersion,
 };
 use crate::query::Query;
-use crate::records::Value;
+use crate::records::{Value, ValueType};
 use crate::schema::JazzSchema;
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
@@ -46,9 +46,9 @@ use crate::values::{
     Schema, Sql, Table, from_sql, quote, sql_literal, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RemoteLinkHint,
-    SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream,
-    WireTransport, WireTransportAdapter, duplex,
+    Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
+    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
+    Upstream, WireTransport, WireTransportAdapter, duplex,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -480,9 +480,11 @@ impl Db {
         conn.commit_hook(Some(move || {
             committed.unpin();
             false
-        }));
+        }))
+        .map_err(storage)?;
         let rolled_back = chunks.clone();
-        conn.rollback_hook(Some(move || rolled_back.unpin()));
+        conn.rollback_hook(Some(move || rolled_back.unpin()))
+            .map_err(storage)?;
         let fresh: i64 = conn
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_jazz_%'", [], |r| r.get(0))
             .map_err(storage)?;
@@ -1363,6 +1365,11 @@ impl Inner {
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         let names: Arc<str> = Arc::from(table);
+        let types: Arc<[ValueType]> = compiled
+            .projection
+            .iter()
+            .map(|(_, ty)| ty.clone())
+            .collect();
         let mut rows = statement
             .query(params_from_iter(compiled.params.iter()))
             .map_err(storage)?;
@@ -1406,6 +1413,7 @@ impl Inner {
                 seq: seq as u64,
                 deleted: deleted != 0,
                 cells: Arc::new(cells),
+                types: types.clone(),
             });
         }
         if blocked {

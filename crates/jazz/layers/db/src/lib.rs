@@ -18,7 +18,7 @@
 // The layers below, under the paths this crate's code uses.
 use jazz_model::{query, schema, tx};
 use jazz_protocol::{protocol, wire};
-use jazz_types::{ids, local_executor, records};
+use jazz_types::{ids, local_executor, object, records};
 
 /// The public schema and policy vocabulary.
 mod tools {
@@ -28,6 +28,8 @@ mod tools {
     pub use jazz_model::model::transaction::OpenTransactionId;
 }
 
+pub mod binding_args;
+pub mod binding_codec;
 pub mod compile;
 pub mod db;
 pub(crate) mod large;

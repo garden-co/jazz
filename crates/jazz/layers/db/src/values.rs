@@ -553,6 +553,8 @@ pub struct CurrentRow {
     pub(crate) deleted: bool,
     /// Projected cells in projection order. `None` is an unwritten cell.
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
+    /// The declared type of each projected cell, shared by a read's rows.
+    pub(crate) types: Arc<[ValueType]>,
 }
 
 impl CurrentRow {
@@ -584,6 +586,11 @@ impl CurrentRow {
     /// A projected cell by projection position.
     pub fn cell_at(&self, index: usize) -> Option<Value> {
         self.cells.get(index).and_then(|(_, value)| value.clone())
+    }
+
+    /// The declared type of each projected cell, in projection order.
+    pub fn cell_types(&self) -> &[ValueType] {
+        &self.types
     }
 
     /// Projected cells in projection order.
