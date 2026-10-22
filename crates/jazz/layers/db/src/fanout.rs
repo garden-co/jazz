@@ -1028,6 +1028,27 @@ impl Inner {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
             Ok(rows) => {
                 group.awaiting = false;
+                // Rows that left the result go out as removals before the
+                // re-opening: a reset tells local readers to replace their
+                // result, but a replica only drops rows it is told to (a
+                // tighter policy must evict what it can no longer read).
+                if group.opened {
+                    let kept: BTreeSet<RowKey> = rows.iter().map(row_key).collect();
+                    let removed: Vec<RemovedRow> = group
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, row)| !kept.contains(&row_key(row)))
+                        .map(|(index, row)| RemovedRow {
+                            table: row.table.to_string(),
+                            row_uuid: row.id,
+                            index,
+                        })
+                        .collect();
+                    if !removed.is_empty() {
+                        group.push(delta(false, Vec::new(), Vec::new(), removed));
+                    }
+                }
                 group.opened = true;
                 group.push(opening(&rows));
                 group.rows = rows;
