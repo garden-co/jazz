@@ -703,7 +703,19 @@ impl AuthorSubject {
             ty = &record.fields().get(record.field_index(name)?)?.value_type;
         }
         if root == "$deletedBy" {
-            Some(internment::Intern::new(ValueType::Nullable(Box::new(ty.clone()))).as_ref())
+            // Deletion authors are nullable. This runs per published row, so
+            // build each path's nullable type once instead of interning it.
+            const PATHS: [AuthorField; 5] = [
+                AuthorField::Whole,
+                AuthorField::Account,
+                AuthorField::Identity,
+                AuthorField::IdentityIssuer,
+                AuthorField::IdentitySubject,
+            ];
+            static DELETED: [std::sync::OnceLock<ValueType>; PATHS.len()] =
+                [const { std::sync::OnceLock::new() }; PATHS.len()];
+            let slot = PATHS.iter().position(|field| field.path() == path)?;
+            Some(DELETED[slot].get_or_init(|| ValueType::Nullable(Box::new(ty.clone()))))
         } else {
             Some(ty)
         }
