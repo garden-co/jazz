@@ -2592,10 +2592,10 @@ fn author_columns_store_dictionary_codes() {
             ["created_by", "updated_by"]
                 .iter()
                 .map(|column| {
+                    // Stored author columns hold this node's dictionary codes.
                     let index = descriptor.field_index(column).unwrap();
-                    crate::ids::RowAuthor::from_record(record.get_record(index).unwrap())
-                        .unwrap()
-                        .as_author_subject()
+                    let code = AuthorCode(record.get_dictionary_code(index).unwrap());
+                    reopened.authors.subject(code).unwrap()
                 })
                 .collect::<Vec<_>>()
         })
