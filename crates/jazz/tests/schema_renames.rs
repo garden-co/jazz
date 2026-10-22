@@ -605,3 +605,74 @@ fn an_old_client_is_served_under_the_current_policies_by_the_stored_column() {
         vec![text(&user(1).principal_parts().1)]
     );
 }
+
+/// `docs(branch_id, title)`, branched, and the same table renamed `pages`.
+fn branched(table: &str) -> JazzSchema {
+    schema(vec![
+        TableSchemaBuilder::new(table)
+            .column("branch_id", ColumnType::Uuid)
+            .column("title", ColumnType::Text)
+            .branch_by("branch_id")
+            .policies(allow_all_policies()),
+    ])
+}
+
+fn branch(byte: u8) -> jazz::protocol::BranchSelector {
+    jazz::protocol::BranchSelector::new([(
+        "branch_id",
+        Value::Uuid(uuid::Uuid::from_bytes([byte; 16])),
+    )])
+}
+
+/// A snapshot taken before a table rename still freezes the base: a draft
+/// written under the new name over that frozen base copies the row as it was
+/// at the capture, read from the stored table's history.
+#[test]
+fn a_frozen_base_from_before_a_table_rename_still_copies_the_frozen_row() {
+    use jazz::db::{ExactWriteTarget, WriteTarget};
+    use jazz::protocol::BranchViewBase;
+    let db = block_on(Db::open(config(branched("docs"), 1, AuthorSubject::SYSTEM))).unwrap();
+    let (main, draft) = (branch(1), branch(2));
+    block_on(db.insert(
+        "docs",
+        BTreeMap::from([("title".to_owned(), text("frozen"))]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            target: ExactWriteTarget::Branch(main.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let snapshot = block_on(db.capture_snapshot()).unwrap();
+    let on = |head: &jazz::protocol::BranchSelector, base| UpdateOptions {
+        target: WriteTarget::BranchView {
+            head: head.clone(),
+            base,
+        },
+        ..Default::default()
+    };
+    block_on(db.update(
+        "docs",
+        row(1),
+        BTreeMap::from([("title".to_owned(), text("later"))]),
+        on(&main, None),
+    ))
+    .unwrap();
+
+    let pages = branched("pages");
+    let rename = lens(&branched("docs"), &pages, "docs", "pages", vec![]);
+    block_on(db.activate_schema_with_lenses(pages, &[rename])).unwrap();
+
+    let frozen = Some(BranchViewBase::snapshot(main.clone(), snapshot));
+    block_on(db.update("pages", row(1), BTreeMap::new(), on(&draft, frozen.clone()))).unwrap();
+    let titles = |opts| read_query(&db, Query::from("pages"), "title", opts);
+    assert_eq!(
+        titles(ReadOpts::default().branch_view(draft.clone(), None)),
+        texts(&["frozen"]),
+        "the draft copied the frozen version"
+    );
+    assert_eq!(
+        titles(ReadOpts::default().branch_view(main, None)),
+        texts(&["later"])
+    );
+}
