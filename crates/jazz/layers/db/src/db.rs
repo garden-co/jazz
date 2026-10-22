@@ -3371,8 +3371,6 @@ pub enum ReadTier {
 pub struct ReadOpts {
     /// Read semantics; execution resolves coverage durability separately.
     pub tier: ReadTier,
-    /// Include current rows whose deletion winner is `Deleted`.
-    pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an empty, unsettled opening. Host read-option state
@@ -3385,7 +3383,6 @@ impl Default for ReadOpts {
     fn default() -> Self {
         Self {
             tier: ReadTier::LocalFirst,
-            include_deleted: false,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
         }
@@ -3403,7 +3400,7 @@ impl ReadOpts {
 
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
-        self.read_view = ReadViewSpec::branch_view(head, base);
+        self.read_view.source = ReadViewSourceSpec::BranchView { head, base };
         self
     }
 }
@@ -3537,8 +3534,8 @@ fn remote_subscription_tier(
     tier.max(upstream_durability_floor)
 }
 
-fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.read_view.is_default() {
+fn ensure_current_read_source(opts: &ReadOpts) -> Result<(), Error> {
+    if matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
         return Ok(());
     }
     Err(Error::new(
@@ -3562,31 +3559,54 @@ fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     ))
 }
 
-fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.include_deleted {
+/// Include-deleted subscriptions support the current source, any snapshot
+/// (transaction reads register as snapshot subscriptions), or any source of a
+/// history query. Branch views of current tables reject the flag until they are
+/// specified and tested (SPEC 6 §6.6). Plain one-shot reads are narrower: they
+/// reject every non-current source of a current-table query with the flag.
+fn ensure_supported_include_deleted_read_view(
+    read_view: &ReadViewSpec,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    if read_view.include_deleted
+        && !query_uses_history
+        && matches!(read_view.source, ReadViewSourceSpec::BranchView { .. })
+    {
         return Err(Error::new(
             ErrorCode::Query,
-            "live subscriptions do not support include_deleted yet",
+            "branch views do not support include_deleted yet",
         ));
     }
-    ensure_supported_read_view(opts)
+    Ok(())
 }
 
-fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
+fn ensure_supported_subscription_read_opts(
+    opts: &ReadOpts,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    ensure_supported_read_view(opts)?;
+    ensure_supported_include_deleted_read_view(&opts.read_view, query_uses_history)
+}
+
+fn ensure_supported_register_shape_read_view(
+    opts: &RegisterShapeOptions,
+    query_uses_history: bool,
+) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
         ..ReadOpts::default()
     };
-    ensure_supported_read_view(&read_opts)
+    ensure_supported_subscription_read_opts(&read_opts, query_uses_history)
 }
 
 fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
+    query_uses_history: bool,
     local_receiver: bool,
     peer_role: PeerRole,
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
-    ensure_supported_register_shape_read_view(opts)?;
+    ensure_supported_register_shape_read_view(opts, query_uses_history)?;
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(

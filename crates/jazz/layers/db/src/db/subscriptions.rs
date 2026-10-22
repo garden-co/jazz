@@ -59,7 +59,6 @@ where
     ///     &query,
     ///     ReadOpts {
     ///         tier: jazz::db::ReadTier::LocalOnly,
-    ///         include_deleted: false,
     ///         ..ReadOpts::default()
     ///     },
     /// ))?;
@@ -288,10 +287,8 @@ where
         };
         let mut node = prepared.scoped_node(&mut node, author.unwrap_or(self.identity.author))?;
         if let Some(open_tx_id) = open_tx_id {
-            opts.read_view = ReadViewSpec {
-                source: ReadViewSourceSpec::Snapshot {
-                    snapshot: node.open_transaction_snapshot(open_tx_id)?.into(),
-                },
+            opts.read_view.source = ReadViewSourceSpec::Snapshot {
+                snapshot: node.open_transaction_snapshot(open_tx_id)?.into(),
             };
         }
         if opts.tier == ReadTier::LocalOnly {
@@ -996,7 +993,7 @@ where
     ) -> Result<SubscriptionStream, Error> {
         let coverage_tier = coverage_tier.unwrap_or_else(|| read_coverage_tier(&opts));
         self.await_open_schema_for_coverage(coverage_tier).await?;
-        ensure_supported_subscription_read_opts(&opts)?;
+        ensure_supported_subscription_read_opts(&opts, prepared.shape.query().uses_history())?;
         self.validate_prepared_shape_for_registration(prepared)
             .await?;
         let (coverage_tier, opening_gate) =
@@ -1430,8 +1427,8 @@ where
     ) -> Result<SubscriptionStream, Error> {
         self.await_open_schema_for_coverage(read_coverage_tier(&opts))
             .await?;
-        ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
+        ensure_supported_subscription_read_opts(&opts, query.uses_history())?;
         let prepared = self.prepare_query(&query)?;
         self.open_subscription(&prepared, opts, author, authorization_mode, true)
             .await

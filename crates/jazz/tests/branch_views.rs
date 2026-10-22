@@ -2018,6 +2018,7 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let opts = ReadOpts {
         read_view: ReadViewSpec {
+            include_deleted: false,
             source: ReadViewSourceSpec::BranchView {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),
@@ -2256,6 +2257,7 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let opts = ReadOpts {
         read_view: ReadViewSpec {
+            include_deleted: false,
             source: ReadViewSourceSpec::BranchView {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),

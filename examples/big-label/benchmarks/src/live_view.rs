@@ -236,7 +236,6 @@ fn seed_rows(db: &Db, table_rows: usize) {
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
         tier: ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }
@@ -244,7 +243,6 @@ fn global_read_opts() -> ReadOpts {
 fn local_read_opts() -> ReadOpts {
     ReadOpts {
         tier: ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

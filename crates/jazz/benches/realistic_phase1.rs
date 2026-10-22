@@ -348,7 +348,6 @@ fn byte_duplex_with_session(
 fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

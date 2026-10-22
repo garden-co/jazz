@@ -125,7 +125,6 @@ fn open_server(seed: u8, schema: JazzSchema) -> Db {
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

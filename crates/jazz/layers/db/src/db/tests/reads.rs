@@ -1424,7 +1424,6 @@ fn point_join_one_shot_uses_junction_index_and_tracks_deletion() {
                 prepared,
                 ReadOpts {
                     tier: crate::db::ReadTier::Remote,
-                    include_deleted: false,
                     ..ReadOpts::default()
                 },
                 bob,
@@ -1678,7 +1677,10 @@ fn point_join_read_opts(tier: DurabilityTier, include_deleted: bool) -> ReadOpts
         } else {
             ReadTier::LocalOnly
         },
-        include_deleted,
+        read_view: crate::protocol::ReadViewSpec {
+            include_deleted,
+            ..Default::default()
+        },
         ..ReadOpts::default()
     }
 }
@@ -2757,7 +2759,6 @@ fn local_subscribe_uses_prepared_non_simple_plan() {
         &prepared,
         ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     ))
@@ -2800,7 +2801,6 @@ fn subscription_reset_preserves_ordered_window_rank() {
         &query,
         ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     )
@@ -3051,7 +3051,6 @@ fn authoritative_global_bound_read_uses_the_declared_index() {
         &prepared,
         ReadOpts {
             tier: crate::db::ReadTier::Remote,
-            include_deleted: false,
             ..ReadOpts::default()
         },
         AuthorSubject::SYSTEM,
@@ -6864,7 +6863,6 @@ fn read_opts_resolve_product_tiers_to_coverage() {
     assert_eq!(
         read_coverage_tier(&ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         }),
         DurabilityTier::Local
@@ -6872,7 +6870,6 @@ fn read_opts_resolve_product_tiers_to_coverage() {
     assert_eq!(
         read_coverage_tier(&ReadOpts {
             tier: crate::db::ReadTier::Remote,
-            include_deleted: false,
             ..ReadOpts::default()
         }),
         DurabilityTier::Global
@@ -6880,7 +6877,6 @@ fn read_opts_resolve_product_tiers_to_coverage() {
     assert_eq!(
         read_coverage_tier(&ReadOpts {
             tier: crate::db::ReadTier::LocalFirst,
-            include_deleted: false,
             ..ReadOpts::default()
         }),
         DurabilityTier::Local
@@ -6903,7 +6899,6 @@ fn global_read_and_wait_require_core_confirmation() {
     assert_eq!(
         read_coverage_tier(&ReadOpts {
             tier: crate::db::ReadTier::Remote,
-            include_deleted: false,
             ..ReadOpts::default()
         }),
         DurabilityTier::Global
@@ -6913,7 +6908,6 @@ fn global_read_and_wait_require_core_confirmation() {
             &prepared_query,
             ReadOpts {
                 tier: crate::db::ReadTier::Remote,
-                include_deleted: false,
                 ..ReadOpts::default()
             },
             AuthorSubject::SYSTEM,
@@ -6946,7 +6940,6 @@ fn global_read_and_wait_require_core_confirmation() {
                 &prepared_query,
                 ReadOpts {
                     tier: crate::db::ReadTier::Remote,
-                    include_deleted: false,
                     ..ReadOpts::default()
                 },
                 AuthorSubject::SYSTEM,

@@ -739,18 +739,8 @@ pub(super) fn event_settled(event: &SubscriptionEvent) -> bool {
 pub(super) fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
         tier: crate::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
-}
-
-pub(super) fn assert_unsupported_subscription_include_deleted(error: Error) {
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error.message.contains("include_deleted"),
-        "unexpected error message: {}",
-        error.message
-    );
 }
 
 pub(super) fn assert_subscribe_rejected_unsupported_shape_capability_detail(

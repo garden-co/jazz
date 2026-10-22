@@ -1202,7 +1202,7 @@ where
         opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
-        ensure_default_read_view(&opts)?;
+        ensure_current_read_source(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut node = prepared.scoped_node(&mut node, author)?;
         let mut snapshot = match authorization_mode {
@@ -1211,7 +1211,7 @@ where
                     tx_id,
                     &prepared.shape,
                     &prepared.binding,
-                    opts.include_deleted,
+                    opts.read_view.include_deleted,
                 )
                 .await
                 .map_err(Error::from)?,
@@ -1221,7 +1221,7 @@ where
                     &prepared.shape,
                     &prepared.binding,
                     author,
-                    opts.include_deleted,
+                    opts.read_view.include_deleted,
                 )
                 .await
                 .map_err(Error::from)?,
@@ -1238,7 +1238,7 @@ where
         opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
-        ensure_default_read_view(&opts)?;
+        ensure_current_read_source(&opts)?;
         let mut node = self.lock_for_transaction_operation(tx_id).await?;
         let mut node = prepared.scoped_node(&mut node, author)?;
         let mut rows = match authorization_mode {
@@ -1247,7 +1247,7 @@ where
                     tx_id,
                     &prepared.shape,
                     &prepared.binding,
-                    opts.include_deleted,
+                    opts.read_view.include_deleted,
                 )
                 .await
                 .map_err(Error::from)?,
@@ -1257,7 +1257,7 @@ where
                     &prepared.shape,
                     &prepared.binding,
                     author,
-                    opts.include_deleted,
+                    opts.read_view.include_deleted,
                 )
                 .await
                 .map_err(Error::from)?,

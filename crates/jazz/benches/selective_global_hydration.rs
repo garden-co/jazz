@@ -609,7 +609,6 @@ fn seed_rows(db: &Db, config: ConfigRef, table_rows: usize) {
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }
@@ -617,7 +616,6 @@ fn global_read_opts() -> ReadOpts {
 fn local_read_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }
