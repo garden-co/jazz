@@ -2288,11 +2288,15 @@ where
                     ))
                     .into());
                 }
-                resolved.graph = with_deletion_metadata(
-                    resolved.graph,
-                    &resolved.row_shape.descriptor,
-                    request,
-                )?;
+                // Re-project every field the source graph carries, not only the
+                // row shape: policy claim parameters ride along as routing
+                // fields that downstream operators still read.
+                let source_descriptor = self
+                    .node
+                    .database
+                    .graph_output_descriptor(&resolved.graph)?;
+                resolved.graph =
+                    with_deletion_metadata(resolved.graph, &source_descriptor, request)?;
                 resolved.row_shape.descriptor = self
                     .node
                     .database
@@ -2343,8 +2347,14 @@ fn deletion_metadata_columns(
 }
 
 /// Both fields come from the same deletion winner and remain opt-in.
+///
+/// `source_descriptor` holds the `$updatedAt`/`$updatedBy` fields the deleted
+/// arm projects. The live arm's typed null takes the stored type from it, not
+/// the logical magic-column type: stored authors are interned, and both union
+/// arms must agree on the physical descriptor.
 pub(super) fn deletion_metadata_projections(
     request: &SourceRequest,
+    source_descriptor: &RecordDescriptor,
     source_prefix: Option<&str>,
 ) -> Vec<ProjectField> {
     deletion_metadata_columns(request)
@@ -2353,10 +2363,23 @@ pub(super) fn deletion_metadata_projections(
                 Some(prefix) => {
                     ProjectField::nullable(format!("{prefix}{source}"), user_column_field(name))
                 }
-                None => ProjectField::null_typed(
-                    user_column_field(name),
-                    ValueType::Nullable(Box::new(ty)),
-                ),
+                None => {
+                    // Resolve `source` as the deleted arm's field reference does.
+                    let stored = source_descriptor
+                        .field_index(source)
+                        .or_else(|| {
+                            source_descriptor
+                                .fields()
+                                .iter()
+                                .position(|field| field.name.as_deref() == Some(source))
+                        })
+                        .map(|index| source_descriptor.fields()[index].value_type.clone())
+                        .unwrap_or(ty);
+                    ProjectField::null_typed(
+                        user_column_field(name),
+                        ValueType::Nullable(Box::new(stored)),
+                    )
+                }
             };
             field.output_identity = records::FieldIdentity::Name(name.to_owned());
             field
@@ -2382,6 +2405,7 @@ pub(super) fn with_deletion_metadata(
             })
             .chain(deletion_metadata_projections(
                 request,
+                descriptor,
                 deleted.then_some(""),
             ))
             .collect::<Vec<_>>()
@@ -6908,12 +6932,6 @@ mod tests {
             None,
         );
     }
-}
-
-fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
-    Ok(RowAuthor::from_persisted_subject(author)
-        .map_err(|_| Error::UnadmittedWriteAuthor)?
-        .to_value())
 }
 
 /// The normalized source occurrence of a query's only root-level `join_via`.

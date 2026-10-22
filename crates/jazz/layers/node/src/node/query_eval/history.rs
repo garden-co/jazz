@@ -459,6 +459,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 let descriptor = self.node.database.graph_output_descriptor(&graph)?;
                 let fields = descriptor.fields();
                 let deleted = deleted.project(["row_uuid", "$updatedAt", "$updatedBy"]);
+                let deletion_descriptor = self.node.database.graph_output_descriptor(&deleted)?;
                 let live = GraphBuilder::anti_join(
                     graph.clone(),
                     deleted.clone(),
@@ -474,7 +475,11 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                                 field.identity.clone().expect("history identity"),
                             )
                         })
-                        .chain(read_sources::deletion_metadata_projections(request, None)),
+                        .chain(read_sources::deletion_metadata_projections(
+                            request,
+                            &deletion_descriptor,
+                            None,
+                        )),
                 );
                 let deleted = GraphBuilder::join(graph, deleted, ["row_uuid"], ["row_uuid"])
                     .project_fields(
@@ -492,6 +497,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                             })
                             .chain(read_sources::deletion_metadata_projections(
                                 request,
+                                &deletion_descriptor,
                                 Some("right."),
                             )),
                     );
