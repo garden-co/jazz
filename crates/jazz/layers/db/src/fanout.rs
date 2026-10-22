@@ -362,7 +362,7 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
-            .with_cut(read.cut)
+            .with_cut(read.cut.clone())
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
