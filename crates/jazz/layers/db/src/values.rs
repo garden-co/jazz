@@ -97,7 +97,9 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Bool(v) => Sql::Integer(*v as i64),
         Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
         Value::Bytes(v) => Sql::Text(crate::large::inline_bytes(v)),
-        Value::Large(v) => Sql::Text(crate::large::chunked_cell(v)?),
+        // A chunked cell carries its sort prefix, which needs the chunks:
+        // descriptors are stored through `Inner::large_cell`.
+        Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
@@ -431,6 +433,10 @@ impl Table {
                 .iter()
                 .map(|c| match elided_as(c) {
                     Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
+                    // The key expression queries order and range by.
+                    None if table.column(c).is_some_and(crate::large::large_capable) => {
+                        crate::large::key_sql(&quote(c))
+                    }
                     None => quote(c),
                 })
                 .collect();
@@ -449,14 +455,10 @@ impl Table {
     }
 }
 
-/// A stored column's definition. Large-capable columns compare through the
-/// `jazz` collation, which reads chunked cells as their logical values.
+/// A stored column's definition: just its name. Columns carry no type
+/// affinity or collation, so the file opens on any SQLite.
 pub(crate) fn column_def(column: &Column) -> String {
-    if crate::large::large_capable(column) {
-        format!("{} COLLATE jazz", quote(&column.name))
-    } else {
-        quote(&column.name)
-    }
+    quote(&column.name)
 }
 
 /// A value as an SQL literal, for DDL defaults.

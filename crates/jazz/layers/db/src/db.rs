@@ -469,9 +469,7 @@ impl Db {
         path: Option<&std::path::Path>,
     ) -> Result<Self, Error> {
         let schema = Schema::new(&config.schema);
-        // The collation and functions must exist before any table that
-        // uses them is created or written.
-        let chunks = crate::large::Chunks::install(&conn, path)?;
+        let chunks = crate::large::Chunks::install(path)?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -1314,7 +1312,56 @@ impl Inner {
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        let mut statement = self.conn.prepare_cached(&compiled.sql).map_err(storage)?;
+        self.with_preps(&compiled.preps, |ties| {
+            let sql = match &compiled.ranked_sql {
+                Some(ranked) if ties => ranked,
+                _ => &compiled.sql,
+            };
+            self.execute_sql(sql, compiled, table)
+        })
+    }
+
+    /// Answer `preps` into `_jazz_lv_scratch`, run `body` (told whether a
+    /// rank prep found chunked values sharing a sort key), then clear the
+    /// answers. Statements that need no prep run directly.
+    pub(crate) fn with_preps<T>(
+        &self,
+        preps: &[crate::compile::Prep],
+        body: impl FnOnce(bool) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if preps.is_empty() {
+            return body(false);
+        }
+        self.conn
+            .execute_batch("SAVEPOINT jazz_scratch")
+            .map_err(storage)?;
+        let result = (|| {
+            let mut ties = false;
+            for prep in preps {
+                ties |= crate::large::answer(&self.conn, &self.chunks, prep)?;
+            }
+            body(ties)
+        })();
+        let mut clear = self
+            .conn
+            .prepare_cached("DELETE FROM _jazz_lv_scratch WHERE slot = ?1")
+            .map_err(storage)?;
+        for prep in preps {
+            clear.execute([prep.slot()]).map_err(storage)?;
+        }
+        self.conn
+            .execute_batch("RELEASE jazz_scratch")
+            .map_err(storage)?;
+        result
+    }
+
+    fn execute_sql(
+        &self,
+        sql: &str,
+        compiled: &Compiled,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         let names: Arc<str> = Arc::from(table);
         let mut rows = statement
             .query(params_from_iter(compiled.params.iter()))
@@ -1500,6 +1547,7 @@ impl Inner {
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding);
         let condition = policy(&mut ctx)?;
+        let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
@@ -1509,10 +1557,11 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        let value: i64 = self
-            .conn
-            .query_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-            .map_err(storage)?;
+        let value: i64 = self.with_preps(&preps, |_| {
+            self.conn
+                .query_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .map_err(storage)
+        })?;
         Ok(value != 0)
     }
 
@@ -1535,10 +1584,21 @@ impl Inner {
             }
             None => "1".to_owned(),
         };
+        let preps = std::mem::take(&mut ctx.preps);
         let base = ctx.params;
+        self.with_preps(&preps, |_| self.versions_in(table, &condition, &base, ids))
+    }
+
+    fn versions_in(
+        &self,
+        table: &Table,
+        condition: &str,
+        base: &[Sql],
+        ids: &[[u8; 16]],
+    ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
         let mut out = Vec::new();
         for chunk in ids.chunks(500) {
-            let mut params = base.clone();
+            let mut params = base.to_vec();
             let first = params.len() + 1;
             params.extend(chunk.iter().map(|id| Sql::Blob(id.to_vec())));
             let marks: Vec<String> = (first..first + chunk.len())
@@ -1730,7 +1790,11 @@ impl Inner {
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
         crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
-        Ok(Sql::Text(crate::large::chunked_cell(&prepared.value_ref)?))
+        let prefix = crate::large::sort_prefix(crate::large::kind(column), logical);
+        Ok(Sql::Text(crate::large::chunked_cell(
+            &prepared.value_ref,
+            &prefix,
+        )?))
     }
 
     /// A chunked value written by reference: an edit's consolidated tree
@@ -1767,7 +1831,26 @@ impl Inner {
             }
             crate::large::admit(&self.conn, &self.chunks, large)?;
         }
-        Ok(Sql::Text(crate::large::chunked_cell(large)?))
+        self.large_cell(large)
+    }
+
+    /// The cell of a chunked value this store holds the chunks for. A value
+    /// an edit shrank to the inline threshold is stored inline, so each
+    /// logical value has exactly one cell and equality compares cells.
+    pub(crate) fn large_cell(
+        &self,
+        large: &jazz_types::large_values::LargeValueRef,
+    ) -> Result<Sql, Error> {
+        use jazz_types::large_values::LargeValueKind;
+        if large.byte_length <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES as u64 {
+            let bytes = self.chunks.value_bytes(large)?;
+            return Ok(Sql::Text(match large.kind {
+                LargeValueKind::Bytes => crate::large::inline_bytes(&bytes),
+                LargeValueKind::String | LargeValueKind::Json => bytes,
+            }));
+        }
+        let prefix = self.chunks.prefix(large)?;
+        Ok(Sql::Text(crate::large::chunked_cell(large, &prefix)?))
     }
 
     /// Every stored column of `table`, including ones only other schema
