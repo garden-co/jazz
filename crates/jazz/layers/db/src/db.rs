@@ -172,6 +172,8 @@ impl std::ops::Deref for SubscriptionOutputRow {
 pub struct RemovedRow {
     pub table: String,
     pub row_uuid: RowUuid,
+    /// A flat join's joined source rows ([`CurrentRow::joined_rows`]).
+    pub joined: Vec<RowUuid>,
     pub index: usize,
 }
 
@@ -1675,12 +1677,21 @@ impl Inner {
             };
             let seq: i64 = row.get(1).map_err(storage)?;
             let deleted: i64 = row.get(2).map_err(storage)?;
+            let joined = (0..compiled.joined)
+                .map(|i| {
+                    let id: Vec<u8> = row.get(3 + i).map_err(storage)?;
+                    uuid::Uuid::from_slice(&id)
+                        .map(RowUuid)
+                        .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+                })
+                .collect::<Result<Arc<[RowUuid]>, Error>>()?;
+            let first = 3 + compiled.joined;
             let cells = compiled
                 .projection
                 .iter()
                 .enumerate()
                 .map(|(i, (name, ty))| {
-                    let cell = row.get_ref(3 + i).map_err(storage)?;
+                    let cell = row.get_ref(first + i).map_err(storage)?;
                     match from_sql(ty, cell, &self.chunks) {
                         Err(error) if crate::large::is_missing(&error) => {
                             blocked = true;
@@ -1700,6 +1711,7 @@ impl Inner {
                 deleted: deleted != 0,
                 cells: Arc::new(cells),
                 types: types.clone(),
+                joined,
             });
         }
         if blocked {
@@ -3753,6 +3765,23 @@ impl TxRef<'_> {
             }) => Some((*snapshot, *pinned)),
             _ => None,
         };
+        if let (Some(_), Some(flat_join)) = (snapshot, &prepared.query.flat_join) {
+            // Its read set would need each occurrence's joined rows.
+            let joined = flat_join
+                .sources
+                .iter()
+                .map(|source| format!("`{}`", source.table))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::new(
+                ErrorCode::Query,
+                format!(
+                    "Reading a flat join of `{}` with {joined} is not supported in exclusive \
+                     transactions yet",
+                    prepared.query.table
+                ),
+            ));
+        }
         if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
         {

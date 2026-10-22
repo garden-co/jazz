@@ -272,15 +272,14 @@ impl Forwarder {
             }
         }
         for row in &removed_rows {
-            let held = self
-                .rows
-                .iter()
-                .position(|held| held.row_uuid() == row.row_uuid && held.table() == row.table);
+            let held = self.rows.iter().position(|held| {
+                held.row_uuid() == row.row_uuid
+                    && held.table() == row.table
+                    && held.joined_rows() == row.joined.as_slice()
+            });
             let id = match held {
                 Some(at) => decoder.key(&self.rows.remove(at))?,
-                None => ResultKey::from_occurrence(OutputOccurrenceId::single_source(
-                    ObjectId::from_uuid(row.row_uuid.0),
-                )),
+                None => occurrence_key(row.row_uuid, &row.joined),
             };
             delta.removed.push(OrderedRemoved {
                 id,
@@ -288,10 +287,11 @@ impl Forwarder {
             });
         }
         for row in &updated_rows {
-            let held = self
-                .rows
-                .iter()
-                .position(|held| held.row_uuid() == row.row_uuid() && held.table() == row.table());
+            let held = self.rows.iter().position(|held| {
+                held.row_uuid() == row.row_uuid()
+                    && held.table() == row.table()
+                    && held.joined_rows() == row.joined_rows()
+            });
             let changed = held.is_none_or(|at| self.rows[at].row != row.row);
             if let Some(at) = held {
                 self.rows.remove(at);
@@ -1821,9 +1821,7 @@ impl Decoder<'_> {
                 NodeUuid(*node),
             )));
         }
-        Ok(ResultKey::from_occurrence(
-            OutputOccurrenceId::single_source(id),
-        ))
+        Ok(occurrence_key(row.row_uuid(), row.joined_rows()))
     }
 
     fn values(&self, row: &CurrentRow) -> Result<Vec<QueryResultField>> {
@@ -1886,6 +1884,17 @@ fn projected(query: &Query, table: &TableSchema) -> Vec<String> {
         );
     }
     columns
+}
+
+/// A row's occurrence: the row itself, or a flat join's root followed by
+/// its joined source rows.
+fn occurrence_key(root: RowUuid, joined: &[RowUuid]) -> ResultKey {
+    let id = |row: &RowUuid| ObjectId::from_uuid(row.0);
+    ResultKey::from_occurrence(if joined.is_empty() {
+        OutputOccurrenceId::single_source(id(&root))
+    } else {
+        OutputOccurrenceId::new(id(&root), joined.iter().map(id))
+    })
 }
 
 /// A projected cell by name; an unwritten cell reads as null.

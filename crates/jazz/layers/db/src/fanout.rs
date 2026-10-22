@@ -83,6 +83,11 @@ pub(super) struct Group {
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    /// The query this group answers.
+    pub(super) fn query(&self) -> &Query {
+        &self.prepared.query
+    }
+
     fn live(&self) -> bool {
         self.members.iter().any(|m| m.queue.strong_count() > 0)
     }
@@ -430,6 +435,9 @@ impl Inner {
             Ok(())
         }
         arrays(&mut structural, &query.array_subqueries, &stored)?;
+        for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
+            structural.insert(stored(&source.table)?);
+        }
         for include in &query.includes {
             let column = include.path.split('.').next().unwrap_or_default();
             if let Some(target) = root.references.get(column) {
@@ -854,6 +862,7 @@ impl Inner {
             .map(|(id, (index, row, _))| RemovedRow {
                 table: row.table.to_string(),
                 row_uuid: *id,
+                joined: Vec::new(),
                 index: *index,
             })
             .collect();
@@ -868,6 +877,7 @@ impl Inner {
                 (!before.contains_key(&row.id)).then(|| RemovedRow {
                     table: row.table.to_string(),
                     row_uuid: row.id,
+                    joined: Vec::new(),
                     index,
                 })
             }));
@@ -1042,6 +1052,7 @@ impl Inner {
                         .map(|(index, row)| RemovedRow {
                             table: row.table.to_string(),
                             row_uuid: row.id,
+                            joined: row.joined.to_vec(),
                             index,
                         })
                         .collect();
@@ -1238,8 +1249,9 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 }
 
 /// What identifies a result row across runs: its id, plus its seq for a
-/// history read, whose versions share their row's id.
-type RowKey = (RowUuid, u64);
+/// history read, whose versions share their row's id, and a flat join's
+/// joined rows (the occurrence).
+type RowKey = (RowUuid, u64, Arc<[RowUuid]>);
 
 fn row_key(row: &CurrentRow) -> RowKey {
     let version = if is_history_table(&row.table) {
@@ -1247,7 +1259,7 @@ fn row_key(row: &CurrentRow) -> RowKey {
     } else {
         0
     };
-    (row.id, version)
+    (row.id, version, row.joined.clone())
 }
 
 /// The keyed diff of two results, or `None` when nothing changed.
@@ -1289,6 +1301,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
         .map(|(index, row)| RemovedRow {
             table: row.table.to_string(),
             row_uuid: row.id,
+            joined: row.joined.to_vec(),
             index,
         })
         .collect();
@@ -1338,7 +1351,7 @@ fn moved_rows(
     kept.iter()
         .zip(in_order)
         .filter(|(_, in_order)| !in_order)
-        .map(|((id, _), _)| *id)
+        .map(|((id, _), _)| id.clone())
         .collect()
 }
 

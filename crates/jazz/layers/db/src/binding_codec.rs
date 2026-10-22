@@ -192,12 +192,16 @@ pub fn encode_relation_snapshot(snapshot: &RelationSnapshot) -> Result<Vec<u8>, 
     })
 }
 
-/// A plain-table row's occurrence: the row itself. SQLite results have no
-/// join occurrences; relations arrive as nested rows, not joined outputs.
-fn occurrence(row: RowUuid) -> ResultKey {
-    ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
-        row.0,
-    )))
+/// A row's occurrence: the row itself, or a flat join's root followed by
+/// its joined source rows. Relations arrive as nested rows, not joined
+/// outputs.
+fn occurrence(row: RowUuid, joined: &[RowUuid]) -> ResultKey {
+    let id = |row: &RowUuid| ObjectId::from_uuid(row.0);
+    ResultKey::from_occurrence(if joined.is_empty() {
+        OutputOccurrenceId::single_source(id(&row))
+    } else {
+        OutputOccurrenceId::new(id(&row), joined.iter().map(id))
+    })
 }
 
 /// Encode an incremental subscription delta with aligned occurrence sidecars.
@@ -221,12 +225,18 @@ pub fn encode_subscription_delta(
                 row_id: row.row_uuid,
             })
             .collect(),
-        added_occurrence_keys: added.iter().map(|row| occurrence(row.row_uuid())).collect(),
+        added_occurrence_keys: added
+            .iter()
+            .map(|row| occurrence(row.row_uuid(), row.joined_rows()))
+            .collect(),
         updated_occurrence_keys: updated
             .iter()
-            .map(|row| occurrence(row.row_uuid()))
+            .map(|row| occurrence(row.row_uuid(), row.joined_rows()))
             .collect(),
-        removed_occurrence_keys: removed.iter().map(|row| occurrence(row.row_uuid)).collect(),
+        removed_occurrence_keys: removed
+            .iter()
+            .map(|row| occurrence(row.row_uuid, &row.joined))
+            .collect(),
         added_indices: added.iter().map(|row| row.index as u64).collect(),
         updated_previous_indices: updated
             .iter()
@@ -485,6 +495,7 @@ mod tests {
                 ("done".to_owned(), done.map(Value::Bool)),
             ]),
             types: Arc::from([ValueType::String, ValueType::Bool]),
+            joined: Arc::from([]),
         }
     }
 
@@ -564,6 +575,7 @@ mod tests {
             &[RemovedRow {
                 table: "todos".to_owned(),
                 row_uuid: RowUuid::from_bytes([8; 16]),
+                joined: Vec::new(),
                 index: 1,
             }],
         )

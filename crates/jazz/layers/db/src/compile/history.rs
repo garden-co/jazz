@@ -196,6 +196,7 @@ impl Ctx<'_> {
             projection,
             tables: self.tables,
             aggregate: false,
+            joined: 0,
             preps: self.preps,
         })
     }
