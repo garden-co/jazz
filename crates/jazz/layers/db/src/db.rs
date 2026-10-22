@@ -363,6 +363,27 @@ pub struct FileOptions {
     pub synchronous_full: bool,
     /// Page cache bound per connection, in KiB.
     pub cache_kib: u64,
+    /// SQLite VFS the file lives on (`None`: the platform default). Browser
+    /// builds register theirs (IndexedDB, OPFS) before opening.
+    pub vfs: Option<&'static str>,
+    pub journal: Journal,
+}
+
+/// How the file journals its commits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Journal {
+    /// Write-ahead log: readers never block the writer.
+    #[default]
+    Wal,
+    /// Rollback journal, for VFSes without shared memory (OPFS). The page
+    /// cache never spills mid-transaction, so the large-value reader
+    /// connection sees only committed pages even when the VFS's locks are
+    /// no-ops.
+    Rollback,
+    /// Journal kept in memory and no syncs, for VFSes that persist whole
+    /// commits themselves (IndexedDB). A crash can lose the newest commits,
+    /// never tear one.
+    Memory,
 }
 
 impl Default for FileOptions {
@@ -370,6 +391,8 @@ impl Default for FileOptions {
         Self {
             synchronous_full: false,
             cache_kib: 8 * 1024,
+            vfs: None,
+            journal: Journal::Wal,
         }
     }
 }
@@ -474,32 +497,60 @@ impl Db {
         Self::open_on(config, conn, None)
     }
 
-    /// A durable store in one SQLite file (WAL). Reopening restores rows,
-    /// history, the commit seq and, for a replica, its pending uploads and
-    /// shadow; they are resent on the next connection.
+    /// A durable store in one SQLite file (WAL unless `options.journal`
+    /// says otherwise). Reopening restores rows, history, the commit seq
+    /// and, for a replica, its pending uploads and shadow; they are resent
+    /// on the next connection.
     pub async fn open_at(
         config: DbConfig,
         path: &std::path::Path,
         options: FileOptions,
     ) -> Result<Self, Error> {
-        let conn = Connection::open(path).map_err(storage)?;
+        let flags = rusqlite::OpenFlags::default();
+        let conn = match options.vfs {
+            None => Connection::open_with_flags(path, flags),
+            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+        }
+        .map_err(storage)?;
+        let synchronous = match (options.journal, options.synchronous_full) {
+            (Journal::Memory, _) => "OFF",
+            (_, true) => "FULL",
+            (_, false) => "NORMAL",
+        };
+        let journal = match options.journal {
+            Journal::Wal => "WAL",
+            Journal::Rollback => "TRUNCATE",
+            Journal::Memory => "MEMORY",
+        };
+        let cache_spill = if options.journal == Journal::Wal {
+            ""
+        } else {
+            " PRAGMA cache_spill = OFF;"
+        };
+        // `journal_mode` answers with a row, so it is queried, not batched.
+        let mode: String = conn
+            .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
+                r.get(0)
+            })
+            .map_err(storage)?;
+        if !mode.eq_ignore_ascii_case(journal) {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                format!("journal_mode {journal} is not supported on this VFS yet (got {mode})"),
+            ));
+        }
         conn.execute_batch(&format!(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = {}; PRAGMA cache_size = -{};",
-            if options.synchronous_full {
-                "FULL"
-            } else {
-                "NORMAL"
-            },
+            "PRAGMA synchronous = {synchronous}; PRAGMA cache_size = -{};{cache_spill}",
             options.cache_kib
         ))
         .map_err(storage)?;
-        Self::open_on(config, conn, Some(path))
+        Self::open_on(config, conn, Some((path, options.vfs)))
     }
 
     fn open_on(
         config: DbConfig,
         conn: Connection,
-        path: Option<&std::path::Path>,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         let schema = Schema::new(&config.schema);
         let chunks = crate::large::Chunks::install(path)?;
@@ -807,7 +858,7 @@ impl Db {
                         if *timeout_ms > 0 && sync::may_wait(hint.get()) =>
                     {
                         Some(Some(
-                            std::time::Instant::now()
+                            web_time::Instant::now()
                                 + std::time::Duration::from_millis(*timeout_ms),
                         ))
                     }
@@ -2900,8 +2951,8 @@ impl Inner {
         let at = if seq == last_seq {
             last_at
         } else {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as i64);
             now.max(last_at + 1)
         };

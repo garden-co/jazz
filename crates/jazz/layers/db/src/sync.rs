@@ -35,7 +35,7 @@ use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::rc::Rc;
 use std::task::Poll;
-use std::time::Instant;
+use web_time::Instant;
 
 use jazz_types::large_values::chunks::ChunkRequest;
 use serde::{Deserialize, Serialize};
@@ -46,8 +46,8 @@ pub use crate::wire::TransportError;
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
 }
 
