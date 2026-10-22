@@ -3254,7 +3254,7 @@ impl TickEvaluator<'_> {
         if self.context.eval_mode == EvalMode::Hydrate {
             let mut groups = BTreeMap::<Vec<u8>, Vec<(Bytes, i64)>>::new();
             for delta in &input.deltas {
-                let group_key = encoded_record_key_part(
+                let group_key = encoded_arrangement_key_part(
                     input_desc,
                     delta.raw(),
                     &aggregate.group_field_indices,
@@ -3279,8 +3279,13 @@ impl TickEvaluator<'_> {
         }
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &canonical.deltas {
-            let group_key =
-                encoded_record_key_part(input_desc, delta.raw(), &aggregate.group_field_indices)?;
+            // These keys probe the input arrangement. Runtime window keys use
+            // different nullable framing and cannot find nullable groups here.
+            let group_key = encoded_arrangement_key_part(
+                input_desc,
+                delta.raw(),
+                &aggregate.group_field_indices,
+            )?;
             touched_groups
                 .entry(group_key)
                 .or_default()
