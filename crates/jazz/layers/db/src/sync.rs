@@ -340,11 +340,16 @@ pub enum SyncMessage {
         at: Option<u64>,
         include_deleted: bool,
     },
+    /// `author`: the provenance the writes carry when it is not the
+    /// sender's own (a trusted session or an attribution), as a canonical
+    /// author subject. Only a trusted link may set one that differs from
+    /// its own identity.
     Commit {
         node: [u8; 16],
         tx: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
+        author: Option<String>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -682,6 +687,45 @@ pub(crate) enum Support {
         outer: String,
         nested: Vec<Support>,
     },
+    /// The edges of a gather from the row's `frontier` value: edge rows
+    /// whose `member` holds it, then transitively from each edge's
+    /// `parent`. The depth bound is the client's to apply.
+    Reach {
+        frontier: String,
+        edges: String,
+        member: String,
+        parent: String,
+    },
+}
+
+/// Whether a reachability traversal is a gather the replica can evaluate
+/// from the result and its edges ([`Support::Reach`]): seeded by rows of
+/// the root table that are themselves in the result (no filter after the
+/// gather), reaching root rows by id.
+fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
+    via.seed.as_ref().is_some_and(|seed| {
+        seed.table == query.table && seed.user_column.is_none() && seed.team_column == "id"
+    }) && via.access_table == query.table
+        && via.access_row_column == "id"
+        && via.access_team_column == "id"
+        && via.access_filters.is_empty()
+        && query.filters.is_empty()
+}
+
+/// Whether a junction traversal's witnesses can ship as [`Support::Array`]
+/// children of the row it starts from: it correlates with a column of that
+/// row (not a referenced row's), at every level.
+fn join_followable(join: &crate::query::JoinVia) -> bool {
+    join.target != crate::query::JoinTarget::Uncorrelated
+        && join.source_lookup.is_none()
+        && join.nested_joins.iter().all(join_followable)
+}
+
+/// The edge table of a [`Support::Reach`], by stored names.
+struct Reach<'a> {
+    edges: &'a str,
+    member: &'a str,
+    parent: &'a str,
 }
 
 /// A watch as a 64-bit hash: per-session checks stay a few integer probes
@@ -925,6 +969,16 @@ impl Inner {
             });
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
+        support.extend(self.join_support(table, &query.joins)?);
+        for via in &query.reachable {
+            let edges = self.schema.table(&via.edge_table)?;
+            support.push(Support::Reach {
+                frontier: table.stored_name(&via.access_team_column).to_owned(),
+                edges: edges.stored.clone(),
+                member: edges.stored_name(&via.edge_member_column).to_owned(),
+                parent: edges.stored_name(&via.edge_parent_column).to_owned(),
+            });
+        }
         Ok(support)
     }
 
@@ -943,6 +997,29 @@ impl Inner {
                 inner: child.stored_name(&array.inner_column).to_owned(),
                 outer: parent.stored_name(&array.outer_column).to_owned(),
                 nested: self.array_support(child, &array.nested_arrays)?,
+            });
+        }
+        Ok(support)
+    }
+
+    /// The support of junction traversals from rows of `parent`: every
+    /// readable row of the joined table correlated with the parent row
+    /// (the client applies the join's filters), and its nested joins'.
+    fn join_support(
+        &self,
+        parent: &crate::values::Table,
+        joins: &[crate::query::JoinVia],
+    ) -> Result<Vec<Support>, Error> {
+        let mut support = Vec::with_capacity(joins.len());
+        for join in joins {
+            let target = self.schema.table(&join.table)?;
+            support.push(Support::Array {
+                table: target.stored.clone(),
+                inner: target.stored_name(&join.on_column).to_owned(),
+                outer: parent
+                    .stored_name(join.source_column.as_deref().unwrap_or("id"))
+                    .to_owned(),
+                nested: self.join_support(target, &join.nested_joins)?,
             });
         }
         Ok(support)
@@ -1052,6 +1129,22 @@ impl Inner {
     ) -> Result<(), Error> {
         for item in support {
             let (table, column, value, nested) = match item {
+                Support::Reach {
+                    frontier,
+                    edges,
+                    member,
+                    parent,
+                } => {
+                    if let Some(value) = image_cell(image, frontier) {
+                        let reach = Reach {
+                            edges,
+                            member,
+                            parent,
+                        };
+                        self.follow_edges(&reach, value, identity, out, watch, held)?;
+                    }
+                    continue;
+                }
                 Support::Include { column, target } => match image_cell(image, column) {
                     Some(value @ Sql::Blob(_)) => (target, "id", value, &[][..]),
                     _ => continue,
@@ -1107,6 +1200,63 @@ impl Inner {
                     out.push(found.clone());
                 }
                 self.follow_support(nested, &found, identity, out, watch, held)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Ship the readable edges of a gather from `value` and, transitively,
+    /// from their parents, watching each frontier value so later edges
+    /// reach the replica. A watched value was followed already: cycles end.
+    fn follow_edges(
+        &self,
+        reach: &Reach<'_>,
+        value: Sql,
+        identity: Option<AuthorSubject>,
+        out: &mut Vec<Image>,
+        watch: &mut HashSet<u64>,
+        held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
+    ) -> Result<(), Error> {
+        let mut frontier = vec![value];
+        while let Some(value) = frontier.pop() {
+            if matches!(value, Sql::Null) {
+                continue;
+            }
+            let key = (
+                reach.edges.to_owned(),
+                reach.member.to_owned(),
+                watch_key(&value),
+            );
+            if !watch.insert(wk(key)) {
+                continue;
+            }
+            let filter = if reach.member == "id" {
+                "id = ?1".to_owned()
+            } else {
+                format!("{} = ?1", quote(reach.member))
+            };
+            for found in self.images_where(reach.edges, false, &filter, &[&value])? {
+                let row = RowUuid::from_bytes(found.id);
+                let can = readable(self, reach.edges, row, &found.key, identity)?;
+                if identity.is_some() {
+                    held.entry(reach.edges.to_owned())
+                        .or_default()
+                        .insert((row, found.key.clone()), can);
+                }
+                if !can {
+                    continue;
+                }
+                if let Some(parent) = image_cell(&found, reach.parent) {
+                    frontier.push(parent);
+                }
+                let unwatched = watch.insert(wk((
+                    reach.edges.to_owned(),
+                    "id".to_owned(),
+                    watch_key(&Sql::Blob(found.id.to_vec())),
+                )));
+                if unwatched {
+                    out.push(found);
+                }
             }
         }
         Ok(())
@@ -1835,14 +1985,18 @@ impl Inner {
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
             let rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-            let SyncMessage::Commit { ops, .. } = &commit else {
+            let SyncMessage::Commit { ops, author, .. } = &commit else {
                 continue;
             };
-            let ops = ops
+            let mut ops = ops
                 .iter()
                 .cloned()
                 .map(from_wire)
                 .collect::<Result<Vec<_>, _>>()?;
+            if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
+                let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+                ops.iter_mut().for_each(|op| op.attribute(author));
+            }
             client.pending.push(Pending {
                 tx,
                 ops,
@@ -2080,6 +2234,12 @@ impl Db {
         if ops.is_empty() || seq != inner.seq {
             return;
         }
+        // The writer the authority stamps: an explicit identity, or the
+        // system at this node (the authority stamps its own writes as its
+        // node, so a trusted link names its own).
+        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
+            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+        });
         let rows = inner.written_rows(&ops, seq).unwrap_or_default();
         let mut shadows = Vec::new();
         for (table, row, key) in &rows {
@@ -2116,6 +2276,7 @@ impl Db {
                     tx: seq,
                     kind,
                     ops: wire,
+                    author: author.map(|author| author.canonical().to_owned()),
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
@@ -2152,13 +2313,14 @@ impl Db {
     }
 
     /// Remote reads ship the query's rows plus its supporting rows (single
-    /// hop includes, one level of array subqueries); the client evaluates
-    /// locally. Other shapes that read further tables (joins, relation
-    /// filters, multi-hop includes, nested arrays, aggregates) would see a
-    /// partial replica, so they are refused explicitly.
+    /// hop includes, array subqueries, junction traversals, gathers); the
+    /// client evaluates locally. Other shapes that read further tables
+    /// (uncorrelated traversals or ones through a referenced row, gathers
+    /// filtered after the gather, multi-hop includes, aggregates) would see
+    /// a partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
-        let other_tables = !query.joins.is_empty()
-            || !query.reachable.is_empty()
+        let other_tables = !query.joins.iter().all(join_followable)
+            || !query.reachable.iter().all(|via| gather_shaped(query, via))
             || !query.inherits.is_empty()
             || query
                 .includes
@@ -3539,12 +3701,16 @@ impl Db {
                 tx,
                 kind,
                 ops,
+                author,
             } => {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
-                    None => match db.authorize_commit(policy, kind, ops, (node, tx)) {
+                    None => match commit_who(policy, author.as_deref())
+                        .map_err(|error| (error, Vec::new()))
+                        .and_then(|who| db.authorize_commit(who, policy, kind, ops, (node, tx)))
+                    {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
                         Err((error, rows)) => {
@@ -3641,6 +3807,7 @@ impl Db {
     #[allow(clippy::type_complexity)]
     fn authorize_commit(
         &self,
+        who: Who,
         identity: Option<AuthorSubject>,
         kind: WireKind,
         ops: Vec<WireOp>,
@@ -3734,10 +3901,6 @@ impl Db {
                 }
             }
         }
-        let who = match identity {
-            Some(author) => Who::Session(author),
-            None => Who::Local,
-        };
         let seq = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
@@ -3778,6 +3941,28 @@ impl Db {
     pub(crate) fn sync_tick(&self) -> Result<(), Error> {
         self.server_tick()?;
         self.client_tick()
+    }
+}
+
+/// Who an uploaded commit is applied as. A session link writes under its
+/// own identity and may not name another author; a trusted link (no policy
+/// identity) writes unchecked, attributed to the author it names.
+fn commit_who(policy: Option<AuthorSubject>, author: Option<&str>) -> Result<Who, Error> {
+    let author = author
+        .map(AuthorSubject::from_canonical)
+        .transpose()
+        .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;
+    match (policy, author) {
+        // A node's own writes (it names itself as the system at that node)
+        // over a session link are that session's: the link decides.
+        (Some(session), Some(AuthorSubject::SystemAt(_))) => Ok(Who::Session(session)),
+        (Some(session), Some(author)) if author != session => Err(Error::new(
+            ErrorCode::WriteRejected,
+            "attribution requires a trusted serving node",
+        )),
+        (Some(session), _) => Ok(Who::Session(session)),
+        (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
+        (None, _) => Ok(Who::Local),
     }
 }
 

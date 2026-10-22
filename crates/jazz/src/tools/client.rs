@@ -102,6 +102,9 @@ struct Shared {
     upstream_paused: watch::Sender<bool>,
     /// No server is configured, so nothing can confirm a write past Local.
     serverless: bool,
+    /// The upstream link is a trusted backend or admin link, which may
+    /// attribute writes to other authors.
+    trusted: bool,
     state: RefCell<State>,
 }
 
@@ -495,6 +498,7 @@ impl JazzClient {
             progress,
             upstream_paused: watch::channel(false).0,
             serverless: connector.is_none(),
+            trusted: context.backend_secret.is_some() || context.admin_secret.is_some(),
             state: RefCell::new(State::default()),
         });
 
@@ -596,6 +600,11 @@ impl JazzClient {
             if author.account_id().is_none() {
                 return Err(JazzError::Write(
                     "attribution requires an admitted account identity".into(),
+                ));
+            }
+            if !self.shared.trusted && !self.shared.serverless {
+                return Err(JazzError::Write(
+                    "attribution requires a trusted serving node".into(),
                 ));
             }
             return Ok(WriteIdentity::Attribution(author));
@@ -981,6 +990,7 @@ impl JazzClient {
                 cells,
                 InsertOptions {
                     row_id,
+                    identity: self.write_identity()?,
                     ..Default::default()
                 },
             ))
@@ -1021,7 +1031,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                UpsertOptions::default(),
+                UpsertOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1060,7 +1074,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                UpdateOptions::default(),
+                UpdateOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1092,7 +1110,10 @@ impl JazzClient {
             crate::db::block_on(db.serializable_tx_ref(transaction_id).delete(
                 table,
                 row,
-                DeleteOptions::default(),
+                DeleteOptions {
+                    identity: self.write_identity()?,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1131,7 +1152,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                RestoreOptions::default(),
+                RestoreOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1158,12 +1183,9 @@ impl JazzClient {
     /// if every read and written row is unchanged since then. Staged writes
     /// are not visible to ordinary reads until the transaction commits.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        if !matches!(self.write_identity()?, WriteIdentity::Database) {
-            return Err(JazzError::Write(
-                "transactions with an explicit session or attribution are not supported yet"
-                    .to_owned(),
-            ));
-        }
+        // Each staged write carries this handle's identity (checked when
+        // staged, and named on the commit for the authority).
+        self.write_identity()?;
         let db = self.db()?;
         let mut transaction_id = OpenTransactionId::new();
         {

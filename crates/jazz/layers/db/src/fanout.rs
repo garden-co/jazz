@@ -420,9 +420,21 @@ impl Inner {
         // Tables the query itself reaches (joins, arrays, includes,
         // reachability): these always watch the whole table.
         let mut structural = BTreeSet::new();
-        for join in &query.joins {
-            structural.insert(stored(&join.table)?);
+        fn joins(
+            out: &mut BTreeSet<String>,
+            list: &[crate::query::JoinVia],
+            stored: &dyn Fn(&str) -> Result<String, Error>,
+        ) -> Result<(), Error> {
+            for join in list {
+                out.insert(stored(&join.table)?);
+                if let Some(lookup) = &join.source_lookup {
+                    out.insert(stored(&lookup.table)?);
+                }
+                joins(out, &join.nested_joins, stored)?;
+            }
+            Ok(())
         }
+        joins(&mut structural, &query.joins, &stored)?;
         fn arrays(
             out: &mut BTreeSet<String>,
             list: &[crate::query::ArraySubquery],
@@ -448,6 +460,9 @@ impl Inner {
         for reach in &query.reachable {
             structural.insert(stored(&reach.access_table)?);
             structural.insert(stored(&reach.edge_table)?);
+            if let Some(seed) = &reach.seed {
+                structural.insert(stored(&seed.table)?);
+            }
         }
         // Policy evidence pinned by a session equality.
         let mut pinned: HashMap<String, Option<(String, String)>> = HashMap::new();

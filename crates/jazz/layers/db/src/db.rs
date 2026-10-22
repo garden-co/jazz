@@ -17,7 +17,7 @@ use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -433,11 +433,17 @@ pub(crate) enum Who {
     Local,
     /// A trusted session identity: policies apply now.
     Session(AuthorSubject),
+    /// Unchecked like `Local` (the database identity stays the policy
+    /// subject), with this author as the write's provenance.
+    Attributed(AuthorSubject),
 }
 
 fn who(identity: WriteIdentity) -> Who {
     match identity {
         WriteIdentity::Session(author) if author != AuthorSubject::SYSTEM => Who::Session(author),
+        WriteIdentity::Attribution(author) if author != AuthorSubject::SYSTEM => {
+            Who::Attributed(author)
+        }
         _ => Who::Local,
     }
 }
@@ -1117,12 +1123,9 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
-        let local = matches!(who, Who::Local);
         self.with_upload(|| {
             let handle = self.write(op.table(), |inner, seq| inner.apply_as(&op, who, seq))?;
-            if local {
-                self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
-            }
+            self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
             Ok(handle)
         })
     }
@@ -2126,8 +2129,18 @@ impl Inner {
             Some(stamp) => Ok(stamp.clone()),
             None => Ok(Stamp {
                 at: 0,
-                author: self.author_code(&author_key(&self.identity.author))?,
+                author: self.author_code(&author_key(&self.stamp_author()))?,
             }),
+        }
+    }
+
+    /// Who this database's own writes are attributed to: its author, or for
+    /// the internal authority, the system at this node (as Jazz attributes
+    /// system writes to the node that made them).
+    pub(crate) fn stamp_author(&self) -> AuthorSubject {
+        match self.identity.author {
+            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.identity.node),
+            author => author,
         }
     }
 
@@ -2140,23 +2153,39 @@ impl Inner {
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
-        self.exec(
-            "INSERT OR IGNORE INTO _jazz_authors (account, issuer, subject) VALUES (?1, ?2, ?3)",
-            rusqlite::params![account, issuer, subject],
-        )
-        .map_err(storage)?;
-        let code: i64 = self
-            .conn
-            .query_row(
+        let find = |conn: &rusqlite::Connection| {
+            conn.query_row(
                 "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
                 rusqlite::params![account, issuer, subject],
-                |row| row.get(0),
+                |row| row.get::<_, i64>(0),
             )
-            .map_err(storage)?;
-        let mut authors = self.authors.borrow_mut();
-        authors.codes.insert(key.clone(), code);
-        authors.parts.insert(code, key.clone());
+            .optional()
+            .map_err(storage)
+        };
+        let code = match find(&self.conn)? {
+            Some(code) => code,
+            None => {
+                self.exec(
+                    "INSERT INTO _jazz_authors (account, issuer, subject) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![account, issuer, subject],
+                )
+                .map_err(storage)?;
+                self.conn.last_insert_rowid()
+            }
+        };
+        self.remember_author(key, code);
         Ok(code)
+    }
+
+    /// Cache an author's code, but only once it is committed: one interned
+    /// inside a savepoint (a transaction overlay, a batch that may fail) is
+    /// undone by its rollback, and its code may then go to another author.
+    fn remember_author(&self, key: &AuthorKey, code: i64) {
+        if self.conn.is_autocommit() {
+            let mut authors = self.authors.borrow_mut();
+            authors.codes.insert(key.clone(), code);
+            authors.parts.insert(code, key.clone());
+        }
     }
 
     /// The account and principal an author code stands for.
@@ -2175,9 +2204,7 @@ impl Inner {
         let account = uuid::Uuid::from_slice(&account)
             .map_err(|e| Error::new(ErrorCode::Storage, format!("author account: {e}")))?;
         let parts = (account, issuer, subject);
-        let mut authors = self.authors.borrow_mut();
-        authors.codes.insert(parts.clone(), code);
-        authors.parts.insert(code, parts.clone());
+        self.remember_author(&parts, code);
         Ok(parts)
     }
 
@@ -3293,6 +3320,44 @@ fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, u64)> {
 }
 
 impl StagedOp {
+    fn identity(&self) -> Option<WriteIdentity> {
+        match self {
+            StagedOp::Insert(.., o) => Some(o.identity),
+            StagedOp::Update(.., o) => Some(o.identity),
+            StagedOp::Upsert(.., o) => Some(o.identity),
+            StagedOp::Delete(.., o) => Some(o.identity),
+            StagedOp::Restore(.., o) => Some(o.identity),
+            StagedOp::Move(..) => None,
+        }
+    }
+
+    /// The write's provenance author when it is not the database's own: a
+    /// trusted session's, or an attribution.
+    pub(crate) fn author(&self) -> Option<AuthorSubject> {
+        match self.identity()? {
+            WriteIdentity::Session(author) | WriteIdentity::Attribution(author)
+                if author != AuthorSubject::SYSTEM =>
+            {
+                Some(author)
+            }
+            _ => None,
+        }
+    }
+
+    /// Attribute the write to `author` (unchecked, as an uploaded write is
+    /// re-applied locally).
+    pub(crate) fn attribute(&mut self, author: AuthorSubject) {
+        let identity = WriteIdentity::Attribution(author);
+        match self {
+            StagedOp::Insert(.., o) => o.identity = identity,
+            StagedOp::Update(.., o) => o.identity = identity,
+            StagedOp::Upsert(.., o) => o.identity = identity,
+            StagedOp::Delete(.., o) => o.identity = identity,
+            StagedOp::Restore(.., o) => o.identity = identity,
+            StagedOp::Move(..) => {}
+        }
+    }
+
     fn table(&self) -> &str {
         match self {
             StagedOp::Insert(t, ..)
@@ -3319,15 +3384,17 @@ impl StagedOp {
 impl Inner {
     /// Apply one staged write as client-local staging (the authority checks
     /// policies on upload, as for Jazz's mergeable batches).
+    /// Re-apply a staged write unchecked, keeping its provenance.
     fn apply(&mut self, op: &StagedOp, seq: u64) -> Result<WriteHandle, Error> {
-        self.apply_as(op, Who::Local, seq)
+        let who = op.author().map_or(Who::Local, Who::Attributed);
+        self.apply_as(op, who, seq)
     }
 
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
-            Who::Session(author) => author,
-            Who::Local => self.identity.author,
+            Who::Session(author) | Who::Attributed(author) => author,
+            Who::Local => self.stamp_author(),
         };
         let (last_seq, last_at) = self.last_stamp;
         let at = if seq == last_seq {
@@ -3373,28 +3440,42 @@ impl Inner {
     }
 
     /// Apply staged writes at `seq`, each under the schema that staged it.
-    fn apply_all(&mut self, ops: &[(Rc<Schema>, StagedOp)], seq: u64) -> Result<(), Error> {
+    /// Ops from `checked` on are checked as their own identity would be (a
+    /// session's policies apply) instead of re-applied unchecked: how a
+    /// newly staged write is validated.
+    fn apply_all_checking(
+        &mut self,
+        ops: &[(Rc<Schema>, StagedOp)],
+        checked: usize,
+        seq: u64,
+    ) -> Result<(), Error> {
         let active = self.schema.clone();
-        let result = ops.iter().try_for_each(|(schema, op)| {
+        let result = ops.iter().enumerate().try_for_each(|(i, (schema, op))| {
             self.schema = schema.clone();
-            self.apply(op, seq).map(drop)
+            if i < checked {
+                self.apply(op, seq).map(drop)
+            } else {
+                let identity = op.identity().map_or(Who::Local, who);
+                self.apply_as(op, identity, seq).map(drop)
+            }
         });
         self.schema = active;
         result
     }
 
-    /// [`Inner::apply_all`] trusting and storing what a batch's partial
+    /// [`Inner::apply_all_checking`] trusting and storing what a batch's partial
     /// large-value updates built.
     fn apply_with_edits(
         &mut self,
         ops: &[(Rc<Schema>, StagedOp)],
         edits: &LargeEdits,
+        checked: usize,
         seq: u64,
     ) -> Result<(), Error> {
         self.derived.extend(edits.derived.iter().cloned());
         self.pending_nodes
             .extend(edits.pending_nodes.iter().cloned());
-        let result = self.apply_all(ops, seq);
+        let result = self.apply_all_checking(ops, checked, seq);
         self.clear_derived();
         result
     }
@@ -3582,7 +3663,7 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            let applied = inner.apply_with_edits(ops, &batch.edits, seq);
+            let applied = inner.apply_with_edits(ops, &batch.edits, ops.len(), seq);
             if let Err(error) = applied {
                 inner
                     .conn
@@ -3630,6 +3711,7 @@ impl Db {
                 Some(inner.serializable_cut(*snapshot, own)?)
             }
         };
+        let checked = ops.len();
         if let Some(op) = extra {
             ops.push((inner.schema.clone(), op));
         }
@@ -3640,7 +3722,7 @@ impl Db {
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
         let result = inner
-            .apply_with_edits(&ops, &edits, own)
+            .apply_with_edits(&ops, &edits, checked, own)
             .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
         inner
             .conn

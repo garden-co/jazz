@@ -648,31 +648,7 @@ impl<'a> Ctx<'a> {
             wheres.push(self.reachable(reachable, table, alias)?);
         }
         for join in &query.joins {
-            if !join.nested_joins.is_empty() || !join.correlated_filters.is_empty() {
-                return Err(unsupported("nested or correlated join filters on SQLite"));
-            }
-            let target = self.table(&join.table)?;
-            let j = self.alias("j");
-            let mut conds = vec![format!("{j}._del = 0")];
-            match join.target {
-                JoinTarget::Uncorrelated => {}
-                JoinTarget::Column | JoinTarget::RowId => {
-                    let source = join.source_column.as_deref().unwrap_or("id");
-                    conds.push(format!(
-                        "{} = {}",
-                        column_sql(target, &j, &join.on_column)?,
-                        column_sql(table, alias, source)?
-                    ));
-                }
-            }
-            for filter in &join.filters {
-                conds.push(self.predicate(filter, target, &j)?);
-            }
-            wheres.push(format!(
-                "EXISTS (SELECT 1 FROM {} AS {j} WHERE {})",
-                self.source(target)?,
-                conds.join(" AND ")
-            ));
+            wheres.push(self.join_exists(join, table, alias)?);
         }
         for include in &query.includes {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -1153,6 +1129,83 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// A junction traversal from the row of `table` at `alias`: some live
+    /// row of the joined table matches its correlations and filters, is
+    /// readable by the session, and satisfies its nested joins in turn.
+    fn join_exists(
+        &mut self,
+        join: &crate::query::JoinVia,
+        table: &Table,
+        alias: &str,
+    ) -> Result<String, Error> {
+        let target = self.table(&join.table)?;
+        let j = self.alias("j");
+        let mut conds = vec![format!("{j}._del = 0")];
+        if let Some(session) = self.policy {
+            conds.push(self.read_policy(target, &j, session)?);
+        }
+        match join.target {
+            JoinTarget::Uncorrelated => {
+                if join.source_lookup.is_some() || !join.correlated_filters.is_empty() {
+                    return Err(query_error(
+                        "an uncorrelated join takes no source lookup or correlations",
+                    ));
+                }
+            }
+            JoinTarget::Column | JoinTarget::RowId => {
+                let source = match &join.source_lookup {
+                    // The value the join matches is a column of the row
+                    // the source row references.
+                    Some(lookup) => {
+                        let referenced = self.table(&lookup.table)?;
+                        let l = self.alias("l");
+                        let mut found = vec![
+                            format!("{l}._del = 0"),
+                            format!(
+                                "{l}.id = {}",
+                                column_sql(table, alias, &lookup.row_id_source_column)?
+                            ),
+                        ];
+                        if let Some(session) = self.policy {
+                            found.push(self.read_policy(referenced, &l, session)?);
+                        }
+                        format!(
+                            "(SELECT {} FROM {} AS {l} WHERE {})",
+                            column_sql(referenced, &l, &lookup.value_column)?,
+                            self.source(referenced)?,
+                            found.join(" AND ")
+                        )
+                    }
+                    None => {
+                        column_sql(table, alias, join.source_column.as_deref().unwrap_or("id"))?
+                    }
+                };
+                conds.push(format!(
+                    "{} = {source}",
+                    column_sql(target, &j, &join.on_column)?
+                ));
+            }
+        }
+        for correlation in &join.correlated_filters {
+            conds.push(format!(
+                "{} = {}",
+                column_sql(target, &j, &correlation.join_column)?,
+                column_sql(table, alias, &correlation.source_column)?
+            ));
+        }
+        for filter in &join.filters {
+            conds.push(self.predicate(filter, target, &j)?);
+        }
+        for nested in &join.nested_joins {
+            conds.push(self.join_exists(nested, target, &j)?);
+        }
+        Ok(format!(
+            "EXISTS (SELECT 1 FROM {} AS {j} WHERE {})",
+            self.source(target)?,
+            conds.join(" AND ")
+        ))
+    }
+
     /// Root rows an access edge grants to a team reachable from the seed.
     /// The closure is `WITH RECURSIVE` over effective edge rows: `UNION`
     /// dedupes, so a fixpoint terminates on cycles; a depth bound carries
@@ -1163,20 +1216,56 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
-        if via.seed.is_some() || via.access_team_target != JoinTarget::Column {
-            return Err(unsupported(
-                "relation-seeded or row-id reachability on SQLite",
-            ));
+        if via.access_team_target == JoinTarget::Uncorrelated {
+            return Err(unsupported("uncorrelated reachability on SQLite"));
         }
         let access = self.table(&via.access_table)?;
         let edges = self.table(&via.edge_table)?;
-        let seed = match self.operand(&via.from, table, alias)? {
-            Term::Missing | Term::NaN => return Ok("0".to_owned()),
-            term => term.sql().expect("present").to_owned(),
-        };
         let r = self.alias("reach");
+        // The initial frontier: the seed rows' team column, or one value.
+        let seed = match &via.seed {
+            Some(seed) => {
+                let seeds = self.table(&seed.table)?;
+                let s = self.alias("s");
+                let mut conds = vec![format!("{s}._del = 0")];
+                if let Some(session) = self.policy {
+                    conds.push(self.read_policy(seeds, &s, session)?);
+                }
+                match (&seed.user_column, &seed.user_claim) {
+                    (None, None) => {}
+                    (Some(column), Some(claim)) => {
+                        let value = self.claims.claim(claim);
+                        let Some(value) = self.present(value)?.sql().map(str::to_owned) else {
+                            return Ok("0".to_owned());
+                        };
+                        conds.push(format!("{} = {value}", column_sql(seeds, &s, column)?));
+                    }
+                    _ => {
+                        return Err(query_error(
+                            "a reachability seed names a user column without a claim",
+                        ));
+                    }
+                }
+                for filter in &seed.filters {
+                    conds.push(self.predicate(filter, seeds, &s)?);
+                }
+                format!(
+                    "SELECT {} AS team FROM {} AS {s} WHERE {}",
+                    column_sql(seeds, &s, &seed.team_column)?,
+                    self.source(seeds)?,
+                    conds.join(" AND ")
+                )
+            }
+            None => match self.operand(&via.from, table, alias)? {
+                Term::Missing | Term::NaN => return Ok("0".to_owned()),
+                term => format!("SELECT {} AS team", term.sql().expect("present")),
+            },
+        };
         let e = self.alias("e");
         let mut step = vec![format!("{e}._del = 0")];
+        if let Some(session) = self.policy {
+            step.push(self.read_policy(edges, &e, session)?);
+        }
         for filter in &via.edge_filters {
             step.push(self.predicate(filter, edges, &e)?);
         }
@@ -1185,14 +1274,15 @@ impl<'a> Ctx<'a> {
         let edge_source = self.source(edges)?;
         let cte = match via.bound {
             crate::query::RecursionBound::Fixpoint => format!(
-                "{r}(team) AS (SELECT {seed} UNION SELECT {parent} FROM {edge_source} AS {e} \
+                "{r}(team) AS ({seed} UNION SELECT {parent} FROM {edge_source} AS {e} \
                  JOIN {r} ON {member} = {r}.team WHERE {})",
                 and(&step)
             ),
             crate::query::RecursionBound::MaxDepth(depth) => {
                 step.push(format!("{r}.d < {depth}"));
                 format!(
-                    "{r}(team, d) AS (SELECT {seed}, 0 UNION SELECT {parent}, {r}.d + 1 \
+                    "{r}(team, d) AS (SELECT team, 0 FROM ({seed}) UNION \
+                     SELECT {parent}, {r}.d + 1 \
                      FROM {edge_source} AS {e} JOIN {r} ON {member} = {r}.team WHERE {})",
                     and(&step)
                 )
@@ -1210,6 +1300,9 @@ impl<'a> Ctx<'a> {
                 column_sql(access, &a, &via.access_team_column)?
             ),
         ];
+        if let Some(session) = self.policy {
+            conds.push(self.read_policy(access, &a, session)?);
+        }
         for filter in &via.access_filters {
             conds.push(self.predicate(filter, access, &a)?);
         }
@@ -1438,6 +1531,32 @@ impl<'a> Ctx<'a> {
                 or(&parts)
             }
             PolicyExpr::Not(inner) => format!("(NOT COALESCE({}, 0))", recurse(self, inner)?),
+            PolicyExpr::Cmp {
+                column,
+                op,
+                value: PolicyValue::SessionRef(path),
+            } if crate::values::author_record(column).is_some()
+                && path.first().map(String::as_str) == Some("user") =>
+            {
+                self.author_cmp(table, alias, column, op, path, session)?
+            }
+            PolicyExpr::Cmp {
+                column,
+                op,
+                value: PolicyValue::SessionRef(path),
+            } if is_uuid(table, column)
+                && path.first().map(String::as_str) != Some("__jazz_outer_row") =>
+            {
+                // A claim is JSON, so a UUID claim arrives as its string:
+                // compare it with a UUID column as the UUID it spells.
+                let value = match session.resolve(path) {
+                    Some(Value::String(text)) => text.parse().map(Value::Uuid).ok(),
+                    value => value,
+                };
+                let left = self.column_term(table, alias, column)?;
+                let right = self.present(value)?;
+                self.cmp(op.clone(), left, right)?
+            }
             PolicyExpr::Cmp { column, op, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
@@ -1976,6 +2095,14 @@ fn array_element_id(element: &str) -> String {
     format!("unhex(replace({element}.value, '-', ''))")
 }
 
+/// Whether `column` is a UUID column (nullable or not).
+fn is_uuid(table: &Table, column: &str) -> bool {
+    table.column(column).is_some_and(|column| match &column.ty {
+        ValueType::Nullable(inner) => matches!(**inner, ValueType::Uuid),
+        ty => matches!(ty, ValueType::Uuid),
+    })
+}
+
 /// Whether `column` is an array column (nullable or not).
 fn is_array(table: &Table, column: &str) -> bool {
     let Some(column) = table.column(column) else {
@@ -2239,6 +2366,76 @@ impl Ctx<'_> {
             self.preps.push(prep);
         }
         slot
+    }
+
+    /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
+    /// the session's user (or its identity): equal when every part is, with
+    /// an accountless session standing for the system account as
+    /// [`crate::values::author_key`] stores it.
+    fn author_cmp(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        column: &str,
+        op: &CmpOp,
+        path: &[String],
+        session: &Session,
+    ) -> Result<String, Error> {
+        let (_, whole) = crate::values::author_record(column).expect("author record");
+        let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        let parts: &[&str] = match (whole, path.as_slice()) {
+            (true, ["user"]) => &["account", "identity.issuer", "identity.subject"],
+            (false, ["user", "identity"]) => &["issuer", "subject"],
+            _ => {
+                return Err(query_error(format!(
+                    "comparing `{column}` with `session.{}`: compare an author record \
+                     with `session.user` and its identity with `session.user.identity`",
+                    path.join(".")
+                )));
+            }
+        };
+        let negate = match op {
+            CmpOp::Eq => false,
+            CmpOp::Ne => true,
+            op => {
+                return Err(unsupported(format!(
+                    "comparing the author record `{column}` with {op:?}"
+                )));
+            }
+        };
+        if session.system || session.subject.is_none() {
+            return Ok(bool_sql(negate));
+        }
+        let record = if whole {
+            column.to_owned()
+        } else {
+            column.trim_end_matches(".identity").to_owned()
+        };
+        let mut clauses = Vec::new();
+        for part in parts {
+            let part = part.trim_start_matches("identity.");
+            let field = match part {
+                "account" => format!("{record}.account"),
+                part => format!("{record}.identity.{part}"),
+            };
+            let left = self.column_term(table, alias, &field)?;
+            let value = match part {
+                "account" => {
+                    Some(Value::Uuid(session.account.unwrap_or(
+                        jazz_types::account_registry::SYSTEM_ACCOUNT_ID.0,
+                    )))
+                }
+                part => session.resolve(&["user".into(), "identity".into(), part.into()]),
+            };
+            let right = self.present(value)?;
+            clauses.push(self.cmp(CmpOp::Eq, left, right)?);
+        }
+        let all = and(&clauses);
+        Ok(if negate {
+            format!("(NOT COALESCE({all}, 0))")
+        } else {
+            all
+        })
     }
 
     fn cmp(&mut self, op: CmpOp, left: Term, right: Term) -> Result<String, Error> {
