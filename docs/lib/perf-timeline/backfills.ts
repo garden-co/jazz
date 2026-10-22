@@ -23,11 +23,6 @@ export const historicalBackfills: HistoricalBackfill[] = [
     receipts: [
       {
         runId: "6aa81939e6139cee3e70f236",
-        resultId: "6aa81db9ad9a6239bf751fa7",
-        benchmarkName: "first_sync_27518_rocksdb",
-      },
-      {
-        runId: "6aa81939e6139cee3e70f236",
         resultId: "6aa81db8ad9a6239bf751fa2",
         benchmarkName: "batch_update_1350_rocksdb",
       },

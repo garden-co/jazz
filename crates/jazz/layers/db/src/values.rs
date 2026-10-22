@@ -97,7 +97,9 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Bool(v) => Sql::Integer(*v as i64),
         Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
         Value::Bytes(v) => Sql::Text(crate::large::inline_bytes(v)),
-        Value::Large(v) => Sql::Text(crate::large::chunked_cell(v)?),
+        // A chunked cell carries its sort prefix, which needs the chunks:
+        // descriptors are stored through `Inner::large_cell`.
+        Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
@@ -358,9 +360,9 @@ impl Schema {
 
     /// The physical store for `self` plus `other`: tables and columns are
     /// unioned, so every schema view reads and writes one set of rows. Returns
-    /// the DDL that brings an existing store up to the union: new tables, and
+    /// the DDL that brings an existing store up to the union: new tables,
     /// `ADD COLUMN ... DEFAULT` for new columns (an O(1) schema change; old
-    /// rows read the default without being rewritten).
+    /// rows read the default without being rewritten) and new indexes.
     pub fn union(&mut self, other: &Schema) -> Result<String, Error> {
         let mut ddl = String::new();
         for (name, table) in &other.tables {
@@ -390,6 +392,12 @@ impl Schema {
                         }
                         physical.columns.push(column.clone());
                     }
+                    for index in &table.indexes {
+                        if !physical.indexes.contains(index) {
+                            physical.indexes.push(index.clone());
+                            ddl.push_str(&table.index_ddl(index));
+                        }
+                    }
                 }
             }
         }
@@ -398,6 +406,58 @@ impl Schema {
 }
 
 impl Table {
+    /// A table known only by its stored column names, as a reopened store
+    /// lists it. Enough to extend it and to copy whole rows.
+    pub(crate) fn stored_only(name: String, columns: Vec<String>) -> Self {
+        Self {
+            name,
+            columns: columns
+                .into_iter()
+                .filter(|column| !STORED_PROVENANCE.contains(&column.as_str()))
+                .map(|name| Column {
+                    name,
+                    ty: ValueType::Nullable(Box::new(ValueType::U64)),
+                    default: None,
+                    json: false,
+                })
+                .collect(),
+            references: BTreeMap::new(),
+            policies: TablePolicies::default(),
+            indexes: Vec::new(),
+            branch_by: Vec::new(),
+            provenance: provenance_columns(),
+            stored_provenance: stored_provenance_columns(),
+        }
+    }
+
+    /// One index. Its name is its key list, so re-creating it on a store
+    /// that already has it is a no-op.
+    pub fn index_ddl(&self, index: &[String]) -> String {
+        let table = self;
+        let lead = if table.branch_by.is_empty() {
+            ""
+        } else {
+            "_b, "
+        };
+        let keys: Vec<String> = index
+            .iter()
+            .map(|c| match elided_as(c) {
+                Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
+                // The key expression queries order and range by.
+                None if table.column(c).is_some_and(crate::large::large_capable) => {
+                    crate::large::key_sql(&quote(c))
+                }
+                None => quote(c),
+            })
+            .collect();
+        format!(
+            "CREATE INDEX IF NOT EXISTS {} ON {}({lead}{}, id);\n",
+            quote(&format!("{}__ix({})", table.name, index.join(","))),
+            quote(&table.name),
+            keys.join(", ")
+        )
+    }
+
     /// DDL for one table. Columns are declared without a type so SQLite
     /// keeps every value's storage class as bound (no affinity coercion).
     pub fn ddl(&self) -> String {
@@ -421,24 +481,8 @@ impl Table {
              _del INTEGER NOT NULL{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.name)),
         ));
-        let lead = if table.branch_by.is_empty() {
-            ""
-        } else {
-            "_b, "
-        };
-        for (n, index) in table.indexes.iter().enumerate() {
-            let keys: Vec<String> = index
-                .iter()
-                .map(|c| match elided_as(c) {
-                    Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
-                    None => quote(c),
-                })
-                .collect();
-            sql.push_str(&format!(
-                "CREATE INDEX {} ON {name}({lead}{}, id);\n",
-                quote(&format!("{}__ix{n}", table.name)),
-                keys.join(", ")
-            ));
+        for index in &table.indexes {
+            sql.push_str(&table.index_ddl(index));
         }
         let large: Vec<&Column> = table
             .stored()
@@ -449,14 +493,10 @@ impl Table {
     }
 }
 
-/// A stored column's definition. Large-capable columns compare through the
-/// `jazz` collation, which reads chunked cells as their logical values.
+/// A stored column's definition: just its name. Columns carry no type
+/// affinity or collation, so the file opens on any SQLite.
 pub(crate) fn column_def(column: &Column) -> String {
-    if crate::large::large_capable(column) {
-        format!("{} COLLATE jazz", quote(&column.name))
-    } else {
-        quote(&column.name)
-    }
+    quote(&column.name)
 }
 
 /// A value as an SQL literal, for DDL defaults.
@@ -551,6 +591,8 @@ pub struct CurrentRow {
     pub(crate) deleted: bool,
     /// Projected cells in projection order. `None` is an unwritten cell.
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
+    /// The declared type of each projected cell, shared by a read's rows.
+    pub(crate) types: Arc<[ValueType]>,
 }
 
 impl CurrentRow {
@@ -582,6 +624,11 @@ impl CurrentRow {
     /// A projected cell by projection position.
     pub fn cell_at(&self, index: usize) -> Option<Value> {
         self.cells.get(index).and_then(|(_, value)| value.clone())
+    }
+
+    /// The declared type of each projected cell, in projection order.
+    pub fn cell_types(&self) -> &[ValueType] {
+        &self.types
     }
 
     /// Projected cells in projection order.

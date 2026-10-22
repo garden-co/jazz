@@ -102,7 +102,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
         }
         // The snapshot sees row 0 as "i0"; then it changes.
         let open = OpenTransactionId::new();
-        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.begin_serializable(open)).unwrap();
         block_on(db.update(
             "items",
             row(0),
@@ -110,7 +110,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
             Default::default(),
         ))
         .unwrap();
-        db.abandon_exclusive_handle(open).unwrap();
+        db.abandon_serializable_handle(open).unwrap();
         block_on(db.insert("items", item(99), Default::default()))
             .unwrap()
             .mergeable_tx_id()
@@ -123,7 +123,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
     assert_eq!(next, before + 1, "the commit seq continues");
     // History survived: an as-of read of the superseded image.
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     let first = db
         .prepare_query(
             &Query::from("items")
@@ -131,12 +131,12 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
                 .limit(1),
         )
         .unwrap();
-    let rows = block_on(db.exclusive_tx_ref(open).all_prepared(&first)).unwrap();
+    let rows = block_on(db.serializable_tx_ref(open).all_prepared(&first)).unwrap();
     assert_eq!(
         rows[0].cells().find(|(n, _)| *n == "label").unwrap().1,
         Some(&Value::String("changed".to_owned()))
     );
-    db.abandon_exclusive_handle(open).unwrap();
+    db.abandon_serializable_handle(open).unwrap();
 }
 
 const CHILD: &str = "JAZZ_SQLITE_CRASH_CHILD";
@@ -258,6 +258,16 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
     block_on(client.connect_upstream(client_side));
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    drive(
+        &[&client, &server, &client],
+        client.wait_for_pending_writes(DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(
+        count(&server),
+        3,
+        "every recovered upload reached the server"
+    );
     for tx in txs {
         assert!(tx > LOCAL_BASE);
         drive(
@@ -276,6 +286,52 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
         client.sync_debug().starts_with("pending [] "),
         "{}",
         client.sync_debug()
+    );
+}
+
+/// A node handed to a fresh in-memory database (a browser tab's
+/// main-thread peer under a leased node) continues after the previous
+/// holder's seqs: the authority deduplicates uploads by transaction id, so a
+/// reused one would silently drop the new write.
+#[test]
+fn a_fresh_database_under_a_reused_node_continues_after_the_seeded_floor() {
+    let server = block_on(Db::open_history_complete(config(0xed))).unwrap();
+    let connect = |client: &Db| {
+        let (client_side, server_side) = duplex();
+        block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    };
+    let insert = |db: &Db, n: u64| {
+        let options = InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        };
+        let tx = block_on(db.insert("items", item(n), options))
+            .unwrap()
+            .mergeable_tx_id();
+        drive(
+            &[db, &server, db],
+            db.wait_for_transaction(tx, DurabilityTier::Global),
+        )
+        .unwrap();
+        tx
+    };
+    let high_water = {
+        let first = block_on(Db::open(config(6))).unwrap();
+        connect(&first);
+        for n in 0..2 {
+            insert(&first, n);
+        }
+        first.seq_high_water()
+    };
+    let second = block_on(Db::open(config(6))).unwrap();
+    second.seed_seq_floor(high_water);
+    connect(&second);
+    assert!(insert(&second, 2) > high_water);
+    assert_eq!(
+        count(&server),
+        3,
+        "the new write was applied, not deduplicated"
     );
 }
 
@@ -337,6 +393,7 @@ fn memory_stays_bounded_by_the_page_cache() {
         FileOptions {
             synchronous_full: false,
             cache_kib: 2 * 1024,
+            ..FileOptions::default()
         },
     ))
     .unwrap();

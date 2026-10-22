@@ -152,7 +152,7 @@ pub struct ContentHash(pub [u8; 32]);
 /// An opaque retrieval capability allocated by Groove.
 ///
 /// ```compile_fail
-/// use groove::large_values::Locator;
+/// use jazz_types::large_values::Locator;
 /// let forged = Locator([0_u8; 32]);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -287,7 +287,7 @@ pub struct StagedChunk {
 /// A read-only preparation returned by Groove's graph builder.
 ///
 /// ```compile_fail
-/// use groove::large_values::{LargeValueRef, PreparedLargeValue, StagedChunk};
+/// use jazz_types::large_values::{LargeValueRef, PreparedLargeValue, StagedChunk};
 /// fn forge(value_ref: LargeValueRef, staged_chunks: Vec<StagedChunk>) {
 ///     let _ = PreparedLargeValue { value_ref, staged_chunks };
 /// }

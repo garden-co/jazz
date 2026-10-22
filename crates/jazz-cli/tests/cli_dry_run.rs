@@ -734,6 +734,11 @@ const BACKPRESSURE_RECEIVE_WINDOW_REQUEST_BYTES: libc::c_int = 4 * 1024;
 #[cfg(unix)]
 const BACKPRESSURE_MIN_RESPONSE_BATCHES: usize = 2;
 
+/// How long the bug-196 fixture may go without progress (a seed write settling,
+/// or A consuming a delivery extent) before the test reports a stall.
+#[cfg(unix)]
+const BACKPRESSURE_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[cfg(target_os = "linux")]
 fn tcp_send_buffer_ceiling_bytes() -> u64 {
     let contents = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_wmem")
@@ -2200,29 +2205,34 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     assert!(sent_seed_update, "seed client must send its fixture rows");
 
     // Settle the fixture before opening A, so its handshake does not wait
-    // behind the seed upload.
-    let settlement_deadline = Instant::now() + Duration::from_secs(15);
-    let mut settled_writes = 0;
-    while Instant::now() < settlement_deadline {
+    // behind the seed upload. The fixture scales with the host's TCP
+    // send-buffer ceiling (64 MiB on CI runners), so its upload time depends
+    // on runner load: fail when settlement stops making progress, not after a
+    // fixed total budget.
+    let mut pending_writes = seeded_writes.iter().enumerate().collect::<Vec<_>>();
+    let mut last_progress = Instant::now();
+    while !pending_writes.is_empty() && last_progress.elapsed() < BACKPRESSURE_STALL_TIMEOUT {
         pump_websocket_once(&mut seed.socket, &seed.db, &seed.wire);
-        settled_writes = 0;
-        for (index, write) in seeded_writes.iter().enumerate() {
+        let pending_before = pending_writes.len();
+        pending_writes.retain(|(index, write)| {
             match block_on(write.wait(DurabilityTier::Global)) {
-                Ok(_) => settled_writes += 1,
-                Err(error) if error.code == jazz::db::ErrorCode::NotObserved => {}
+                Ok(_) => false,
+                Err(error) if error.code == jazz::db::ErrorCode::NotObserved => true,
                 Err(error) => panic!("seed fixture write {index} failed: {error}"),
             }
-        }
-        if settled_writes == row_count {
-            break;
+        });
+        if pending_writes.len() < pending_before {
+            last_progress = Instant::now();
         }
     }
+    let settled_writes = row_count - pending_writes.len();
     assert_eq!(
         settled_writes,
         row_count,
         "seed fixture writes must settle globally before client A opens; \
-         settled={settled_writes} pending={}",
-        row_count - settled_writes,
+         settled={settled_writes} pending={} (no write settled for {:?})",
+        pending_writes.len(),
+        BACKPRESSURE_STALL_TIMEOUT,
     );
 
     let mut stalled = open_connected_client(
@@ -2385,13 +2395,24 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         .iter()
         .find(|table| table.name == "users")
         .expect("users table");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // A's response is at least the host's TCP send-buffer ceiling, so its
+    // total transfer time depends on runner load. Keep draining while A
+    // consumes new delivery extents; fail only once delivery stalls.
     let mut saw_server_frames = false;
     let mut observed_payloads = Vec::new();
     let mut long_read_window = true;
-    while observed_payloads.len() < row_count && Instant::now() < deadline {
+    let mut last_progress = Instant::now();
+    let mut delivery_frames = stalled.wire.queues.borrow().delivery_frames;
+    while observed_payloads.len() < row_count
+        && last_progress.elapsed() < BACKPRESSURE_STALL_TIMEOUT
+    {
         let received = pump_websocket_once(&mut stalled.socket, &stalled.db, &stalled.wire);
         saw_server_frames |= received;
+        let delivered = stalled.wire.queues.borrow().delivery_frames;
+        if delivered > delivery_frames {
+            delivery_frames = delivered;
+            last_progress = Instant::now();
+        }
         if received && long_read_window {
             if let MaybeTlsStream::Plain(stream) = stalled.socket.get_mut() {
                 stream

@@ -125,7 +125,7 @@ function added(id: string, title: string): RuntimeSubscriptionDelta {
     added: [
       {
         sourceId,
-        occurrenceKey: Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]),
+        occurrenceKey: Uint8Array.from([2, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
         index: 0,
         row: { id: sourceId, values: [{ type: "Text", value: title }] },
       },

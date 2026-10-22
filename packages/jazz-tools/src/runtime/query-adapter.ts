@@ -1,3 +1,4 @@
+import { resolveQueryTable } from "./history-relation.js";
 /**
  * Translate public QueryBuilder JSON into the runtime query payload.
  *
@@ -42,7 +43,7 @@ function relationColumnsForTable(
   scope: string,
   schema: WasmSchema,
 ): RelProjectColumn[] {
-  const tableSchema = schema[table];
+  const tableSchema = resolveQueryTable(schema, table);
   if (!tableSchema) {
     throw new Error(`Unknown table "${table}" in relation projection.`);
   }
@@ -63,7 +64,7 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
   if (column === "id") return { type: "Uuid" };
   const magicType = magicColumnType(column);
   if (magicType) return magicType;
-  const tableSchema = schema[table];
+  const tableSchema = resolveQueryTable(schema, table);
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
   return col?.column_type;

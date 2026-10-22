@@ -139,6 +139,7 @@ export function queryFromTable(table: string): Uint8Array {
 }
 
 export type QueryLiteral =
+  | { type: "U64"; value: bigint }
   | { type: "Boolean"; value: boolean }
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: bigint }
@@ -443,6 +444,15 @@ function predicateOpTag(op: QueryPredicateOp): number {
 }
 
 function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
+  if (value.type === "U64") {
+    if (value.value < 0n || value.value > (1n << 64n) - 1n) {
+      throw new Error("U64 value must be an unsigned 64-bit integer");
+    }
+    writer.u64(3); // Existing groove::records::Value::U64 representation.
+    writer.u64(value.value);
+    return;
+  }
+
   if (value.type === "Nullable") {
     writer.u64(13); // groove::records::Value::Nullable
     if (value.value == null) {
