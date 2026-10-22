@@ -130,10 +130,10 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 /// fixed offset in a chunked cell.
 pub(crate) fn triggers(table: &Table, columns: &[&Column]) -> String {
     let mut sql = String::new();
-    for target in [table.name.clone(), format!("{}__h", table.name)] {
+    for target in [table.stored.clone(), format!("{}__h", table.stored)] {
         for column in columns {
-            let name = quote(&column.name);
-            let trigger = |what: &str| quote(&format!("{target}__lv_{what}_{}", column.name));
+            let name = quote(&column.stored);
+            let trigger = |what: &str| quote(&format!("{target}__lv_{what}_{}", column.stored));
             let add = |cell: &str| {
                 format!(
                     "INSERT INTO _jazz_lv_root (root, durable) VALUES ({}, 1) \
@@ -164,7 +164,7 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column]) -> String {
             // Only chunked rows: what a prep scans, near-empty otherwise.
             sql.push_str(&format!(
                 "CREATE INDEX IF NOT EXISTS {} ON {on} (id) WHERE {};\n",
-                quote(&format!("{target}__lv_{}", column.name)),
+                quote(&format!("{target}__lv_{}", column.stored)),
                 chunked_sql(&name)
             ));
             sql.push_str(&format!(
@@ -1537,6 +1537,7 @@ mod tests {
         .unwrap();
         let table = Table {
             name: "t".to_owned(),
+            stored: "t".to_owned(),
             columns: Vec::new(),
             references: Default::default(),
             policies: Default::default(),
@@ -1547,6 +1548,7 @@ mod tests {
         };
         let column = Column {
             name: "body".to_owned(),
+            stored: "body".to_owned(),
             ty: crate::records::ValueType::String,
             default: None,
             json: false,
