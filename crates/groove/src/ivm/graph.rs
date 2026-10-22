@@ -1630,6 +1630,7 @@ pub enum ProjectExpr {
         value_type: ValueType,
     },
     Field(FieldRef),
+    /// Projects a nested field, propagating null from nullable parent records.
     RecordField {
         source: FieldRef,
         path: Vec<String>,

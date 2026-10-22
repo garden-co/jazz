@@ -2716,10 +2716,10 @@ fn lower_named_relation_field(
         NormalizedValueRef::FrontierColumn { field, .. } => field,
         NormalizedValueRef::Param(param) => param,
         NormalizedValueRef::SourceField { field, .. } => field,
+        NormalizedValueRef::Magic { column, .. } => column.name(),
         NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => "row_uuid",
         NormalizedValueRef::RowId(RowIdRef::Source(_))
         | NormalizedValueRef::Claim(_)
-        | NormalizedValueRef::Provenance { .. }
         | NormalizedValueRef::Literal(_)
         | NormalizedValueRef::TemplateLiteral(_) => {
             return Err(UnsupportedReason::Operator(
@@ -2779,12 +2779,23 @@ fn lower_linear_root_key_ref(
     }
 }
 
+// Provenance is supplied by the source; history-only columns belong to the
+// virtual table schema and use the same carrier naming as its content columns.
+fn magic_column_carrier(column: MagicColumn) -> String {
+    if column.is_provenance() {
+        column.name().to_owned()
+    } else {
+        user_column_field(column.name())
+    }
+}
+
 fn accumulated_join_field(
     value: &NormalizedValueRef,
     fields: &BTreeMap<(SourceId, String), (String, usize)>,
 ) -> Option<(String, usize)> {
     let (source, field) = match value {
         NormalizedValueRef::SourceField { source, field } => (source, user_column_field(field)),
+        NormalizedValueRef::Magic { source, column } => (source, magic_column_carrier(*column)),
         NormalizedValueRef::RowId(RowIdRef::Source(source)) => (source, "row_uuid".to_owned()),
         _ => return None,
     };
@@ -2967,6 +2978,12 @@ fn lower_relation_projection_ref(
                         } if value_source == source_id => {
                             return Ok(Some(user_column_field(field)));
                         }
+                        NormalizedValueRef::Magic {
+                            source: value_source,
+                            column,
+                        } if value_source == source_id => {
+                            return Ok(Some(magic_column_carrier(*column)));
+                        }
                         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
                             if value_source == source_id =>
                         {
@@ -2985,7 +3002,7 @@ fn lower_relation_projection_ref(
                 NormalizedValueRef::Claim(_)
                 | NormalizedValueRef::SourceField { .. }
                 | NormalizedValueRef::RowId(_)
-                | NormalizedValueRef::Provenance { .. } => Ok(None),
+                | NormalizedValueRef::Magic { .. } => Ok(None),
             }
         }
         RelationInputPlan::Recursive(relation) => match value {
@@ -2999,7 +3016,7 @@ fn lower_relation_projection_ref(
             NormalizedValueRef::Claim(_)
             | NormalizedValueRef::SourceField { .. }
             | NormalizedValueRef::RowId(_)
-            | NormalizedValueRef::Provenance { .. }
+            | NormalizedValueRef::Magic { .. }
             | NormalizedValueRef::FrontierColumn { .. } => Ok(None),
         },
         RelationInputPlan::Union(_) => match value {
@@ -3007,10 +3024,10 @@ fn lower_relation_projection_ref(
             | NormalizedValueRef::FrontierColumn { field: param, .. }
             | NormalizedValueRef::SourceField { field: param, .. } => Ok(Some(param.clone())),
             NormalizedValueRef::RowId(_) => Ok(Some("row_uuid".to_owned())),
+            NormalizedValueRef::Magic { column, .. } => Ok(Some(column.name().to_owned())),
             NormalizedValueRef::Literal(_)
             | NormalizedValueRef::TemplateLiteral(_)
-            | NormalizedValueRef::Claim(_)
-            | NormalizedValueRef::Provenance { .. } => Ok(None),
+            | NormalizedValueRef::Claim(_) => Ok(None),
         },
     }
 }
@@ -3197,6 +3214,10 @@ fn source_join_field(
                 .or_else(|_| require_source_field(source, field));
             resolved?
         }
+        NormalizedValueRef::Magic {
+            source: value_source,
+            column,
+        } if value_source == source_id => require_source_field(source, column.name())?,
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source_id => {
             require_source_field(source, source.row_shape.occurrence_key.row_field())?
         }
@@ -3207,6 +3228,11 @@ fn source_join_field(
             "source field {field:?} is missing from resolved descriptor"
         )));
     };
+    // This is an optional equality-join optimization. Structured values
+    // remain residual predicates instead of reaching the scalar key encoder.
+    if !collect_by_ordered_scalar(&value_type) {
+        return Ok(None);
+    }
     let (value_type, nullable) = match value_type {
         ValueType::Nullable(inner) => ((*inner).clone(), true),
         value_type => (value_type, false),
@@ -4107,15 +4133,15 @@ fn lower_value_ref(
         NormalizedValueRef::RowId(RowIdRef::Frontier(_)) => Err(UnsupportedReason::Operator(
             "frontier row ids are not valid in root source predicates".to_owned(),
         )),
-        NormalizedValueRef::Provenance {
+        NormalizedValueRef::Magic {
             source: value_source,
-            field,
+            column,
         } if value_source == source_id => Ok(LoweredValueRef::Field(require_source_field(
             source,
-            provenance_source_field(*field),
+            column.name(),
         )?)),
-        NormalizedValueRef::Provenance { source, .. } => Err(UnsupportedReason::Operator(format!(
-            "predicate references unsupported provenance source {:?}",
+        NormalizedValueRef::Magic { source, .. } => Err(UnsupportedReason::Operator(format!(
+            "predicate references unsupported magic column source {:?}",
             source
         ))),
         NormalizedValueRef::Literal(bytes) => {
@@ -4188,15 +4214,6 @@ pub(super) fn require_source_field(
                 source.row_shape.source
             ))
         })
-}
-
-fn provenance_source_field(field: ProvenanceField) -> &'static str {
-    match field {
-        ProvenanceField::CreatedAt => "$createdAt",
-        ProvenanceField::CreatedBy => "$createdBy",
-        ProvenanceField::UpdatedAt => "$updatedAt",
-        ProvenanceField::UpdatedBy => "$updatedBy",
-    }
 }
 
 pub(super) fn has_explicit_closure_path(shape: &NormalizedRowSetShape) -> bool {

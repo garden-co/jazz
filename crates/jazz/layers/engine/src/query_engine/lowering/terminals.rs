@@ -1811,13 +1811,10 @@ pub(super) fn collect_window_source_field<'a>(
                     .and_then(|index| descriptor.fields().get(index));
             }
         }
-        NormalizedValueRef::Provenance { field, .. } => match field {
-            ProvenanceField::CreatedAt => "$createdAt",
-            ProvenanceField::CreatedBy => "$createdBy",
-            ProvenanceField::UpdatedAt => "$updatedAt",
-            ProvenanceField::UpdatedBy => "$updatedBy",
+        NormalizedValueRef::Magic { column, .. } => {
+            return resolved_source_descriptor_index(source, column.name())
+                .and_then(|index| descriptor.fields().get(index));
         }
-        .to_owned(),
         _ => return None,
     };
     descriptor
@@ -3985,6 +3982,12 @@ fn aggregate_source_field_name(
         } if value_source == &source.row_shape.source => {
             require_source_field(source, field).map_err(single_gap_report)
         }
+        NormalizedValueRef::Magic {
+            source: value_source,
+            column,
+        } if value_source == &source.row_shape.source => {
+            require_source_field(source, column.name()).map_err(single_gap_report)
+        }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source))
             if value_source == &source.row_shape.source =>
         {
@@ -4394,7 +4397,19 @@ fn settle_position_field(row_shape: &SourceRowShape) -> Option<String> {
 }
 
 fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
-    let mut fields = BTreeSet::new();
+    let mut fields = row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            let column = MagicColumn::parse(field.logical_name()?)?;
+            if column.is_provenance() {
+                field.name.clone()
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
     for metadata in row_shape.metadata.values() {
         match metadata {
             SourceMetadataFields::VersionWitnesses {
@@ -4445,9 +4460,6 @@ fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
             } => {
                 fields.insert(policy_path_field.clone());
                 fields.insert(edge_kind_field.clone());
-            }
-            SourceMetadataFields::Provenance { field } => {
-                fields.insert(field.clone());
             }
         }
     }

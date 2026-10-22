@@ -2,6 +2,7 @@
 //! belong to the ordinary relational pipeline, not to this source adapter.
 
 use super::*;
+use crate::node::query_engine::AuthorizedDeletionPreimage;
 use crate::schema::history::HistoryMetadataColumn;
 
 pub(super) fn unsupported(pattern: &str) -> Error {
@@ -23,6 +24,14 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
         let base_name = crate::schema::history::history_source_table(&request.source.table)
             .ok_or_else(|| unsupported("unknown history source"))?;
         let base_table = self.node.table_in_schema(base_name, schema_version)?;
+        if let Some(column) = read_sources::requested_deletion_column(request)
+            && request.visibility != RowVisibility::IncludeDeleted
+        {
+            return Err(QueryError::UnsupportedRelationQuery(format!(
+                "Reading {column} requires includeDeleted"
+            ))
+            .into());
+        }
         let path = self
             .access_paths
             .get(&request.source)
@@ -144,7 +153,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                         root_source_id(base_name),
                         SourceAccessPath::Lookup(SourceLookup {
                             fields: vec!["row_uuid".into()],
-                            keys,
+                            keys: keys.clone(),
                         }),
                     )]),
                 ))
@@ -194,7 +203,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             .filter(PredicateExpr::gt("seq", Value::U64(0)));
         let history_descriptor = self.node.database.graph_output_descriptor(&history)?;
         let history_fields = descriptor_field_names(&history_descriptor)?;
-        let history = if let Some(covered) = covered {
+        let history = if let Some(covered) = &covered {
             let mut left_keys = vec!["row_uuid", "tx_time", "tx_node_id"];
             let mut right_keys = left_keys.clone();
             if branch_witness {
@@ -203,7 +212,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             }
             GraphBuilder::join(
                 history,
-                covered.project(right_keys.clone()),
+                covered.clone().project(right_keys.clone()),
                 left_keys,
                 right_keys,
             )
@@ -355,6 +364,147 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 .filter(PredicateExpr::is_null("updated_by"))
                 .project_fields(projection(false)),
         ]);
+        let (graph, deletion_register, authorized_deletion_preimage) =
+            if read_sources::requested_deletion_column(request).is_some() {
+                // A historical version's provenance cannot supply deletion metadata, because
+                // deletion state depends on the current state of the row.
+                // There are two sources for that state:
+                // - With upstream coverage: this information is already available
+                // - Without coverage: prepare an ordinary include-deleted current source,
+                //   restricted to the history query's row IDs and read view. Restrict those rows
+                //   again to the history graph's already-authorized rows.
+                let (deleted, register, preimage) = if let Some(covered) = &covered {
+                    (
+                        covered
+                            .clone()
+                            .filter(PredicateExpr::eq("covered_is_current", Value::Bool(true)))
+                            .filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(true))),
+                        None,
+                        None,
+                    )
+                } else {
+                    // Resolve the bounded current view through the ordinary source path.
+                    // History's existing authorization gate still limits the rows below.
+                    let source_id = root_source_id(base_name);
+                    let mut read_view = self.read_view.clone();
+                    read_view.sources.insert(
+                        source_id.clone(),
+                        self.read_view.sources[&request.source].clone(),
+                    );
+                    let current_request = SourceRequest {
+                        source: source_id.clone(),
+                        visibility: RowVisibility::IncludeDeleted,
+                        authorization: SourceAuthorizationRequest::System,
+                        requirements: SourceRequirements {
+                            app_fields: FieldRequirement::None,
+                            magic_fields: BTreeSet::new(),
+                            metadata: BTreeSet::new(),
+                        },
+                    };
+                    let mut preparer = JazzSourceGraphPreparer {
+                        node: self.node,
+                        read_view: &read_view,
+                        local_unavailable_scope: self.local_unavailable_scope.clone(),
+                        inline_sources: BTreeMap::new(),
+                        covered_input_sources: BTreeMap::new(),
+                        covered_input_descriptors: BTreeMap::new(),
+                        access_paths: BTreeMap::from([(
+                            source_id,
+                            SourceAccessPath::Lookup(SourceLookup {
+                                fields: vec!["row_uuid".to_owned()],
+                                keys,
+                            }),
+                        )]),
+                        bounded_deletion_register: None,
+                        count_access_path_metrics: false,
+                        current_projection_targets: BTreeMap::new(),
+                        nested_program_dependencies: Default::default(),
+                        policy_subplan: false,
+                        transaction_overlay: Default::default(),
+                    };
+                    let current = preparer.prepare_source_graph(&current_request).await?;
+                    let deleted = GraphBuilder::semi_join(
+                        current
+                            .graph
+                            .filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(true))),
+                        graph.clone().project(["row_uuid"]),
+                        ["row_uuid"],
+                        ["row_uuid"],
+                    );
+                    let tier = self
+                        .read_view
+                        .source_current_tier(&request.source)
+                        .unwrap_or(DurabilityTier::Local);
+                    let (_, register) = preparer
+                        .live_branch_view_registers(
+                            &current_request,
+                            &base_table,
+                            tier,
+                            &branch,
+                            None,
+                        )
+                        .await?;
+                    (
+                        deleted.clone(),
+                        Some(DeletionRegisterSource {
+                            graph: register,
+                            row_uuid_field: "row_uuid".to_owned(),
+                        }),
+                        Some(AuthorizedDeletionPreimage {
+                            graph: deleted,
+                            routing_fields: BTreeSet::new(),
+                        }),
+                    )
+                };
+                let descriptor = self.node.database.graph_output_descriptor(&graph)?;
+                let fields = descriptor.fields();
+                let deleted = deleted.project(["row_uuid", "$updatedAt", "$updatedBy"]);
+                let deletion_descriptor = self.node.database.graph_output_descriptor(&deleted)?;
+                let live = GraphBuilder::anti_join(
+                    graph.clone(),
+                    deleted.clone(),
+                    ["row_uuid"],
+                    ["row_uuid"],
+                )
+                .project_fields(
+                    fields
+                        .iter()
+                        .map(|field| {
+                            ProjectField::named_with_identity(
+                                field.name.clone().expect("named history field"),
+                                field.identity.clone().expect("history identity"),
+                            )
+                        })
+                        .chain(read_sources::deletion_metadata_projections(
+                            request,
+                            &deletion_descriptor,
+                            None,
+                        )),
+                );
+                let deleted = GraphBuilder::join(graph, deleted, ["row_uuid"], ["row_uuid"])
+                    .project_fields(
+                        fields
+                            .iter()
+                            .map(|field| {
+                                ProjectField::renamed_with_identity(
+                                    format!(
+                                        "left.{}",
+                                        field.name.as_ref().expect("named history field")
+                                    ),
+                                    field.name.clone().expect("named history field"),
+                                    field.identity.clone().expect("history identity"),
+                                )
+                            })
+                            .chain(read_sources::deletion_metadata_projections(
+                                request,
+                                &deletion_descriptor,
+                                Some("right."),
+                            )),
+                    );
+                (GraphBuilder::union([live, deleted]), register, preimage)
+            } else {
+                (graph, None, None)
+            };
         let descriptor = self.node.database.graph_output_descriptor(&graph)?;
         let mut metadata = BTreeMap::new();
         if needs_version_witnesses {
@@ -399,8 +549,8 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
             routing_fields: BTreeSet::new(),
             requires_result_payload: false,
             content_version: None,
-            deletion_register: None,
-            authorized_deletion_preimage: None,
+            deletion_register,
+            authorized_deletion_preimage,
         })
     }
 

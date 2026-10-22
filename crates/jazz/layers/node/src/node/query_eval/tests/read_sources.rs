@@ -16,9 +16,10 @@ fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
     let table = &schema.tables[0];
     let requirements = SourceRequirements {
         app_fields: FieldRequirement::None,
-        metadata: BTreeSet::from([SourceMetadataRequirement::Provenance(
-            ProvenanceField::CreatedBy,
-        )]),
+        magic_fields: BTreeSet::from([
+            crate::schema::magic::MagicColumn::parse("$createdBy").unwrap()
+        ]),
+        metadata: BTreeSet::new(),
     };
     assert!(
         !requirements
@@ -142,6 +143,7 @@ fn reverse_table_lens_projects_membership_and_content_version_sources() {
         authorization: SourceAuthorizationRequest::System,
         requirements: SourceRequirements {
             app_fields: FieldRequirement::All,
+            magic_fields: BTreeSet::new(),
             metadata: BTreeSet::from([SourceMetadataRequirement::VersionPayloads]),
         },
     };

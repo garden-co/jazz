@@ -50,19 +50,19 @@ use super::query_engine::{
     OverlayStack, PathCardinality, PathHolePolicy, PayloadProjection, PolicyContext,
     PolicyDecisionRole, PolicyEnforcementMode, PredicateExpr as NormalizedPredicateExpr,
     ProgramBinding, ProgramClaimParam, ProgramFactKey, ProgramOutputSchemas, ProgramPathId,
-    ProvenanceField, QueryAuthorizationMode, QueryProgram, QueryProgramCompilation,
-    QueryProgramRequest, QueryReadSet, ReachableContribution, ReadView, RequestedReadSet,
-    RequestedSourceStage, ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef,
-    RowIdRef, RowProjection, RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId,
-    RowSetOutputRequest, RowSetProgramInput, RowVisibility, SchemaFamilySelection,
-    SchemaProjection, SortDirection as NormalizedSortDirection, SourceAuthorizationRequest,
-    SourceExpr, SourceGap, SourceGraphPreparer, SourceId, SourceLookup, SourceMetadataFields,
-    SourceMetadataRequirement, SourcePath, SourceRequest, SourceRequirements,
-    SourceResolutionError, SourceRole, SourceRowShape, StorageSchemaSelection, TypedOutputField,
-    UnionInput, ValueSourceColumn, ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema,
-    aggregate_output_column, aggregate_output_field, authorized_deletion_preimage_source_request,
-    claim_param_field, claim_path_from_param_field, left_field, query_program_source_requests,
-    right_field, route_param_field, table_user_column_field, user_column_field,
+    QueryAuthorizationMode, QueryProgram, QueryProgramCompilation, QueryProgramRequest,
+    QueryReadSet, ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage,
+    ResolvedSource, ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
+    RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
+    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
+    SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
+    SourceGraphPreparer, SourceId, SourceLookup, SourceMetadataFields, SourceMetadataRequirement,
+    SourcePath, SourceRequest, SourceRequirements, SourceResolutionError, SourceRole,
+    SourceRowShape, StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn,
+    ValueSourceMode, VersionIdentityFields, VersionedRowRefSchema, aggregate_output_column,
+    aggregate_output_field, authorized_deletion_preimage_source_request, claim_param_field,
+    claim_path_from_param_field, left_field, query_program_source_requests, right_field,
+    route_param_field, table_user_column_field, user_column_field,
 };
 use crate::object::{ObjectId, OutputOccurrenceId};
 #[cfg(test)]
@@ -1865,14 +1865,18 @@ where
                 .extend(metadata);
             // Include-deleted occurrences keep the authority's deletion bit so
             // a covered deleted image materializes as a deleted row.
-            let descriptor = if source_request.visibility == RowVisibility::IncludeDeleted {
-                let mut fields = descriptor.fields().to_vec();
+            let mut fields = descriptor.fields().to_vec();
+            if source_request.visibility == RowVisibility::IncludeDeleted {
                 fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
-                RecordDescriptor::new_with_fields(fields)
-            } else {
-                descriptor
-            };
-            occurrences.push((source_request.source, source_request.visibility, descriptor));
+            }
+            if crate::schema::history::is_history_table(&source_request.source.table) {
+                fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
+            }
+            occurrences.push((
+                source_request.source,
+                source_request.visibility,
+                RecordDescriptor::new_with_fields(fields),
+            ));
         }
         for (table_name, metadata) in table_metadata {
             let stored_name =
@@ -5174,29 +5178,34 @@ fn normalize_public_current_rows(
     table: &TableSchema,
     rows: &mut [CurrentRow],
 ) -> Result<(), Error> {
-    let columns =
-        table
-            .columns
-            .iter()
-            // Normalize only columns retained by the terminal projection. Missing
-            // unselected metadata must not be recreated as application cells.
-            .filter(|column| {
-                query.aggregate.is_some()
-                    || query.select.as_ref().is_none_or(|selected| {
-                        selected.contains(&column.name)
-                            || query
-                                .order_by
-                                .iter()
-                                .any(|order| order.column == column.name)
-                    })
-            })
-            .map(|column| column.name.clone())
-            .chain(
-                query.select.iter().flatten().filter_map(|column| {
-                    AuthorSubject::metadata_path(column).map(|_| column.clone())
-                }),
-            )
-            .collect::<Vec<_>>();
+    let columns = table
+        .columns
+        .iter()
+        // Normalize only columns retained by the terminal projection. Missing
+        // unselected metadata must not be recreated as application cells.
+        .filter(|column| {
+            query.aggregate.is_some()
+                || query.select.as_ref().is_none_or(|selected| {
+                    selected.contains(&column.name)
+                        || query
+                            .order_by
+                            .iter()
+                            .any(|order| order.column == column.name)
+                })
+        })
+        .map(|column| column.name.clone())
+        .chain(
+            query
+                .select
+                .iter()
+                .flatten()
+                .filter(|column| {
+                    (column.as_str() == "$deletedAt" || column.starts_with("$deletedBy"))
+                        || AuthorSubject::metadata_path(column).is_some()
+                })
+                .cloned(),
+        )
+        .collect::<Vec<_>>();
     for row in rows {
         *row = if let Some(aggregate) = &query.aggregate {
             // A grouped source and an aggregate result may share a public name.
@@ -5260,13 +5269,9 @@ fn apply_query_window(query: &crate::query::Query, rows: &mut Vec<CurrentRow>) {
 }
 
 fn magic_current_column_type(column: &str) -> Option<&'static groove::schema::ColumnType> {
-    if let Some(ty) = AuthorSubject::metadata_type(column) {
-        return Some(ty);
-    }
-    match column {
-        "$createdAt" | "$updatedAt" => Some(&groove::schema::ColumnType::U64),
-        _ => None,
-    }
+    crate::schema::magic::MagicColumn::parse(column)
+        .filter(|column| column.is_provenance())
+        .map(|column| column.value_type())
 }
 
 fn is_magic_current_column(column: &str) -> bool {
