@@ -81,6 +81,7 @@ impl Ctx<'_> {
             };
             versions.columns.push(crate::values::Column {
                 name: metadata.name().to_owned(),
+                stored: metadata.name().to_owned(),
                 ty,
                 default: None,
                 json: false,
@@ -91,12 +92,12 @@ impl Ctx<'_> {
 
         let mut stored = String::new();
         for column in table.stored() {
-            stored.push_str(&format!(", {}", quote(&column.name)));
+            stored.push_str(&format!(", {}", quote(&column.stored)));
         }
         let current_bound = self.predicate(bound, versions, "c")?;
         let history_bound = self.predicate(bound, versions, "h")?;
-        let name = quote(&table.name);
-        let history = quote(&format!("{}__h", table.name));
+        let name = quote(&table.stored);
+        let history = quote(&format!("{}__h", table.stored));
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
         let mut keep = vec![
             "v._c = 1".to_owned(),

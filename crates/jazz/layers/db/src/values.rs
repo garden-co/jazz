@@ -172,7 +172,11 @@ fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
 /// One application column.
 #[derive(Clone, Debug)]
 pub struct Column {
+    /// The name this schema reads and writes it by.
     pub name: String,
+    /// The stored column's name: the name it was created under. A rename
+    /// lens changes `name` only, so every schema version reads one column.
+    pub stored: String,
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
@@ -187,7 +191,11 @@ impl Column {
 /// One application table.
 #[derive(Clone, Debug)]
 pub struct Table {
+    /// The name this schema reads and writes it by.
     pub name: String,
+    /// The stored table's name: the name it was created under (see
+    /// [`Column::stored`]). SQL and every table-keyed bookkeeping use it.
+    pub stored: String,
     pub columns: Vec<Column>,
     pub references: BTreeMap<String, String>,
     pub policies: TablePolicies,
@@ -246,6 +254,7 @@ fn stored_provenance_columns() -> Vec<Column> {
         .iter()
         .map(|name| Column {
             name: (*name).to_owned(),
+            stored: (*name).to_owned(),
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
@@ -258,6 +267,7 @@ fn provenance_columns() -> Vec<Column> {
         .iter()
         .map(|name| Column {
             name: (*name).to_owned(),
+            stored: (*name).to_owned(),
             ty: if name.ends_with("At") {
                 ValueType::Nullable(Box::new(ValueType::U64))
             } else {
@@ -283,6 +293,48 @@ impl Table {
         self.columns.iter().chain(&self.stored_provenance)
     }
 
+    /// The stored name of a readable column (`id` and provenance are
+    /// stored by their own names).
+    pub fn stored_name<'a>(&'a self, name: &'a str) -> &'a str {
+        match self.columns.iter().find(|column| column.name == name) {
+            Some(column) => &column.stored,
+            None => name,
+        }
+    }
+
+    /// An application or stored provenance column by its stored name.
+    pub fn by_stored(&self, stored: &str) -> Option<&Column> {
+        self.stored().find(|column| column.stored == stored)
+    }
+
+    /// This table as the store holds it: named by stored names throughout.
+    pub(crate) fn physical(&self) -> Table {
+        let mut table = self.clone();
+        table.name = table.stored.clone();
+        table.indexes = self
+            .indexes
+            .iter()
+            .map(|index| self.stored_index(index))
+            .collect();
+        for column in &mut table.columns {
+            column.name = column.stored.clone();
+        }
+        table.branch_by = self
+            .branch_by
+            .iter()
+            .map(|column| self.stored_name(column).to_owned())
+            .collect();
+        table
+    }
+
+    /// An index's key list by stored column names.
+    pub(crate) fn stored_index(&self, index: &[String]) -> Vec<String> {
+        index
+            .iter()
+            .map(|column| self.stored_name(column).to_owned())
+            .collect()
+    }
+
     pub fn has_column(&self, name: &str) -> bool {
         name == "id" || self.column(name).is_some()
     }
@@ -305,6 +357,11 @@ impl Table {
 pub struct Schema {
     pub tables: BTreeMap<String, Table>,
     pub jazz: JazzSchema,
+    /// The schema whose policies govern this one's tables, when they are
+    /// another's: a sync session on an older version is checked against
+    /// the current schema's policies, compiled under its names (tables
+    /// match by stored name; see [`crate::compile::Ctx`]).
+    pub policies_from: Option<std::rc::Rc<Schema>>,
 }
 
 impl Schema {
@@ -321,6 +378,7 @@ impl Schema {
                 .iter()
                 .map(|column| Column {
                     name: column.name.clone(),
+                    stored: column.name.clone(),
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: format!("{:?}", column.large_value_kind) == "Json",
@@ -339,6 +397,7 @@ impl Schema {
                 table.name.clone(),
                 Table {
                     name: table.name.clone(),
+                    stored: table.name.clone(),
                     columns,
                     references: table.references.clone(),
                     policies: public
@@ -354,6 +413,7 @@ impl Schema {
         Self {
             tables,
             jazz: jazz.clone(),
+            policies_from: None,
         }
     }
 
@@ -369,22 +429,92 @@ impl Schema {
         self.tables.values().map(Table::ddl).collect()
     }
 
+    /// `jazz` with each table and column stored under the name `names`
+    /// gives it; ones `names` does not list are stored by their own names.
+    pub fn stored_as(jazz: &JazzSchema, names: &StoredNames) -> Self {
+        let mut schema = Self::new(jazz);
+        for table in schema.tables.values_mut() {
+            let Some((stored, columns)) = names.tables.get(&table.name) else {
+                continue;
+            };
+            table.stored = stored.clone();
+            for column in &mut table.columns {
+                if let Some(stored) = columns.get(&column.name) {
+                    column.stored = stored.clone();
+                }
+            }
+        }
+        schema
+    }
+
+    /// Where this schema stores each of its tables and columns.
+    pub fn names(&self) -> StoredNames {
+        StoredNames {
+            tables: self
+                .tables
+                .values()
+                .map(|table| {
+                    let columns = table
+                        .columns
+                        .iter()
+                        .map(|column| (column.name.clone(), column.stored.clone()))
+                        .collect();
+                    (table.name.clone(), (table.stored.clone(), columns))
+                })
+                .collect(),
+        }
+    }
+
+    /// `self` governed by `current`'s policies: each table takes the
+    /// policies of `current`'s table with the same stored name (none, so
+    /// deny, when `current` no longer has it).
+    pub fn with_policies_of(mut self, current: std::rc::Rc<Schema>) -> Self {
+        for table in self.tables.values_mut() {
+            table.policies = current
+                .by_stored(&table.stored)
+                .map(|table| table.policies.clone())
+                .unwrap_or_default();
+        }
+        self.policies_from = Some(current);
+        self
+    }
+
+    /// The schema whose names this schema's policies use.
+    pub fn policy_schema(&self) -> &Schema {
+        self.policies_from.as_deref().unwrap_or(self)
+    }
+
+    /// The table stored as `stored`.
+    pub fn by_stored(&self, stored: &str) -> Option<&Table> {
+        match self.tables.get(stored) {
+            Some(table) if table.stored == stored => Some(table),
+            _ => self.tables.values().find(|table| table.stored == stored),
+        }
+    }
+
+    /// The stored name of table `name`.
+    pub fn stored_table(&self, name: &str) -> Result<&str, Error> {
+        Ok(&self.table(name)?.stored)
+    }
+
     /// The physical store for `self` plus `other`: tables and columns are
-    /// unioned, so every schema view reads and writes one set of rows. Returns
+    /// unioned by their stored names, so every schema view reads and writes
+    /// one set of rows. `self` is keyed and named by stored names. Returns
     /// the DDL that brings an existing store up to the union: new tables,
     /// `ADD COLUMN ... DEFAULT` for new columns (an O(1) schema change; old
     /// rows read the default without being rewritten) and new indexes.
     pub fn union(&mut self, other: &Schema) -> Result<String, Error> {
         let mut ddl = String::new();
-        for (name, table) in &other.tables {
+        for table in other.tables.values() {
+            let name = &table.stored;
             match self.tables.get_mut(name) {
                 None => {
                     ddl.push_str(&table.ddl());
-                    self.tables.insert(name.clone(), table.clone());
+                    self.tables.insert(name.clone(), table.physical());
                 }
                 Some(physical) => {
                     for column in &table.columns {
-                        if physical.column(&column.name).is_some() {
+                        if physical.column(&column.stored).is_some() {
                             continue;
                         }
                         let default = match &column.default {
@@ -398,15 +528,18 @@ impl Schema {
                                 column_def(column)
                             ));
                         }
+                        let mut stored = column.clone();
+                        stored.name = column.stored.clone();
                         if crate::large::large_capable(column) {
-                            ddl.push_str(&crate::large::triggers(physical, &[column]));
+                            ddl.push_str(&crate::large::triggers(physical, &[&stored]));
                         }
-                        physical.columns.push(column.clone());
+                        physical.columns.push(stored);
                     }
                     for index in &table.indexes {
-                        if !physical.indexes.contains(index) {
-                            physical.indexes.push(index.clone());
-                            ddl.push_str(&table.index_ddl(index));
+                        let index = table.stored_index(index);
+                        if !physical.indexes.contains(&index) {
+                            ddl.push_str(&physical.index_ddl(&index));
+                            physical.indexes.push(index);
                         }
                     }
                 }
@@ -416,16 +549,25 @@ impl Schema {
     }
 }
 
+/// Where one schema stores its tables and columns: logical table ->
+/// (stored table, logical column -> stored column).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredNames {
+    pub tables: BTreeMap<String, (String, BTreeMap<String, String>)>,
+}
+
 impl Table {
     /// A table known only by its stored column names, as a reopened store
     /// lists it. Enough to extend it and to copy whole rows.
     pub(crate) fn stored_only(name: String, columns: Vec<String>) -> Self {
         Self {
+            stored: name.clone(),
             name,
             columns: columns
                 .into_iter()
                 .filter(|column| !STORED_PROVENANCE.contains(&column.as_str()))
                 .map(|name| Column {
+                    stored: name.clone(),
                     name,
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
@@ -441,8 +583,8 @@ impl Table {
         }
     }
 
-    /// One index. Its name is its key list, so re-creating it on a store
-    /// that already has it is a no-op.
+    /// One index. Its name is its stored key list, so re-creating it on a
+    /// store that already has it (under any schema version) is a no-op.
     pub fn index_ddl(&self, index: &[String]) -> String {
         let table = self;
         let lead = if table.branch_by.is_empty() {
@@ -450,12 +592,13 @@ impl Table {
         } else {
             "_b, "
         };
+        let index = table.stored_index(index);
         let keys: Vec<String> = index
             .iter()
             .map(|c| match elided_as(c) {
                 Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
                 // The key expression queries order and range by.
-                None if table.column(c).is_some_and(crate::large::large_capable) => {
+                None if table.by_stored(c).is_some_and(crate::large::large_capable) => {
                     crate::large::key_sql(&quote(c))
                 }
                 None => quote(c),
@@ -463,8 +606,8 @@ impl Table {
             .collect();
         format!(
             "CREATE INDEX IF NOT EXISTS {} ON {}({lead}{}, id);\n",
-            quote(&format!("{}__ix({})", table.name, index.join(","))),
-            quote(&table.name),
+            quote(&format!("{}__ix({})", table.stored, index.join(","))),
+            quote(&table.stored),
             keys.join(", ")
         )
     }
@@ -478,8 +621,8 @@ impl Table {
             .stored()
             .map(|column| format!(", {}", column_def(column)))
             .collect();
-        let name = quote(&table.name);
-        let history = quote(&format!("{}__h", table.name));
+        let name = quote(&table.stored);
+        let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
         // first, so every index leads with it. `_c` is 1 when the version's
@@ -494,7 +637,7 @@ impl Table {
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
              _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1{columns}, \
              PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
-            quote(&format!("{}__by_seq", table.name)),
+            quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));
@@ -508,10 +651,10 @@ impl Table {
     }
 }
 
-/// A stored column's definition: just its name. Columns carry no type
-/// affinity or collation, so the file opens on any SQLite.
+/// A stored column's definition: just its stored name. Columns carry no
+/// type affinity or collation, so the file opens on any SQLite.
 pub(crate) fn column_def(column: &Column) -> String {
-    quote(&column.name)
+    quote(&column.stored)
 }
 
 /// A value as an SQL literal, for DDL defaults.
