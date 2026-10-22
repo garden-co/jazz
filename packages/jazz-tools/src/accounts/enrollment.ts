@@ -12,6 +12,7 @@ import {
   AccountOperationSuperseded,
   type AccountHandle,
   type AccountIdentity,
+  type AccountSelectionDurability,
 } from "./state.js";
 
 /** A refresh callback must continue to authenticate the same exact identity. */
@@ -299,6 +300,7 @@ export function createAccountManagerWithRuntime(options: {
    * keep the ordinary teardown-and-reopen transition.
    */
   revalidateInPlace?: boolean;
+  selectionDurability?: AccountSelectionDurability;
   fetch?: typeof fetch;
 }): AccountManager<JWTAuth> {
   const registry = options.registry.replace(/\/$/, "");
@@ -552,5 +554,6 @@ export function createAccountManagerWithRuntime(options: {
             ),
           )
         : undefined,
+    options.selectionDurability,
   );
 }

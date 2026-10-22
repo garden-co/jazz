@@ -1,4 +1,3 @@
-import { setAccountSelectionBarrier } from "./selection-durability.js";
 import {
   createAccountManagerWithRuntime,
   isRetainedAccountAssignment,
@@ -284,6 +283,23 @@ export async function prepareAccountManager(options: {
     restoredLocalFirstSecret: stored.selected === null ? undefined : stored.roots[stored.selected],
     restoredAccount: stored.selected === null ? (stored.assignment ?? undefined) : undefined,
     revalidateInPlace: options.retainAccountAssignment === true,
+    selectionDurability: {
+      selectionChanged(next) {
+        // Creating/restoring a local handle already queued its root and selection.
+        // External credentials are owned by the provider and never serialized here.
+        if (next?.identity.issuer === "urn:jazz:local-first") return;
+        stored.selected = null;
+        // Keep only the assignment of a provider-admitted account, never its token.
+        stored.assignment =
+          next && options.retainAccountAssignment
+            ? (retainedAccountAssignment(next) ?? null)
+            : null;
+        // Construction does not publish a selection, and this promise callback runs
+        // only after the factory has returned and assigned manager.
+        void save().catch((error) => manager.reportPersistenceError(error));
+      },
+      settle: (retry) => (retry ? writes.catch(() => save()) : writes),
+    },
     localFirst: localFirstFactory({
       appId: options.appId,
       mintToken: options.mintToken,
@@ -381,21 +397,6 @@ export async function prepareAccountManager(options: {
       unsubscribe();
     }
   });
-  let selection = manager.getLoggedIn();
-  manager.subscribe(() => {
-    const next = manager.getLoggedIn();
-    if (next === selection) return;
-    selection = next;
-    // Creating/restoring a local handle already queued its root and selection.
-    // External credentials are owned by the provider and never serialized here.
-    if (next?.identity.issuer === "urn:jazz:local-first") return;
-    stored.selected = null;
-    // Keep only the assignment of a provider-admitted account, never its token.
-    stored.assignment =
-      next && options.retainAccountAssignment ? (retainedAccountAssignment(next) ?? null) : null;
-    void save().catch((error) => manager.reportPersistenceError(error));
-  });
-  setAccountSelectionBarrier(manager, (retry) => (retry ? writes.catch(() => save()) : writes));
   await writes;
   return manager;
 }
