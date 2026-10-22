@@ -11,10 +11,11 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, block_on};
-use jazz::groove::large_values::INLINE_VALUE_MAX_BYTES;
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+/// The largest value the previous engine stored inline; the workloads keep
+/// their payload sizes relative to it.
+const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -64,11 +65,8 @@ impl ScrubFixture {
             "exercise the indirect large-value path"
         );
         let schema = schema();
-        let refs = schema.column_families();
-        let storage = TestStorage::new(&refs.iter().map(String::as_str).collect::<Vec<_>>());
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0xe1; 16]),
                 author: AuthorSubject::for_test_bytes([0xe2; 16]),
