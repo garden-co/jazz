@@ -378,7 +378,6 @@ mod tests {
     fn writes_account_exact_bytes_per_partition_and_process() {
         let class = NonDurableClass::default();
         class.declare_table("t");
-        let before = process_non_durable_resident_bytes();
         let a = [7, b'a', 0, 0, 1];
         let b = [7, b'b', 0, 0, 1];
         class.write("t", &a, Some(b"xyz"));
@@ -387,7 +386,9 @@ mod tests {
         let residency = class.residency();
         assert_eq!(residency.bytes(), (5 + 2) + (5 + 1));
         assert_eq!(residency.partitions().count(), 2);
-        assert!(process_non_durable_resident_bytes() >= before + 13);
+        // Other classes in the process change the total concurrently but
+        // never take away bytes this class holds, so the total covers ours.
+        assert!(process_non_durable_resident_bytes() >= residency.bytes());
         class.write("t", &a, None);
         class.write("t", &b, None);
         assert_eq!(class.residency().bytes(), 0);

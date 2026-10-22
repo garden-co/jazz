@@ -143,7 +143,6 @@ fn resident_overlay_bytes_follow_pending_writes_and_return_to_zero_on_settle() {
     let schema = todos_notes_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x32), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x3a), schema);
-    let process_before = groove::storage::process_non_durable_resident_bytes();
     assert_eq!(writer.database.non_durable_residency().bytes(), 0);
 
     let mut units = Vec::new();
@@ -171,7 +170,12 @@ fn resident_overlay_bytes_follow_pending_writes_and_return_to_zero_on_settle() {
             usize::from(index.min(1)) + 1
         );
     }
-    assert!(groove::storage::process_non_durable_resident_bytes() >= process_before + last);
+    // The process total sums every live class, and other tests' classes
+    // only ever remove bytes they added, so whatever they do concurrently it
+    // cannot fall below this database's own bytes. A baseline taken before
+    // the writes would not hold: a parallel test may release bytes between
+    // the two reads.
+    assert!(groove::storage::process_non_durable_resident_bytes() >= last);
 
     for unit in units {
         let fate = core_fate(&mut core, unit);
