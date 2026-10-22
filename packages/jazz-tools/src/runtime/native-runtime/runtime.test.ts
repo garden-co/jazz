@@ -3843,14 +3843,6 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).toThrow("unsupported read tier");
   });
 
-  it("rejects include_deleted subscription query intent", () => {
-    const runtime = emptyNativeRuntime();
-
-    expect(() =>
-      runtime.createSubscription(JSON.stringify({ table: "todos", include_deleted: true })),
-    ).toThrow("include_deleted subscriptions");
-  });
-
   it("rejects permission introspection selected columns before preparing flat queries", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(

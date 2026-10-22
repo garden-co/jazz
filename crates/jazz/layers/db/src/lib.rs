@@ -42,6 +42,9 @@ pub mod options;
 mod sql_trace;
 pub mod values;
 
+#[cfg(feature = "testing")]
+pub use large::full_materializations_for_test;
+
 /// Structured read results.
 pub mod result_tree {
     use std::collections::BTreeMap;

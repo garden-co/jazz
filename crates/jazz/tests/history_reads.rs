@@ -258,6 +258,7 @@ fn unsupported_history_shapes_are_explicit_errors() {
         ReadOpts {
             read_view: jazz::protocol::ReadViewSpec {
                 source: jazz::protocol::ReadViewSourceSpec::Snapshot { snapshot },
+                include_deleted: false,
             },
             ..Default::default()
         },
@@ -278,7 +279,10 @@ fn deletion_hides_history_and_restores_reveal_it() {
     block_on(db.delete("notes", note, Default::default())).unwrap();
 
     let deleted = ReadOpts {
-        include_deleted: true,
+        read_view: jazz::protocol::ReadViewSpec {
+            include_deleted: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     assert!(read(&db, &history_of(note), ReadOpts::default()).is_empty());
@@ -592,21 +596,6 @@ fn history_subscriptions_follow_accepted_versions() {
         next_delta(&mut subscription),
         (vec!["first".into(), "second".into()], vec![], 0)
     );
-
-    let message = match block_on(db.subscribe(
-        &prepared,
-        ReadOpts {
-            include_deleted: true,
-            ..Default::default()
-        },
-    )) {
-        Err(error) => error.message,
-        Ok(_) => panic!("includeDeleted history subscriptions must be refused"),
-    };
-    assert!(
-        message.contains("includeDeleted on history subscriptions"),
-        "{message}"
-    );
 }
 
 /// A history subscription under a read policy follows the current row's
@@ -774,9 +763,7 @@ fn remote_history_reads_fetch_versions_with_their_transactions() {
         tier: ReadTier::Remote,
         ..Default::default()
     };
-    let versions = synced
-        .alice_reads(&history_of(note), remote.clone())
-        .unwrap();
+    let versions = synced.alice_reads(&history_of(note), remote).unwrap();
     let expected = [
         (first, SERVER_NODE),
         (second, BOB_NODE),
@@ -804,20 +791,6 @@ fn remote_history_reads_fetch_versions_with_their_transactions() {
         titles(&current),
         ["third"],
         "fetched history never stands in for the current row"
-    );
-
-    let message = synced
-        .alice_reads(
-            &history_of(note),
-            ReadOpts {
-                include_deleted: true,
-                ..remote
-            },
-        )
-        .unwrap_err();
-    assert!(
-        message.contains("includeDeleted on synced history reads"),
-        "{message}"
     );
 }
 

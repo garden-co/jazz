@@ -303,7 +303,7 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         opts.tier = binding_args::read_tier(&tier)?;
     }
     if let Some(include_deleted) = options.get("include_deleted")? {
-        opts.include_deleted =
+        opts.read_view.include_deleted =
             O::boolean(&include_deleted).ok_or("include_deleted must be a boolean")?;
     }
     if let Some(wait) = options.get("first_load_remote_wait_ms")? {
@@ -947,11 +947,8 @@ impl Binding {
             jazz_model::query::lit(Value::Uuid(row.0)),
         ));
         let prepared = self.db.prepare_query(&query)?;
-        let opts = ReadOpts {
-            tier: ReadTier::LocalOnly,
-            include_deleted: true,
-            ..ReadOpts::default()
-        };
+        let mut opts = ReadOpts::for_read_tier(ReadTier::LocalOnly);
+        opts.read_view.include_deleted = true;
         let rows = block_on(self.db.all(&prepared, opts))?;
         Ok(crate::binding_codec::encode_rows(&rows)?)
     }

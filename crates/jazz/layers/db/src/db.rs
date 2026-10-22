@@ -227,7 +227,7 @@ impl ReadSpec {
             }
         };
         Ok(Self {
-            include_deleted: opts.include_deleted,
+            include_deleted: opts.read_view.include_deleted,
             view,
             cut,
         })
@@ -247,14 +247,14 @@ pub struct SubscriptionStream {
     gate: Option<sync::Gate>,
     group: Weak<RefCell<fanout::Group>>,
     /// The remote attachment to release on drop.
-    remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>)>,
+    remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>, bool)>,
 }
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding);
+        if let Some((inner, query, binding, include_deleted)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted);
         }
     }
 }
@@ -820,9 +820,11 @@ impl Db {
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let inner = self.inner();
-        // Validate: tables, columns, parameters, supported forms.
+        // Validate: tables, columns, parameters, supported forms. Read
+        // options are not known yet: validate the widest read (deleted rows
+        // included, so their metadata columns are accepted).
         let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, false)?;
+        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
         let shape =
             blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
         let bound = blake3::hash(format!("{binding:?}").as_bytes());
@@ -845,6 +847,32 @@ impl Db {
     ) -> Result<Vec<CurrentRow>, Error> {
         let inner = self.inner();
         inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+    }
+
+    /// Root rows with each array relation nested in a cell under its
+    /// column name ([`ResultNode::into_nested_row`]).
+    pub fn nest_relations(
+        &self,
+        prepared: &PreparedQuery,
+        roots: Vec<CurrentRow>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if prepared.query.array_subqueries.is_empty() {
+            return Ok(roots);
+        }
+        let inner = self.inner();
+        roots
+            .into_iter()
+            .map(|row| {
+                inner
+                    .node(
+                        prepared,
+                        &prepared.query.table,
+                        &prepared.query.array_subqueries,
+                        row,
+                    )?
+                    .into_nested_row()
+            })
+            .collect()
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
@@ -926,7 +954,7 @@ impl Db {
             Self::remote_shape(&prepared.query)?;
         }
         let remote = if remote_read {
-            self.attach_remote(prepared)
+            self.attach_remote(prepared, read.include_deleted)
         } else {
             None
         };
@@ -959,6 +987,7 @@ impl Db {
             }
             _ => None,
         };
+        let include_deleted = read.include_deleted;
         let mut inner = self.inner();
         let (queue, group) = inner.subscribe_member(prepared, identity, read, settled)?;
         Ok(SubscriptionStream {
@@ -971,6 +1000,7 @@ impl Db {
                     self.inner.clone(),
                     prepared.query.clone(),
                     prepared.binding.clone(),
+                    include_deleted,
                 )
             }),
         })
@@ -2616,10 +2646,13 @@ impl Inner {
                 if table.branch_by.contains(&column.name) {
                     continue;
                 }
-                let value = match content.get(&column.name) {
-                    Some(value) => value.clone(),
-                    None if column.nullable() => Value::Nullable(None),
-                    None => {
+                // Restored content is a whole row: omitted columns take
+                // their defaults, as on insert.
+                let value = match (content.get(&column.name), &column.default) {
+                    (Some(value), _) => value.clone(),
+                    (None, Some(default)) => default.clone(),
+                    (None, None) if column.nullable() => Value::Nullable(None),
+                    (None, None) => {
                         return Err(rejected(format!(
                             "`{table_name}.{}` is required",
                             column.name
@@ -3144,6 +3177,9 @@ enum BatchKind {
         snapshot: u64,
         reads: Vec<ReadRecord>,
         pinned: bool,
+        /// On a client, its own commits still unsettled at begin: the
+        /// snapshot includes them (reads see what this client wrote).
+        own: Vec<u64>,
     },
 }
 
@@ -3300,12 +3336,13 @@ impl Db {
     /// On a client the snapshot is the server seq the replica is known
     /// complete through.
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
-        let snapshot = {
+        let (snapshot, own) = {
             let inner = self.inner.borrow();
-            inner
+            let snapshot = inner
                 .client
                 .as_ref()
-                .map_or(inner.seq, |client| client.known)
+                .map_or(inner.seq, |client| client.known);
+            (snapshot, inner.unsettled_own())
         };
         self.begin(
             id,
@@ -3313,6 +3350,7 @@ impl Db {
                 snapshot,
                 reads: Vec::new(),
                 pinned: !self.is_client(),
+                own,
             },
         )
     }
@@ -3379,7 +3417,10 @@ impl Db {
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
         let BatchKind::Serializable {
-            snapshot, reads, ..
+            snapshot,
+            reads,
+            own,
+            ..
         } = &batch.kind
         else {
             return Err(rejected(format!("transaction {id:?} is not serializable")));
@@ -3404,6 +3445,7 @@ impl Db {
                 sync::Kind::Serializable {
                     snapshot: *snapshot,
                     reads,
+                    own: own.clone(),
                 },
             );
         }
@@ -3490,7 +3532,9 @@ impl Db {
         };
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
-            BatchKind::Serializable { snapshot, .. } => Some(*snapshot),
+            BatchKind::Serializable { snapshot, own, .. } => {
+                Some(inner.serializable_cut(*snapshot, own)?)
+            }
         };
         if let Some(op) = extra {
             ops.push((inner.schema.clone(), op));
@@ -3501,15 +3545,9 @@ impl Db {
             .execute_batch("SAVEPOINT overlay")
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
-        let result = inner.apply_with_edits(&ops, &edits, own).and_then(|()| {
-            read(
-                &mut inner,
-                snapshot.map(|seq| Cut {
-                    own,
-                    ..Cut::at(seq)
-                }),
-            )
-        });
+        let result = inner
+            .apply_with_edits(&ops, &edits, own)
+            .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
         inner
             .conn
             .execute_batch("ROLLBACK TO overlay; RELEASE overlay")
@@ -3564,14 +3602,14 @@ impl Db {
     fn record_read(&self, id: OpenTransactionId, prepared: &PreparedQuery) -> Result<(), Error> {
         let mut inner = self.inner();
         let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, .. },
+            kind: BatchKind::Serializable { snapshot, own, .. },
             ..
         }) = inner.batches.get(&id)
         else {
             return Ok(());
         };
         let read = ReadSpec {
-            cut: Some(Cut::at(*snapshot)),
+            cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
         let rows = versions(&inner.run(prepared, None, &read)?);
@@ -3679,7 +3717,7 @@ impl TxRef<'_> {
         {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
-            let through = self.db.fetch(prepared, at, None).await;
+            let through = self.db.fetch(prepared, at, false, None).await;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {

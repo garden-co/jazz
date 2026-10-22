@@ -159,6 +159,7 @@ fn at(snapshot: &SnapshotRef) -> ReadOpts {
             source: ReadViewSourceSpec::Snapshot {
                 snapshot: snapshot.clone(),
             },
+            include_deleted: false,
         },
         ..ReadOpts::default()
     }

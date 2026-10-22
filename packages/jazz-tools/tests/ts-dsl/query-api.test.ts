@@ -1,3 +1,4 @@
+import type { RowAuthor } from "../../src/magic-columns.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db, QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
@@ -119,84 +120,277 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     },
   );
 
-  it.skipIf(readMode === "direct")(
-    "relation reads include staged deletions and staged restores",
-    async () => {
-      const user = insertUser(db, "Assignee");
-      const todo = insertTodo(db, { assigneesIds: [user.id] });
-      const begin = () =>
-        readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+  describe("includeDeleted", () => {
+    function watch<T extends { id: string }>(query: QueryBuilder<T>) {
+      let rows: T[] | undefined;
+      let failure: Error | undefined;
+      const stop = db.subscribe(query, {
+        onUpdate: (updated) => {
+          rows = updated;
+        },
+        onError: (error) => {
+          failure = error;
+        },
+      });
+      return {
+        stop,
+        latest: () => {
+          if (failure) throw failure;
+          return rows;
+        },
+      };
+    }
 
-      const deleting = begin();
+    it("projects the deletion author and clears it after restoration", async () => {
+      const project = insertProject(db, "retained");
+      const [original] = await readAll(app.projects.where({ id: project.id }).select("$createdBy"));
+      const query = app.projects.includeDeleted().where({ id: project.id }).select("$deletedBy");
+      expect(await readAll(query)).toEqual([{ id: project.id, $deletedBy: null }]);
+      await db.delete(app.projects, project.id);
+      const rows = await readAll(query);
+      expectTypeOf(rows[0]!.$deletedBy).toEqualTypeOf<RowAuthor | null>();
+      expect(rows).toEqual([{ id: project.id, $deletedBy: original!.$createdBy }]);
+      await db.restore(app.projects, project.id, { name: "restored" });
+      expect(await readAll(query)).toEqual([{ id: project.id, $deletedBy: null }]);
+    });
+
+    it.skipIf(readMode !== "direct")("updates deletion timestamps in subscriptions", async () => {
+      const project = insertProject(db, "watched");
+      const query = app.projects
+        .includeDeleted()
+        .where({ id: project.id })
+        .select("name", "$deletedAt");
+      const { latest, stop } = watch(query);
       try {
-        deleting.delete(app.todos, todo.id);
-        const deletedRead = deleting.one(
-          app.todos
-            .includeDeleted()
-            .where({ id: { eq: todo.id } })
-            .include({ assignees: app.users.select("id", "name") }),
-        );
-        if (readMode === "exclusive-tx") {
-          // An exclusive read of deleted rows with related rows cannot be
-          // recorded precisely, so it is rejected (garden-co/jazz#3694).
-          await expect(deletedRead).rejects.toThrow(
-            "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
-          );
-        } else {
-          const deleted = await deletedRead;
-          assert(deleted, "staged deleted todo is not defined");
-          expect(deleted.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
-        }
+        await expect.poll(latest).toEqual([{ id: project.id, name: "watched", $deletedAt: null }]);
+        const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+        await db.delete(app.projects, project.id, { updatedAt: deletedAt.getTime() });
+        await expect
+          .poll(latest)
+          .toEqual([{ id: project.id, name: "watched", $deletedAt: deletedAt }]);
+        await db.restore(app.projects, project.id, { name: "restored" });
+        await expect.poll(latest).toEqual([{ id: project.id, name: "restored", $deletedAt: null }]);
       } finally {
-        deleting.rollback();
+        stop();
       }
+    });
 
-      db.delete(app.todos, todo.id);
-      const restoring = begin();
+    it.skipIf(readMode !== "direct")("updates deletion authors in subscriptions", async () => {
+      const project = insertProject(db, "retained");
+      const [original] = await readAll(app.projects.where({ id: project.id }).select("$createdBy"));
+      const author = original!.$createdBy;
+      const query = app.projects.includeDeleted().where({ id: project.id }).select("$deletedBy");
+      const { latest, stop } = watch(query);
       try {
-        restoring.restore(app.todos, todo.id, {
-          title: "Restored todo",
-          done: false,
-          tags: [],
-          projectId: todo.projectId,
-          assigneesIds: [user.id],
-        });
-        const restored = await restoring.one(
-          app.todos
-            .where({ id: { eq: todo.id } })
-            .include({ assignees: app.users.select("id", "name") }),
-        );
-        assert(restored, "staged restored todo is not defined");
-        expect(restored.title).toBe("Restored todo");
-        expect(restored.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+        await expect.poll(latest).toEqual([{ id: project.id, $deletedBy: null }]);
+        await db.delete(app.projects, project.id);
+        await expect.poll(latest).toEqual([{ id: project.id, $deletedBy: author }]);
+        await db.restore(app.projects, project.id, { name: "restored" });
+        await expect.poll(latest).toEqual([{ id: project.id, $deletedBy: null }]);
       } finally {
-        restoring.rollback();
+        stop();
       }
-    },
-  );
+    });
 
-  it.skipIf(readMode !== "exclusive-tx")(
-    "includeDeleted relation reads are not supported in exclusive transactions yet",
-    async () => {
-      const user = insertUser(db, "Assignee");
-      const todo = insertTodo(db, { assigneesIds: [user.id] });
-      const tx = db.beginExclusiveTransaction();
-      try {
-        await expect(
-          tx.one(
+    it("filters by the deletion author without exposing it in wildcard results", async () => {
+      const project = insertProject(db, "first");
+      const [original] = await readAll(app.projects.where({ id: project.id }).select("$createdBy"));
+      const query = app.projects.includeDeleted().where({ id: project.id });
+      expect(await readAll(query.where({ $deletedBy: { isNull: false } }))).toEqual([]);
+      await db.delete(app.projects, project.id);
+      expect(
+        await readAll(query.where({ $deletedBy: { eq: original!.$createdBy } }).select("name")),
+      ).toEqual([{ id: project.id, name: "first" }]);
+      expect(await readAll(query.where({ $deletedBy: { isNull: true } }))).toEqual([]);
+      expect((await readAll(query))[0]).not.toHaveProperty("$deletedBy");
+    });
+
+    it("projects nullable deletion author fields", async () => {
+      const project = insertProject(db, "first");
+      const [original] = await readAll(app.projects.where({ id: project.id }).select("$createdBy"));
+      const query = app.projects
+        .includeDeleted()
+        .where({ id: project.id })
+        .select("$deletedBy.account", "$deletedBy.identity");
+      expect(await readAll(query)).toEqual([
+        {
+          id: project.id,
+          "$deletedBy.account": null,
+          "$deletedBy.identity": null,
+        },
+      ]);
+      await db.delete(app.projects, project.id);
+      const rows = await readAll(query);
+      expectTypeOf(rows[0]!["$deletedBy.account"]).toEqualTypeOf<string | null>();
+      expectTypeOf(rows[0]!["$deletedBy.identity"]).toEqualTypeOf<RowAuthor["identity"] | null>();
+      expect(rows).toEqual([
+        {
+          id: project.id,
+          "$deletedBy.account": original!.$createdBy.account,
+          "$deletedBy.identity": original!.$createdBy.identity,
+        },
+      ]);
+    });
+
+    it("rejects deletion author projection without includeDeleted", async () => {
+      const project = insertProject(db, "first");
+      // @ts-expect-error Deletion metadata requires includeDeleted.
+      const query = app.projects.where({ id: project.id }).select("$deletedBy");
+      await expect(readAll(query)).rejects.toMatchObject({
+        message: "Query: unsupported relation query: Reading $deletedBy requires includeDeleted",
+      });
+    });
+
+    it.skipIf(readMode === "direct")(
+      "relation reads include staged deletions and staged restores",
+      async () => {
+        const user = insertUser(db, "Assignee");
+        const todo = insertTodo(db, { assigneesIds: [user.id] });
+        const begin = () =>
+          readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+
+        const deleting = begin();
+        try {
+          deleting.delete(app.todos, todo.id);
+          const deletedRead = deleting.one(
             app.todos
               .includeDeleted()
               .where({ id: { eq: todo.id } })
               .include({ assignees: app.users.select("id", "name") }),
-          ),
-        ).rejects.toThrow(
-          "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
-        );
-      } finally {
-        tx.rollback();
-      }
-    },
-  );
+          );
+          if (readMode === "exclusive-tx") {
+            // An exclusive read of deleted rows with related rows cannot be
+            // recorded precisely, so it is rejected (garden-co/jazz#3694).
+            await expect(deletedRead).rejects.toThrow(
+              "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+            );
+          } else {
+            const deleted = await deletedRead;
+            assert(deleted, "staged deleted todo is not defined");
+            expect(deleted.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+          }
+        } finally {
+          deleting.rollback();
+        }
+
+        db.delete(app.todos, todo.id);
+        const restoring = begin();
+        try {
+          restoring.restore(app.todos, todo.id, {
+            title: "Restored todo",
+            done: false,
+            tags: [],
+            projectId: todo.projectId,
+            assigneesIds: [user.id],
+          });
+          const restored = await restoring.one(
+            app.todos
+              .where({ id: { eq: todo.id } })
+              .include({ assignees: app.users.select("id", "name") }),
+          );
+          assert(restored, "staged restored todo is not defined");
+          expect(restored.title).toBe("Restored todo");
+          expect(restored.assignees).toEqual([{ id: user.id, name: "Assignee" }]);
+        } finally {
+          restoring.rollback();
+        }
+      },
+    );
+
+    it.skipIf(readMode !== "exclusive-tx")(
+      "includeDeleted relation reads are not supported in exclusive transactions yet",
+      async () => {
+        const user = insertUser(db, "Assignee");
+        const todo = insertTodo(db, { assigneesIds: [user.id] });
+        const tx = db.beginExclusiveTransaction();
+        try {
+          await expect(
+            tx.one(
+              app.todos
+                .includeDeleted()
+                .where({ id: { eq: todo.id } })
+                .include({ assignees: app.users.select("id", "name") }),
+            ),
+          ).rejects.toThrow(
+            "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+          );
+        } finally {
+          tx.rollback();
+        }
+      },
+    );
+
+    it("projects the deletion timestamp only when requested", async () => {
+      const project = await insertProject(db, "deleted timestamp");
+      const query = app.projects
+        .includeDeleted()
+        .where({ id: project.id })
+        .select("name", "$deletedAt");
+      expectTypeOf((await readAll(query))[0]!.$deletedAt).toEqualTypeOf<Date | null>();
+      expect(await readAll(query)).toEqual([
+        { id: project.id, name: "deleted timestamp", $deletedAt: null },
+      ]);
+      const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+      await db.delete(app.projects, project.id, { updatedAt: deletedAt.getTime() });
+      expect(await readAll(query)).toEqual([
+        { id: project.id, name: "deleted timestamp", $deletedAt: deletedAt },
+      ]);
+      expect(await readAll(app.projects.includeDeleted().where({ id: project.id }))).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ $deletedAt: expect.anything() })]),
+      );
+    });
+
+    it("clears the deletion timestamp after restoration", async () => {
+      const project = await insertProject(db, "restored timestamp");
+      await db.delete(app.projects, project.id);
+      await db.restore(app.projects, project.id, { name: "restored timestamp" });
+      const query = app.projects.includeDeleted().where({ id: project.id }).select("$deletedAt");
+      expect(await readAll(query)).toEqual([{ id: project.id, $deletedAt: null }]);
+    });
+
+    it("filters deleted rows by their deletion timestamp", async () => {
+      const project = await insertProject(db, "timestamp filter");
+      const deletedAt = new Date("2026-01-02T03:04:05.678Z");
+      await db.delete(app.projects, project.id, { updatedAt: deletedAt.getTime() });
+      const query = app.projects
+        .includeDeleted()
+        .where({ id: project.id, $deletedAt: { gte: deletedAt } })
+        .orderBy("$deletedAt")
+        .select("$deletedAt");
+      expect(await readAll(query)).toEqual([{ id: project.id, $deletedAt: deletedAt }]);
+      expect(await readAll(query.where({ $deletedAt: { isNull: true } }))).toEqual([]);
+      const wildcard = await readAll(
+        app.projects.includeDeleted().where({ id: project.id, $deletedAt: deletedAt }),
+      );
+      expect(wildcard).toHaveLength(1);
+      expect(wildcard[0]).not.toHaveProperty("$deletedAt");
+    });
+
+    it("rejects deletion timestamps without includeDeleted", async () => {
+      await insertProject(db, "metadata validation");
+      // @ts-expect-error Deletion metadata requires includeDeleted.
+      const query = app.projects.select("$deletedAt");
+      await expect(readAll(query)).rejects.toMatchObject({
+        message: "Query: unsupported relation query: Reading $deletedAt requires includeDeleted",
+      });
+    });
+
+    it("can read deleted rows with includeDeleted", async () => {
+      const project = insertProject(db, "Deleted Project");
+      db.delete(app.projects, project.id);
+
+      const defaultResult = await readOne(app.projects.where({ id: { eq: project.id } }));
+      expect(defaultResult).toBeNull();
+
+      const deletedResult = await readOne(
+        app.projects.includeDeleted().where({ id: { eq: project.id } }),
+      );
+
+      assert(deletedResult, "Deleted row is not defined");
+      expectTypeOf(deletedResult).branded.toEqualTypeOf<Project>();
+      expect(deletedResult).toEqual(project);
+    });
+  });
 
   describe("default ordering", () => {
     it("orders one-shot roots and pagination by canonical row id, not insertion order", async () => {
@@ -372,22 +566,6 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expectTypeOf(results[0]!).branded.toEqualTypeOf<Project>();
       expect(results[0]!.id).toBe(id);
       expect(results[0]!.name).toBe("Project A");
-    });
-
-    it("can read deleted rows with includeDeleted", async () => {
-      const project = insertProject(db, "Deleted Project");
-      db.delete(app.projects, project.id);
-
-      const defaultResult = await readOne(app.projects.where({ id: { eq: project.id } }));
-      expect(defaultResult).toBeNull();
-
-      const deletedResult = await readOne(
-        app.projects.includeDeleted().where({ id: { eq: project.id } }),
-      );
-
-      assert(deletedResult, "Deleted row is not defined");
-      expectTypeOf(deletedResult).branded.toEqualTypeOf<Project>();
-      expect(deletedResult).toEqual(project);
     });
 
     it("filters nullable columns with isNull:true", async () => {

@@ -935,6 +935,13 @@ before writing `dot_count` and the dot sequence. Thus equivalent snapshot
 frontiers yield the same UUIDv5 read-view key regardless of observation order
 or repeated dots. No generic Rust serializer is part of this durable identity.
 
+A read view with `include_deleted` set uses the `JRVK` V3 preimage
+`magic "JRVK" | version 3 | tier:u8 | binding_source:u8 | source | 0x01`.
+The V3 key exists only for include-deleted reads; every other read view keeps
+its V2 preimage and therefore its existing durable key. Include-deleted and
+ordinary subscriptions of the same shape, binding and source thus never share
+coverage or a settled result.
+
 The serving authority maintains flat result members, association state, and
 version witnesses for each program instance, then its output terminal renders
 the structured result tree (§6.4). The subscriber receives and stores its own
@@ -979,10 +986,27 @@ rows complete only relative to the node's own visible-current knowledge
 (`INV-QUERY-11`). A settled read on a subscriber is answered from the
 subscription's settled subscription result set; an unresolvable result-set entry is an
 invariant violation, not a degraded answer (`INV-QUERY-12`).
-An include-deleted one-shot read widens only the root current-row source: deleted
-root rows may be returned and marked deleted, while joins, reachability access
-tables, reachability edge tables, and include payloads continue to use ordinary
-visible-current witnesses.
+An include-deleted read, one-shot or subscription, widens only the root
+current-row source: deleted root rows may be returned, while joins,
+reachability access tables, reachability edge tables, include payloads and
+policy dependencies continue to use ordinary visible-current witnesses. A
+one-shot read marks returned deleted rows deleted. A subscription carries the
+flag in its `ReadViewSpec` (§6.5), so the authority admits deleted root rows
+under the include-deleted read policy; the covered input carries the
+authority's deletion bit, which keeps deleted rows out of the subscriber's
+visible-current join and include witnesses, but published subscription rows
+are not marked deleted. Subscription deletion state is exposed through the
+`$deletedAt`/`$deletedBy` columns instead (below). Deleting, restoring or
+revoking access to a row updates the subscription like any other change: a
+restoration replaces the deleted row with the live one, and a row whose read
+policy no longer holds, including because its granting row was deleted, leaves
+the result. Include-deleted reads of current tables differ by read path. Plain
+one-shot reads support only the current source and reject every other read
+view (branch views and snapshots) with a "not supported yet" error.
+Subscriptions, and transaction reads, which register as snapshot
+subscriptions, accept the current source and any snapshot; they reject branch
+views with a "not supported yet" error. History queries keep their own branch
+selection.
 
 Inside an open exclusive transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,
@@ -990,7 +1014,17 @@ Inside an open exclusive transaction, `tx_query` records a binding-sensitive
 `base_snapshot.global_base` against now.
 
 Allowed "magic" select columns are the provenance columns `$createdAt`,
-`$createdBy`, `$updatedAt`, `$updatedBy`. Alpha-compatible permission
+`$createdBy`, `$updatedAt`, `$updatedBy`, and the deletion columns `$deletedAt`
+and `$deletedBy`, with the author paths `$createdBy.*`, `$updatedBy.*` and
+`$deletedBy.*`. The deletion columns require `includeDeleted` and are rejected
+without it; they are nullable (`Nullable(U64)` physical milliseconds and
+`Nullable(RowAuthor)`) and are `NULL` for live and restored rows. A deleted
+row's values are the current deletion winner's authored `$updatedAt` and
+`$updatedBy`, not its acceptance time. Every history version of a row carries
+the same current deletion values, so a restoration clears them on all
+versions. They may be selected, filtered, and ordered, but only on the root of
+a plain query: flat joins reject them, because joined sources read only live
+rows. Alpha-compatible permission
 introspection fields such as `$canRead` are not
 ordinary stored columns and are not executable query columns. Permission
 introspection is exposed through standalone dry-run APIs (ch. 7, ch. 13), so

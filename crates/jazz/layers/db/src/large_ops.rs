@@ -343,10 +343,13 @@ fn nullable(column: &crate::values::Column, value: Value) -> Value {
     }
 }
 
-fn identity_of(inner: &Inner, identity: WriteIdentity) -> Option<AuthorSubject> {
+/// The session an edit's read of the current cell is checked as: a
+/// trusted session's, or none for local staging, which (like every local
+/// write) the authority checks on upload.
+fn identity_of(identity: WriteIdentity) -> Option<AuthorSubject> {
     match who(identity) {
         Who::Session(author) => Some(author),
-        Who::Local => inner.reader(),
+        Who::Local => None,
     }
 }
 
@@ -490,7 +493,7 @@ impl Db {
         let value = {
             let mut inner = self.inner();
             let (col, cell) =
-                inner.physical_cell(table, row, column, identity_of(&inner, opts.identity))?;
+                inner.physical_cell(table, row, column, identity_of(opts.identity))?;
             let value = inner.edited(table, &col, cell, edit)?;
             nullable(&col, value)
         };
@@ -515,7 +518,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let lowered = {
             let mut inner = self.inner();
-            let identity = identity_of(&inner, opts.identity);
+            let identity = identity_of(opts.identity);
             inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
         };
         if let Err(error) = lowered {
@@ -1123,7 +1126,7 @@ impl TxRef<'_> {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
-            let identity = identity_of(inner, opts.identity);
+            let identity = identity_of(opts.identity);
             let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
             let edits = crate::db::LargeEdits {
                 derived: std::mem::take(&mut inner.derived),

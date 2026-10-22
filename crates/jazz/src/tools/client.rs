@@ -111,6 +111,10 @@ struct State {
     writes: HashMap<TransactionId, u64>,
     forwarders: Vec<Forwarder>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Whether the background tick loop runs. A client without an
+    /// upstream starts it with its first subscription; until then its
+    /// calls tick inline, so it needs no `LocalSet`.
+    driven: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -154,11 +158,25 @@ impl Shared {
             if let Some(value) = poll() {
                 return Ok(value);
             }
+            if !self.state.borrow().driven {
+                self.tick().await;
+                tokio::task::yield_now().await;
+                continue;
+            }
             self.tick_soon();
             if progress.changed().await.is_err() {
                 return Err(JazzError::ChannelClosed);
             }
         }
+    }
+
+    /// Start the background tick loop if it is not running.
+    fn ensure_driven(self: &Rc<Self>) {
+        if std::mem::replace(&mut self.state().driven, true) {
+            return;
+        }
+        let driver = tokio::task::spawn_local(drive(Rc::downgrade(self), self.work.clone()));
+        self.state().tasks.push(driver);
     }
 
     /// Await an engine future whose progress depends on ticks. Engine
@@ -496,9 +514,8 @@ impl JazzClient {
                 attached,
             ));
             shared.state().tasks.push(keeper);
+            shared.ensure_driven();
         }
-        let driver = tokio::task::spawn_local(drive(Rc::downgrade(&shared), work));
-        shared.state().tasks.push(driver);
         Ok(Self {
             write_context: None,
             shared,
@@ -751,6 +768,7 @@ impl JazzClient {
             cancellation,
             rows: Vec::new(),
         });
+        self.shared.ensure_driven();
         self.shared.tick_soon();
         Ok(SubscriptionStream::new(receiver, cancel))
     }

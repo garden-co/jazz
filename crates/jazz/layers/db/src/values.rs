@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
-use crate::records::{Value, ValueType};
+use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+use crate::result_tree::{ResultNode, ResultRelation};
 use crate::schema::JazzSchema;
 use crate::tools::{PolicyExpr, TablePolicies};
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
@@ -102,8 +103,88 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
+        Value::Array(items) => Sql::Text(array_json(items)?.to_string().into_bytes()),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
     }))
+}
+
+/// An array cell as JSON text, so plain SQLite reads it with `json_each`.
+/// Elements are JSON scalars (uuids as their hyphenated strings, enum
+/// tags as numbers) or nested arrays; equal arrays encode to equal text.
+fn array_json(items: &[Value]) -> Result<serde_json::Value, Error> {
+    items
+        .iter()
+        .map(element_json)
+        .collect::<Result<Vec<_>, _>>()
+        .map(serde_json::Value::Array)
+}
+
+fn element_json(item: &Value) -> Result<serde_json::Value, Error> {
+    Ok(match item {
+        Value::Nullable(None) => serde_json::Value::Null,
+        Value::Nullable(Some(inner)) => element_json(inner)?,
+        Value::U8(v) => (*v).into(),
+        Value::U16(v) => (*v).into(),
+        Value::U32(v) => (*v).into(),
+        Value::U64(v) | Value::U48(v) => (*v).into(),
+        Value::I32(v) => (*v).into(),
+        Value::I64(v) => (*v).into(),
+        Value::F64(v) => serde_json::Number::from_f64(*v)
+            .ok_or_else(|| unsupported("storing NaN or infinity in an array"))?
+            .into(),
+        Value::Bool(v) => (*v).into(),
+        Value::String(v) => v.clone().into(),
+        Value::Uuid(v) => v.to_string().into(),
+        Value::EnumTag(v) => (*v).into(),
+        Value::Array(items) => array_json(items)?,
+        other => {
+            return Err(unsupported(format!(
+                "storing {other:?} inside an array in SQLite"
+            )));
+        }
+    })
+}
+
+/// A JSON array element back as a value of its declared type.
+fn json_element(ty: &ValueType, json: &serde_json::Value) -> Option<Value> {
+    use serde_json::Value as Json;
+    Some(match (ty, json) {
+        (ValueType::Nullable(_), Json::Null) => Value::Nullable(None),
+        (ValueType::Nullable(inner), json) => {
+            Value::Nullable(Some(Box::new(json_element(inner, json)?)))
+        }
+        (ValueType::U8, json) => Value::U8(json.as_u64()?.try_into().ok()?),
+        (ValueType::U16, json) => Value::U16(json.as_u64()?.try_into().ok()?),
+        (ValueType::U32, json) => Value::U32(json.as_u64()?.try_into().ok()?),
+        (ValueType::U64, json) => Value::U64(json.as_u64()?),
+        (ValueType::U48, json) => Value::U48(json.as_u64()?),
+        (ValueType::I32, json) => Value::I32(json.as_i64()?.try_into().ok()?),
+        (ValueType::I64, json) => Value::I64(json.as_i64()?),
+        (ValueType::F64, json) => Value::F64(json.as_f64()?),
+        (ValueType::Bool, Json::Bool(v)) => Value::Bool(*v),
+        (ValueType::String, Json::String(v)) => Value::String(v.clone()),
+        (ValueType::Uuid, Json::String(v)) => Value::Uuid(v.parse().ok()?),
+        (ValueType::EnumTag(_), json) => Value::EnumTag(json.as_u64()?.try_into().ok()?),
+        (ValueType::Array(element), Json::Array(items)) => Value::Array(
+            items
+                .iter()
+                .map(|item| json_element(element, item))
+                .collect::<Option<_>>()?,
+        ),
+        _ => return None,
+    })
+}
+
+/// An array element bound for comparison with what `json_each` reads back
+/// as its `value`: uuids are their hyphenated text there.
+pub(crate) fn array_needle(sql: Sql) -> Sql {
+    match sql {
+        Sql::Blob(bytes) => match uuid::Uuid::from_slice(&bytes) {
+            Ok(id) => Sql::Text(id.to_string().into_bytes()),
+            Err(_) => Sql::Blob(bytes),
+        },
+        sql => sql,
+    }
 }
 
 /// Decode a SQLite cell by the column's declared type, reading a chunked
@@ -137,6 +218,11 @@ pub(crate) fn from_sql(
             let json = serde_json::from_slice(cell)
                 .map_err(|e| Error::new(ErrorCode::Storage, format!("record cell: {e}")))?;
             return Ok(json_record(descriptor, &json));
+        }
+        (ValueType::Array(_), ValueRef::Text(cell)) => {
+            let json = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+            return Ok(json_element(ty, &json));
         }
         _ => {}
     }
@@ -274,6 +360,24 @@ pub(crate) const PROVENANCE: [&str; 12] = [
     "$updatedBy.identity.subject",
 ];
 
+/// The current deletion of a row, readable with `includeDeleted`: the
+/// deleting version's update stamp, NULL for live and restored rows. Never
+/// stored: a deleted row is its current version with `_del` set, and that
+/// version's update stamp is the deletion's.
+pub(crate) const DELETION: [&str; 6] = [
+    "$deletedAt",
+    "$deletedBy",
+    "$deletedBy.account",
+    "$deletedBy.identity",
+    "$deletedBy.identity.issuer",
+    "$deletedBy.identity.subject",
+];
+
+/// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
+pub(crate) fn is_deletion(column: &str) -> bool {
+    column == "$deletedAt" || column == "$deletedBy" || column.starts_with("$deletedBy.")
+}
+
 /// Provenance as stored: each author is one code into `_jazz_authors`
 /// instead of its account and two strings on every row version.
 pub(crate) const STORED_PROVENANCE: [&str; 4] =
@@ -305,6 +409,9 @@ pub(crate) fn author_part(column: &str) -> Option<(&'static str, &'static str)> 
         "$updatedBy.account" => ("$updatedBy", "account"),
         "$updatedBy.identity.issuer" => ("$updatedBy", "issuer"),
         "$updatedBy.identity.subject" => ("$updatedBy", "subject"),
+        "$deletedBy.account" => ("$deletedBy", "account"),
+        "$deletedBy.identity.issuer" => ("$deletedBy", "issuer"),
+        "$deletedBy.identity.subject" => ("$deletedBy", "subject"),
         _ => return None,
     })
 }
@@ -317,6 +424,8 @@ pub(crate) fn author_record(column: &str) -> Option<(&'static str, bool)> {
         "$createdBy.identity" => ("$createdBy", false),
         "$updatedBy" => ("$updatedBy", true),
         "$updatedBy.identity" => ("$updatedBy", false),
+        "$deletedBy" => ("$deletedBy", true),
+        "$deletedBy.identity" => ("$deletedBy", false),
         _ => return None,
     })
 }
@@ -354,6 +463,7 @@ fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
         .iter()
+        .chain(&DELETION)
         .map(|name| Column {
             name: (*name).to_owned(),
             stored: (*name).to_owned(),
@@ -887,4 +997,82 @@ impl CurrentRow {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_ref()))
     }
+}
+
+impl ResultNode {
+    /// The node's row with each relation appended as a cell under its
+    /// column name: an array of records, each the child's `row_uuid`
+    /// followed by its own cells (relations nested the same way). This is
+    /// the shape the bindings publish for relation reads.
+    pub fn into_nested_row(self) -> Result<CurrentRow, Error> {
+        let ResultNode { row, relations } = self;
+        if relations.is_empty() {
+            return Ok(row);
+        }
+        let mut cells = (*row.cells).clone();
+        let mut types = row.types.to_vec();
+        for (name, relation) in relations {
+            let children = match relation {
+                ResultRelation::Array(children) => children,
+                ResultRelation::Null | ResultRelation::Hole => Vec::new(),
+            };
+            let children = children
+                .into_iter()
+                .map(ResultNode::into_nested_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            let (element, values) = child_records(&children)?;
+            cells.push((name, Some(Value::Array(values))));
+            types.push(ValueType::Array(Box::new(element)));
+        }
+        Ok(CurrentRow {
+            cells: Arc::new(cells),
+            types: types.into(),
+            ..row
+        })
+    }
+}
+
+/// One relation's children as records under a shared descriptor. A field
+/// is nullable when its declared type is, or when any child left it
+/// unwritten.
+fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Error> {
+    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+    if let Some(first) = children.first() {
+        for (index, ((name, _), ty)) in first.cells().zip(first.cell_types()).enumerate() {
+            let unwritten = children
+                .iter()
+                .any(|child| child.cells.get(index).is_some_and(|(_, v)| v.is_none()));
+            let ty = match ty {
+                ValueType::Nullable(_) => ty.clone(),
+                _ if unwritten => ValueType::Nullable(Box::new(ty.clone())),
+                _ => ty.clone(),
+            };
+            fields.push((name.to_owned(), ty));
+        }
+    }
+    let descriptor = RecordDescriptor::new(fields.clone());
+    let mut values = Vec::with_capacity(children.len());
+    for child in children {
+        if child.cells.len() + 1 != fields.len() {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation children with different projections",
+            ));
+        }
+        let mut record = vec![Value::Uuid(child.id.0)];
+        for ((_, value), (_, ty)) in child.cells.iter().zip(&fields[1..]) {
+            record.push(match (value, ty) {
+                (None, _) => Value::Nullable(None),
+                (Some(value), ValueType::Nullable(_)) if !matches!(value, Value::Nullable(_)) => {
+                    Value::Nullable(Some(Box::new(value.clone())))
+                }
+                (Some(value), _) => value.clone(),
+            });
+        }
+        let raw = descriptor
+            .create(&record)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("relation record: {error}")))?;
+        values.push(Value::Record(OwnedRecord::new(raw, descriptor)));
+    }
+    Ok((ValueType::Record(Box::new(descriptor)), values))
 }

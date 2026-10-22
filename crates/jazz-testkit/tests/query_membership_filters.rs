@@ -44,8 +44,8 @@ async fn id_membership_with_nullable_uuid_keeps_matching_rows() {
                     col("id"),
                     [
                         lit(*alice.uuid()),
-                        lit(jazz::groove::records::Value::Nullable(Some(Box::new(
-                            jazz::groove::records::Value::Uuid(*alice.uuid()),
+                        lit(jazz::records::Value::Nullable(Some(Box::new(
+                            jazz::records::Value::Uuid(*alice.uuid()),
                         )))),
                     ],
                 ))

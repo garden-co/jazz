@@ -41,6 +41,17 @@ use crate::options::{Error, ErrorCode};
 use crate::values::{Column, Table, quote, storage};
 
 /// First byte of an inline bytes cell.
+#[cfg(feature = "testing")]
+static FULL_MATERIALIZATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many chunked values have been rebuilt whole, so tests can tell a
+/// range read from a full materialization.
+#[cfg(feature = "testing")]
+pub fn full_materializations_for_test() -> usize {
+    FULL_MATERIALIZATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) const BYTES: u8 = 0xFE;
 /// First byte of a chunked cell.
 pub(crate) const CHUNKED: u8 = 0xFF;
@@ -540,7 +551,7 @@ impl Chunks {
     pub(crate) fn materialize(&self, cell: &[u8]) -> Result<Vec<u8>, Error> {
         match logical(cell)? {
             Logical::Inline(bytes) => Ok(bytes.to_vec()),
-            Logical::Chunked(value) => self.run(|inputs| lv::materialize_attempt(&value, inputs)),
+            Logical::Chunked(value) => self.value_bytes(&value),
         }
     }
 
@@ -556,6 +567,8 @@ impl Chunks {
 
     /// The whole logical value of a descriptor.
     pub(crate) fn value_bytes(&self, value: &LargeValueRef) -> Result<Vec<u8>, Error> {
+        #[cfg(feature = "testing")]
+        FULL_MATERIALIZATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.run(|inputs| lv::materialize_attempt(value, inputs))
     }
 

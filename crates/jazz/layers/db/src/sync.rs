@@ -246,7 +246,14 @@ pub struct WireRead {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireKind {
     Mergeable,
-    Serializable { snapshot: u64, reads: Vec<WireRead> },
+    /// `own`: the sender's own commits (by local seq) that were unsettled
+    /// when the transaction began; its snapshot includes them, and the
+    /// authority resolves each to where it settled.
+    Serializable {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -306,11 +313,14 @@ pub enum SyncMessage {
     // client → server
     /// `since`: a resumed subscription the client held settled through
     /// that seq; its opening ships only rows changed after it.
+    /// `include_deleted`: the result also lists deleted rows (the root's),
+    /// which ship as their deleted current versions.
     Subscribe {
         id: u64,
         query: Query,
         binding: BTreeMap<String, Value>,
         since: Option<u64>,
+        include_deleted: bool,
     },
     Unsubscribe {
         id: u64,
@@ -328,6 +338,7 @@ pub enum SyncMessage {
         query: Query,
         binding: BTreeMap<String, Value>,
         at: Option<u64>,
+        include_deleted: bool,
     },
     Commit {
         node: [u8; 16],
@@ -412,7 +423,11 @@ pub enum SyncMessage {
 
 pub(crate) enum Kind {
     Mergeable,
-    Serializable { snapshot: u64, reads: Vec<WireRead> },
+    Serializable {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+    },
 }
 
 struct Pending {
@@ -427,6 +442,7 @@ pub(crate) struct Remote {
     refs: usize,
     query: Query,
     binding: BTreeMap<String, Value>,
+    include_deleted: bool,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// The server seq this query's result was last settled through.
     through: Option<u64>,
@@ -485,8 +501,8 @@ pub(crate) struct Client {
     arrived: bool,
 }
 
-fn remote_key(query: &Query, binding: &BTreeMap<String, Value>) -> String {
-    format!("{query:?}{binding:?}")
+fn remote_key(query: &Query, binding: &BTreeMap<String, Value>, include_deleted: bool) -> String {
+    format!("{query:?}{binding:?}{include_deleted}")
 }
 
 /// Whether a read may wait for the server: a live link needs the own
@@ -555,6 +571,10 @@ pub(crate) struct Session {
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
     outbox: Vec<SyncMessage>,
+    /// Evictions answering a `Hold`: they describe the state the client
+    /// declared, so they go out before any row this tick ships (a resumed
+    /// subscription may ship a row's newer version).
+    stale: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
     /// The versions this tick's accepted commits from the client wrote:
@@ -597,6 +617,7 @@ impl Session {
             identity,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
+            stale: Vec::new(),
             touched: BTreeSet::new(),
             committed: Vec::new(),
             support: BTreeMap::new(),
@@ -626,6 +647,7 @@ impl Session {
     fn idle(&self) -> bool {
         self.touched.is_empty()
             && self.outbox.is_empty()
+            && self.stale.is_empty()
             && self.resume.is_empty()
             && self
                 .subs
@@ -1634,6 +1656,31 @@ impl Inner {
         }
     }
 
+    /// A serializable transaction's snapshot on this store: the authority's
+    /// state through `snapshot` plus this replica's own commits that were
+    /// unsettled at begin (`own`), wherever each is now: settled at a seq,
+    /// still pending at its local seq, or rejected (then it never happened).
+    pub(crate) fn serializable_cut(&self, snapshot: u64, own: &[u64]) -> Result<Cut, Error> {
+        let mut cut = Cut::at(snapshot);
+        let me = *self.identity.node.as_bytes();
+        for &tx in own {
+            match self.settled(me, tx)? {
+                Some(Some(seq)) => cut.extra.push(seq),
+                Some(None) => {}
+                None => cut.extra.push(tx),
+            }
+        }
+        Ok(cut)
+    }
+
+    /// The own commits a replica's serializable transaction began over:
+    /// those still unsettled (none on the authority).
+    pub(crate) fn unsettled_own(&self) -> Vec<u64> {
+        self.client.as_ref().map_or_else(Vec::new, |client| {
+            client.pending.iter().map(|p| p.tx).collect()
+        })
+    }
+
     /// The cut a snapshot reference reads: the authority's state through
     /// its global base, plus each commit it names individually (a
     /// replica's writes not yet settled when it was captured) wherever
@@ -1831,6 +1878,7 @@ impl Db {
                     query: r.query.clone(),
                     binding: r.binding.clone(),
                     since: r.through,
+                    include_deleted: r.include_deleted,
                 }
             })
             .collect();
@@ -1971,9 +2019,15 @@ impl Db {
             Ok(wire) => {
                 let kind = match kind {
                     Kind::Mergeable => WireKind::Mergeable,
-                    Kind::Serializable { snapshot, reads } => {
-                        WireKind::Serializable { snapshot, reads }
-                    }
+                    Kind::Serializable {
+                        snapshot,
+                        reads,
+                        own,
+                    } => WireKind::Serializable {
+                        snapshot,
+                        reads,
+                        own,
+                    },
                 };
                 let commit = SyncMessage::Commit {
                     node: client.node,
@@ -2044,10 +2098,14 @@ impl Db {
     }
 
     /// Attach a remote query (refcounted per query and binding).
-    pub(crate) fn attach_remote(&self, prepared: &PreparedQuery) -> Option<Rc<StdCell<bool>>> {
+    pub(crate) fn attach_remote(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+    ) -> Option<Rc<StdCell<bool>>> {
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
-        let key = remote_key(&prepared.query, &prepared.binding);
+        let key = remote_key(&prepared.query, &prepared.binding, include_deleted);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some(remote.answered.clone());
@@ -2060,6 +2118,7 @@ impl Db {
             query: prepared.query.clone(),
             binding: prepared.binding.clone(),
             since: None,
+            include_deleted,
         });
         client.remote.insert(
             key.clone(),
@@ -2068,6 +2127,7 @@ impl Db {
                 refs: 1,
                 query: prepared.query.clone(),
                 binding: prepared.binding.clone(),
+                include_deleted,
                 answered: answered.clone(),
                 through: None,
                 resumed: false,
@@ -2077,12 +2137,17 @@ impl Db {
         Some(answered)
     }
 
-    pub(crate) fn detach_remote(&self, query: &Query, binding: &BTreeMap<String, Value>) {
+    pub(crate) fn detach_remote(
+        &self,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
+        include_deleted: bool,
+    ) {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return;
         };
-        let key = remote_key(query, binding);
+        let key = remote_key(query, binding, include_deleted);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -2106,6 +2171,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
+        include_deleted: bool,
         deadline: Option<Instant>,
     ) -> Option<u64> {
         let id = {
@@ -2122,6 +2188,7 @@ impl Db {
                 query: prepared.query.clone(),
                 binding: prepared.binding.clone(),
                 at,
+                include_deleted,
             });
             id
         };
@@ -3104,7 +3171,7 @@ impl Db {
                     )));
                 }
             }
-            let mut out = Vec::new();
+            let mut out = std::mem::take(&mut inner.sessions[index].stale);
             if !history_seqs.is_empty() {
                 out.push(SyncMessage::Origins {
                     commits: inner.origins(&history_seqs)?,
@@ -3167,6 +3234,7 @@ impl Db {
                 query,
                 binding,
                 since,
+                include_deleted,
             } => {
                 let prepared = db.prepare_query_bound(&query, binding)?;
                 let windowed = query.limit.is_some() || query.offset > 0;
@@ -3175,7 +3243,10 @@ impl Db {
                 let (queue, group) = inner.subscribe_member(
                     &prepared,
                     policy,
-                    ReadSpec::default(),
+                    ReadSpec {
+                        include_deleted,
+                        ..ReadSpec::default()
+                    },
                     SettledBy::Always,
                 )?;
                 inner.sessions[index]
@@ -3220,8 +3291,11 @@ impl Db {
                         current.insert((id, key), (seq, deleted, can));
                     }
                     for ((id, key), seq) in declared {
+                        // A deleted version the client already holds stays
+                        // (includeDeleted reads list it); a deletion it
+                        // missed is an eviction.
                         match current.get(&(id, key.clone())) {
-                            Some(&(now, false, can)) => {
+                            Some(&(now, deleted, can)) if !deleted || (now == seq && can) => {
                                 watch.insert(wk((
                                     stored.clone(),
                                     "id".to_owned(),
@@ -3242,7 +3316,7 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
                 session.touched.extend(touched);
-                session.outbox.extend(evict);
+                session.stale.extend(evict);
             }
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
@@ -3263,6 +3337,7 @@ impl Db {
                 query,
                 binding,
                 at,
+                include_deleted,
             } => {
                 let prepared = db.prepare_query_bound(&query, binding)?;
                 let mut inner = db.inner();
@@ -3274,6 +3349,7 @@ impl Db {
                     .to_owned();
                 let read = ReadSpec {
                     cut: at.map(Cut::at),
+                    include_deleted,
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
@@ -3463,8 +3539,27 @@ impl Db {
             }
             out
         };
-        if let WireKind::Serializable { snapshot, reads } = &kind {
+        if let WireKind::Serializable {
+            snapshot,
+            reads,
+            own,
+        } = &kind
+        {
             let inner = self.inner();
+            // The sender's own commits its snapshot included, by local seq
+            // and where each settled here (earlier on this connection, so
+            // before this one).
+            let mut settled = BTreeMap::new();
+            for &tx in own {
+                if let Some(seq) = inner
+                    .settled(origin.0, tx)
+                    .map_err(|e| (e, Vec::new()))?
+                    .flatten()
+                {
+                    settled.insert(tx, seq);
+                }
+            }
+            let in_snapshot = |seq: u64| seq <= *snapshot || settled.values().any(|s| *s == seq);
             for op in &ops {
                 if let Some(row) = op.row()
                     && inner
@@ -3472,7 +3567,7 @@ impl Db {
                         .stored_table(op.table())
                         .and_then(|table| inner.newest_seq(table, row))
                         .map_err(|e| (e, Vec::new()))?
-                        .is_some_and(|seq| seq > *snapshot)
+                        .is_some_and(|seq| !in_snapshot(seq))
                 {
                     let rows = mentioned(&inner);
                     return Err((
@@ -3495,7 +3590,14 @@ impl Db {
                     .map_err(|e| (e, Vec::new()))?;
                 let now: Vec<([u8; 16], u64)> =
                     now.iter().map(|r| (*r.id.0.as_bytes(), r.seq)).collect();
-                if now != read.rows {
+                // A row the sender read at an own commit's local seq is
+                // compared where that commit settled.
+                let then: Vec<([u8; 16], u64)> = read
+                    .rows
+                    .iter()
+                    .map(|(row, seq)| (*row, settled.get(seq).copied().unwrap_or(*seq)))
+                    .collect();
+                if now != then {
                     let rows = mentioned(&inner);
                     return Err((
                         conflict("a row read by the transaction changed since its snapshot"),
@@ -3709,19 +3811,25 @@ impl Db {
         if let Some((author, claims)) = request_scope {
             prepared = prepared.with_identity_claims(author, claims);
         }
+        // Relations arrive as nested rows in their parent's cells, so a
+        // relation read's snapshot is its root rows alone.
+        let relation = !prepared.query.array_subqueries.is_empty();
+        let result = |rows: Vec<CurrentRow>| {
+            if relation {
+                SerializedReadResult::Relation(RelationSnapshot {
+                    root_count: rows.len(),
+                    rows,
+                })
+            } else {
+                SerializedReadResult::Rows(rows)
+            }
+        };
         if let Some(tx) = open_tx {
-            return Ok(SerializedReadResult::Rows(
-                self.serializable_tx_ref(tx).all_prepared(&prepared).await?,
-            ));
+            let roots = self.serializable_tx_ref(tx).all_prepared(&prepared).await?;
+            return Ok(result(self.nest_relations(&prepared, roots)?));
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
         if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
-            // A fetch reads the authority's live rows only.
-            if opts.include_deleted && is_history_table(&query.table) {
-                return Err(crate::values::unsupported(
-                    "includeDeleted on synced history reads",
-                ));
-            }
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
                 (_, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => Some(Some(
@@ -3731,19 +3839,20 @@ impl Db {
             };
             if let Some(deadline) = wait {
                 Self::remote_shape(&prepared.query)?;
-                self.fetch(&prepared, None, deadline).await;
+                self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
+                    .await;
             }
         }
-        Ok(SerializedReadResult::Rows(
-            self.all(
+        let roots = self
+            .all(
                 &prepared,
                 ReadOpts {
                     first_load: FirstLoad::Deliver,
                     ..opts
                 },
             )
-            .await?,
-        ))
+            .await?;
+        Ok(result(self.nest_relations(&prepared, roots)?))
     }
 }
 
