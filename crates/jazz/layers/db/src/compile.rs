@@ -1163,18 +1163,48 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
-        if via.seed.is_some() || via.access_team_target != JoinTarget::Column {
-            return Err(unsupported(
-                "relation-seeded or row-id reachability on SQLite",
-            ));
+        if via.access_team_target == JoinTarget::Uncorrelated {
+            return Err(unsupported("uncorrelated reachability on SQLite"));
         }
         let access = self.table(&via.access_table)?;
         let edges = self.table(&via.edge_table)?;
-        let seed = match self.operand(&via.from, table, alias)? {
-            Term::Missing | Term::NaN => return Ok("0".to_owned()),
-            term => term.sql().expect("present").to_owned(),
-        };
         let r = self.alias("reach");
+        // The initial frontier: the seed rows' team column, or one value.
+        let seed = match &via.seed {
+            Some(seed) => {
+                let seeds = self.table(&seed.table)?;
+                let s = self.alias("s");
+                let mut conds = vec![format!("{s}._del = 0")];
+                match (&seed.user_column, &seed.user_claim) {
+                    (None, None) => {}
+                    (Some(column), Some(claim)) => {
+                        let value = self.claims.claim(claim);
+                        let Some(value) = self.present(value)?.sql().map(str::to_owned) else {
+                            return Ok("0".to_owned());
+                        };
+                        conds.push(format!("{} = {value}", column_sql(seeds, &s, column)?));
+                    }
+                    _ => {
+                        return Err(query_error(
+                            "a reachability seed names a user column without a claim",
+                        ));
+                    }
+                }
+                for filter in &seed.filters {
+                    conds.push(self.predicate(filter, seeds, &s)?);
+                }
+                format!(
+                    "SELECT {} AS team FROM {} AS {s} WHERE {}",
+                    column_sql(seeds, &s, &seed.team_column)?,
+                    self.source(seeds)?,
+                    conds.join(" AND ")
+                )
+            }
+            None => match self.operand(&via.from, table, alias)? {
+                Term::Missing | Term::NaN => return Ok("0".to_owned()),
+                term => format!("SELECT {} AS team", term.sql().expect("present")),
+            },
+        };
         let e = self.alias("e");
         let mut step = vec![format!("{e}._del = 0")];
         for filter in &via.edge_filters {
@@ -1185,14 +1215,15 @@ impl<'a> Ctx<'a> {
         let edge_source = self.source(edges)?;
         let cte = match via.bound {
             crate::query::RecursionBound::Fixpoint => format!(
-                "{r}(team) AS (SELECT {seed} UNION SELECT {parent} FROM {edge_source} AS {e} \
+                "{r}(team) AS ({seed} UNION SELECT {parent} FROM {edge_source} AS {e} \
                  JOIN {r} ON {member} = {r}.team WHERE {})",
                 and(&step)
             ),
             crate::query::RecursionBound::MaxDepth(depth) => {
                 step.push(format!("{r}.d < {depth}"));
                 format!(
-                    "{r}(team, d) AS (SELECT {seed}, 0 UNION SELECT {parent}, {r}.d + 1 \
+                    "{r}(team, d) AS (SELECT team, 0 FROM ({seed}) UNION \
+                     SELECT {parent}, {r}.d + 1 \
                      FROM {edge_source} AS {e} JOIN {r} ON {member} = {r}.team WHERE {})",
                     and(&step)
                 )
