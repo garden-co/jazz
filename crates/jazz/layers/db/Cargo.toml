@@ -17,9 +17,11 @@ testing = [
 jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-protocol.workspace = true
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.34", features = ["bundled", "functions", "hooks"] }
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 blake3 = "1"
+bytes = "1"
+serde_bytes = "0.11"
 serde_json = "1.0.145"
 futures = "0.3"
 serde = { version = "1.0.228", features = ["derive"] }

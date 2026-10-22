@@ -8,7 +8,7 @@ use crate::options::{Error, ErrorCode};
 use crate::records::{Value, ValueType};
 use crate::schema::JazzSchema;
 use crate::tools::{PolicyExpr, TablePolicies};
-use rusqlite::types::{Value as Sql, ValueRef};
+use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
 
 pub(crate) fn unsupported(what: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Query, format!("{what} is not supported yet"))
@@ -20,6 +20,55 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
 
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
     Error::new(ErrorCode::Storage, error.to_string())
+}
+
+/// One SQLite value, as bound or read. Text holds raw bytes: large-capable
+/// columns store text that is not UTF-8 (tagged bytes and chunked large-value
+/// descriptors, see [`crate::large`]), which SQLite stores and compares
+/// without interpreting.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Sql {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(Vec<u8>),
+    Blob(Vec<u8>),
+}
+
+impl Sql {
+    pub(crate) fn as_ref(&self) -> ValueRef<'_> {
+        match self {
+            Sql::Null => ValueRef::Null,
+            Sql::Integer(v) => ValueRef::Integer(*v),
+            Sql::Real(v) => ValueRef::Real(*v),
+            Sql::Text(v) => ValueRef::Text(v),
+            Sql::Blob(v) => ValueRef::Blob(v),
+        }
+    }
+}
+
+impl From<ValueRef<'_>> for Sql {
+    fn from(value: ValueRef<'_>) -> Self {
+        match value {
+            ValueRef::Null => Sql::Null,
+            ValueRef::Integer(v) => Sql::Integer(v),
+            ValueRef::Real(v) => Sql::Real(v),
+            ValueRef::Text(v) => Sql::Text(v.to_vec()),
+            ValueRef::Blob(v) => Sql::Blob(v.to_vec()),
+        }
+    }
+}
+
+impl ToSql for Sql {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(self.as_ref()))
+    }
+}
+
+impl FromSql for Sql {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        Ok(Sql::from(value))
+    }
 }
 
 /// A Jazz value as a SQLite cell. `None` means "no SQL value": NaN, which
@@ -41,23 +90,45 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::F64(v) if v.is_nan() => return Ok(None),
         Value::F64(v) => Sql::Real(*v),
         Value::Bool(v) => Sql::Integer(*v as i64),
-        Value::String(v) => Sql::Text(v.clone()),
-        Value::Bytes(v) => Sql::Blob(v.clone()),
+        Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
+        Value::Bytes(v) => Sql::Text(crate::large::inline_bytes(v)),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
     }))
 }
 
-/// Decode a SQLite cell by the column's declared type. `None` is a NULL in
-/// a non-nullable column, which only an unwritten cell can hold.
-pub(crate) fn from_sql(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
+/// Decode a SQLite cell by the column's declared type, reading a chunked
+/// large value's chunks. `None` is a NULL in a non-nullable column, which
+/// only an unwritten cell can hold.
+pub(crate) fn from_sql(
+    ty: &ValueType,
+    cell: ValueRef<'_>,
+    chunks: &crate::large::Chunks,
+) -> Result<Option<Value>, Error> {
     if let ValueType::Nullable(inner) = ty {
-        return Some(match cell {
+        return Ok(Some(match cell {
             ValueRef::Null => Value::Nullable(None),
-            cell => Value::Nullable(from_sql(inner, cell).map(Box::new)),
-        });
+            cell => Value::Nullable(from_sql(inner, cell, chunks)?.map(Box::new)),
+        }));
     }
+    match (ty, cell) {
+        (ValueType::String, ValueRef::Text(cell)) => {
+            let text = match cell.first() {
+                Some(&crate::large::CHUNKED) => chunks.materialize(cell)?,
+                _ => cell.to_vec(),
+            };
+            return Ok(String::from_utf8(text).ok().map(Value::String));
+        }
+        (ValueType::Bytes, ValueRef::Text(cell)) => {
+            return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
+        }
+        _ => {}
+    }
+    Ok(decode_fixed(ty, cell))
+}
+
+fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
     let int = || cell.as_i64().ok();
     Some(match ty {
         ValueType::U8 => Value::U8(int()? as u8),
@@ -73,8 +144,6 @@ pub(crate) fn from_sql(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
             _ => return None,
         }),
         ValueType::Bool => Value::Bool(int()? != 0),
-        ValueType::String => Value::String(cell.as_str().ok()?.to_owned()),
-        ValueType::Bytes => Value::Bytes(cell.as_blob().ok()?.to_vec()),
         ValueType::Uuid => Value::Uuid(uuid::Uuid::from_slice(cell.as_blob().ok()?).ok()?),
         ValueType::EnumTag(_) => Value::EnumTag(int()? as u8),
         _ => return None,
@@ -307,8 +376,11 @@ impl Schema {
                             ddl.push_str(&format!(
                                 "ALTER TABLE {} ADD COLUMN {} DEFAULT {default};\n",
                                 quote(&target),
-                                quote(&column.name)
+                                column_def(column)
                             ));
+                        }
+                        if crate::large::large_capable(column) {
+                            ddl.push_str(&crate::large::triggers(physical, &[column]));
                         }
                         physical.columns.push(column.clone());
                     }
@@ -327,7 +399,7 @@ impl Table {
         let mut sql = String::new();
         let columns: String = table
             .stored()
-            .map(|column| format!(", {}", quote(&column.name)))
+            .map(|column| format!(", {}", column_def(column)))
             .collect();
         let name = quote(&table.name);
         let history = quote(&format!("{}__h", table.name));
@@ -362,23 +434,40 @@ impl Table {
                 keys.join(", ")
             ));
         }
+        let large: Vec<&Column> = table
+            .stored()
+            .filter(|c| crate::large::large_capable(c))
+            .collect();
+        sql.push_str(&crate::large::triggers(table, &large));
         sql
+    }
+}
+
+/// A stored column's definition. Large-capable columns compare through the
+/// `jazz` collation, which reads chunked cells as their logical values.
+pub(crate) fn column_def(column: &Column) -> String {
+    if crate::large::large_capable(column) {
+        format!("{} COLLATE jazz", quote(&column.name))
+    } else {
+        quote(&column.name)
     }
 }
 
 /// A value as an SQL literal, for DDL defaults.
 pub(crate) fn sql_literal(value: &Value) -> Result<String, Error> {
-    use rusqlite::types::Value as Sql;
+    let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
     Ok(match to_sql(value)? {
         None => return Err(unsupported("a NaN default")),
         Some(Sql::Null) => "NULL".to_owned(),
         Some(Sql::Integer(v)) => v.to_string(),
         Some(Sql::Real(v)) => format!("{v:e}"),
-        Some(Sql::Text(v)) => format!("'{}'", v.replace('\'', "''")),
-        Some(Sql::Blob(v)) => format!(
-            "X'{}'",
-            v.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        ),
+        // A tagged bytes cell is TEXT that no SQL literal can spell (it
+        // starts with NUL), and a column default must be a literal.
+        Some(Sql::Text(v)) => match std::str::from_utf8(&v) {
+            Ok(text) if !text.contains('\0') => format!("'{}'", text.replace('\'', "''")),
+            _ => return Err(unsupported("a bytes default on an added column")),
+        },
+        Some(Sql::Blob(v)) => format!("X'{}'", hex(&v)),
     })
 }
 

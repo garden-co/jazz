@@ -15,9 +15,8 @@ use crate::query::{
 };
 use crate::records::{Value, ValueType};
 use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
-use rusqlite::types::Value as Sql;
 
-use crate::values::{Schema, Table, query_error, quote, to_sql, unsupported};
+use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
 
 /// Inherits chains with no explicit bound unroll this deep.
 const DEFAULT_INHERITS_DEPTH: usize = 10;
@@ -1470,7 +1469,9 @@ fn contains(left: Term, right: Term) -> String {
     let (Term::Sql(l), Term::Sql(r)) = (left, right) else {
         return "0".to_owned();
     };
-    format!("(instr({l}, {r}) > 0)")
+    // Never SQLite's `instr`: a large-capable cell may be tagged bytes or a
+    // chunked descriptor, which only `jz_contains` reads as its value.
+    format!("(jz_contains({l}, {r}) > 0)")
 }
 
 /// A public schema value (policy literals, defaults) as a storage value.

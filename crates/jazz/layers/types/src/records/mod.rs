@@ -114,9 +114,25 @@ pub use values::{
 pub const MAX_VARIANT_TAG_LEN: usize = 5;
 
 use values::{
-    checked_add, decode_value, encode_fixed_value, usize_to_u32, validate_schema_value_type,
-    write_u32,
+    checked_add, decode_value, encode_fixed_value, encode_value, usize_to_u32,
+    validate_schema_value_type, write_u32,
 };
+
+pub(crate) fn encode_single_field_value(
+    value: &Value,
+    value_type: &ValueType,
+) -> Result<Vec<u8>, Error> {
+    encode_value(value, value_type)
+}
+
+/// Decode one value using the ordinary value algebra. Engine-owned physical
+/// envelopes use this only behind declared logical schema types.
+pub(crate) fn decode_single_field_value(
+    bytes: &[u8],
+    value_type: &ValueType,
+) -> Result<Value, Error> {
+    decode_value(bytes, value_type)
+}
 
 /// Interned schema-side description needed to interpret compact record bytes.
 ///

@@ -1490,6 +1490,7 @@ name = "jazz-db"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "futures",
  "jazz-model",
  "jazz-protocol",
@@ -1497,6 +1498,7 @@ dependencies = [
  "postcard",
  "rusqlite",
  "serde",
+ "serde_bytes",
  "serde_json",
  "uuid",
 ]
@@ -1674,6 +1676,8 @@ dependencies = [
  "blake3",
  "bytes",
  "ed25519-dalek",
+ "futures",
+ "getrandom 0.3.4",
  "internment",
  "paste",
  "postcard",

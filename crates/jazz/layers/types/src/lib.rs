@@ -24,7 +24,9 @@ pub use internment::Intern;
 /// Column and table descriptions over [`records::ValueType`].
 #[allow(missing_docs)]
 pub mod column_schema;
-/// The inline scalar envelope for variable-width cells.
+/// Chunked large values: descriptors, immutable nodes, the edit tail and
+/// the stored-scalar envelope for variable-width cells.
+#[allow(missing_docs)]
 pub mod large_values;
 /// Logical values, value types and the record encoding Jazz schemas are
 /// described in.

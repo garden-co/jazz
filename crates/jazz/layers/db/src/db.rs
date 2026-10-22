@@ -16,7 +16,7 @@ use crate::schema::JazzSchema;
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
-use rusqlite::types::Value as Sql;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, params_from_iter};
 
 pub use crate::options::{
@@ -36,7 +36,9 @@ pub(crate) mod sync;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
-use crate::values::{Schema, Table, from_sql, quote, sql_literal, storage, to_sql, unsupported};
+use crate::values::{
+    Schema, Sql, Table, from_sql, quote, sql_literal, storage, to_sql, unsupported,
+};
 pub use sync::{
     Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RemoteLinkHint,
     SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream,
@@ -287,6 +289,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// Large-value chunks: the cache the collation and decoders read.
+    chunks: Arc<crate::large::Chunks>,
     /// The schema the current operation runs under: the owner's, or the
     /// schema view's that issued it.
     schema: Rc<Schema>,
@@ -330,6 +334,9 @@ struct Inner {
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
 }
+
+/// Large-value nodes one tick may reclaim.
+const RECLAIM_NODES_PER_TICK: usize = 256;
 
 /// File store settings.
 #[derive(Clone, Copy, Debug)]
@@ -412,7 +419,7 @@ fn rejected(message: impl Into<String>) -> Error {
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
-        Self::open_on(config, conn)
+        Self::open_on(config, conn, None)
     }
 
     /// A durable store in one SQLite file (WAL). Reopening restores rows,
@@ -434,11 +441,28 @@ impl Db {
             options.cache_kib
         ))
         .map_err(storage)?;
-        Self::open_on(config, conn)
+        Self::open_on(config, conn, Some(path))
     }
 
-    fn open_on(config: DbConfig, conn: Connection) -> Result<Self, Error> {
+    fn open_on(
+        config: DbConfig,
+        conn: Connection,
+        path: Option<&std::path::Path>,
+    ) -> Result<Self, Error> {
         let schema = Schema::new(&config.schema);
+        // The collation and functions must exist before any table that
+        // uses them is created or written.
+        let chunks = crate::large::Chunks::install(&conn, path)?;
+        conn.execute_batch(crate::large::DDL).map_err(storage)?;
+        // Nodes a transaction writes stay cached until it ends: until then
+        // the reader connection cannot see them.
+        let committed = chunks.clone();
+        conn.commit_hook(Some(move || {
+            committed.unpin();
+            false
+        }));
+        let rolled_back = chunks.clone();
+        conn.rollback_hook(Some(move || rolled_back.unpin()));
         let fresh: i64 = conn
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_jazz_%'", [], |r| r.get(0))
             .map_err(storage)?;
@@ -465,6 +489,7 @@ impl Db {
             view: None,
             inner: Rc::new(RefCell::new(Inner {
                 conn,
+                chunks,
                 schema: owner.clone(),
                 owner,
                 physical: schema,
@@ -526,8 +551,31 @@ impl Db {
 
     pub async fn tick(&self) -> Result<(), Error> {
         self.sync_tick()?;
-        self.inner().fan.collect();
+        let mut inner = self.inner();
+        inner.fan.collect();
+        inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
         Ok(())
+    }
+
+    /// Diagnostics: stored large-value nodes, and roots referenced by cells.
+    #[doc(hidden)]
+    pub fn large_value_nodes_for_test(&self) -> Result<(u64, u64), Error> {
+        let inner = self.inner();
+        inner
+            .conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM _jazz_lv_node), \
+                 (SELECT count(*) FROM _jazz_lv_root WHERE durable > 0)",
+                [],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(storage)
+    }
+
+    /// Diagnostics: the chunks reads needed that nothing local holds.
+    #[doc(hidden)]
+    pub fn take_missing_chunks_for_test(&self) -> usize {
+        self.inner().chunks.take_demand().len()
     }
 
     pub async fn close(&self) -> Result<(), Error> {
@@ -1240,10 +1288,10 @@ impl Inner {
         let mut out = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
-                let key = format!(
-                    "{:?}",
-                    rusqlite::types::Value::from(row.get_ref(0).map_err(storage)?)
-                );
+                let key = match row.get_ref(0).map_err(storage)? {
+                    ValueRef::Text(cell) => format!("{:?}", self.chunks.materialize(cell)?),
+                    cell => format!("{:?}", Sql::from(cell)),
+                };
                 blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
             } else {
                 row.get(0).map_err(storage)?
@@ -1256,7 +1304,7 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty))| {
                     let cell = row.get_ref(3 + i).map_err(storage)?;
-                    Ok((name.clone(), from_sql(ty, cell)))
+                    Ok((name.clone(), from_sql(ty, cell, &self.chunks)?))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             out.push(CurrentRow {
@@ -1312,12 +1360,11 @@ impl Inner {
             quote(column),
             quote(table)
         );
-        self.conn
-            .query_row(&sql, [row.0.as_bytes().to_vec()], |r| {
-                Ok(from_sql(&ty, r.get_ref(0)?))
-            })
-            .map_err(storage)
-            .map(|value| value.unwrap_or(Value::Nullable(None)))
+        let cell: Sql = self
+            .conn
+            .query_row(&sql, [row.0.as_bytes().to_vec()], |r| r.get(0))
+            .map_err(storage)?;
+        Ok(from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None)))
     }
 
     // ---- write primitives ---------------------------------------------
@@ -1603,8 +1650,53 @@ impl Inner {
         Ok(())
     }
 
+    /// Delete up to `budget` large-value nodes no cell or branch references.
+    fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        self.conn
+            .execute_batch("SAVEPOINT reclaim")
+            .map_err(storage)?;
+        match crate::large::reclaim(&self.conn, &self.chunks, budget) {
+            Ok(deleted) => {
+                self.conn
+                    .execute_batch("RELEASE reclaim")
+                    .map_err(storage)?;
+                Ok(deleted)
+            }
+            Err(error) => {
+                let _ = self
+                    .conn
+                    .execute_batch("ROLLBACK TO reclaim; RELEASE reclaim");
+                Err(error)
+            }
+        }
+    }
+
     fn bind_value(value: &Value) -> Result<Sql, Error> {
         to_sql(value)?.ok_or_else(|| unsupported("storing NaN"))
+    }
+
+    /// A value as the cell `column` stores. A string, JSON or bytes value
+    /// above the inline threshold is chunked: its nodes are stored in this
+    /// transaction and the cell holds their descriptor.
+    fn bind_cell(&self, column: &crate::values::Column, value: &Value) -> Result<Sql, Error> {
+        let mut inner = value;
+        while let Value::Nullable(Some(value)) = inner {
+            inner = value;
+        }
+        let logical = match inner {
+            Value::String(text) => text.as_bytes(),
+            Value::Bytes(bytes) => bytes.as_slice(),
+            _ => return Self::bind_value(value),
+        };
+        if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+            || !crate::large::large_capable(column)
+        {
+            return Self::bind_value(value);
+        }
+        let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
+            .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
+        crate::large::store(&self.conn, &self.chunks, &prepared)?;
+        Ok(Sql::Text(crate::large::chunked_cell(&prepared.value_ref)?))
     }
 
     /// Every stored column of `table`, including ones only other schema
@@ -1679,7 +1771,10 @@ impl Inner {
             sets.push(format!("_del = ?{}", values.len()));
         }
         for (name, value) in cells {
-            values.push(Self::bind_value(value)?);
+            values.push(match table.column(name) {
+                Some(column) => self.bind_cell(column, value)?,
+                None => Self::bind_value(value)?,
+            });
             sets.push(format!("{} = ?{}", quote(name), values.len()));
         }
         for (name, value) in self.stamp()?.updated() {
@@ -1747,8 +1842,8 @@ impl Inner {
         ];
         for column in &table.columns {
             let value = match (cells.get(&column.name), &column.default) {
-                (Some(value), _) => Self::bind_value(value)?,
-                (None, Some(default)) => Self::bind_value(default)?,
+                (Some(value), _) => self.bind_cell(column, value)?,
+                (None, Some(default)) => self.bind_cell(column, default)?,
                 (None, None) if column.nullable() => Sql::Null,
                 (None, None) => {
                     return Err(rejected(format!(
@@ -2148,14 +2243,15 @@ impl Inner {
                 quote(&column.name),
                 quote(table)
             );
-            let value = self
+            let cell: Sql = self
                 .conn
                 .query_row(
                     &sql,
                     rusqlite::params![row.0.as_bytes().to_vec(), key],
-                    |r| Ok(from_sql(&column.ty, r.get_ref(0)?)),
+                    |r| r.get(0),
                 )
                 .map_err(|_| rejected(format!("move source {row:?} does not exist")))?;
+            let value = from_sql(&column.ty, cell.as_ref(), &self.chunks)?;
             if let Some(value) = value {
                 cells.insert(column.name.clone(), value);
             }
