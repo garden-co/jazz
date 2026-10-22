@@ -986,8 +986,8 @@ fn admit_ingress(inner: &Inner, staged: &[lv::StagedChunk], now: i64) -> Result<
 }
 
 fn streaming_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 

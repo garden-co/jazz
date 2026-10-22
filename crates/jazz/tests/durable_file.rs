@@ -337,6 +337,7 @@ fn memory_stays_bounded_by_the_page_cache() {
         FileOptions {
             synchronous_full: false,
             cache_kib: 2 * 1024,
+            ..FileOptions::default()
         },
     ))
     .unwrap();

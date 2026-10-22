@@ -347,16 +347,19 @@ struct Cached {
 
 impl Chunks {
     /// Chunks of a store in memory (`path` is `None`) or the file at
-    /// `path`.
-    pub(crate) fn install(path: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
+    /// `path`, on its VFS.
+    pub(crate) fn install(
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Arc<Self>, Error> {
         let reader = match path {
             None => None,
-            Some(path) => {
-                let reader = Connection::open_with_flags(
-                    path,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
+            Some((path, vfs)) => {
+                let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+                let reader = match vfs {
+                    None => Connection::open_with_flags(path, flags),
+                    Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+                }
                 .map_err(storage)?;
                 Some(reader)
             }
