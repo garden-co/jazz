@@ -154,6 +154,17 @@ fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
         ValueType::Bool => Value::Bool(int()? != 0),
         ValueType::Uuid => Value::Uuid(uuid::Uuid::from_slice(cell.as_blob().ok()?).ok()?),
         ValueType::EnumTag(_) => Value::EnumTag(int()? as u8),
+        // A transaction id, `(time, node)`: history's `$transactionId`, read
+        // as 8 big-endian bytes of time then the node's 16.
+        ValueType::Tuple(members)
+            if matches!(members.as_slice(), [ValueType::U64, ValueType::Uuid]) =>
+        {
+            let (time, node) = cell.as_blob().ok()?.split_first_chunk::<8>()?;
+            Value::Tuple(vec![
+                Value::U64(u64::from_be_bytes(*time)),
+                Value::Uuid(uuid::Uuid::from_slice(node).ok()?),
+            ])
+        }
         _ => return None,
     })
 }
@@ -471,14 +482,18 @@ impl Table {
         let history = quote(&format!("{}__h", table.name));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it.
+        // first, so every index leads with it. `_c` is 1 when the version's
+        // commit wrote content (not only a delete or a restore): history
+        // reads list those versions.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL DEFAULT 0{columns}, UNIQUE (id, _b));\n\
+             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1{columns}, \
+             UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1{columns}, \
+             PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.name)),
         ));
         for index in &table.indexes {
