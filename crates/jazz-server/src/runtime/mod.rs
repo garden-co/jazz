@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use crate::kv::SqliteKv;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, SubscriberId, SyncMessage, Transport, TransportError,
-    block_on, lens_column_defaults,
+    Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
+    TransportError, WireError, block_on,
 };
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::{
@@ -131,10 +131,9 @@ const INBOUND_MESSAGES_PER_TICK: usize = 16;
 const CATALOGUE_KEY: &[u8] = b"runtime-catalogue:v1";
 
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
-/// Defaults for new columns, keyed by (table, column).
-type ColumnDefaults = BTreeMap<(String, String), Value>;
-/// One activation: a schema and the defaults its new columns take.
-type Step = (JazzSchema, ColumnDefaults);
+/// One activation: a schema and the migration lenses into it (its new
+/// columns' defaults, and the tables and columns it renames).
+type Step = (JazzSchema, Vec<MigrationLens>);
 
 /// Sendable handle for the thread that owns the runtime's store.
 #[derive(Clone)]
@@ -211,7 +210,17 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, false)
+        Self::start(schema, storage, role, false, false)
+    }
+
+    /// Start a core runtime for a catalogue-driven server whose permissions
+    /// head is not published yet: until the first schema activation,
+    /// session reads wait and session writes are rejected.
+    pub fn start_awaiting_permissions(
+        schema: JazzSchema,
+        storage: StorageConfig,
+    ) -> Result<Self, String> {
+        Self::start(schema, storage, NodeRole::Core, false, true)
     }
 
     fn start(
@@ -219,6 +228,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
         any_stored_catalogue: bool,
+        awaiting_permissions: bool,
     ) -> Result<Self, String> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
@@ -231,16 +241,18 @@ impl ServerRuntimeHandle {
         let join = thread::Builder::new()
             .name("jazz-server-runtime".to_owned())
             .spawn(move || {
-                let owner = match Owner::open(schema, &storage, any_stored_catalogue) {
-                    Ok(owner) => {
-                        let _ = started_tx.send(Ok(()));
-                        owner
-                    }
-                    Err(error) => {
-                        let _ = started_tx.send(Err(error));
-                        return;
-                    }
-                };
+                let owner =
+                    match Owner::open(schema, &storage, any_stored_catalogue, awaiting_permissions)
+                    {
+                        Ok(owner) => {
+                            let _ = started_tx.send(Ok(()));
+                            owner
+                        }
+                        Err(error) => {
+                            let _ = started_tx.send(Err(error));
+                            return;
+                        }
+                    };
                 owner.run(receiver, &owner_ticks);
             })
             .map_err(|error| format!("failed to spawn server runtime thread: {error}"))?;
@@ -267,7 +279,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, true)
+        Self::start(schema, storage, role, true, true)
     }
 
     /// Subscribe to activity notices.
@@ -437,7 +449,15 @@ impl ServerRuntimeHandle {
         self.run(move |owner| {
             let id = owner
                 .catalogue
-                .publish(schema, lens, new_tables, dropped_tables)?;
+                .publish(schema.clone(), lens, new_tables, dropped_tables)?;
+            // Clients on the published version read and write by it before
+            // (and without) it becoming current.
+            block_on(
+                owner
+                    .db
+                    .admit_schema_with_lenses(schema, &owner.catalogue.lenses_for(id)),
+            )
+            .map_err(|error| error.to_string())?;
             owner.catalogue.persist()?;
             Ok(id)
         })
@@ -475,10 +495,11 @@ impl ServerRuntimeHandle {
     #[doc(hidden)]
     pub async fn validate_schema_activation(
         &self,
-        _revision: u64,
+        revision: u64,
         schema: JazzSchema,
     ) -> Result<(), String> {
         self.run(move |owner| {
+            owner.check_revision(revision)?;
             let mut steps = owner.catalogue.activated.clone();
             steps.push(schema);
             owner.catalogue.replay(&steps)
@@ -520,7 +541,7 @@ impl ServerRuntimeHandle {
     ) -> Result<(), String> {
         self.run(move |owner| {
             let steps = deployment_steps(&snapshot)?;
-            owner.catalogue.replay_with_defaults(&steps)
+            owner.catalogue.replay_with_lenses(&steps)
         })
         .await
     }
@@ -532,7 +553,13 @@ impl ServerRuntimeHandle {
         &self,
         snapshot: CatalogueSnapshot,
     ) -> Result<(), String> {
-        let result = self.run(move |owner| owner.apply_snapshot(snapshot)).await;
+        let result = self
+            .run(move |owner| {
+                owner.apply_snapshot(snapshot)?;
+                owner.release_held_reads();
+                Ok(())
+            })
+            .await;
         if result.is_ok() {
             self.notify_activity();
         }
@@ -572,7 +599,7 @@ impl ServerRuntimeHandle {
 }
 
 /// A deployment as ordered activation steps: each lineage schema with the
-/// new-column defaults its incoming lenses carry, then the write schema.
+/// incoming lenses, then the write schema.
 fn deployment_steps(snapshot: &CatalogueSnapshot) -> Result<Vec<Step>, String> {
     let genesis = snapshot
         .schemas
@@ -584,22 +611,23 @@ fn deployment_steps(snapshot: &CatalogueSnapshot) -> Result<Vec<Step>, String> {
                 .any(|(_, publication)| publication.schema.id == schema.id)
         })
         .ok_or("deployment has no genesis schema")?;
-    let mut steps = vec![(genesis.schema.clone(), BTreeMap::new())];
-    let mut defaults = BTreeMap::new();
+    let mut steps = vec![(genesis.schema.clone(), Vec::new())];
+    let mut lenses = Vec::new();
     let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
     lineages.sort_by_key(|(seq, _)| *seq);
     for (_, publication) in lineages {
         for predecessor in &publication.predecessors {
-            defaults.extend(lens_column_defaults(&predecessor.lens).map_err(|e| e.to_string())?);
+            LensEffects::of(&predecessor.lens).map_err(|e| e.to_string())?;
+            lenses.push(predecessor.lens.clone());
         }
-        steps.push((publication.schema.schema.clone(), defaults.clone()));
+        steps.push((publication.schema.schema.clone(), lenses.clone()));
     }
     let current = snapshot
         .schemas
         .iter()
         .find(|schema| schema.id == snapshot.current_write_schema.schema)
         .ok_or("deployment write schema is missing from its schemas")?;
-    steps.push((current.schema.clone(), defaults));
+    steps.push((current.schema.clone(), lenses));
     Ok(steps)
 }
 
@@ -609,10 +637,18 @@ struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
     catalogue: Catalogue,
+    /// No permissions head is published yet: session reads wait in
+    /// `OwnerSession::held` and session commits are rejected.
+    awaiting_permissions: bool,
 }
 
 struct OwnerSession {
     subscriber: SubscriberId,
+    /// A session under its own identity (not a trusted backend or
+    /// authority link).
+    untrusted: bool,
+    /// Reads held until the permissions head is published, in order.
+    held: VecDeque<SyncMessage>,
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
@@ -650,8 +686,8 @@ impl Transport for SessionTransport {
 struct Catalogue {
     schemas: BTreeMap<SchemaVersionId, JazzSchema>,
     lenses: BTreeSet<MigrationLensId>,
-    /// New-column defaults from every admitted lens, keyed by target schema.
-    defaults: BTreeMap<SchemaVersionId, ColumnDefaults>,
+    /// Every admitted lens, keyed by target schema.
+    incoming: BTreeMap<SchemaVersionId, Vec<MigrationLens>>,
     activated: Vec<JazzSchema>,
     snapshot: CatalogueSnapshot,
     /// Where `snapshot` is kept between runs, beside a file store.
@@ -664,7 +700,7 @@ impl Catalogue {
         Self {
             schemas: BTreeMap::from([(version.id, genesis.clone())]),
             lenses: BTreeSet::new(),
-            defaults: BTreeMap::new(),
+            incoming: BTreeMap::new(),
             activated: vec![genesis.clone()],
             store: None,
             snapshot: CatalogueSnapshot {
@@ -686,7 +722,7 @@ impl Catalogue {
         new_tables: Vec<String>,
         dropped_tables: Vec<String>,
     ) -> Result<SchemaVersionId, String> {
-        let defaults = lens_column_defaults(&lens).map_err(|error| error.to_string())?;
+        LensEffects::of(&lens).map_err(|error| error.to_string())?;
         let Some(source) = self.schemas.get(&lens.source).cloned() else {
             return Err("lens source schema is not admitted".to_owned());
         };
@@ -715,7 +751,7 @@ impl Catalogue {
                 .schemas
                 .push(SchemaVersion::new(schema.clone()));
         }
-        self.defaults.entry(id).or_default().extend(defaults);
+        self.admit_lens(id, lens.clone());
         self.lenses.insert(lens.id);
         self.schemas.entry(id).or_insert(schema);
         Ok(id)
@@ -758,26 +794,33 @@ impl Catalogue {
         store.write_many(&[(CATALOGUE_KEY.to_vec(), bytes)])
     }
 
-    fn defaults_for(&self, schema: SchemaVersionId) -> ColumnDefaults {
-        self.defaults.get(&schema).cloned().unwrap_or_default()
+    fn admit_lens(&mut self, target: SchemaVersionId, lens: MigrationLens) {
+        let incoming = self.incoming.entry(target).or_default();
+        if !incoming.iter().any(|admitted| admitted.id == lens.id) {
+            incoming.push(lens);
+        }
+    }
+
+    fn lenses_for(&self, schema: SchemaVersionId) -> Vec<MigrationLens> {
+        self.incoming.get(&schema).cloned().unwrap_or_default()
     }
 
     fn replay(&self, steps: &[JazzSchema]) -> Result<(), String> {
         let steps = steps
             .iter()
-            .map(|schema| (schema.clone(), self.defaults_for(schema.version_id())))
+            .map(|schema| (schema.clone(), self.lenses_for(schema.version_id())))
             .collect::<Vec<_>>();
-        self.replay_with_defaults(&steps)
+        self.replay_with_lenses(&steps)
     }
 
     /// Activate `steps` in order on an empty scratch store.
-    fn replay_with_defaults(&self, steps: &[Step]) -> Result<(), String> {
+    fn replay_with_lenses(&self, steps: &[Step]) -> Result<(), String> {
         let Some(((first, _), rest)) = steps.split_first() else {
             return Ok(());
         };
         let scratch = block_on(Db::open(config(first.clone()))).map_err(|e| e.to_string())?;
-        for (schema, defaults) in rest {
-            block_on(scratch.activate_schema_with_defaults(schema.clone(), defaults))
+        for (schema, lenses) in rest {
+            block_on(scratch.activate_schema_with_lenses(schema.clone(), lenses))
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
@@ -821,6 +864,7 @@ impl Owner {
         schema: JazzSchema,
         storage: &StorageConfig,
         any_stored_catalogue: bool,
+        awaiting_permissions: bool,
     ) -> Result<Self, String> {
         let (db, store, stored) = match storage {
             StorageConfig::InMemory => (block_on(Db::open(config(schema.clone()))), None, None),
@@ -864,6 +908,7 @@ impl Owner {
             db,
             sessions: HashMap::new(),
             catalogue: Catalogue::new(&schema),
+            awaiting_permissions,
         };
         if let Some(snapshot) = stored {
             owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
@@ -920,6 +965,8 @@ impl Owner {
             session,
             OwnerSession {
                 subscriber,
+                untrusted: identity != AuthorSubject::SYSTEM,
+                held: VecDeque::new(),
                 queues,
                 output,
                 egress,
@@ -931,9 +978,33 @@ impl Owner {
         let Some(owner_session) = self.sessions.get(&session) else {
             return;
         };
+        let gated = self.awaiting_permissions && owner_session.untrusted;
+        let Some(owner_session) = self.sessions.get_mut(&session) else {
+            return;
+        };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
             match postcard::from_bytes::<SyncMessage>(&frame) {
+                Ok(SyncMessage::Commit { tx, .. }) if gated => {
+                    owner_session
+                        .queues
+                        .outbound
+                        .borrow_mut()
+                        .push_back(SyncMessage::Fate {
+                            tx,
+                            through: self.db.seq_high_water(),
+                            result: Err(WireError::Rejected(
+                                "permissions_head_missing: no published permissions head"
+                                    .to_owned(),
+                            )),
+                        });
+                }
+                Ok(
+                    message @ (SyncMessage::Subscribe { .. }
+                    | SyncMessage::Unsubscribe { .. }
+                    | SyncMessage::Fetch { .. }
+                    | SyncMessage::Hold { .. }),
+                ) if gated => owner_session.held.push_back(message),
                 Ok(message) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
@@ -943,6 +1014,18 @@ impl Owner {
                     self.close_session(session);
                     return;
                 }
+            }
+        }
+    }
+
+    /// The permissions head is published: reads held meanwhile are served,
+    /// ahead of anything that arrived after them.
+    fn release_held_reads(&mut self) {
+        self.awaiting_permissions = false;
+        for session in self.sessions.values_mut() {
+            let mut inbound = session.queues.inbound.borrow_mut();
+            for message in std::mem::take(&mut session.held).into_iter().rev() {
+                inbound.push_front(message);
             }
         }
     }
@@ -1001,18 +1084,31 @@ impl Owner {
         }
     }
 
+    /// An activation at a revision older than the current one is stale: the
+    /// runtime is ahead of whoever proposed it.
+    fn check_revision(&self, revision: u64) -> Result<(), String> {
+        let current = self.catalogue.snapshot.current_write_schema.revision;
+        if revision < current {
+            return Err(format!(
+                "stale active schema revision {revision}: the runtime is at revision {current}"
+            ));
+        }
+        Ok(())
+    }
+
     fn activate(
         &mut self,
         revision: u64,
         schema: JazzSchema,
         permissions: &HashMap<TableName, TablePolicies>,
     ) -> Result<SchemaVersionId, String> {
+        self.check_revision(revision)?;
         let id = schema.version_id();
-        let defaults = self.catalogue.defaults_for(id);
+        let lenses = self.catalogue.lenses_for(id);
         let selected = with_permissions(&schema, permissions)?;
         block_on(
             self.db
-                .activate_schema_with_defaults(selected.clone(), &defaults),
+                .activate_schema_with_lenses(selected.clone(), &lenses),
         )
         .map_err(|error| error.to_string())?;
         self.catalogue
@@ -1032,17 +1128,15 @@ impl Owner {
             schema: id,
         };
         self.catalogue.persist()?;
+        self.release_held_reads();
         Ok(id)
     }
 
     fn apply_snapshot(&mut self, snapshot: CatalogueSnapshot) -> Result<(), String> {
         let steps = deployment_steps(&snapshot)?;
-        for (schema, defaults) in &steps {
-            block_on(
-                self.db
-                    .activate_schema_with_defaults(schema.clone(), defaults),
-            )
-            .map_err(|error| error.to_string())?;
+        for (schema, lenses) in &steps {
+            block_on(self.db.activate_schema_with_lenses(schema.clone(), lenses))
+                .map_err(|error| error.to_string())?;
             self.catalogue
                 .schemas
                 .entry(schema.version_id())
@@ -1053,14 +1147,25 @@ impl Owner {
             for predecessor in &publication.predecessors {
                 self.catalogue.lenses.insert(predecessor.lens.id);
                 self.catalogue
-                    .defaults
-                    .entry(publication.schema.id)
-                    .or_default()
-                    .extend(
-                        lens_column_defaults(&predecessor.lens)
-                            .map_err(|error| error.to_string())?,
-                    );
+                    .admit_lens(publication.schema.id, predecessor.lens.clone());
             }
+        }
+        // Published versions that were never made current stay readable by
+        // the clients that declare them.
+        let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
+        lineages.sort_by_key(|(sequence, _)| *sequence);
+        for (_, publication) in lineages {
+            let id = publication.schema.id;
+            if self.catalogue.schemas.contains_key(&id) {
+                continue;
+            }
+            let schema = publication.schema.schema.clone();
+            block_on(
+                self.db
+                    .admit_schema_with_lenses(schema.clone(), &self.catalogue.lenses_for(id)),
+            )
+            .map_err(|error| error.to_string())?;
+            self.catalogue.schemas.insert(id, schema);
         }
         self.catalogue.snapshot = snapshot;
         self.catalogue.persist()

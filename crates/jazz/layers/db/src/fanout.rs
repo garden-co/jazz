@@ -12,6 +12,7 @@
 //! that equality; everything else watches the whole table.
 
 use super::*;
+use crate::schema::history::{history_source_table, is_history_table};
 
 pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
 
@@ -25,6 +26,10 @@ enum Watch {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GroupKey {
+    /// The renamed tables and columns of the schema naming the rows:
+    /// versions on either side of a rename compile to the same SQL but
+    /// label rows differently.
+    renames: String,
     sql: String,
     params: String,
     /// Set only when the SQL depends on the identity's session.
@@ -45,6 +50,8 @@ struct Member {
 pub(super) struct Group {
     key: GroupKey,
     prepared: PreparedQuery,
+    /// The root table's stored name, which changed rows name.
+    root: String,
     identity: Option<AuthorSubject>,
     read: ReadSpec,
     pub(super) rows: Vec<CurrentRow>,
@@ -76,6 +83,11 @@ pub(super) struct Group {
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    /// The query this group answers.
+    pub(super) fn query(&self) -> &Query {
+        &self.prepared.query
+    }
+
     fn live(&self) -> bool {
         self.members.iter().any(|m| m.queue.strong_count() > 0)
     }
@@ -241,6 +253,7 @@ impl Inner {
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
+            renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
             identity: session_used.then(|| format!("{identity:?}")),
@@ -278,13 +291,24 @@ impl Inner {
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self.execute(&compiled, &prepared.query.table) {
+        let (rows, awaiting) = match self
+            .execute(&compiled, &prepared.query.table)
+            .and_then(|rows| self.nest_relations(prepared, identity, rows))
+        {
             Ok(rows) => (rows, false),
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
             Err(error) => return Err(error),
         };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
-        let recheck = recheckable(&prepared.query, &read, &compiled);
+        let root = prepared
+            .schema
+            .as_ref()
+            .unwrap_or(&self.owner)
+            .stored_table(
+                history_source_table(&prepared.query.table).unwrap_or(&prepared.query.table),
+            )?
+            .to_owned();
+        let recheck = recheckable(&prepared.query, &root, &read, &compiled);
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
         let queue: Queue = Rc::new(RefCell::new(if awaiting {
@@ -299,6 +323,7 @@ impl Inner {
         let handle = Rc::new(RefCell::new(Group {
             key,
             prepared: prepared.clone(),
+            root,
             identity,
             read,
             rows,
@@ -342,11 +367,12 @@ impl Inner {
             let Some(target) = root.references.get(column) else {
                 continue;
             };
-            if *target != query.table
+            let target = schema.stored_table(target)?;
+            if target != root.stored
                 && !others.contains(target)
                 && compiled.projection.iter().any(|(name, _)| name == column)
             {
-                out.push((target.clone(), column.to_owned()));
+                out.push((target.to_owned(), column.to_owned()));
             }
         }
         Ok(out)
@@ -363,6 +389,7 @@ impl Inner {
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_history_origin(self.history_origin())
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -377,38 +404,50 @@ impl Inner {
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        // Watches name stored tables and columns: changed rows do.
+        let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
         // columns, so a key on a branch column would miss base changes.
         let keyable = |table: &str, column: &str| {
             read.view.is_none()
                 || schema
-                    .table(table)
-                    .is_ok_and(|t| !t.branch_by.iter().any(|c| c == column))
+                    .by_stored(table)
+                    .is_some_and(|t| !t.branch_by.iter().any(|c| t.stored_name(c) == column))
         };
         let query = &prepared.query;
-        let root = schema.table(&query.table)?;
+        // A history read's rows are its source table's versions.
+        let root = schema.table(history_source_table(&query.table).unwrap_or(&query.table))?;
         // Tables the query itself reaches (joins, arrays, includes,
         // reachability): these always watch the whole table.
         let mut structural = BTreeSet::new();
         for join in &query.joins {
-            structural.insert(join.table.clone());
+            structural.insert(stored(&join.table)?);
         }
-        fn arrays(out: &mut BTreeSet<String>, list: &[crate::query::ArraySubquery]) {
+        fn arrays(
+            out: &mut BTreeSet<String>,
+            list: &[crate::query::ArraySubquery],
+            stored: &dyn Fn(&str) -> Result<String, Error>,
+        ) -> Result<(), Error> {
             for array in list {
-                out.insert(array.table.clone());
-                arrays(out, &array.nested_arrays);
+                out.insert(stored(&array.table)?);
+                arrays(out, &array.nested_arrays, stored)?;
             }
+            Ok(())
         }
-        arrays(&mut structural, &query.array_subqueries);
+        arrays(&mut structural, &query.array_subqueries, &stored)?;
+        for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
+            let table = &source.table;
+            structural.insert(stored(history_source_table(table).unwrap_or(table))?);
+        }
         for include in &query.includes {
             let column = include.path.split('.').next().unwrap_or_default();
             if let Some(target) = root.references.get(column) {
-                structural.insert(target.clone());
+                structural.insert(stored(target)?);
             }
         }
         for reach in &query.reachable {
-            structural.insert(reach.access_table.clone());
-            structural.insert(reach.edge_table.clone());
+            structural.insert(stored(&reach.access_table)?);
+            structural.insert(stored(&reach.edge_table)?);
         }
         // Policy evidence pinned by a session equality.
         let mut pinned: HashMap<String, Option<(String, String)>> = HashMap::new();
@@ -419,7 +458,10 @@ impl Inner {
                 _ => pinned.clear(),
             }
         }
-        if pinned.contains_key(&root.name) {
+        // Policies name tables and columns as the schema they come from.
+        let policies = schema.policy_schema();
+        let mut pinned = stored_pins(policies, pinned);
+        if pinned.contains_key(&root.stored) {
             pinned.clear();
         }
         // A read policy that requires `column = session value` of the row
@@ -430,22 +472,28 @@ impl Inner {
             .and_then(|session| {
                 root.policy(Operation::Select)
                     .and_then(|p| row_pin(p, &session))
+            })
+            .and_then(|(column, value)| {
+                let governing = policies.by_stored(&root.stored)?;
+                Some((governing.stored_name(&column).to_owned(), value))
             });
         let mut watches = Vec::new();
-        let root_key = if structural.contains(&root.name) {
+        let root_key = if structural.contains(&root.stored) {
             None
         } else {
-            root_key(query, &prepared.binding).or(policy_root_key)
+            root_key(query, &prepared.binding)
+                .map(|(column, value)| (root.stored_name(&column).to_owned(), value))
+                .or(policy_root_key)
         }
-        .filter(|(column, _)| keyable(&root.name, column));
+        .filter(|(column, _)| keyable(&root.stored, column));
         watches.push(match root_key {
-            Some((column, value)) => Watch::Key(root.name.clone(), column, value),
-            None => Watch::Table(root.name.clone()),
+            Some((column, value)) => Watch::Key(root.stored.clone(), column, value),
+            None => Watch::Table(root.stored.clone()),
         });
         let mut reads = compiled.tables.clone();
         reads.extend(structural.iter().cloned());
         for table in reads {
-            if table == root.name {
+            if table == root.stored {
                 continue;
             }
             watches.push(match pinned.get(&table) {
@@ -478,7 +526,7 @@ impl Inner {
                     continue;
                 };
                 let group = group.borrow();
-                let root = group.prepared.query.table == table;
+                let root = group.root == table;
                 let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
                 let columns: Vec<&String> = group
                     .includes
@@ -815,6 +863,8 @@ impl Inner {
             .map(|(id, (index, row, _))| RemovedRow {
                 table: row.table.to_string(),
                 row_uuid: *id,
+                joined: Vec::new(),
+                version: None,
                 index: *index,
             })
             .collect();
@@ -829,6 +879,8 @@ impl Inner {
                 (!before.contains_key(&row.id)).then(|| RemovedRow {
                     table: row.table.to_string(),
                     row_uuid: row.id,
+                    joined: Vec::new(),
+                    version: None,
                     index,
                 })
             }));
@@ -892,7 +944,8 @@ impl Inner {
         if rows.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let table = &self.schema.tables[&group.prepared.query.table];
+        let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
+        let table = schema.tables.get(&group.prepared.query.table)?;
         // By id alone a branched table's row is ambiguous.
         if !table.branch_by.is_empty() {
             return None;
@@ -906,7 +959,7 @@ impl Inner {
         }
         let sql = format!(
             "SELECT t.id{columns} FROM {} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each(?1))",
-            quote(&table.name)
+            quote(&table.stored)
         );
         let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
@@ -977,11 +1030,40 @@ impl Inner {
         }
     }
 
+    /// A group's rows, with array relations nested in their cells.
+    fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
+        let rows = self.run(&group.prepared, group.identity, &group.read)?;
+        self.nest_relations(&group.prepared, group.identity, rows)
+    }
+
     fn reset_group(&self, group: &mut Group) {
-        match self.run(&group.prepared, group.identity, &group.read) {
+        match self.group_rows(group) {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
             Ok(rows) => {
                 group.awaiting = false;
+                // Rows that left the result go out as removals before the
+                // re-opening: a reset tells local readers to replace their
+                // result, but a replica only drops rows it is told to (a
+                // tighter policy must evict what it can no longer read).
+                if group.opened {
+                    let kept: BTreeSet<RowKey> = rows.iter().map(row_key).collect();
+                    let removed: Vec<RemovedRow> = group
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, row)| !kept.contains(&row_key(row)))
+                        .map(|(index, row)| RemovedRow {
+                            table: row.table.to_string(),
+                            row_uuid: row.id,
+                            joined: row.joined.to_vec(),
+                            version: row.version,
+                            index,
+                        })
+                        .collect();
+                    if !removed.is_empty() {
+                        group.push(delta(false, Vec::new(), Vec::new(), removed));
+                    }
+                }
                 group.opened = true;
                 group.push(opening(&rows));
                 group.rows = rows;
@@ -1009,7 +1091,7 @@ impl Inner {
                 None => {}
             }
         }
-        let rows = match self.run(&group.prepared, group.identity, &group.read) {
+        let rows = match self.group_rows(group) {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
@@ -1096,8 +1178,9 @@ impl Group {
 /// aggregates, windows), outside branch views and cuts, whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
-fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
-    query.offset == 0
+fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
+    !is_history_table(&query.table)
+        && query.offset == 0
         && query.aggregate.is_none()
         && query.joins.is_empty()
         && query.flat_join.is_none()
@@ -1108,7 +1191,7 @@ fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
         && read.view.is_none()
         && read.cut.is_none()
         && !compiled.aggregate
-        && compiled.sql.matches(&quote(&query.table)).count() == 1
+        && compiled.sql.matches(&quote(root)).count() == 1
 }
 
 /// Whether every order column of a query is among its shown columns.
@@ -1169,19 +1252,33 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
     delta(true, added, Vec::new(), Vec::new())
 }
 
+/// What identifies a result row across runs: its id, plus its seq for a
+/// history read, whose versions share their row's id, and a flat join's
+/// joined rows (the occurrence).
+type RowKey = (RowUuid, u64, Arc<[crate::values::JoinedRow]>);
+
+fn row_key(row: &CurrentRow) -> RowKey {
+    let version = if is_history_table(&row.table) {
+        row.seq
+    } else {
+        0
+    };
+    (row.id, version, row.joined.clone())
+}
+
 /// The keyed diff of two results, or `None` when nothing changed.
 fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
-    let old: HashMap<RowUuid, (usize, &CurrentRow)> = before
+    let old: HashMap<RowKey, (usize, &CurrentRow)> = before
         .iter()
         .enumerate()
-        .map(|(i, row)| (row.id, (i, row)))
+        .map(|(i, row)| (row_key(row), (i, row)))
         .collect();
-    let new: BTreeSet<RowUuid> = after.iter().map(|row| row.id).collect();
+    let new: BTreeSet<RowKey> = after.iter().map(row_key).collect();
     let moved = moved_rows(before, after, &new);
     let mut added = Vec::new();
     let mut updated = Vec::new();
     for (index, row) in after.iter().enumerate() {
-        match old.get(&row.id) {
+        match old.get(&row_key(row)) {
             None => added.push(SubscriptionOutputRow {
                 row: row.clone(),
                 previous_index: None,
@@ -1190,7 +1287,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
             Some((previous, prior))
                 if prior.cells != row.cells
                     || prior.deleted != row.deleted
-                    || moved.contains(&row.id) =>
+                    || moved.contains(&row_key(row)) =>
             {
                 updated.push(SubscriptionOutputRow {
                     row: row.clone(),
@@ -1204,10 +1301,12 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
     let removed: Vec<RemovedRow> = before
         .iter()
         .enumerate()
-        .filter(|(_, row)| !new.contains(&row.id))
+        .filter(|(_, row)| !new.contains(&row_key(row)))
         .map(|(index, row)| RemovedRow {
             table: row.table.to_string(),
             row_uuid: row.id,
+            joined: row.joined.to_vec(),
+            version: row.version,
             index,
         })
         .collect();
@@ -1223,17 +1322,17 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
 fn moved_rows(
     before: &[CurrentRow],
     after: &[CurrentRow],
-    kept_after: &BTreeSet<RowUuid>,
-) -> BTreeSet<RowUuid> {
-    let rank: HashMap<RowUuid, usize> = before
+    kept_after: &BTreeSet<RowKey>,
+) -> BTreeSet<RowKey> {
+    let rank: HashMap<RowKey, usize> = before
         .iter()
-        .filter(|row| kept_after.contains(&row.id))
+        .filter(|row| kept_after.contains(&row_key(row)))
         .enumerate()
-        .map(|(rank, row)| (row.id, rank))
+        .map(|(rank, row)| (row_key(row), rank))
         .collect();
-    let kept: Vec<(RowUuid, usize)> = after
+    let kept: Vec<(RowKey, usize)> = after
         .iter()
-        .filter_map(|row| Some((row.id, *rank.get(&row.id)?)))
+        .filter_map(|row| Some((row_key(row), *rank.get(&row_key(row))?)))
         .collect();
     // Patience sorting: `tails[k]` ends the best increasing run of length
     // k + 1; `back` links each element to its predecessor in its run.
@@ -1257,7 +1356,7 @@ fn moved_rows(
     kept.iter()
         .zip(in_order)
         .filter(|(_, in_order)| !in_order)
-        .map(|((id, _), _)| *id)
+        .map(|((id, _), _)| id.clone())
         .collect()
 }
 
@@ -1352,6 +1451,39 @@ pub(super) fn policy_pins(
         // Everything else reads only the protected row (and the session).
         _ => true,
     }
+}
+
+/// Policy pins (see [`policy_pins`]) by stored table and column. A table
+/// the schema does not know stays unpinned (it is watched whole).
+/// `schema`'s tables and columns named other than they are stored, in a
+/// canonical text form (empty without renames).
+fn renames(schema: &Schema) -> String {
+    let mut out = String::new();
+    for table in schema.tables.values() {
+        let columns = table.columns.iter().filter(|c| c.name != c.stored);
+        if table.name == table.stored && columns.clone().next().is_none() {
+            continue;
+        }
+        out.push_str(&format!("{:?}={:?}:", table.name, table.stored));
+        for column in columns {
+            out.push_str(&format!("{:?}={:?},", column.name, column.stored));
+        }
+        out.push(';');
+    }
+    out
+}
+
+pub(super) fn stored_pins(
+    schema: &Schema,
+    pins: HashMap<String, Option<(String, String)>>,
+) -> HashMap<String, Option<(String, String)>> {
+    pins.into_iter()
+        .filter_map(|(table, pin)| {
+            let table = schema.table(&table).ok()?;
+            let pin = pin.map(|(column, value)| (table.stored_name(&column).to_owned(), value));
+            Some((table.stored.clone(), pin))
+        })
+        .collect()
 }
 
 /// `column = session value` required of the protected row itself: the

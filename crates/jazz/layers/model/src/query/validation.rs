@@ -1692,6 +1692,14 @@ fn qualify_flat_join_column(
     column: &str,
     sources: &BTreeMap<String, &TableSchema>,
 ) -> Result<String, QueryError> {
+    let field = flat_join_qualified_field(column).map_or(column, |(_, field)| field);
+    if crate::schema::magic::MagicColumn::parse(field).is_some_and(|magic| magic.is_deletion()) {
+        // includeDeleted() widens only a plain root query. Flat-join sources
+        // read live rows, so they have no deletion metadata to filter on.
+        return Err(QueryError::UnsupportedRelationQuery(format!(
+            "Reading {field} is not supported in flat joins yet"
+        )));
+    }
     if let Ok((scope, field)) = flat_join_qualified_field(column) {
         let table = sources
             .get(scope)
@@ -2037,18 +2045,14 @@ fn planner_column_type<'a>(
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
-    if let Some(ty) = crate::ids::AuthorSubject::metadata_type(column) {
-        return Ok(Some(ty));
-    }
     if is_permission_introspection_magic_column(column) {
         return Err(QueryError::UnsupportedMagicColumn {
             column: column.to_owned(),
         });
     }
-    match column {
-        "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
-        _ => Ok(None),
-    }
+    Ok(crate::schema::magic::MagicColumn::parse(column)
+        .filter(|column| column.is_provenance())
+        .map(|column| column.value_type()))
 }
 
 fn is_permission_introspection_magic_column(column: &str) -> bool {

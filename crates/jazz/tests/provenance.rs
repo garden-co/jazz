@@ -337,3 +337,83 @@ fn author_codes_never_leave_their_database() {
         );
     }
 }
+
+/// An author is its account and exact principal: `$createdBy` reads as the
+/// whole record, its parts filter, and two principals of one account stay
+/// distinct authors.
+#[test]
+fn author_provenance_carries_the_account() {
+    let db = db();
+    let account = jazz::account_registry::AccountId(uuid::Uuid::from_bytes([0x0a; 16]));
+    let author = AuthorSubject::authenticated("https://issuer.example", "alice")
+        .unwrap()
+        .with_account(account);
+    let other_principal = AuthorSubject::authenticated("https://issuer.example", "alice-2")
+        .unwrap()
+        .with_account(account);
+    for (n, who) in [(1, author), (2, other_principal)] {
+        block_on(db.insert(
+            "notes",
+            body("a"),
+            InsertOptions {
+                row_id: Some(row(n)),
+                identity: WriteIdentity::Session(who),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+
+    let prepared = db
+        .prepare_query(
+            &Query::from("notes")
+                .filter(eq(col("id"), lit(Value::Uuid(row(1).0))))
+                .select(["$createdBy", "$createdBy.identity", "$updatedBy"]),
+        )
+        .unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let record = |name: &str| -> Vec<Value> {
+        match rows[0].cells().find(|(n, _)| *n == name).unwrap().1 {
+            Some(Value::Nullable(Some(value))) => match &**value {
+                Value::Record(record) => record.to_values().unwrap(),
+                other => panic!("{name}: {other:?}"),
+            },
+            other => panic!("{name}: {other:?}"),
+        }
+    };
+    let identity = |subject: &str| -> Vec<Value> {
+        vec![
+            Value::String("https://issuer.example".to_owned()),
+            Value::String(subject.to_owned()),
+        ]
+    };
+    let created = record("$createdBy");
+    assert_eq!(created[0], Value::Uuid(account.0));
+    let Value::Record(created_identity) = &created[1] else {
+        panic!("{:?}", created[1]);
+    };
+    assert_eq!(created_identity.to_values().unwrap(), identity("alice"));
+    assert_eq!(record("$createdBy.identity"), identity("alice"));
+    // Written once: the update author reads as the create author.
+    assert_eq!(record("$updatedBy"), created);
+
+    let count = |query: Query| {
+        block_on(db.all(&db.prepare_query(&query).unwrap(), ReadOpts::default()))
+            .unwrap()
+            .len()
+    };
+    assert_eq!(
+        count(
+            Query::from("notes").filter(eq(col("$createdBy.account"), lit(Value::Uuid(account.0))))
+        ),
+        2
+    );
+    assert_eq!(
+        count(Query::from("notes").filter(eq(
+            col("$createdBy.identity.subject"),
+            lit(Value::String("alice".to_owned()))
+        ))),
+        1
+    );
+    assert_eq!(db.interned_authors_for_test(), 2);
+}

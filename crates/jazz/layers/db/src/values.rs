@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
-use crate::records::{Value, ValueType};
+use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+use crate::result_tree::{ResultNode, ResultRelation};
 use crate::schema::JazzSchema;
 use crate::tools::{PolicyExpr, TablePolicies};
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
@@ -102,8 +103,88 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
+        Value::Array(items) => Sql::Text(array_json(items)?.to_string().into_bytes()),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
     }))
+}
+
+/// An array cell as JSON text, so plain SQLite reads it with `json_each`.
+/// Elements are JSON scalars (uuids as their hyphenated strings, enum
+/// tags as numbers) or nested arrays; equal arrays encode to equal text.
+fn array_json(items: &[Value]) -> Result<serde_json::Value, Error> {
+    items
+        .iter()
+        .map(element_json)
+        .collect::<Result<Vec<_>, _>>()
+        .map(serde_json::Value::Array)
+}
+
+fn element_json(item: &Value) -> Result<serde_json::Value, Error> {
+    Ok(match item {
+        Value::Nullable(None) => serde_json::Value::Null,
+        Value::Nullable(Some(inner)) => element_json(inner)?,
+        Value::U8(v) => (*v).into(),
+        Value::U16(v) => (*v).into(),
+        Value::U32(v) => (*v).into(),
+        Value::U64(v) | Value::U48(v) => (*v).into(),
+        Value::I32(v) => (*v).into(),
+        Value::I64(v) => (*v).into(),
+        Value::F64(v) => serde_json::Number::from_f64(*v)
+            .ok_or_else(|| unsupported("storing NaN or infinity in an array"))?
+            .into(),
+        Value::Bool(v) => (*v).into(),
+        Value::String(v) => v.clone().into(),
+        Value::Uuid(v) => v.to_string().into(),
+        Value::EnumTag(v) => (*v).into(),
+        Value::Array(items) => array_json(items)?,
+        other => {
+            return Err(unsupported(format!(
+                "storing {other:?} inside an array in SQLite"
+            )));
+        }
+    })
+}
+
+/// A JSON array element back as a value of its declared type.
+fn json_element(ty: &ValueType, json: &serde_json::Value) -> Option<Value> {
+    use serde_json::Value as Json;
+    Some(match (ty, json) {
+        (ValueType::Nullable(_), Json::Null) => Value::Nullable(None),
+        (ValueType::Nullable(inner), json) => {
+            Value::Nullable(Some(Box::new(json_element(inner, json)?)))
+        }
+        (ValueType::U8, json) => Value::U8(json.as_u64()?.try_into().ok()?),
+        (ValueType::U16, json) => Value::U16(json.as_u64()?.try_into().ok()?),
+        (ValueType::U32, json) => Value::U32(json.as_u64()?.try_into().ok()?),
+        (ValueType::U64, json) => Value::U64(json.as_u64()?),
+        (ValueType::U48, json) => Value::U48(json.as_u64()?),
+        (ValueType::I32, json) => Value::I32(json.as_i64()?.try_into().ok()?),
+        (ValueType::I64, json) => Value::I64(json.as_i64()?),
+        (ValueType::F64, json) => Value::F64(json.as_f64()?),
+        (ValueType::Bool, Json::Bool(v)) => Value::Bool(*v),
+        (ValueType::String, Json::String(v)) => Value::String(v.clone()),
+        (ValueType::Uuid, Json::String(v)) => Value::Uuid(v.parse().ok()?),
+        (ValueType::EnumTag(_), json) => Value::EnumTag(json.as_u64()?.try_into().ok()?),
+        (ValueType::Array(element), Json::Array(items)) => Value::Array(
+            items
+                .iter()
+                .map(|item| json_element(element, item))
+                .collect::<Option<_>>()?,
+        ),
+        _ => return None,
+    })
+}
+
+/// An array element bound for comparison with what `json_each` reads back
+/// as its `value`: uuids are their hyphenated text there.
+pub(crate) fn array_needle(sql: Sql) -> Sql {
+    match sql {
+        Sql::Blob(bytes) => match uuid::Uuid::from_slice(&bytes) {
+            Ok(id) => Sql::Text(id.to_string().into_bytes()),
+            Err(_) => Sql::Blob(bytes),
+        },
+        sql => sql,
+    }
 }
 
 /// Decode a SQLite cell by the column's declared type, reading a chunked
@@ -131,9 +212,59 @@ pub(crate) fn from_sql(
         (ValueType::Bytes, ValueRef::Text(cell)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
         }
+        // An author record, read as a JSON array of its fields (see
+        // `compile::column_sql`).
+        (ValueType::Record(descriptor), ValueRef::Text(cell)) => {
+            let json = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("record cell: {e}")))?;
+            return Ok(json_record(descriptor, &json));
+        }
+        (ValueType::Array(_), ValueRef::Text(cell)) => {
+            let json = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+            return Ok(json_element(ty, &json));
+        }
         _ => {}
     }
     Ok(decode_fixed(ty, cell))
+}
+
+/// A record from a JSON array of its fields in descriptor order: strings,
+/// uuids as hex, nulls, and nested records.
+fn json_record(
+    descriptor: &crate::records::RecordDescriptor,
+    json: &serde_json::Value,
+) -> Option<Value> {
+    use serde_json::Value as Json;
+    fn field(ty: &ValueType, json: &Json) -> Option<Value> {
+        Some(match (ty, json) {
+            (ValueType::Nullable(_), Json::Null) => Value::Nullable(None),
+            (ValueType::Nullable(inner), json) => {
+                Value::Nullable(Some(Box::new(field(inner, json)?)))
+            }
+            (ValueType::String, Json::String(v)) => Value::String(v.clone()),
+            (ValueType::Uuid, Json::String(v)) => Value::Uuid(v.parse().ok()?),
+            (ValueType::Record(descriptor), json) => json_record(descriptor, json)?,
+            _ => return None,
+        })
+    }
+    let Json::Array(items) = json else {
+        return None;
+    };
+    let fields = descriptor.fields();
+    if items.len() != fields.len() {
+        return None;
+    }
+    let values = fields
+        .iter()
+        .zip(items)
+        .map(|(f, item)| field(&f.value_type, item))
+        .collect::<Option<Vec<_>>>()?;
+    let raw = descriptor.create(&values).ok()?;
+    Some(Value::Record(crate::records::OwnedRecord::new(
+        raw,
+        *descriptor,
+    )))
 }
 
 fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
@@ -154,6 +285,17 @@ fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
         ValueType::Bool => Value::Bool(int()? != 0),
         ValueType::Uuid => Value::Uuid(uuid::Uuid::from_slice(cell.as_blob().ok()?).ok()?),
         ValueType::EnumTag(_) => Value::EnumTag(int()? as u8),
+        // A transaction id, `(time, node)`: history's `$transactionId`, read
+        // as 8 big-endian bytes of time then the node's 16.
+        ValueType::Tuple(members)
+            if matches!(members.as_slice(), [ValueType::U64, ValueType::Uuid]) =>
+        {
+            let (time, node) = cell.as_blob().ok()?.split_first_chunk::<8>()?;
+            Value::Tuple(vec![
+                Value::U64(u64::from_be_bytes(*time)),
+                Value::Uuid(uuid::Uuid::from_slice(node).ok()?),
+            ])
+        }
         _ => return None,
     })
 }
@@ -161,7 +303,11 @@ fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
 /// One application column.
 #[derive(Clone, Debug)]
 pub struct Column {
+    /// The name this schema reads and writes it by.
     pub name: String,
+    /// The stored column's name: the name it was created under. A rename
+    /// lens changes `name` only, so every schema version reads one column.
+    pub stored: String,
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
@@ -176,7 +322,11 @@ impl Column {
 /// One application table.
 #[derive(Clone, Debug)]
 pub struct Table {
+    /// The name this schema reads and writes it by.
     pub name: String,
+    /// The stored table's name: the name it was created under (see
+    /// [`Column::stored`]). SQL and every table-keyed bookkeeping use it.
+    pub stored: String,
     pub columns: Vec<Column>,
     pub references: BTreeMap<String, String>,
     pub policies: TablePolicies,
@@ -191,31 +341,91 @@ pub struct Table {
     pub stored_provenance: Vec<Column>,
 }
 
-/// Provenance as read. Timestamps are Unix ms (u64, as in Jazz); authors
-/// are read by their identity parts, so policies and filters can compare
+/// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
+/// read whole (`$createdBy`: account and identity), by identity, or by
+/// part, so policies and filters can compare `$createdBy.account`,
 /// `$createdBy.identity.subject` and friends.
-pub(crate) const PROVENANCE: [&str; 6] = [
+pub(crate) const PROVENANCE: [&str; 12] = [
     "$createdAt",
     "$updatedAt",
+    "$createdBy",
+    "$createdBy.account",
+    "$createdBy.identity",
     "$createdBy.identity.issuer",
     "$createdBy.identity.subject",
+    "$updatedBy",
+    "$updatedBy.account",
+    "$updatedBy.identity",
     "$updatedBy.identity.issuer",
     "$updatedBy.identity.subject",
 ];
 
+/// The current deletion of a row, readable with `includeDeleted`: the
+/// deleting version's update stamp, NULL for live and restored rows. Never
+/// stored: a deleted row is its current version with `_del` set, and that
+/// version's update stamp is the deletion's.
+pub(crate) const DELETION: [&str; 6] = [
+    "$deletedAt",
+    "$deletedBy",
+    "$deletedBy.account",
+    "$deletedBy.identity",
+    "$deletedBy.identity.issuer",
+    "$deletedBy.identity.subject",
+];
+
+/// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
+pub(crate) fn is_deletion(column: &str) -> bool {
+    column == "$deletedAt" || column == "$deletedBy" || column.starts_with("$deletedBy.")
+}
+
 /// Provenance as stored: each author is one code into `_jazz_authors`
-/// instead of its two strings on every row version.
+/// instead of its account and two strings on every row version.
 pub(crate) const STORED_PROVENANCE: [&str; 4] =
     ["$createdAt", "$updatedAt", "$createdBy", "$updatedBy"];
 
-/// The stored author column and identity part behind a readable provenance
-/// column, e.g. `$createdBy.identity.subject` -> (`$createdBy`, `subject`).
+/// An author as interned in `_jazz_authors`: account, issuer, subject.
+pub(crate) type AuthorKey = (uuid::Uuid, String, String);
+
+/// A writer's durable attribution. Every row author has an account (the
+/// `$createdBy` record's `account` is not nullable); a writer without one
+/// (the system, an accountless principal) is attributed to the reserved
+/// system account, as Jazz attributes system writes.
+pub(crate) fn author_key(author: &crate::ids::AuthorSubject) -> AuthorKey {
+    let (issuer, subject) = author.principal_parts();
+    let account = author
+        .account_id()
+        .unwrap_or(jazz_types::account_registry::SYSTEM_ACCOUNT_ID);
+    (account.0, issuer, subject)
+}
+
+/// The stored author column and `_jazz_authors` field behind a readable
+/// provenance column, e.g. `$createdBy.identity.subject` -> (`$createdBy`,
+/// `subject`).
 pub(crate) fn author_part(column: &str) -> Option<(&'static str, &'static str)> {
     Some(match column {
+        "$createdBy.account" => ("$createdBy", "account"),
         "$createdBy.identity.issuer" => ("$createdBy", "issuer"),
         "$createdBy.identity.subject" => ("$createdBy", "subject"),
+        "$updatedBy.account" => ("$updatedBy", "account"),
         "$updatedBy.identity.issuer" => ("$updatedBy", "issuer"),
         "$updatedBy.identity.subject" => ("$updatedBy", "subject"),
+        "$deletedBy.account" => ("$deletedBy", "account"),
+        "$deletedBy.identity.issuer" => ("$deletedBy", "issuer"),
+        "$deletedBy.identity.subject" => ("$deletedBy", "subject"),
+        _ => return None,
+    })
+}
+
+/// The stored author column behind a readable author record, and whether
+/// it is the whole author (else its identity alone).
+pub(crate) fn author_record(column: &str) -> Option<(&'static str, bool)> {
+    Some(match column {
+        "$createdBy" => ("$createdBy", true),
+        "$createdBy.identity" => ("$createdBy", false),
+        "$updatedBy" => ("$updatedBy", true),
+        "$updatedBy.identity" => ("$updatedBy", false),
+        "$deletedBy" => ("$deletedBy", true),
+        "$deletedBy.identity" => ("$deletedBy", false),
         _ => return None,
     })
 }
@@ -235,6 +445,7 @@ fn stored_provenance_columns() -> Vec<Column> {
         .iter()
         .map(|name| Column {
             name: (*name).to_owned(),
+            stored: (*name).to_owned(),
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
@@ -242,16 +453,28 @@ fn stored_provenance_columns() -> Vec<Column> {
         .collect()
 }
 
+fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
+    match ty {
+        ValueType::Nullable(inner) => inner,
+        ty => ty,
+    }
+}
+
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
         .iter()
+        .chain(&DELETION)
         .map(|name| Column {
             name: (*name).to_owned(),
-            ty: if name.ends_with("At") {
-                ValueType::Nullable(Box::new(ValueType::U64))
+            stored: (*name).to_owned(),
+            ty: ValueType::Nullable(Box::new(if name.ends_with("At") {
+                ValueType::U64
             } else {
-                ValueType::Nullable(Box::new(ValueType::String))
-            },
+                unwrap_nullable_type(
+                    crate::ids::AuthorSubject::metadata_type(name).expect("an author path"),
+                )
+                .clone()
+            })),
             default: None,
             json: false,
         })
@@ -270,6 +493,48 @@ impl Table {
     /// Every stored column: application columns, then stored provenance.
     pub fn stored(&self) -> impl Iterator<Item = &Column> {
         self.columns.iter().chain(&self.stored_provenance)
+    }
+
+    /// The stored name of a readable column (`id` and provenance are
+    /// stored by their own names).
+    pub fn stored_name<'a>(&'a self, name: &'a str) -> &'a str {
+        match self.columns.iter().find(|column| column.name == name) {
+            Some(column) => &column.stored,
+            None => name,
+        }
+    }
+
+    /// An application or stored provenance column by its stored name.
+    pub fn by_stored(&self, stored: &str) -> Option<&Column> {
+        self.stored().find(|column| column.stored == stored)
+    }
+
+    /// This table as the store holds it: named by stored names throughout.
+    pub(crate) fn physical(&self) -> Table {
+        let mut table = self.clone();
+        table.name = table.stored.clone();
+        table.indexes = self
+            .indexes
+            .iter()
+            .map(|index| self.stored_index(index))
+            .collect();
+        for column in &mut table.columns {
+            column.name = column.stored.clone();
+        }
+        table.branch_by = self
+            .branch_by
+            .iter()
+            .map(|column| self.stored_name(column).to_owned())
+            .collect();
+        table
+    }
+
+    /// An index's key list by stored column names.
+    pub(crate) fn stored_index(&self, index: &[String]) -> Vec<String> {
+        index
+            .iter()
+            .map(|column| self.stored_name(column).to_owned())
+            .collect()
     }
 
     pub fn has_column(&self, name: &str) -> bool {
@@ -294,6 +559,11 @@ impl Table {
 pub struct Schema {
     pub tables: BTreeMap<String, Table>,
     pub jazz: JazzSchema,
+    /// The schema whose policies govern this one's tables, when they are
+    /// another's: a sync session on an older version is checked against
+    /// the current schema's policies, compiled under its names (tables
+    /// match by stored name; see [`crate::compile::Ctx`]).
+    pub policies_from: Option<std::rc::Rc<Schema>>,
 }
 
 impl Schema {
@@ -310,6 +580,7 @@ impl Schema {
                 .iter()
                 .map(|column| Column {
                     name: column.name.clone(),
+                    stored: column.name.clone(),
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: format!("{:?}", column.large_value_kind) == "Json",
@@ -328,6 +599,7 @@ impl Schema {
                 table.name.clone(),
                 Table {
                     name: table.name.clone(),
+                    stored: table.name.clone(),
                     columns,
                     references: table.references.clone(),
                     policies: public
@@ -343,6 +615,7 @@ impl Schema {
         Self {
             tables,
             jazz: jazz.clone(),
+            policies_from: None,
         }
     }
 
@@ -358,22 +631,92 @@ impl Schema {
         self.tables.values().map(Table::ddl).collect()
     }
 
+    /// `jazz` with each table and column stored under the name `names`
+    /// gives it; ones `names` does not list are stored by their own names.
+    pub fn stored_as(jazz: &JazzSchema, names: &StoredNames) -> Self {
+        let mut schema = Self::new(jazz);
+        for table in schema.tables.values_mut() {
+            let Some((stored, columns)) = names.tables.get(&table.name) else {
+                continue;
+            };
+            table.stored = stored.clone();
+            for column in &mut table.columns {
+                if let Some(stored) = columns.get(&column.name) {
+                    column.stored = stored.clone();
+                }
+            }
+        }
+        schema
+    }
+
+    /// Where this schema stores each of its tables and columns.
+    pub fn names(&self) -> StoredNames {
+        StoredNames {
+            tables: self
+                .tables
+                .values()
+                .map(|table| {
+                    let columns = table
+                        .columns
+                        .iter()
+                        .map(|column| (column.name.clone(), column.stored.clone()))
+                        .collect();
+                    (table.name.clone(), (table.stored.clone(), columns))
+                })
+                .collect(),
+        }
+    }
+
+    /// `self` governed by `current`'s policies: each table takes the
+    /// policies of `current`'s table with the same stored name (none, so
+    /// deny, when `current` no longer has it).
+    pub fn with_policies_of(mut self, current: std::rc::Rc<Schema>) -> Self {
+        for table in self.tables.values_mut() {
+            table.policies = current
+                .by_stored(&table.stored)
+                .map(|table| table.policies.clone())
+                .unwrap_or_default();
+        }
+        self.policies_from = Some(current);
+        self
+    }
+
+    /// The schema whose names this schema's policies use.
+    pub fn policy_schema(&self) -> &Schema {
+        self.policies_from.as_deref().unwrap_or(self)
+    }
+
+    /// The table stored as `stored`.
+    pub fn by_stored(&self, stored: &str) -> Option<&Table> {
+        match self.tables.get(stored) {
+            Some(table) if table.stored == stored => Some(table),
+            _ => self.tables.values().find(|table| table.stored == stored),
+        }
+    }
+
+    /// The stored name of table `name`.
+    pub fn stored_table(&self, name: &str) -> Result<&str, Error> {
+        Ok(&self.table(name)?.stored)
+    }
+
     /// The physical store for `self` plus `other`: tables and columns are
-    /// unioned, so every schema view reads and writes one set of rows. Returns
+    /// unioned by their stored names, so every schema view reads and writes
+    /// one set of rows. `self` is keyed and named by stored names. Returns
     /// the DDL that brings an existing store up to the union: new tables,
     /// `ADD COLUMN ... DEFAULT` for new columns (an O(1) schema change; old
     /// rows read the default without being rewritten) and new indexes.
     pub fn union(&mut self, other: &Schema) -> Result<String, Error> {
         let mut ddl = String::new();
-        for (name, table) in &other.tables {
+        for table in other.tables.values() {
+            let name = &table.stored;
             match self.tables.get_mut(name) {
                 None => {
                     ddl.push_str(&table.ddl());
-                    self.tables.insert(name.clone(), table.clone());
+                    self.tables.insert(name.clone(), table.physical());
                 }
                 Some(physical) => {
                     for column in &table.columns {
-                        if physical.column(&column.name).is_some() {
+                        if physical.column(&column.stored).is_some() {
                             continue;
                         }
                         let default = match &column.default {
@@ -387,15 +730,18 @@ impl Schema {
                                 column_def(column)
                             ));
                         }
+                        let mut stored = column.clone();
+                        stored.name = column.stored.clone();
                         if crate::large::large_capable(column) {
-                            ddl.push_str(&crate::large::triggers(physical, &[column]));
+                            ddl.push_str(&crate::large::triggers(physical, &[&stored]));
                         }
-                        physical.columns.push(column.clone());
+                        physical.columns.push(stored);
                     }
                     for index in &table.indexes {
-                        if !physical.indexes.contains(index) {
-                            physical.indexes.push(index.clone());
-                            ddl.push_str(&table.index_ddl(index));
+                        let index = table.stored_index(index);
+                        if !physical.indexes.contains(&index) {
+                            ddl.push_str(&physical.index_ddl(&index));
+                            physical.indexes.push(index);
                         }
                     }
                 }
@@ -405,16 +751,25 @@ impl Schema {
     }
 }
 
+/// Where one schema stores its tables and columns: logical table ->
+/// (stored table, logical column -> stored column).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredNames {
+    pub tables: BTreeMap<String, (String, BTreeMap<String, String>)>,
+}
+
 impl Table {
     /// A table known only by its stored column names, as a reopened store
     /// lists it. Enough to extend it and to copy whole rows.
     pub(crate) fn stored_only(name: String, columns: Vec<String>) -> Self {
         Self {
+            stored: name.clone(),
             name,
             columns: columns
                 .into_iter()
                 .filter(|column| !STORED_PROVENANCE.contains(&column.as_str()))
                 .map(|name| Column {
+                    stored: name.clone(),
                     name,
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
@@ -430,8 +785,8 @@ impl Table {
         }
     }
 
-    /// One index. Its name is its key list, so re-creating it on a store
-    /// that already has it is a no-op.
+    /// One index. Its name is its stored key list, so re-creating it on a
+    /// store that already has it (under any schema version) is a no-op.
     pub fn index_ddl(&self, index: &[String]) -> String {
         let table = self;
         let lead = if table.branch_by.is_empty() {
@@ -439,12 +794,13 @@ impl Table {
         } else {
             "_b, "
         };
+        let index = table.stored_index(index);
         let keys: Vec<String> = index
             .iter()
             .map(|c| match elided_as(c) {
                 Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
                 // The key expression queries order and range by.
-                None if table.column(c).is_some_and(crate::large::large_capable) => {
+                None if table.by_stored(c).is_some_and(crate::large::large_capable) => {
                     crate::large::key_sql(&quote(c))
                 }
                 None => quote(c),
@@ -452,8 +808,8 @@ impl Table {
             .collect();
         format!(
             "CREATE INDEX IF NOT EXISTS {} ON {}({lead}{}, id);\n",
-            quote(&format!("{}__ix({})", table.name, index.join(","))),
-            quote(&table.name),
+            quote(&format!("{}__ix({})", table.stored, index.join(","))),
+            quote(&table.stored),
             keys.join(", ")
         )
     }
@@ -467,19 +823,23 @@ impl Table {
             .stored()
             .map(|column| format!(", {}", column_def(column)))
             .collect();
-        let name = quote(&table.name);
-        let history = quote(&format!("{}__h", table.name));
+        let name = quote(&table.stored);
+        let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it.
+        // first, so every index leads with it. `_c` is 1 when the version's
+        // commit wrote content (not only a delete or a restore): history
+        // reads list those versions.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL DEFAULT 0{columns}, UNIQUE (id, _b));\n\
+             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1{columns}, \
+             UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
-            quote(&format!("{}__by_seq", table.name)),
+             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1{columns}, \
+             PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+            quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));
@@ -493,10 +853,10 @@ impl Table {
     }
 }
 
-/// A stored column's definition: just its name. Columns carry no type
-/// affinity or collation, so the file opens on any SQLite.
+/// A stored column's definition: just its stored name. Columns carry no
+/// type affinity or collation, so the file opens on any SQLite.
 pub(crate) fn column_def(column: &Column) -> String {
-    quote(&column.name)
+    quote(&column.stored)
 }
 
 /// A value as an SQL literal, for DDL defaults.
@@ -593,6 +953,56 @@ pub struct CurrentRow {
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
     /// The declared type of each projected cell, shared by a read's rows.
     pub(crate) types: Arc<[ValueType]>,
+    /// A flat join's joined source rows in declared order, after the root
+    /// (`id`): with it, the row's occurrence. Empty for other reads.
+    pub(crate) joined: Arc<[JoinedRow]>,
+    /// A flat join's root version when the root is a history source.
+    pub(crate) version: Option<SourceVersion>,
+}
+
+/// A history version's transaction identity, `(tx, node)` as its
+/// `$transactionId` reads.
+pub type SourceVersion = (u64, crate::ids::NodeUuid);
+
+/// A row's result key: the row itself, or a flat join's root followed by
+/// its joined source rows, each with its history version if it has one.
+/// Relations arrive as nested rows, not joined outputs.
+pub fn occurrence_key(
+    root: RowUuid,
+    version: Option<SourceVersion>,
+    joined: &[JoinedRow],
+) -> jazz_types::object::ResultKey {
+    use jazz_types::object::{ObjectId, OutputOccurrenceId, ResultKey, SourceOccurrenceId};
+    let source = |row: RowUuid, version: Option<SourceVersion>| {
+        let id = ObjectId::from_uuid(row.0);
+        match version {
+            Some((tx, node)) => SourceOccurrenceId::history(id, jazz_types::time::TxTime(tx), node),
+            None => SourceOccurrenceId::current(id),
+        }
+    };
+    if joined.is_empty() && version.is_none() {
+        return ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+            root.0,
+        )));
+    }
+    ResultKey::from_occurrence(
+        OutputOccurrenceId::from_source_occurrences(
+            source(root, version),
+            joined
+                .iter()
+                .map(|joined| source(joined.row, joined.version)),
+            [],
+        )
+        .expect("an occurrence without union arms is valid"),
+    )
+}
+
+/// One joined source row of a flat-join occurrence: the row, and its
+/// version when the source is a history relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JoinedRow {
+    pub row: RowUuid,
+    pub version: Option<SourceVersion>,
 }
 
 impl CurrentRow {
@@ -602,6 +1012,17 @@ impl CurrentRow {
 
     pub fn table(&self) -> &str {
         &self.table
+    }
+
+    /// A flat join's joined source rows in declared order (the root is
+    /// [`Self::row_uuid`]); empty for other reads.
+    pub fn joined_rows(&self) -> &[JoinedRow] {
+        &self.joined
+    }
+
+    /// A flat join's root version, when its root is a history source.
+    pub fn root_version(&self) -> Option<SourceVersion> {
+        self.version
     }
 
     pub fn is_deleted(&self) -> bool {
@@ -637,4 +1058,82 @@ impl CurrentRow {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_ref()))
     }
+}
+
+impl ResultNode {
+    /// The node's row with each relation appended as a cell under its
+    /// column name: an array of records, each the child's `row_uuid`
+    /// followed by its own cells (relations nested the same way). This is
+    /// the shape the bindings publish for relation reads.
+    pub fn into_nested_row(self) -> Result<CurrentRow, Error> {
+        let ResultNode { row, relations } = self;
+        if relations.is_empty() {
+            return Ok(row);
+        }
+        let mut cells = (*row.cells).clone();
+        let mut types = row.types.to_vec();
+        for (name, relation) in relations {
+            let children = match relation {
+                ResultRelation::Array(children) => children,
+                ResultRelation::Null | ResultRelation::Hole => Vec::new(),
+            };
+            let children = children
+                .into_iter()
+                .map(ResultNode::into_nested_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            let (element, values) = child_records(&children)?;
+            cells.push((name, Some(Value::Array(values))));
+            types.push(ValueType::Array(Box::new(element)));
+        }
+        Ok(CurrentRow {
+            cells: Arc::new(cells),
+            types: types.into(),
+            ..row
+        })
+    }
+}
+
+/// One relation's children as records under a shared descriptor. A field
+/// is nullable when its declared type is, or when any child left it
+/// unwritten.
+fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Error> {
+    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+    if let Some(first) = children.first() {
+        for (index, ((name, _), ty)) in first.cells().zip(first.cell_types()).enumerate() {
+            let unwritten = children
+                .iter()
+                .any(|child| child.cells.get(index).is_some_and(|(_, v)| v.is_none()));
+            let ty = match ty {
+                ValueType::Nullable(_) => ty.clone(),
+                _ if unwritten => ValueType::Nullable(Box::new(ty.clone())),
+                _ => ty.clone(),
+            };
+            fields.push((name.to_owned(), ty));
+        }
+    }
+    let descriptor = RecordDescriptor::new(fields.clone());
+    let mut values = Vec::with_capacity(children.len());
+    for child in children {
+        if child.cells.len() + 1 != fields.len() {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation children with different projections",
+            ));
+        }
+        let mut record = vec![Value::Uuid(child.id.0)];
+        for ((_, value), (_, ty)) in child.cells.iter().zip(&fields[1..]) {
+            record.push(match (value, ty) {
+                (None, _) => Value::Nullable(None),
+                (Some(value), ValueType::Nullable(_)) if !matches!(value, Value::Nullable(_)) => {
+                    Value::Nullable(Some(Box::new(value.clone())))
+                }
+                (Some(value), _) => value.clone(),
+            });
+        }
+        let raw = descriptor
+            .create(&record)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("relation record: {error}")))?;
+        values.push(Value::Record(OwnedRecord::new(raw, descriptor)));
+    }
+    Ok((ValueType::Record(Box::new(descriptor)), values))
 }

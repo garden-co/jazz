@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::db::RelationSnapshot;
 use crate::db::{CurrentRow, RemovedRow, SubscriptionOutputRow};
 use crate::ids::{PhysicalColumnId, RowUuid};
-use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::object::ResultKey;
 use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 
 /// Encode only the descriptor portion of the named-cell input role. This is
@@ -192,12 +192,15 @@ pub fn encode_relation_snapshot(snapshot: &RelationSnapshot) -> Result<Vec<u8>, 
     })
 }
 
-/// A plain-table row's occurrence: the row itself. SQLite results have no
-/// join occurrences; relations arrive as nested rows, not joined outputs.
-fn occurrence(row: RowUuid) -> ResultKey {
-    ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
-        row.0,
-    )))
+/// A row's occurrence: the row itself, or a flat join's root followed by
+/// its joined source rows. Relations arrive as nested rows, not joined
+/// outputs.
+fn occurrence(
+    row: RowUuid,
+    version: Option<crate::values::SourceVersion>,
+    joined: &[crate::values::JoinedRow],
+) -> ResultKey {
+    crate::values::occurrence_key(row, version, joined)
 }
 
 /// Encode an incremental subscription delta with aligned occurrence sidecars.
@@ -221,12 +224,18 @@ pub fn encode_subscription_delta(
                 row_id: row.row_uuid,
             })
             .collect(),
-        added_occurrence_keys: added.iter().map(|row| occurrence(row.row_uuid())).collect(),
+        added_occurrence_keys: added
+            .iter()
+            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
+            .collect(),
         updated_occurrence_keys: updated
             .iter()
-            .map(|row| occurrence(row.row_uuid()))
+            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
             .collect(),
-        removed_occurrence_keys: removed.iter().map(|row| occurrence(row.row_uuid)).collect(),
+        removed_occurrence_keys: removed
+            .iter()
+            .map(|row| occurrence(row.row_uuid, row.version, &row.joined))
+            .collect(),
         added_indices: added.iter().map(|row| row.index as u64).collect(),
         updated_previous_indices: updated
             .iter()
@@ -292,6 +301,105 @@ pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::E
         }
     }
     Ok(batches)
+}
+
+/// One decoded [`RowBatch`]: what a host's reader sees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedRowBatch {
+    /// Logical table name.
+    pub table: String,
+    /// Rows in producer order.
+    pub rows: Vec<DecodedRow>,
+}
+
+/// One decoded [`Row`] with its cells by result name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedRow {
+    /// Stable source row identity.
+    pub row_id: RowUuid,
+    /// Whether the row is an opt-in deleted historical row.
+    pub deleted: bool,
+    /// Cells by their descriptor name; metadata fields included.
+    pub cells: BTreeMap<String, Value>,
+}
+
+/// Decode an [`encode_rows`] payload the way a host's reader does.
+pub fn decode_rows(bytes: &[u8]) -> Result<Vec<DecodedRowBatch>, String> {
+    let mut input = bytes;
+    let batches = read_row_batches(&mut input)?;
+    if !input.is_empty() {
+        return Err("trailing bytes after row batches".to_owned());
+    }
+    Ok(batches)
+}
+
+/// Decode an [`encode_relation_snapshot`] payload: the root-row count and
+/// the row batches.
+pub fn decode_relation_snapshot(bytes: &[u8]) -> Result<(usize, Vec<DecodedRowBatch>), String> {
+    let mut input = bytes;
+    let root_count: u64 = publication_type::take(&mut input)?;
+    let batches = read_row_batches(&mut input)?;
+    if !input.is_empty() {
+        return Err("trailing bytes after relation snapshot".to_owned());
+    }
+    Ok((root_count as usize, batches))
+}
+
+/// Decode the added and updated rows of an [`encode_subscription_delta`]
+/// payload.
+pub fn decode_subscription_delta_rows(
+    bytes: &[u8],
+) -> Result<(Vec<DecodedRowBatch>, Vec<DecodedRowBatch>), String> {
+    let mut input = bytes;
+    let added = read_row_batches(&mut input)?;
+    let updated = read_row_batches(&mut input)?;
+    Ok((added, updated))
+}
+
+fn read_row_batches(input: &mut &[u8]) -> Result<Vec<DecodedRowBatch>, String> {
+    use publication_type::{count, read_type, take};
+    let mut budget = 1 << 20;
+    let batches = count(input, budget)?;
+    let mut decoded = Vec::with_capacity(batches);
+    for _ in 0..batches {
+        let table: String = take(input)?;
+        let fields = count(input, budget)?;
+        let mut descriptor = Vec::with_capacity(fields);
+        for _ in 0..fields {
+            let tag: u32 = take(input)?;
+            let name: String = match tag {
+                1 | 2 => take(input)?,
+                _ => return Err("stored-column descriptor fields are not decoded".to_owned()),
+            };
+            descriptor.push((name, read_type(input, &mut budget, 0)?));
+        }
+        let names = descriptor
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let descriptor = RecordDescriptor::new(descriptor);
+        let rows = count(input, budget)?;
+        let mut decoded_rows = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            let row_id: RowUuid = take(input)?;
+            let deleted: bool = take(input)?;
+            let raw: &[u8] = take(input)?;
+            let values = crate::records::BorrowedRecord::new(raw, &descriptor)
+                .to_values()
+                .map_err(|error| error.to_string())?;
+            decoded_rows.push(DecodedRow {
+                row_id,
+                deleted,
+                cells: names.iter().cloned().zip(values).collect(),
+            });
+        }
+        budget = budget.saturating_sub(rows + fields);
+        decoded.push(DecodedRowBatch {
+            table,
+            rows: decoded_rows,
+        });
+    }
+    Ok(decoded)
 }
 
 #[cfg(test)]
@@ -386,6 +494,8 @@ mod tests {
                 ("done".to_owned(), done.map(Value::Bool)),
             ]),
             types: Arc::from([ValueType::String, ValueType::Bool]),
+            joined: Arc::from([]),
+            version: None,
         }
     }
 
@@ -465,6 +575,8 @@ mod tests {
             &[RemovedRow {
                 table: "todos".to_owned(),
                 row_uuid: RowUuid::from_bytes([8; 16]),
+                joined: Vec::new(),
+                version: None,
                 index: 1,
             }],
         )

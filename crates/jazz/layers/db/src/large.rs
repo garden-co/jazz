@@ -41,6 +41,17 @@ use crate::options::{Error, ErrorCode};
 use crate::values::{Column, Table, quote, storage};
 
 /// First byte of an inline bytes cell.
+#[cfg(feature = "testing")]
+static FULL_MATERIALIZATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// How many chunked values have been rebuilt whole, so tests can tell a
+/// range read from a full materialization.
+#[cfg(feature = "testing")]
+pub fn full_materializations_for_test() -> usize {
+    FULL_MATERIALIZATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) const BYTES: u8 = 0xFE;
 /// First byte of a chunked cell.
 pub(crate) const CHUNKED: u8 = 0xFF;
@@ -130,10 +141,10 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 /// fixed offset in a chunked cell.
 pub(crate) fn triggers(table: &Table, columns: &[&Column]) -> String {
     let mut sql = String::new();
-    for target in [table.name.clone(), format!("{}__h", table.name)] {
+    for target in [table.stored.clone(), format!("{}__h", table.stored)] {
         for column in columns {
-            let name = quote(&column.name);
-            let trigger = |what: &str| quote(&format!("{target}__lv_{what}_{}", column.name));
+            let name = quote(&column.stored);
+            let trigger = |what: &str| quote(&format!("{target}__lv_{what}_{}", column.stored));
             let add = |cell: &str| {
                 format!(
                     "INSERT INTO _jazz_lv_root (root, durable) VALUES ({}, 1) \
@@ -164,7 +175,7 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column]) -> String {
             // Only chunked rows: what a prep scans, near-empty otherwise.
             sql.push_str(&format!(
                 "CREATE INDEX IF NOT EXISTS {} ON {on} (id) WHERE {};\n",
-                quote(&format!("{target}__lv_{}", column.name)),
+                quote(&format!("{target}__lv_{}", column.stored)),
                 chunked_sql(&name)
             ));
             sql.push_str(&format!(
@@ -540,7 +551,7 @@ impl Chunks {
     pub(crate) fn materialize(&self, cell: &[u8]) -> Result<Vec<u8>, Error> {
         match logical(cell)? {
             Logical::Inline(bytes) => Ok(bytes.to_vec()),
-            Logical::Chunked(value) => self.run(|inputs| lv::materialize_attempt(&value, inputs)),
+            Logical::Chunked(value) => self.value_bytes(&value),
         }
     }
 
@@ -556,6 +567,8 @@ impl Chunks {
 
     /// The whole logical value of a descriptor.
     pub(crate) fn value_bytes(&self, value: &LargeValueRef) -> Result<Vec<u8>, Error> {
+        #[cfg(feature = "testing")]
+        FULL_MATERIALIZATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.run(|inputs| lv::materialize_attempt(value, inputs))
     }
 
@@ -1522,6 +1535,7 @@ mod tests {
         .unwrap();
         let table = Table {
             name: "t".to_owned(),
+            stored: "t".to_owned(),
             columns: Vec::new(),
             references: Default::default(),
             policies: Default::default(),
@@ -1532,6 +1546,7 @@ mod tests {
         };
         let column = Column {
             name: "body".to_owned(),
+            stored: "body".to_owned(),
             ty: crate::records::ValueType::String,
             default: None,
             json: false,

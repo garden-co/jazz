@@ -18,6 +18,8 @@ use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
 
+mod history;
+
 /// Inherits chains with no explicit bound unroll this deep.
 const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
@@ -220,6 +222,10 @@ pub struct Ctx<'a> {
     pub cut: Option<Cut>,
     /// Questions the statement needs answered first.
     pub preps: Vec<Prep>,
+    /// The authority's node, whose own commits history reads name by their
+    /// seq; `None` on a replica, which lists only versions whose
+    /// transaction it knows.
+    pub history_origin: Option<[u8; 16]>,
     next_alias: usize,
 }
 
@@ -266,6 +272,9 @@ pub struct Compiled {
     pub tables: BTreeSet<String>,
     /// Rows are aggregate groups: column 0 is the group key, hashed to an id.
     pub aggregate: bool,
+    /// Joined source row ids each row carries after its root's id, seq and
+    /// deletion flag (a flat join's occurrence; 0 otherwise).
+    pub joined: usize,
     /// Run before the statement.
     pub preps: Vec<Prep>,
     /// The statement with prefix-tie ranks in its order, used instead when
@@ -290,8 +299,14 @@ impl<'a> Ctx<'a> {
             view: None,
             cut: None,
             preps: Vec::new(),
+            history_origin: None,
             next_alias: 0,
         }
+    }
+
+    pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
+        self.history_origin = origin;
+        self
     }
 
     pub fn with_view(mut self, view: Option<View>) -> Self {
@@ -313,7 +328,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn rows_at(&mut self, table: &Table, columns: &str, cut: Option<Cut>) -> String {
-        let name = quote(&table.name);
+        let name = quote(&table.stored);
         let Some(cut) = cut else {
             return name;
         };
@@ -339,7 +354,7 @@ impl<'a> Ctx<'a> {
                 format!("c._seq > {seq} AND c._seq <> {own} AND c._seq NOT IN ({extra})"),
             )
         };
-        let history = quote(&format!("{}__h", table.name));
+        let history = quote(&format!("{}__h", table.stored));
         let h_columns = columns
             .replace("rid, ", "")
             .split(", ")
@@ -364,12 +379,12 @@ impl<'a> Ctx<'a> {
         // physical (unioned) table.
         let mut columns = "rid, id, _b, _seq, _del".to_owned();
         for column in table.stored() {
-            columns.push_str(&format!(", {}", quote(&column.name)));
+            columns.push_str(&format!(", {}", quote(&column.stored)));
         }
         let view = self.view.clone().filter(|_| !table.branch_by.is_empty());
         let Some(view) = view else {
             if self.cut.is_none() {
-                return Ok(quote(&table.name));
+                return Ok(quote(&table.stored));
             }
             return Ok(self.rows(table, &columns));
         };
@@ -392,7 +407,7 @@ impl<'a> Ctx<'a> {
                             };
                             inherited.push_str(&format!(", {term}"));
                         }
-                        None => inherited.push_str(&format!(", m.{}", quote(&column.name))),
+                        None => inherited.push_str(&format!(", m.{}", quote(&column.stored))),
                     }
                 }
                 let base = self.bind(Sql::Blob(table.selector_key(&base)?));
@@ -432,9 +447,12 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// A table by this schema's name for it; its stored name joins the
+    /// dependencies.
     fn table(&mut self, name: &str) -> Result<&'a Table, Error> {
-        self.tables.insert(name.to_owned());
-        self.schema.table(name)
+        let table = self.schema.table(name)?;
+        self.tables.insert(table.stored.clone());
+        Ok(table)
     }
 
     // ---- root queries ---------------------------------------------------
@@ -572,6 +590,7 @@ impl<'a> Ctx<'a> {
             projection,
             tables: self.tables,
             aggregate: true,
+            joined: 0,
             preps: self.preps,
         })
     }
@@ -581,13 +600,38 @@ impl<'a> Ctx<'a> {
         query: &Query,
         include_deleted: bool,
     ) -> Result<Compiled, Error> {
-        if query.flat_join.is_some()
-            || !query.policy_branches.is_empty()
+        if let Some(column) = deletion_column(query) {
+            if !include_deleted {
+                return Err(query_error(format!(
+                    "Reading {column} requires includeDeleted"
+                )));
+            }
+            // includeDeleted widens only the root: joined rows are live.
+            if !query.joins.is_empty() || query.flat_join.is_some() {
+                return Err(unsupported(format!("reading {column} in joins")));
+            }
+        }
+        if query.flat_join.is_some() {
+            return self.compile_flat_join(query);
+        }
+        if let Some(source) = crate::schema::history::history_source_table(&query.table) {
+            if !query.policy_branches.is_empty()
+                || !query.inherits.is_empty()
+                || query.relation.is_some()
+            {
+                return Err(unsupported("joins or relationships in history queries"));
+            }
+            return self.compile_history(query, source, include_deleted);
+        }
+        if query.flat_join.is_some() {
+            return self.compile_flat_join(query);
+        }
+        if !query.policy_branches.is_empty()
             || !query.inherits.is_empty()
             || query.relation.is_some()
         {
             return Err(unsupported(
-                "this query form (flat join, inherits, relation) on SQLite",
+                "this query form (policy branches, inherits, relation) on SQLite",
             ));
         }
         let table = self.table(&query.table)?;
@@ -645,40 +689,57 @@ impl<'a> Ctx<'a> {
                 wheres.push(format!(
                     "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND {i}._del = 0)",
                     self.source(target)?,
-                    quote(column)
+                    quote(table.stored_name(column))
                 ));
             }
         }
         for array in &query.array_subqueries {
             self.validate_array(array)?;
-            match array.requirement {
-                ArraySubqueryRequirement::Optional => {}
-                ArraySubqueryRequirement::AtLeastOne => {
-                    let child = self.table(&array.table)?;
-                    let c = self.alias("c");
-                    let mut conds = vec![
-                        format!("{c}._del = 0"),
-                        format!(
-                            "{} = {}",
-                            column_sql(child, &c, &array.inner_column)?,
-                            column_sql(table, alias, &array.outer_column)?
-                        ),
-                    ];
-                    for filter in &array.filters {
-                        conds.push(self.predicate(filter, child, &c)?);
-                    }
-                    wheres.push(format!(
-                        "EXISTS (SELECT 1 FROM {} AS {c} WHERE {})",
-                        self.source(child)?,
-                        conds.join(" AND ")
-                    ));
-                }
-                ArraySubqueryRequirement::MatchCorrelationCardinality => {
-                    return Err(unsupported(
-                        "cardinality-matching array requirements on SQLite",
-                    ));
-                }
+            if array.requirement == ArraySubqueryRequirement::Optional {
+                continue;
             }
+            let child = self.table(&array.table)?;
+            let c = self.alias("c");
+            let outer = column_sql(table, alias, &array.outer_column)?;
+            let mut conds = vec![format!("{c}._del = 0")];
+            for filter in &array.filters {
+                conds.push(self.predicate(filter, child, &c)?);
+            }
+            let source = self.source(child)?;
+            if is_array(table, &array.outer_column) {
+                // A forward array relation: one child per element, in the
+                // array's order and with its duplicates.
+                let r = self.alias("r");
+                conds.push(format!(
+                    "{} = {}",
+                    column_sql(child, &c, &array.inner_column)?,
+                    array_element_id(&r)
+                ));
+                let matched = format!(
+                    "SELECT 1 FROM json_each({outer}) AS {r} JOIN {source} AS {c} ON {}",
+                    conds.join(" AND ")
+                );
+                wheres.push(match array.requirement {
+                    ArraySubqueryRequirement::AtLeastOne => format!("EXISTS ({matched})"),
+                    _ => {
+                        format!("((SELECT count(*) FROM ({matched})) = json_array_length({outer}))")
+                    }
+                });
+                continue;
+            }
+            if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
+                return Err(unsupported(
+                    "cardinality-matching requirements on scalar relations on SQLite",
+                ));
+            }
+            conds.push(format!(
+                "{} = {outer}",
+                column_sql(child, &c, &array.inner_column)?
+            ));
+            wheres.push(format!(
+                "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
+                conds.join(" AND ")
+            ));
         }
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(table, alias, session)?);
@@ -713,8 +774,299 @@ impl<'a> Ctx<'a> {
             projection,
             tables: self.tables,
             aggregate: false,
+            joined: 0,
             preps: self.preps,
         })
+    }
+
+    /// A flat join: one row per matching tuple of the root and each joined
+    /// source, every source live and read-policy filtered. Cells are each
+    /// source's columns qualified as `<source>.<column>`, root first; a
+    /// row's id is its root's, and its joined source ids follow it, so the
+    /// tuple is its occurrence. Filters name qualified columns, or
+    /// unqualified ones only one source has, and each conjunct reads one
+    /// source. Ordered by the occurrence.
+    ///
+    /// A `history.<table>` source lists its rows' versions (gated by the
+    /// current row, as a history read is), so each version is its own
+    /// occurrence. It must be bounded by row id: an id filter, or a join
+    /// key on its `id` whose other side reads a bounded source.
+    fn compile_flat_join(mut self, query: &Query) -> Result<Compiled, Error> {
+        let Some(flat_join) = &query.flat_join else {
+            unreachable!("compile_flat_join on a query without one")
+        };
+        let combined = [
+            (flat_join.sources.is_empty(), "zero joined sources"),
+            (!query.joins.is_empty(), "existential joins"),
+            (!query.policy_branches.is_empty(), "policy branches"),
+            (!query.reachable.is_empty(), "reachability"),
+            (!query.inherits.is_empty(), "inherited-policy traversals"),
+            (!query.includes.is_empty(), "includes"),
+            (!query.array_subqueries.is_empty(), "array subqueries"),
+            (query.relation.is_some(), "relations"),
+            (query.select.is_some(), "select projections"),
+            (!query.order_by.is_empty(), "ordering"),
+            (query.aggregate.is_some(), "aggregates"),
+            (query.limit.is_some(), "limits"),
+            (query.offset != 0, "offsets"),
+        ];
+        if let Some((_, feature)) = combined.iter().find(|(present, _)| *present) {
+            return Err(unsupported(format!("flat joins with {feature}")));
+        }
+        let mut declared = vec![(
+            flat_join
+                .root_alias
+                .clone()
+                .unwrap_or_else(|| query.table.clone()),
+            query.table.clone(),
+            "t".to_owned(),
+        )];
+        for source in &flat_join.sources {
+            let name = source.alias.clone().unwrap_or_else(|| source.table.clone());
+            if declared.iter().any(|(seen, ..)| *seen == name) {
+                return Err(query_error(format!("flat join duplicate source `{name}`")));
+            }
+            let alias = self.alias("f");
+            declared.push((name, source.table.clone(), alias));
+        }
+        // Each source as it reads: a history source as its versions (whose
+        // SQL waits for its bound), others as their table.
+        let mut sources: Vec<FlatSource<'a>> = Vec::with_capacity(declared.len());
+        for (name, table, alias) in declared {
+            let history = crate::schema::history::history_source_table(&table);
+            let base = self.table(history.unwrap_or(&table))?;
+            let (table, sql) = match history {
+                Some(_) => (history::versions_table(base), None),
+                None => (base.clone(), Some(self.source(base)?)),
+            };
+            sources.push(FlatSource {
+                name,
+                base,
+                table,
+                alias,
+                history: history.is_some(),
+                sql,
+            });
+        }
+        let resolve = |sources: &[FlatSource], column: &str| -> Result<(usize, String), Error> {
+            let (scope, field) = match column.find(".$") {
+                Some(at) => (&column[..at], &column[at + 1..]),
+                None => column.rsplit_once('.').unwrap_or(("", column)),
+            };
+            let has = |table: &Table, field: &str| {
+                field == "id" || field == "_id" || column_sql(table, "t", field).is_ok()
+            };
+            let public = |field: &str| if field == "_id" { "id" } else { field }.to_owned();
+            if let Some(at) = sources.iter().position(|source| source.name == scope) {
+                if !has(&sources[at].table, field) {
+                    return Err(query_error(format!("unknown flat join column `{column}`")));
+                }
+                return Ok((at, public(field)));
+            }
+            let mut found = (0..sources.len()).filter(|&at| has(&sources[at].table, column));
+            match (found.next(), found.next()) {
+                (Some(at), None) => Ok((at, public(column))),
+                (Some(_), Some(_)) => Err(query_error(format!(
+                    "ambiguous flat join column `{column}`; qualify its source"
+                ))),
+                (None, _) => Err(query_error(format!("unknown flat join column `{column}`"))),
+            }
+        };
+        let mut keys = Vec::with_capacity(flat_join.sources.len());
+        for (at, source) in flat_join.sources.iter().enumerate() {
+            let left = resolve(&sources[..=at], &source.on.left)?;
+            let right = resolve(&sources, &source.on.right)?;
+            if right.0 != at + 1 {
+                return Err(query_error(format!(
+                    "flat join condition `{}` must name the joined source `{}`",
+                    source.on.right,
+                    sources[at + 1].name
+                )));
+            }
+            keys.push((left, right));
+        }
+        // Filters, each conjunct routed to the one source it reads.
+        let mut routed: Vec<(usize, Predicate)> = Vec::new();
+        for filter in &query.filters {
+            let mut conjuncts = Vec::new();
+            flatten_all(filter, &mut conjuncts);
+            for conjunct in conjuncts {
+                if matches!(conjunct, Predicate::EnumMatch { .. }) {
+                    return Err(unsupported("enum-match filters in flat joins"));
+                }
+                let mut predicate = conjunct.clone();
+                let mut reads = BTreeSet::new();
+                let mut failed = None;
+                predicate.for_each_operand_mut(&mut |operand| {
+                    if let Operand::Column(column) = operand {
+                        match resolve(&sources, column) {
+                            Ok((at, field)) => {
+                                reads.insert(at);
+                                *column = field;
+                            }
+                            Err(error) => failed = failed.take().or(Some(error)),
+                        }
+                    }
+                });
+                if let Some(error) = failed {
+                    return Err(error);
+                }
+                if reads.len() > 1 {
+                    return Err(unsupported("flat join filters spanning multiple sources"));
+                }
+                routed.push((reads.first().copied().unwrap_or(0), predicate));
+            }
+        }
+        // Bound history sources until none is left: by an id filter, else
+        // by a key on their id whose other side is bound.
+        while let Some(at) = sources.iter().position(|source| source.sql.is_none()) {
+            let mut bound = routed
+                .iter()
+                .filter(|(source, _)| *source == at)
+                .find_map(|(_, predicate)| history::bounding_id(predicate))
+                .map(history::HistoryBound::Filter);
+            if bound.is_none() {
+                for ((left, left_column), (right, right_column)) in &keys {
+                    let other = match (*left == at, *right == at) {
+                        (true, false) if left_column == "id" => (*right, right_column),
+                        (false, true) if right_column == "id" => (*left, left_column),
+                        _ => continue,
+                    };
+                    let source = &sources[other.0];
+                    let Some(sql) = &source.sql else { continue };
+                    let b = self.alias("b");
+                    bound = Some(history::HistoryBound::Ids(format!(
+                        "SELECT {} FROM {sql} AS {b} WHERE {b}._del = 0",
+                        column_sql(&source.table, &b, other.1)?
+                    )));
+                    break;
+                }
+            }
+            let Some(bound) = bound else {
+                return Err(query_error(
+                    "unsupported relation query: Reading history without a bounded row access \
+                     path is not supported in history queries yet",
+                ));
+            };
+            let base = sources[at].base;
+            let (sql, _) = self.history_source(&base.name, bound, false)?;
+            sources[at].sql = Some(sql);
+        }
+        let sql_of = |source: &FlatSource| source.sql.clone().expect("every source is bound");
+        let mut joins = String::new();
+        for ((left, left_column), (right, right_column)) in &keys {
+            let (left, right) = (&sources[*left], &sources[*right]);
+            if (left.history || right.history)
+                && (is_array(&left.table, left_column) || is_array(&right.table, right_column))
+            {
+                return Err(unsupported("flat joins of history on array columns"));
+            }
+            let on = self.join_key(
+                (&left.table, &left.alias, left_column),
+                (&right.table, &right.alias, right_column),
+            )?;
+            joins.push_str(&format!(
+                " JOIN {} AS {alias} ON {alias}._del = 0 AND {on}",
+                sql_of(right),
+                alias = right.alias
+            ));
+        }
+        let mut wheres = vec!["t._del = 0".to_owned()];
+        for (at, predicate) in &routed {
+            let source = &sources[*at];
+            wheres.push(self.predicate(predicate, &source.table, &source.alias)?);
+        }
+        if let Some(session) = self.policy {
+            // History sources are gated by their current rows already.
+            for source in sources.iter().filter(|source| !source.history) {
+                wheres.push(self.read_policy(&source.table, &source.alias, session)?);
+            }
+        }
+        let version = |source: &FlatSource| match source.history {
+            true => format!(
+                "{}.{}",
+                source.alias,
+                quote(crate::schema::history::TRANSACTION_ID_COLUMN)
+            ),
+            false => "NULL".to_owned(),
+        };
+        let mut ids = format!(", {}", version(&sources[0]));
+        let mut order = vec!["t.id".to_owned()];
+        if sources[0].history {
+            order.push("t._seq".to_owned());
+        }
+        let mut projection = Vec::new();
+        let mut columns = String::new();
+        for (at, source) in sources.iter().enumerate() {
+            if at > 0 {
+                ids.push_str(&format!(", {}.id, {}", source.alias, version(source)));
+                order.push(format!("{}.id", source.alias));
+                if source.history {
+                    order.push(format!("{}._seq", source.alias));
+                }
+            }
+            for (column, ty) in crate::compile::projection(&source.table, None)? {
+                columns.push_str(&format!(
+                    ", {}",
+                    column_sql(&source.table, &source.alias, &column)?
+                ));
+                projection.push((format!("{}.{column}", source.name), ty));
+            }
+        }
+        let sql = format!(
+            "SELECT t.id, t._seq, t._del{ids}{columns} FROM {} AS t{joins} \
+             WHERE {} ORDER BY {}",
+            sql_of(&sources[0]),
+            and(&wheres),
+            order.join(", ")
+        );
+        Ok(Compiled {
+            sql,
+            ranked_sql: None,
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: sources.len() - 1,
+            preps: self.preps,
+        })
+    }
+
+    /// A flat join's key equality, `left = right`; when one side is an
+    /// array, any of its elements equal to the other side.
+    fn join_key(
+        &mut self,
+        left: (&Table, &str, &str),
+        right: (&Table, &str, &str),
+    ) -> Result<String, Error> {
+        let element = |table: &Table, column: &str| {
+            let ty = table.column(column).map(|column| match &column.ty {
+                ValueType::Nullable(inner) => inner.as_ref().clone(),
+                ty => ty.clone(),
+            });
+            match ty {
+                Some(ValueType::Array(element)) => Some(*element),
+                _ => None,
+            }
+        };
+        let side = |(table, alias, column): (&Table, &str, &str)| column_sql(table, alias, column);
+        let (array, scalar) = match (element(left.0, left.2), element(right.0, right.2)) {
+            (None, None) => return Ok(format!("{} = {}", side(left)?, side(right)?)),
+            (Some(element), None) => ((left, element), right),
+            (None, Some(element)) => ((right, element), left),
+            (Some(_), Some(_)) => return Err(unsupported("flat joins on two array columns")),
+        };
+        let ((array, element), scalar) = (array, scalar);
+        let r = self.alias("r");
+        let member = match element {
+            ValueType::Uuid => array_element_id(&r),
+            _ => format!("{r}.value"),
+        };
+        Ok(format!(
+            "EXISTS (SELECT 1 FROM json_each({}) AS {r} WHERE {member} = {})",
+            side(array)?,
+            side(scalar)?
+        ))
     }
 
     fn validate_array(&mut self, array: &ArraySubquery) -> Result<(), Error> {
@@ -736,14 +1088,25 @@ impl<'a> Ctx<'a> {
         let child = self.table(&array.table)?;
         let projection = projection(child, array.select.as_deref())?;
         let alias = "t";
+        let elements = match parent {
+            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+            value => matches!(value, Value::Array(_)),
+        };
         let parent = match self.value_term(parent)? {
             Term::Bound(sql, _) => sql,
             _ => "NULL".to_owned(),
         };
+        // A forward array relation reads one child per array element, in
+        // the array's order and with its duplicates.
+        let (from, correlated) = if elements {
+            ("JOIN", array_element_id("r"))
+        } else {
+            ("", parent.clone())
+        };
         let mut wheres = vec![
             format!("{alias}._del = 0"),
             format!(
-                "{} = {parent}",
+                "{} = {correlated}",
                 column_sql(child, alias, &array.inner_column)?
             ),
         ];
@@ -761,6 +1124,16 @@ impl<'a> Ctx<'a> {
         let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(array.offset as i64));
         let source = self.source(child)?;
+        let source = if elements {
+            format!("json_each({parent}) AS r {from} {source}")
+        } else {
+            source
+        };
+        let order = if elements && array.order_by.is_empty() {
+            "r.key".to_owned()
+        } else {
+            order
+        };
         let statement = |order: &str| {
             format!(
                 "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
@@ -775,6 +1148,7 @@ impl<'a> Ctx<'a> {
             projection,
             tables: self.tables,
             aggregate: false,
+            joined: 0,
             preps: self.preps,
         })
     }
@@ -907,9 +1281,14 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             Predicate::Contains(l, r) => {
+                let array = matches!(l, Operand::Column(column) if is_array(table, column));
                 let l = self.operand(l, table, alias)?;
                 let r = self.operand(r, table, alias)?;
-                self.contains(l, r)
+                if array {
+                    self.array_contains(l, r)
+                } else {
+                    self.contains(l, r)
+                }
             }
             Predicate::IsNull(operand) => match self.operand(operand, table, alias)? {
                 Term::Missing => "1".to_owned(),
@@ -957,12 +1336,32 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        match table.policy(operation) {
+        self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
             None => Ok("0".to_owned()),
             Some(policy) => {
-                self.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
+                ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        }
+        })
+    }
+
+    /// Compile a policy of `table` under the schema whose names its policies
+    /// use (see [`Schema::policies_from`]); its SQL reads the same stored
+    /// rows either way.
+    fn under_policy_schema(
+        &mut self,
+        table: &Table,
+        body: impl FnOnce(&mut Self, &Table) -> Result<String, Error>,
+    ) -> Result<String, Error> {
+        let Some(current) = self.schema.policies_from.as_deref() else {
+            return body(self, table);
+        };
+        let Some(governing) = current.by_stored(&table.stored) else {
+            return Ok("0".to_owned());
+        };
+        let own = std::mem::replace(&mut self.schema, current);
+        let result = body(self, governing);
+        self.schema = own;
+        result
     }
 
     /// A specific policy clause (e.g. UPDATE's WITH CHECK) at `alias`.
@@ -976,12 +1375,12 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        match policy {
+        self.under_policy_schema(table, |ctx, table| match policy {
             None => Ok("0".to_owned()),
             Some(policy) => {
-                self.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
+                ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        }
+        })
     }
 
     fn policy_value(
@@ -1061,7 +1460,11 @@ impl<'a> Ctx<'a> {
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
-                self.contains(left, right)
+                if is_array(table, column) {
+                    self.array_contains(left, right)
+                } else {
+                    self.contains(left, right)
+                }
             }
             PolicyExpr::In {
                 column,
@@ -1139,7 +1542,7 @@ impl<'a> Ctx<'a> {
                 format!(
                     "EXISTS (SELECT 1 FROM {} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
                     self.source(target)?,
-                    quote(via_column)
+                    quote(table.stored_name(via_column))
                 )
             }
             PolicyExpr::InheritsReferencing {
@@ -1545,31 +1948,131 @@ fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<(String, V
     }
 }
 
+/// One source of a flat join.
+struct FlatSource<'a> {
+    /// Its effective name: alias or table.
+    name: String,
+    /// The schema table it reads (a history source's table).
+    base: &'a Table,
+    /// What it reads as: the table, or a history source's versions.
+    table: Table,
+    alias: String,
+    history: bool,
+    /// Its SQL source; a history source's waits for its bound.
+    sql: Option<String>,
+}
+
+/// The conjuncts of a filter: an `All` contributes each of its parts.
+fn flatten_all<'p>(predicate: &'p Predicate, out: &mut Vec<&'p Predicate>) {
+    match predicate {
+        Predicate::All(parts) => parts.iter().for_each(|part| flatten_all(part, out)),
+        predicate => out.push(predicate),
+    }
+}
+
+/// The row id an array element names: array cells hold uuids as their
+/// hyphenated text (see [`crate::values::to_sql`]).
+fn array_element_id(element: &str) -> String {
+    format!("unhex(replace({element}.value, '-', ''))")
+}
+
+/// Whether `column` is an array column (nullable or not).
+fn is_array(table: &Table, column: &str) -> bool {
+    let Some(column) = table.column(column) else {
+        return false;
+    };
+    let ty = match &column.ty {
+        ValueType::Nullable(inner) => inner.as_ref(),
+        ty => ty,
+    };
+    matches!(ty, ValueType::Array(_))
+}
+
 pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<String, Error> {
     if column == "id" {
         return Ok(format!("{alias}.id"));
     }
-    if let Some((stored, part)) = crate::values::author_part(column) {
+    if let Some((stored, whole)) = crate::values::author_record(column) {
+        // A JSON array of the record's fields, read back by
+        // `values::from_sql`.
+        let identity = "json_array(issuer, subject)";
+        let fields = if whole {
+            format!("json_array(lower(hex(account)), {identity})")
+        } else {
+            identity.to_owned()
+        };
+        let code = match stored {
+            "$deletedBy" => deletion_sql(table, alias, stored),
+            _ => stored_sql(alias, stored),
+        };
         return Ok(format!(
-            "(SELECT {part} FROM _jazz_authors WHERE n = {})",
-            stored_sql(alias, stored)
+            "(SELECT {fields} FROM _jazz_authors WHERE n = {code})"
         ));
+    }
+    if let Some((stored, part)) = crate::values::author_part(column) {
+        let code = match stored {
+            "$deletedBy" => deletion_sql(table, alias, stored),
+            _ => stored_sql(alias, stored),
+        };
+        return Ok(format!(
+            "(SELECT {part} FROM _jazz_authors WHERE n = {code})"
+        ));
+    }
+    if column == "$deletedAt" {
+        return Ok(deletion_sql(table, alias, column));
     }
     if crate::values::elided_as(column).is_some() {
         return Ok(stored_sql(alias, column));
     }
     if table.column(column).is_none() {
-        if column.starts_with("$createdBy") || column.starts_with("$updatedBy") {
-            return Err(unsupported(format!(
-                "`{column}` (author provenance is readable as `.identity.issuer` and `.identity.subject`)"
-            )));
-        }
         return Err(query_error(format!(
             "unknown column `{}.{column}`",
             table.name
         )));
     }
-    Ok(format!("{alias}.{}", quote(column)))
+    Ok(format!("{alias}.{}", quote(table.stored_name(column))))
+}
+
+/// The first deletion column a query's root selects, filters or orders by.
+fn deletion_column(query: &Query) -> Option<String> {
+    let mut found = query
+        .select
+        .iter()
+        .flatten()
+        .chain(query.order_by.iter().map(|order| &order.column))
+        .find(|column| crate::values::is_deletion(column))
+        .cloned();
+    for filter in &query.filters {
+        if found.is_some() {
+            break;
+        }
+        filter.any_operand(&mut |operand| match operand {
+            Operand::Column(column) if crate::values::is_deletion(column) => {
+                found = Some(column.clone());
+                true
+            }
+            _ => false,
+        });
+    }
+    found
+}
+
+/// `$deletedAt` or the `$deletedBy` author code: the update stamp of a
+/// deleted current version, which the deletion wrote, else NULL. A source
+/// that carries them as columns (history versions, which take them from
+/// their current row) is read directly.
+fn deletion_sql(table: &Table, alias: &str, column: &str) -> String {
+    if table.stored_provenance.iter().any(|c| c.stored == column) {
+        return format!("{alias}.{}", quote(column));
+    }
+    let stamp = match column {
+        "$deletedAt" => "$updatedAt",
+        _ => "$updatedBy",
+    };
+    format!(
+        "CASE WHEN {alias}._del = 1 THEN {} END",
+        stored_sql(alias, stamp)
+    )
 }
 
 /// A stored provenance column; an update stamp left NULL reads as the
@@ -1715,12 +2218,13 @@ impl Ctx<'_> {
                 if column != "id"
                     && crate::values::elided_as(column).is_none()
                     && crate::values::author_part(column).is_none()
+                    && crate::values::author_record(column).is_none()
                     && crate::large::large_capable(col) =>
             {
                 Term::Large(LargeColumn {
                     cell: sql,
-                    table: table.name.clone(),
-                    column: column.to_owned(),
+                    table: table.stored.clone(),
+                    column: col.stored.clone(),
                     kind: crate::large::kind(col),
                 })
             }
@@ -1931,6 +2435,22 @@ impl Ctx<'_> {
         Some(select)
     }
 
+    /// An array cell (JSON text, see [`crate::values::to_sql`]) holding an
+    /// element equal to `right`.
+    fn array_contains(&mut self, left: Term, right: Term) -> String {
+        let (Some(array), Term::Bound(placeholder, needle)) = (left.sql(), right) else {
+            return "0".to_owned();
+        };
+        // Rebind the needle in its own slot, as `json_each` reads elements.
+        let slot = placeholder[1..]
+            .parse::<usize>()
+            .expect("a numbered placeholder")
+            - 1;
+        self.params[slot] = crate::values::array_needle(needle);
+        let needle = placeholder;
+        format!("EXISTS (SELECT 1 FROM json_each({array}) WHERE value = {needle})")
+    }
+
     fn contains(&mut self, left: Term, right: Term) -> String {
         let (Some(l), Some(r)) = (left.sql(), right.sql()) else {
             return "0".to_owned();
@@ -1976,6 +2496,12 @@ impl Ctx<'_> {
                 OrderDirection::Asc => "ASC",
                 OrderDirection::Desc => "DESC",
             };
+            if crate::values::author_record(&key.column).is_some() {
+                return Err(unsupported(format!(
+                    "ordering by the author record `{}` (order by its parts)",
+                    key.column
+                )));
+            }
             match self.column_term(table, alias, &key.column)? {
                 Term::Large(column) => {
                     any_large = true;

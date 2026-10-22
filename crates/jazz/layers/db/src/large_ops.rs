@@ -137,7 +137,7 @@ fn utf16_byte(text: &str, at: u64) -> Option<usize> {
 
 impl Inner {
     /// Forget what the finished write's edits derived.
-    fn clear_derived(&mut self) {
+    pub(crate) fn clear_derived(&mut self) {
         self.pending_nodes.clear();
         self.derived.clear();
     }
@@ -343,10 +343,13 @@ fn nullable(column: &crate::values::Column, value: Value) -> Value {
     }
 }
 
-fn identity_of(inner: &Inner, identity: WriteIdentity) -> Option<AuthorSubject> {
+/// The session an edit's read of the current cell is checked as: a
+/// trusted session's, or none for local staging, which (like every local
+/// write) the authority checks on upload.
+fn identity_of(identity: WriteIdentity) -> Option<AuthorSubject> {
     match who(identity) {
         Who::Session(author) => Some(author),
-        Who::Local => inner.reader(),
+        Who::Local => None,
     }
 }
 
@@ -490,7 +493,7 @@ impl Db {
         let value = {
             let mut inner = self.inner();
             let (col, cell) =
-                inner.physical_cell(table, row, column, identity_of(&inner, opts.identity))?;
+                inner.physical_cell(table, row, column, identity_of(opts.identity))?;
             let value = inner.edited(table, &col, cell, edit)?;
             nullable(&col, value)
         };
@@ -513,68 +516,12 @@ impl Db {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        let result = (|| {
+        let lowered = {
             let mut inner = self.inner();
-            for mutation in &mutations {
-                let column = mutation.column();
-                if patch.contains_key(column) {
-                    return Err(query(format!(
-                        "`{column}` is both patched and partially updated"
-                    )));
-                }
-            }
-            for mutation in mutations {
-                let column = mutation.column().to_owned();
-                let (col, mut cell) =
-                    inner.physical_cell(table, row, &column, identity_of(&inner, opts.identity))?;
-                let value = match mutation {
-                    LargeValueUpdate::Splice {
-                        within, splices, ..
-                    } => {
-                        let mut value = None;
-                        for splice in lower_splices(&inner, &col, &cell, &within, splices)? {
-                            let next = inner.edited(table, &col, cell.clone(), splice)?;
-                            cell = match &next {
-                                Value::Large(large) => inner.large_cell(large)?,
-                                other => to_sql(other)?.ok_or_else(|| unsupported("NaN"))?,
-                            };
-                            value = Some(next);
-                        }
-                        match value {
-                            Some(value) => value,
-                            None => continue,
-                        }
-                    }
-                    LargeValueUpdate::JsonSet { edits, .. } => {
-                        if crate::large::kind(&col) != lv::LargeValueKind::Json {
-                            return Err(Error::new(
-                                ErrorCode::Schema,
-                                format!("{table}.{column} is not a JSON column"),
-                            ));
-                        }
-                        let Sql::Text(raw) = &cell else {
-                            return Err(query(format!("{table}.{column} is null")));
-                        };
-                        let mut json: serde_json::Value =
-                            serde_json::from_slice(&inner.chunks.materialize(raw)?)
-                                .map_err(|e| query(format!("stored JSON: {e}")))?;
-                        for edit in edits {
-                            let slot = json.pointer_mut(&edit.at).ok_or_else(|| {
-                                query(format!(
-                                    "JSON pointer `{}` names no existing value",
-                                    edit.at
-                                ))
-                            })?;
-                            *slot = edit.value;
-                        }
-                        Value::String(json.to_string())
-                    }
-                };
-                patch.insert(column, nullable(&col, value));
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
+            let identity = identity_of(opts.identity);
+            inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
+        };
+        if let Err(error) = lowered {
             self.inner().clear_derived();
             return Err(error);
         }
@@ -1093,4 +1040,105 @@ fn lower_splices(
         });
     }
     Ok(edits)
+}
+
+impl Inner {
+    /// Lower partial large-value updates into `patch` against the row as
+    /// this store sees it now (inside a batch: with its staged writes).
+    /// What the edits build is left in `derived` and `pending_nodes`.
+    pub(crate) fn lower_large_mutations(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        patch: &mut BTreeMap<String, Value>,
+        mutations: Vec<LargeValueUpdate>,
+        identity: Option<AuthorSubject>,
+    ) -> Result<(), Error> {
+        for mutation in &mutations {
+            let column = mutation.column();
+            if patch.contains_key(column) {
+                return Err(query(format!(
+                    "`{column}` is both patched and partially updated"
+                )));
+            }
+        }
+        for mutation in mutations {
+            let column = mutation.column().to_owned();
+            let (col, mut cell) = self.physical_cell(table, row, &column, identity)?;
+            let value = match mutation {
+                LargeValueUpdate::Splice {
+                    within, splices, ..
+                } => {
+                    let mut value = None;
+                    for splice in lower_splices(self, &col, &cell, &within, splices)? {
+                        let next = self.edited(table, &col, cell.clone(), splice)?;
+                        cell = match &next {
+                            Value::Large(large) => self.large_cell(large)?,
+                            other => to_sql(other)?.ok_or_else(|| unsupported("NaN"))?,
+                        };
+                        value = Some(next);
+                    }
+                    match value {
+                        Some(value) => value,
+                        None => continue,
+                    }
+                }
+                LargeValueUpdate::JsonSet { edits, .. } => {
+                    if crate::large::kind(&col) != lv::LargeValueKind::Json {
+                        return Err(Error::new(
+                            ErrorCode::Schema,
+                            format!("{table}.{column} is not a JSON column"),
+                        ));
+                    }
+                    let Sql::Text(raw) = &cell else {
+                        return Err(query(format!("{table}.{column} is null")));
+                    };
+                    let mut json: serde_json::Value =
+                        serde_json::from_slice(&self.chunks.materialize(raw)?)
+                            .map_err(|e| query(format!("stored JSON: {e}")))?;
+                    for edit in edits {
+                        let slot = json.pointer_mut(&edit.at).ok_or_else(|| {
+                            query(format!(
+                                "JSON pointer `{}` names no existing value",
+                                edit.at
+                            ))
+                        })?;
+                        *slot = edit.value;
+                    }
+                    Value::String(json.to_string())
+                }
+            };
+            patch.insert(column, nullable(&col, value));
+        }
+        Ok(())
+    }
+}
+
+impl TxRef<'_> {
+    /// [`Db::update_with_large_value_mutations`] staged in an open batch:
+    /// the edits read the row with the batch's earlier writes applied.
+    pub async fn update_with_large_value_mutations(
+        &self,
+        table: &str,
+        row: RowUuid,
+        mut patch: BTreeMap<String, Value>,
+        mutations: Vec<LargeValueUpdate>,
+        opts: UpdateOptions,
+    ) -> Result<WriteHandle, Error> {
+        let edits = self.db.in_overlay(self.id, None, |inner, _| {
+            let identity = identity_of(opts.identity);
+            let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
+            let edits = crate::db::LargeEdits {
+                derived: std::mem::take(&mut inner.derived),
+                pending_nodes: std::mem::take(&mut inner.pending_nodes),
+            };
+            lowered.map(|()| edits)
+        })?;
+        self.db.stage_with_edits(
+            self.id,
+            StagedOp::Update(table.to_owned(), row, patch, opts),
+            edits,
+        )?;
+        Ok(WriteHandle { row, seq: 0 })
+    }
 }
