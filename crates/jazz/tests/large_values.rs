@@ -15,7 +15,7 @@ use jazz::db::{
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, contains, eq, lit};
 use jazz::records::Value;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -716,4 +716,114 @@ fn a_file_store_streams_edits_and_reads_back_after_reopening() {
         block_on(db.read_value_range("docs", row(1), "blob", 0..blob.len() as u64)).unwrap(),
         blob
     );
+}
+
+/// Partial updates staged in an open transaction read the row with the
+/// transaction's earlier writes applied, are visible to its own reads, and
+/// land in one commit; an abandoned transaction leaves the row unchanged.
+#[test]
+fn partial_updates_inside_a_transaction_build_on_its_earlier_writes() {
+    let db = db();
+    let original = text(7, LARGE);
+    insert(&db, 1, &original, b"");
+    let appended = |n: usize| LargeValueUpdate::Splice {
+        column: "body".into(),
+        within: LargeValueUpdatePage::TextUtf8 {
+            from: (LARGE + n) as u64,
+            to: (LARGE + n) as u64,
+        },
+        splices: vec![LargeValueUpdateSplice {
+            at: 0,
+            delete: 0,
+            insert: vec![b'0' + (n % 10) as u8],
+        }],
+    };
+    let expected: String = original.clone()
+        + &(0..64)
+            .map(|n| char::from(b'0' + (n % 10) as u8))
+            .collect::<String>();
+
+    // Abandoned: nothing lands.
+    let batch = OpenTransactionId::new();
+    block_on(db.begin_mergeable(batch)).unwrap();
+    block_on(
+        db.mergeable_tx_ref(batch)
+            .update_with_large_value_mutations(
+                "docs",
+                row(1),
+                BTreeMap::new(),
+                vec![appended(0)],
+                Default::default(),
+            ),
+    )
+    .unwrap();
+    db.abandon_transaction_handle(batch).unwrap();
+    assert_eq!(body(&db, 1), original);
+
+    // Each edit builds on the previous one; enough of them that the edit
+    // tail fills and consolidates inside the transaction.
+    let batch = OpenTransactionId::new();
+    block_on(db.begin_mergeable(batch)).unwrap();
+    let tx = db.mergeable_tx_ref(batch);
+    for n in 0..64 {
+        block_on(tx.update_with_large_value_mutations(
+            "docs",
+            row(1),
+            BTreeMap::new(),
+            vec![appended(n)],
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    let point = db
+        .prepare_query(&Query::from("docs").filter(eq(col("id"), lit(Value::Uuid(row(1).0)))))
+        .unwrap();
+    let seen = block_on(tx.all_prepared(&point)).unwrap();
+    assert_eq!(cell(&seen[0], "body"), Value::String(expected.clone()));
+    assert_eq!(body(&db, 1), original, "nothing lands before the commit");
+    block_on(db.commit_mergeable_handle(batch)).unwrap();
+    assert_eq!(body(&db, 1), expected);
+
+    // A JSON member set inside a transaction.
+    let doc = serde_json::json!({
+        "items": (0..4000).map(|n| serde_json::json!({ "n": n, "label": text(n, 20) })).collect::<Vec<_>>(),
+        "title": "draft",
+    })
+    .to_string();
+    assert!(doc.len() > 64 * 1024);
+    block_on(db.insert(
+        "notes",
+        BTreeMap::from([("doc".to_owned(), Value::String(doc))]),
+        InsertOptions {
+            row_id: Some(row(9)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let batch = OpenTransactionId::new();
+    block_on(db.begin_mergeable(batch)).unwrap();
+    for title in ["second", "final"] {
+        block_on(
+            db.mergeable_tx_ref(batch)
+                .update_with_large_value_mutations(
+                    "notes",
+                    row(9),
+                    BTreeMap::new(),
+                    vec![LargeValueUpdate::JsonSet {
+                        column: "doc".into(),
+                        edits: vec![JsonSetEdit {
+                            at: "/title".into(),
+                            value: serde_json::json!(title),
+                        }],
+                    }],
+                    Default::default(),
+                ),
+        )
+        .unwrap();
+    }
+    block_on(db.commit_mergeable_handle(batch)).unwrap();
+    let read =
+        |pointer: &str| block_on(db.read_json_pointer("notes", row(9), "doc", pointer)).unwrap();
+    assert_eq!(read("/title"), Some(serde_json::json!("final")));
+    assert_eq!(read("/items/3999/n"), Some(serde_json::json!(3999)));
 }
