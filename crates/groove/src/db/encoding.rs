@@ -434,7 +434,13 @@ fn primary_key_parts<'k>(
                 take_key_bytes(&mut remaining, 1 + width)?;
             }
             None => {
-                decode_primary_key_part(&mut remaining, &column.key_type.column_type())?;
+                let tag = if column.key_type == PrimaryKeyType::String {
+                    6
+                } else {
+                    7
+                };
+                expect_key_tag(&mut remaining, tag)?;
+                decode_ordered_bytes_into(&mut remaining, &mut |_| {})?;
             }
         }
         parts.push(&before[..before.len() - remaining.len()]);
@@ -485,6 +491,18 @@ fn append_primary_key_part_as_field(
         records::ValueType::Uuid => {
             expect_key_tag(&mut part, 10)?;
             output.extend_from_slice(take_key_bytes(&mut part, 16)?);
+        }
+        records::ValueType::String | records::ValueType::Bytes => {
+            let (tag, kind) = if matches!(value_type, records::ValueType::String) {
+                (6, crate::large_values::LargeValueKind::String)
+            } else {
+                (7, crate::large_values::LargeValueKind::Bytes)
+            };
+            expect_key_tag(&mut part, tag)?;
+            let mut bytes = smallvec::SmallVec::<[u8; 64]>::with_capacity(part.len());
+            decode_ordered_bytes_into(&mut part, &mut |byte| bytes.push(byte))?;
+            crate::large_values::encode_primitive_stored_scalar_into(kind, &bytes, output)
+                .map_err(records::Error::from)?;
         }
         _ => {
             let value = decode_primary_key_part(&mut part, value_type)?;
@@ -1062,15 +1080,30 @@ pub(super) fn decode_persisted_index_ordered_bytes(
 
 pub(super) fn decode_ordered_bytes(bytes: &mut &[u8]) -> Result<Vec<u8>, Error> {
     let mut out = Vec::new();
+    decode_ordered_bytes_into(bytes, &mut |byte| out.push(byte))?;
+    Ok(out)
+}
+
+/// Decode one escaped, terminated byte string (see [`encode_ordered_bytes`]),
+/// passing each byte to `push`.
+fn decode_ordered_bytes_into(bytes: &mut &[u8], push: &mut impl FnMut(u8)) -> Result<(), Error> {
+    let truncated = || Error::InvalidDirectRecordStoreKey("truncated".to_owned());
+    let mut at = 0;
     loop {
-        let byte = take_key_bytes(bytes, 1)?[0];
+        let byte = *bytes.get(at).ok_or_else(truncated)?;
+        at += 1;
         if byte != 0 {
-            out.push(byte);
+            push(byte);
             continue;
         }
-        match take_key_bytes(bytes, 1)?[0] {
-            0 => return Ok(out),
-            0xff => out.push(0),
+        let marker = *bytes.get(at).ok_or_else(truncated)?;
+        at += 1;
+        match marker {
+            0 => {
+                *bytes = &bytes[at..];
+                return Ok(());
+            }
+            0xff => push(0),
             _ => return Err(Error::InvalidDirectRecordStoreKey("bytes".to_owned())),
         }
     }

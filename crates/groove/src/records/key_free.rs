@@ -58,28 +58,26 @@ pub struct KeyFreeLayout {
     full_by_stored: Vec<usize>,
     /// The full field index of each primary-key part, in key order.
     key_fields: Vec<usize>,
-    /// Byte plan when every key field has a static width.
-    static_key: Option<StaticKeyPlan>,
+    /// Byte plan between the two records.
+    plan: Option<RebuildPlan>,
     /// Key byte plan, set by [`Self::with_encoded_key`].
     encoded_key: Option<EncodedKeyPlan>,
 }
 
-/// When every key field has a static width, the two records differ only in
-/// their fixed regions: the variable fields, in the same order, follow an
-/// offset table whose absolute offsets differ by the key fields' total width.
-/// So both directions copy runs of fixed bytes and shift the offsets, with no
+/// How the two records' bytes correspond, compiled once. Both have a fixed
+/// region (static fields in field order), an offset table (the end of each
+/// variable field but the last) and the variable fields in field order. So
+/// either direction copies runs of fixed bytes and runs of variable bytes,
+/// adjusts the copied offsets, and writes or skips the key fields, with no
 /// per-field span lookups.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct StaticKeyPlan {
-    /// The full fixed region in order: runs of stored fixed bytes and key
-    /// fields.
-    pieces: Vec<FixedPiece>,
-    /// Fixed region plus offset table of the stored record.
-    stored_header: usize,
-    /// Fixed region plus offset table of the full record.
-    full_header: usize,
-    /// Full fixed size minus stored fixed size.
-    shift: u32,
+struct RebuildPlan {
+    /// The full fixed region in order.
+    fixed: Vec<FixedPiece>,
+    /// The full variable fields in order.
+    variable: Vec<VariablePiece>,
+    /// Upper bound of key field bytes beyond the stored record's length.
+    key_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,111 +89,168 @@ enum FixedPiece {
         len: usize,
         full_start: usize,
     },
-    /// Key part `part`, the full field `index` at `full_start`, `width`
-    /// bytes wide.
+    /// Key part `part`, the full field `index`, `width` bytes wide.
     Key {
         part: usize,
         index: usize,
-        full_start: usize,
         width: usize,
     },
 }
 
-impl StaticKeyPlan {
-    fn new(
-        full: RecordDescriptor,
-        stored: RecordDescriptor,
-        sources: &[FieldSource],
-    ) -> Option<Self> {
-        let mut pieces = Vec::<FixedPiece>::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VariablePiece {
+    /// `count` consecutive variable fields, stored variable field
+    /// `stored_first` onward and full variable field `full_first` onward.
+    Stored {
+        stored_first: usize,
+        full_first: usize,
+        count: usize,
+    },
+    /// Key part `part`, the full field `index`, full variable field
+    /// `full_variable`.
+    Key {
+        part: usize,
+        index: usize,
+        full_variable: usize,
+    },
+}
+
+impl RebuildPlan {
+    fn new(full: RecordDescriptor, stored: RecordDescriptor, sources: &[FieldSource]) -> Self {
+        let mut fixed = Vec::<FixedPiece>::new();
+        let mut variable = Vec::<VariablePiece>::new();
+        let mut key_bytes = 0;
         for &index in &full.layout.logical_by_physical {
-            let FieldLayout::Static { offset, width } = full.layout.fields[index] else {
-                continue;
-            };
-            match sources[index] {
-                FieldSource::Key(part) => pieces.push(FixedPiece::Key {
-                    part,
-                    index,
-                    full_start: offset,
-                    width,
-                }),
-                FieldSource::Stored(stored_index) => {
-                    let FieldLayout::Static {
-                        offset: start,
-                        width: len,
+            match (full.layout.fields[index], sources[index]) {
+                (FieldLayout::Static { width, .. }, FieldSource::Key(part)) => {
+                    key_bytes += width;
+                    fixed.push(FixedPiece::Key { part, index, width });
+                }
+                (FieldLayout::Static { offset, width }, FieldSource::Stored(stored_index)) => {
+                    let FieldLayout::Static { offset: start, .. } =
+                        stored.layout.fields[stored_index]
+                    else {
+                        unreachable!("a stored field keeps its full field's type");
+                    };
+                    match fixed.last_mut() {
+                        Some(FixedPiece::Stored {
+                            start: run_start,
+                            len,
+                            ..
+                        }) if *run_start + *len == start => *len += width,
+                        _ => fixed.push(FixedPiece::Stored {
+                            start,
+                            len: width,
+                            full_start: offset,
+                        }),
+                    }
+                }
+                (FieldLayout::Variable { variable_idx }, FieldSource::Key(part)) => {
+                    // Room for an offset table entry and a short key.
+                    key_bytes += 4 + 32;
+                    variable.push(VariablePiece::Key {
+                        part,
+                        index,
+                        full_variable: variable_idx,
+                    });
+                }
+                (FieldLayout::Variable { variable_idx }, FieldSource::Stored(stored_index)) => {
+                    let FieldLayout::Variable {
+                        variable_idx: stored_variable,
                     } = stored.layout.fields[stored_index]
                     else {
-                        return None;
+                        unreachable!("a stored field keeps its full field's type");
                     };
-                    if let Some(FixedPiece::Stored {
-                        start: run_start,
-                        len: run_len,
-                        ..
-                    }) = pieces.last_mut()
-                        && *run_start + *run_len == start
-                    {
-                        *run_len += len;
-                    } else {
-                        pieces.push(FixedPiece::Stored {
-                            start,
-                            len,
-                            full_start: offset,
-                        });
+                    match variable.last_mut() {
+                        Some(VariablePiece::Stored {
+                            stored_first,
+                            full_first,
+                            count,
+                        }) if *stored_first + *count == stored_variable
+                            && *full_first + *count == variable_idx =>
+                        {
+                            *count += 1
+                        }
+                        _ => variable.push(VariablePiece::Stored {
+                            stored_first: stored_variable,
+                            full_first: variable_idx,
+                            count: 1,
+                        }),
                     }
                 }
             }
         }
-        for (index, source) in sources.iter().enumerate() {
-            match (full.layout.fields[index], source) {
-                (FieldLayout::Variable { .. }, FieldSource::Key(_)) => return None,
-                (FieldLayout::Variable { variable_idx }, FieldSource::Stored(stored_index)) => {
-                    if stored.layout.fields[*stored_index]
-                        != (FieldLayout::Variable { variable_idx })
-                    {
-                        return None;
-                    }
-                }
-                _ => {}
-            }
+        Self {
+            fixed,
+            variable,
+            key_bytes,
         }
-        let variables = full.layout.variable_count;
-        if stored.layout.variable_count != variables {
+    }
+}
+
+/// The variable fields of one encoded record, checked the way a span read of
+/// each would check them: the record holds its fixed region and offset
+/// table, and the offsets never decrease and stay within the record.
+struct VariableSpans<'a> {
+    record: &'a [u8],
+    fixed: usize,
+    count: usize,
+    header: usize,
+}
+
+impl<'a> VariableSpans<'a> {
+    fn new(record: &'a [u8], descriptor: RecordDescriptor) -> Option<Self> {
+        let fixed = descriptor.layout.fixed_size;
+        let count = descriptor.layout.variable_count;
+        let header = fixed + count.saturating_sub(1) * 4;
+        if record.len() < header || (count == 0 && record.len() != fixed) {
             return None;
         }
-        let offsets = variables.saturating_sub(1);
+        let mut previous = header;
+        for entry in record[fixed..header].chunks_exact(4) {
+            let offset = u32::from_le_bytes(entry.try_into().expect("4 bytes")) as usize;
+            if offset < previous || offset > record.len() {
+                return None;
+            }
+            previous = offset;
+        }
         Some(Self {
-            pieces,
-            stored_header: stored.layout.fixed_size + offsets * 4,
-            full_header: full.layout.fixed_size + offsets * 4,
-            shift: u32::try_from(full.layout.fixed_size - stored.layout.fixed_size).ok()?,
+            record,
+            fixed,
+            count,
+            header,
         })
     }
 
-    /// Copy a record's offset table to `output`, each offset mapped by
-    /// `shift`, checking it the way a span read of each variable field
-    /// would: offsets never decrease and stay within the variable section.
-    /// `None` sends the caller to the field-by-field path, which reports the
-    /// precise error.
-    fn shift_offsets(
-        &self,
-        record: &[u8],
-        fixed: usize,
-        header: usize,
-        output: &mut Vec<u8>,
-        shift: impl Fn(u32) -> Option<u32>,
-    ) -> Option<()> {
-        let mut previous = header;
-        for entry in record[fixed..header].chunks_exact(4) {
-            let offset = u32::from_le_bytes(entry.try_into().expect("4 bytes"));
-            let at = offset as usize;
-            if at < previous || at > record.len() {
-                return None;
-            }
-            previous = at;
-            output.extend_from_slice(&shift(offset)?.to_le_bytes());
+    /// Where variable field `variable` ends.
+    fn end(&self, variable: usize) -> usize {
+        if variable + 1 == self.count {
+            self.record.len()
+        } else {
+            let at = self.fixed + variable * 4;
+            u32::from_le_bytes(self.record[at..at + 4].try_into().expect("4 bytes")) as usize
         }
-        Some(())
     }
+
+    /// Where variable field `variable` starts.
+    fn start(&self, variable: usize) -> usize {
+        if variable == 0 {
+            self.header
+        } else {
+            self.end(variable - 1)
+        }
+    }
+}
+
+/// Record that full variable field `variable` of `count` ends where `output`
+/// now ends, in the offset table at `table`. `None` past `u32` offsets.
+fn set_variable_end(output: &mut [u8], table: usize, count: usize, variable: usize) -> Option<()> {
+    if variable + 1 < count {
+        let end = u32::try_from(output.len()).ok()?;
+        let at = table + variable * 4;
+        output[at..at + 4].copy_from_slice(&end.to_le_bytes());
+    }
+    Some(())
 }
 
 impl KeyFreeLayout {
@@ -230,7 +285,7 @@ impl KeyFreeLayout {
         }
         let stored = RecordDescriptor::new_with_fields(stored_fields);
         Ok(Some(Self {
-            static_key: StaticKeyPlan::new(full, stored, &sources),
+            plan: Some(RebuildPlan::new(full, stored, &sources)),
             encoded_key: None,
             full,
             stored,
@@ -244,13 +299,18 @@ impl KeyFreeLayout {
     /// parts are `parts`, in key order. Ignored unless every part has a
     /// fixed width matching its field's.
     pub fn with_encoded_key(mut self, parts: &[EncodedKeyPart]) -> Self {
-        let Some(plan) = &self.static_key else {
+        let Some(plan) = &self.plan else {
             return self;
         };
-        if parts.len() != self.key_fields.len() {
+        if parts.len() != self.key_fields.len()
+            || plan
+                .variable
+                .iter()
+                .any(|piece| matches!(piece, VariablePiece::Key { .. }))
+        {
             return self;
         }
-        let widths_match = plan.pieces.iter().all(|piece| match *piece {
+        let widths_match = plan.fixed.iter().all(|piece| match *piece {
             FixedPiece::Key { part, width, .. } => parts[part].width == width,
             FixedPiece::Stored { .. } => true,
         });
@@ -308,7 +368,7 @@ impl KeyFreeLayout {
         stored: &[u8],
         mut append_key: impl FnMut(usize, usize, &mut Vec<u8>) -> Result<(), E>,
     ) -> Result<Vec<u8>, E> {
-        if let Some(full) = self.static_key_to_full(stored, &mut append_key) {
+        if let Some(full) = self.planned_to_full(stored, &mut append_key) {
             return full;
         }
         self.full.create_with_encoded_fields(
@@ -324,27 +384,26 @@ impl KeyFreeLayout {
         )
     }
 
-    fn static_key_to_full<E: From<Error>>(
+    /// [`Self::to_full_with`] by the byte plan. `None` when the stored bytes
+    /// do not check out; the field-by-field rebuild then reports the
+    /// precise error.
+    #[inline]
+    fn planned_to_full<E: From<Error>>(
         &self,
         stored: &[u8],
         append_key: &mut impl FnMut(usize, usize, &mut Vec<u8>) -> Result<(), E>,
     ) -> Option<Result<Vec<u8>, E>> {
-        let plan = self.static_key.as_ref()?;
-        let stored_fixed = self.stored.layout.fixed_size;
-        if stored.len() < plan.stored_header
-            || (self.stored.layout.variable_count == 0 && stored.len() != stored_fixed)
-        {
-            return None;
-        }
-        let mut output = Vec::with_capacity(stored.len() + plan.shift as usize);
-        for piece in &plan.pieces {
+        let plan = self.plan.as_ref()?;
+        let spans = VariableSpans::new(stored, self.stored)?;
+        let full_variables = self.full.layout.variable_count;
+        let table = self.full.layout.fixed_size;
+        let mut output = Vec::with_capacity(stored.len() + plan.key_bytes);
+        for piece in &plan.fixed {
             match *piece {
                 FixedPiece::Stored { start, len, .. } => {
                     output.extend_from_slice(&stored[start..start + len]);
                 }
-                FixedPiece::Key {
-                    part, index, width, ..
-                } => {
+                FixedPiece::Key { part, index, width } => {
                     let start = output.len();
                     if let Err(error) = append_key(part, index, &mut output) {
                         return Some(Err(error));
@@ -358,14 +417,38 @@ impl KeyFreeLayout {
                 }
             }
         }
-        plan.shift_offsets(
-            stored,
-            stored_fixed,
-            plan.stored_header,
-            &mut output,
-            |offset| offset.checked_add(plan.shift),
-        )?;
-        output.extend_from_slice(&stored[plan.stored_header..]);
+        output.resize(table + full_variables.saturating_sub(1) * 4, 0);
+        for piece in &plan.variable {
+            match *piece {
+                VariablePiece::Stored {
+                    stored_first,
+                    full_first,
+                    count,
+                } => {
+                    let start = spans.start(stored_first);
+                    let base = output.len();
+                    output.extend_from_slice(&stored[start..spans.end(stored_first + count - 1)]);
+                    for field in 0..count {
+                        let end = base + spans.end(stored_first + field) - start;
+                        if full_first + field + 1 < full_variables {
+                            let end = u32::try_from(end).ok()?;
+                            let at = table + (full_first + field) * 4;
+                            output[at..at + 4].copy_from_slice(&end.to_le_bytes());
+                        }
+                    }
+                }
+                VariablePiece::Key {
+                    part,
+                    index,
+                    full_variable,
+                } => {
+                    if let Err(error) = append_key(part, index, &mut output) {
+                        return Some(Err(error));
+                    }
+                    set_variable_end(&mut output, table, full_variables, full_variable)?;
+                }
+            }
+        }
         Some(Ok(output))
     }
 
@@ -375,63 +458,38 @@ impl KeyFreeLayout {
     /// reports the precise error.
     #[inline]
     pub fn to_full_from_encoded_key(&self, stored: &[u8], key: &[u8]) -> Option<Vec<u8>> {
-        let plan = self.static_key.as_ref()?;
         let key_plan = self.encoded_key.as_ref()?;
-        let stored_fixed = self.stored.layout.fixed_size;
-        if key.len() != key_plan.len
-            || stored.len() < plan.stored_header
-            || (self.stored.layout.variable_count == 0 && stored.len() != stored_fixed)
-        {
+        if key.len() != key_plan.len {
             return None;
         }
-        // Pieces come in full field order, so the record is appended front
-        // to back into one exact allocation.
-        let mut output = Vec::with_capacity(stored.len() + plan.shift as usize);
-        for piece in &plan.pieces {
-            match *piece {
-                FixedPiece::Stored { start, len, .. } => {
-                    output.extend_from_slice(&stored[start..start + len]);
-                }
-                FixedPiece::Key { part, .. } => {
-                    let (at, part) = key_plan.parts[part];
-                    if key[at] != part.tag {
-                        return None;
-                    }
-                    let bytes = &key[at + 1..at + 1 + part.width];
-                    match (part.order, part.width) {
-                        (KeyByteOrder::Same, _) => output.extend_from_slice(bytes),
-                        (KeyByteOrder::Reversed, 8) => output.extend_from_slice(
-                            &u64::from_be_bytes(bytes.try_into().expect("8 bytes")).to_le_bytes(),
-                        ),
-                        (KeyByteOrder::Reversed, 4) => output.extend_from_slice(
-                            &u32::from_be_bytes(bytes.try_into().expect("4 bytes")).to_le_bytes(),
-                        ),
-                        (KeyByteOrder::Reversed, _) => output.extend(bytes.iter().rev()),
-                    }
-                }
+        self.planned_to_full(stored, &mut |part, _, output: &mut Vec<u8>| {
+            let (at, part) = key_plan.parts[part];
+            if key[at] != part.tag {
+                return Err(KeyMismatch);
             }
-        }
-        plan.shift_offsets(
-            stored,
-            stored_fixed,
-            plan.stored_header,
-            &mut output,
-            |offset| offset.checked_add(plan.shift),
-        )?;
-        output.extend_from_slice(&stored[plan.stored_header..]);
-        Some(output)
+            let bytes = &key[at + 1..at + 1 + part.width];
+            match (part.order, part.width) {
+                (KeyByteOrder::Same, _) => output.extend_from_slice(bytes),
+                (KeyByteOrder::Reversed, 8) => output.extend_from_slice(
+                    &u64::from_be_bytes(bytes.try_into().expect("8 bytes")).to_le_bytes(),
+                ),
+                (KeyByteOrder::Reversed, 4) => output.extend_from_slice(
+                    &u32::from_be_bytes(bytes.try_into().expect("4 bytes")).to_le_bytes(),
+                ),
+                (KeyByteOrder::Reversed, _) => output.extend(bytes.iter().rev()),
+            }
+            Ok(())
+        })?
+        .ok()
     }
 
-    fn static_key_to_stored(&self, full: &[u8]) -> Option<Vec<u8>> {
-        let plan = self.static_key.as_ref()?;
-        if full.len() < plan.full_header {
-            return None;
-        }
-        if self.full.layout.variable_count == 0 && full.len() != self.full.layout.fixed_size {
-            return None;
-        }
-        let mut output = Vec::with_capacity(full.len() - plan.shift as usize);
-        for piece in &plan.pieces {
+    fn planned_to_stored(&self, full: &[u8]) -> Option<Vec<u8>> {
+        let plan = self.plan.as_ref()?;
+        let spans = VariableSpans::new(full, self.full)?;
+        let stored_variables = self.stored.layout.variable_count;
+        let table = self.stored.layout.fixed_size;
+        let mut output = Vec::with_capacity(full.len());
+        for piece in &plan.fixed {
             if let FixedPiece::Stored {
                 len, full_start, ..
             } = *piece
@@ -439,20 +497,33 @@ impl KeyFreeLayout {
                 output.extend_from_slice(&full[full_start..full_start + len]);
             }
         }
-        plan.shift_offsets(
-            full,
-            self.full.layout.fixed_size,
-            plan.full_header,
-            &mut output,
-            |offset| offset.checked_sub(plan.shift),
-        )?;
-        output.extend_from_slice(&full[plan.full_header..]);
+        output.resize(table + stored_variables.saturating_sub(1) * 4, 0);
+        for piece in &plan.variable {
+            if let VariablePiece::Stored {
+                stored_first,
+                full_first,
+                count,
+            } = *piece
+            {
+                let start = spans.start(full_first);
+                let base = output.len();
+                output.extend_from_slice(&full[start..spans.end(full_first + count - 1)]);
+                for field in 0..count {
+                    let end = base + spans.end(full_first + field) - start;
+                    if stored_first + field + 1 < stored_variables {
+                        let end = u32::try_from(end).ok()?;
+                        let at = table + (stored_first + field) * 4;
+                        output[at..at + 4].copy_from_slice(&end.to_le_bytes());
+                    }
+                }
+            }
+        }
         Some(output)
     }
 
     /// Rebuild the stored bytes of a full record, leaving out its key fields.
     pub fn to_stored(&self, full: &[u8]) -> Result<Vec<u8>, Error> {
-        if let Some(stored) = self.static_key_to_stored(full) {
+        if let Some(stored) = self.planned_to_stored(full) {
             return Ok(stored);
         }
         self.stored
@@ -463,6 +534,15 @@ impl KeyFreeLayout {
                 output.extend_from_slice(&full[span]);
                 Ok(())
             })
+    }
+}
+
+/// An encoded key part whose tag does not match the plan.
+struct KeyMismatch;
+
+impl From<Error> for KeyMismatch {
+    fn from(_: Error) -> Self {
+        Self
     }
 }
 
@@ -495,19 +575,19 @@ mod tests {
 
     fn without_plan(layout: &KeyFreeLayout) -> KeyFreeLayout {
         KeyFreeLayout {
-            static_key: None,
+            plan: None,
             ..layout.clone()
         }
     }
 
     #[test]
-    fn static_key_plan_matches_field_by_field_rebuild() {
+    fn fixed_width_key_plan_matches_field_by_field_rebuild() {
         let full = descriptor();
         let values = values();
         let record = full.create(&values).unwrap();
         for key_fields in [vec![1], vec![3, 1], vec![1, 2, 3]] {
             let layout = KeyFreeLayout::new(full, &key_fields).unwrap().unwrap();
-            assert!(layout.static_key.is_some());
+            assert!(layout.plan.is_some());
             let general = without_plan(&layout);
             let key = key_fields
                 .iter()
@@ -526,7 +606,7 @@ mod tests {
         let values = [Value::Uuid(uuid::Uuid::from_u128(5)), Value::U32(3)];
         let record = full.create(&values).unwrap();
         let layout = KeyFreeLayout::new(full, &[0]).unwrap().unwrap();
-        assert!(layout.static_key.is_some());
+        assert!(layout.plan.is_some());
         let stored = layout.to_stored(&record).unwrap();
         assert_eq!(stored, 3_u32.to_le_bytes());
         assert_eq!(layout.to_full(&stored, &values[..1]).unwrap(), record);
@@ -541,14 +621,22 @@ mod tests {
     }
 
     #[test]
-    fn variable_width_keys_rebuild_field_by_field() {
+    fn variable_width_key_plan_matches_field_by_field_rebuild() {
         let full = descriptor();
         let values = values();
         let record = full.create(&values).unwrap();
-        let layout = KeyFreeLayout::new(full, &[0, 1]).unwrap().unwrap();
-        assert!(layout.static_key.is_none());
-        let stored = layout.to_stored(&record).unwrap();
-        assert_eq!(layout.to_full(&stored, &values[..2]).unwrap(), record);
+        for key_fields in [vec![0, 1], vec![5], vec![4, 2, 0]] {
+            let layout = KeyFreeLayout::new(full, &key_fields).unwrap().unwrap();
+            let general = without_plan(&layout);
+            let key = key_fields
+                .iter()
+                .map(|&index| values[index].clone())
+                .collect::<Vec<_>>();
+            let stored = layout.to_stored(&record).unwrap();
+            assert_eq!(stored, general.to_stored(&record).unwrap());
+            assert_eq!(layout.to_full(&stored, &key).unwrap(), record);
+            assert_eq!(general.to_full(&stored, &key).unwrap(), record);
+        }
     }
 
     #[test]
