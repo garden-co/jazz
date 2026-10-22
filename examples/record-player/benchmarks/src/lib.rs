@@ -6,10 +6,9 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream,
     block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -37,11 +36,8 @@ impl Fixture {
     pub fn new(track_count: usize) -> Self {
         assert!(track_count >= 32, "fixture needs a useful playlist window");
         let schema = schema();
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x52; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -207,7 +203,6 @@ impl Fixture {
 
     pub fn track_metadata_projection(&self) -> &[String] {
         self.track_metadata
-            .shape()
             .query()
             .select
             .as_deref()
@@ -258,7 +253,8 @@ fn schema() -> JazzSchema {
                     .column("ordinal", ColumnType::Integer)
                     .column("duration_ms", ColumnType::Integer)
                     .nullable_column("audio_bytes", ColumnType::Bytea)
-                    .index_only(["album_id", "ordinal"]),
+                    .index_only(["album_id", "ordinal"])
+                    .composite_index(["album_id", "ordinal"]),
             )
             .table(TableSchemaBuilder::new("playlists").column("name", ColumnType::Text))
             .table(
@@ -266,7 +262,8 @@ fn schema() -> JazzSchema {
                     .fk_column("playlist_id", "playlists")
                     .fk_column("track_id", "tracks")
                     .column("position", ColumnType::Double)
-                    .index_only(["playlist_id", "position"]),
+                    .index_only(["playlist_id", "position"])
+                    .composite_index(["playlist_id", "position"]),
             )
             .build(),
     )
