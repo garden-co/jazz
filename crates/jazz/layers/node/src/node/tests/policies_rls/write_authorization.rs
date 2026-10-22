@@ -40,9 +40,11 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
         key: Vec<u8>,
     ) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>>
     {
-        if key
-            .windows("jazz_transactions".len())
-            .any(|window| window == b"jazz_transactions")
+        // The class layout frames `jazz_transactions` keys by its fixed class
+        // table id in the shared meta class.
+        let transactions_id = groove::storage::class_table_id("jazz_transactions").unwrap();
+        if cf == "__groove_class_meta"
+            && key.starts_with(&transactions_id.to_be_bytes())
             && let Some(remaining) = self.fail_after_transaction_reads.get()
         {
             if remaining == 0 {
@@ -554,9 +556,9 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         )
         .unwrap();
 
-    // The first five transaction reads are part of validation and acceptance;
-    // the sixth comes after Accepted persists.
-    storage.fail_after_transaction_reads(5);
+    // The first four transaction reads are part of validation and acceptance;
+    // the fifth comes after Accepted persists.
+    storage.fail_after_transaction_reads(4);
     let error = core
         .finalize_local_mergeable_commit_settled(tx_id)
         .unwrap_err();

@@ -1683,7 +1683,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     // The maintained-view producer must preserve the receiver's partial
     // cardinality when it relays this selected row downstream.
     let stored = reader.query_transaction(tx_id).unwrap().unwrap();
-    let versions = reader.query_versions_for_tx(tx_id).unwrap();
+    let versions = reader.stored_versions_for_tx_for_test(tx_id).unwrap();
     let downstream_bundle = reader
         .version_bundle_for_maintained_view_versions_with_tx(&stored, &versions)
         .unwrap();

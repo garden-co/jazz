@@ -1,13 +1,15 @@
-//! Conversion between the stored (physical) and logical forms of records
-//! whose descriptor has interned fields.
+//! Conversion between records that carry dictionary codes and their resolved
+//! form, for the boundaries where rows leave or enter a node.
 //!
-//! An interned field stores a 4-byte dictionary code (`u32` LE) where the
-//! logical record holds the full value. Every other field has the same
-//! encoding in both forms, but the record layout differs: a code is
-//! fixed-width while the logical value usually is not, so fields move between
-//! the fixed region and the variable region. [`RecordTranscoder`] rebuilds a
-//! record field by field in the other form; it never decodes a field that is
-//! not interned.
+//! An interned field holds a 4-byte dictionary code (`u32` LE), and that code
+//! is its value inside the node. Where a row leaves the node, egress rebuilds
+//! it with each code replaced by the full value the code stands for (the
+//! *resolved* or *logical* form); where a row with full values arrives,
+//! ingress does the reverse. Every other field has the same encoding in both
+//! forms, but the record layout differs: a code is fixed-width while the
+//! value usually is not, so fields move between the fixed region and the
+//! variable region. [`RecordTranscoder`] rebuilds a record field by field in
+//! the other form; it never decodes a field that is not interned.
 
 use super::values::{
     decode_value, encode_value, ensure_value_type, validate_canonical_value,
@@ -64,6 +66,58 @@ impl RecordDescriptor {
     pub fn logical(&self) -> RecordDescriptor {
         logical_record_descriptor(self)
     }
+
+    /// Call `visit` with the dictionary and code of every present interned
+    /// field of `record`, in field order. An interned field sits at top
+    /// level, optionally under one `Nullable`; deeper placements are refused.
+    pub fn visit_interned_codes<E>(
+        &self,
+        record: &[u8],
+        mut visit: impl FnMut(&str, u32) -> Result<(), E>,
+    ) -> Result<(), E>
+    where
+        E: From<Error>,
+    {
+        for (index, field) in self.fields().iter().enumerate() {
+            if !field.value_type.contains_interned() {
+                continue;
+            }
+            let (dictionary, nullable) = match &field.value_type {
+                ValueType::Nullable(inner) => (inner.as_interned(), true),
+                other => (other.as_interned(), false),
+            };
+            let Some((dictionary, _)) = dictionary else {
+                return Err(Error::UnsupportedInternedPlacement {
+                    field: field.name.clone().unwrap_or_default(),
+                }
+                .into());
+            };
+            let span = self.field_span(record, index)?;
+            let code = interned_code(&record[span], nullable)?;
+            if let Some(code) = code {
+                visit(dictionary, code)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The code an interned field's bytes hold, `None` for a null
+/// `Nullable(Interned)`.
+pub(crate) fn interned_code(bytes: &[u8], nullable: bool) -> Result<Option<u32>, Error> {
+    let code = if nullable {
+        match bytes.split_first() {
+            Some((0, padding)) if padding.iter().all(|byte| *byte == 0) => return Ok(None),
+            Some((1, code)) => code,
+            Some((0, _)) => return Err(Error::InvalidOffset),
+            Some((flag, _)) => return Err(Error::InvalidNullFlag(*flag)),
+            None => return Err(Error::UnexpectedEof),
+        }
+    } else {
+        bytes
+    };
+    let code: [u8; 4] = code.try_into().map_err(|_| Error::InvalidOffset)?;
+    Ok(Some(u32::from_le_bytes(code)))
 }
 
 impl RecordTranscoder {

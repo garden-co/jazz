@@ -136,6 +136,7 @@ impl From<crate::node::Error> for Error {
             crate::node::Error::HistoricalReadRequiresServer => {
                 ErrorCode::HistoricalReadRequiresServer
             }
+            crate::node::Error::SnapshotHistoryUnavailable => ErrorCode::NotObserved,
             crate::node::Error::Groove(_) | crate::node::Error::NodeAliasExhausted => {
                 ErrorCode::Storage
             }

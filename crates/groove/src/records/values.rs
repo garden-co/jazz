@@ -529,6 +529,10 @@ const DESCRIPTOR_NODE_RECORD: u8 = 22;
 const DESCRIPTOR_NODE_ENUM: u8 = 23;
 const DESCRIPTOR_NODE_ENUM_CASE: u8 = 24;
 const DESCRIPTOR_NODE_U48: u8 = 25;
+/// An interned column type: `name` is the dictionary, the one child is the
+/// logical value type. Only node-local descriptors carry it; a descriptor
+/// that leaves the node is resolved to its logical form first.
+const DESCRIPTOR_NODE_INTERNED: u8 = 26;
 
 /// Largest value representable by [`ValueType::U48`] (`2^48 - 1`).
 pub const U48_MAX: u64 = (1 << 48) - 1;
@@ -774,16 +778,28 @@ fn descriptor_codec_push_value_type(
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::StoredScalar(
             crate::large_values::LargeValueKind::Json,
         ))) => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_STORED_JSON)),
-        // Interning is a property of one Groove storage column, not of a
-        // value. A descriptor carrying it never leaves Groove's storage
-        // boundary: wire, result and persisted descriptors name the logical
-        // type, so encoding one here is a caller bug and fails closed.
+        // A dictionary code is node-local. Node-local persisted descriptors
+        // (maintained results, durable views) carry the interned type with
+        // its dictionary; a descriptor that leaves the node must be resolved
+        // to its logical form (`RecordDescriptor::logical`) first.
         ValueType::Internal(InternalValueType(InternalValueTypeRepr::Interned {
             dictionary,
-            ..
-        })) => Err(Error::InternedTypeNotEncodable {
-            dictionary: dictionary.clone(),
-        }),
+            logical,
+        })) => {
+            descriptor_codec_push(
+                nodes,
+                DescriptorCodecNode {
+                    tag: DESCRIPTOR_NODE_INTERNED,
+                    name: Some(dictionary.clone()),
+                    identity_name: None,
+                    identity_slot: None,
+                    registry_id: 0,
+                    children: 1,
+                    strings: Vec::new(),
+                },
+            )?;
+            descriptor_codec_push_value_type(nodes, logical)
+        }
         ValueType::Uuid => descriptor_codec_push(nodes, scalar(DESCRIPTOR_NODE_UUID)),
         ValueType::EnumTag(schema) => descriptor_codec_push(
             nodes,
@@ -893,6 +909,22 @@ fn descriptor_codec_take<'a>(
     Ok(node)
 }
 
+/// The child count of `node`, checked against the nodes left after `cursor`.
+/// Every child consumes at least one node, so a larger count is truncated
+/// input. Checking before reserving keeps an untrusted count from sizing an
+/// allocation.
+fn descriptor_codec_children(
+    node: &DescriptorCodecNode,
+    nodes: &[DescriptorCodecNode],
+    cursor: usize,
+) -> Result<usize, Error> {
+    let children = usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?;
+    if children > nodes.len().saturating_sub(cursor) {
+        return Err(Error::UnexpectedEof);
+    }
+    Ok(children)
+}
+
 fn descriptor_codec_metadata_empty(node: &DescriptorCodecNode) -> Result<(), Error> {
     if node.name.is_none()
         && node.identity_name.is_none()
@@ -935,8 +967,7 @@ fn descriptor_codec_decode_descriptor(
     {
         return Err(Error::NonCanonicalRecord);
     }
-    let mut fields =
-        Vec::with_capacity(usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?);
+    let mut fields = Vec::with_capacity(descriptor_codec_children(node, nodes, *cursor)?);
     for _ in 0..node.children {
         let field = descriptor_codec_take(nodes, cursor)?;
         if field.tag != DESCRIPTOR_NODE_FIELD
@@ -1026,9 +1057,7 @@ fn descriptor_codec_decode_value_type(
             {
                 return Err(Error::NonCanonicalRecord);
             }
-            let mut members = Vec::with_capacity(
-                usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?,
-            );
+            let mut members = Vec::with_capacity(descriptor_codec_children(node, nodes, *cursor)?);
             for _ in 0..node.children {
                 members.push(descriptor_codec_decode_value_type(nodes, cursor)?);
             }
@@ -1073,6 +1102,23 @@ fn descriptor_codec_decode_value_type(
                 descriptor_codec_decode_descriptor(nodes, cursor)?,
             )))
         }
+        DESCRIPTOR_NODE_INTERNED => {
+            let Some(dictionary) = node.name.clone() else {
+                return Err(Error::NonCanonicalRecord);
+            };
+            if node.identity_name.is_some()
+                || node.identity_slot.is_some()
+                || node.registry_id != 0
+                || node.children != 1
+                || !node.strings.is_empty()
+            {
+                return Err(Error::NonCanonicalRecord);
+            }
+            Ok(ValueType::interned(
+                dictionary,
+                descriptor_codec_decode_value_type(nodes, cursor)?,
+            ))
+        }
         DESCRIPTOR_NODE_ENUM => {
             if node.name.as_deref().is_none()
                 || node.identity_name.is_some()
@@ -1081,9 +1127,7 @@ fn descriptor_codec_decode_value_type(
             {
                 return Err(Error::NonCanonicalRecord);
             }
-            let mut cases = Vec::with_capacity(
-                usize::try_from(node.children).map_err(|_| Error::LengthOverflow)?,
-            );
+            let mut cases = Vec::with_capacity(descriptor_codec_children(node, nodes, *cursor)?);
             for _ in 0..node.children {
                 let case = descriptor_codec_take(nodes, cursor)?;
                 if case.tag != DESCRIPTOR_NODE_ENUM_CASE
@@ -1180,6 +1224,7 @@ fn persisted_descriptor_node_schema() -> &'static EnumSchema {
             (DESCRIPTOR_NODE_ENUM, "Enum"),
             (DESCRIPTOR_NODE_ENUM_CASE, "EnumCase"),
             (DESCRIPTOR_NODE_U48, "U48"),
+            (DESCRIPTOR_NODE_INTERNED, "Interned"),
         ];
         let cases = kinds.into_iter().enumerate().map(|(index, (tag, name))| {
             assert_eq!(index, usize::from(tag));
@@ -1204,7 +1249,9 @@ fn persisted_descriptor_node_schema() -> &'static EnumSchema {
                     ("registry_id", ValueType::U64),
                     ("children", ValueType::U32),
                 ],
-                DESCRIPTOR_NODE_ENUM_CASE => vec![("name", ValueType::raw_string())],
+                DESCRIPTOR_NODE_ENUM_CASE | DESCRIPTOR_NODE_INTERNED => {
+                    vec![("name", ValueType::raw_string())]
+                }
                 _ => Vec::new(),
             };
             EnumCase::new(name, RecordDescriptor::new(fields))
@@ -1244,7 +1291,7 @@ fn persisted_descriptor_node_value(node: DescriptorCodecNode) -> Result<Value, E
             Value::U64(node.registry_id),
             Value::U32(node.children),
         ],
-        DESCRIPTOR_NODE_ENUM_CASE => {
+        DESCRIPTOR_NODE_ENUM_CASE | DESCRIPTOR_NODE_INTERNED => {
             vec![Value::String(node.name.ok_or(Error::NonCanonicalRecord)?)]
         }
         _ => Vec::new(),
@@ -1311,7 +1358,7 @@ fn persisted_descriptor_node_from_value(value: &Value) -> Result<DescriptorCodec
             node.registry_id = *registry_id;
             node.children = *children;
         }
-        (DESCRIPTOR_NODE_ENUM_CASE, [Value::String(name)]) => {
+        (DESCRIPTOR_NODE_ENUM_CASE | DESCRIPTOR_NODE_INTERNED, [Value::String(name)]) => {
             node.name = Some(name.clone());
             node.children = 1;
         }
@@ -2952,6 +2999,44 @@ fn checked_offset_slot(start: usize, index: usize) -> Result<usize, Error> {
 
 pub(super) fn usize_to_u32(value: usize) -> Result<u32, Error> {
     value.try_into().map_err(|_| Error::LengthOverflow)
+}
+
+#[cfg(test)]
+mod descriptor_codec_child_count_tests {
+    use super::*;
+
+    fn node(tag: u8, name: Option<&str>, children: u32) -> DescriptorCodecNode {
+        DescriptorCodecNode {
+            tag,
+            name: name.map(str::to_owned),
+            identity_name: None,
+            identity_slot: None,
+            registry_id: 0,
+            children,
+            strings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn child_counts_beyond_the_remaining_nodes_are_rejected_before_reserving() {
+        let descriptor = [node(DESCRIPTOR_NODE_DESCRIPTOR, None, u32::MAX)];
+        assert_eq!(
+            descriptor_codec_decode_descriptor(&descriptor, &mut 0),
+            Err(Error::UnexpectedEof)
+        );
+
+        let tuple = [node(DESCRIPTOR_NODE_TUPLE, None, u32::MAX)];
+        assert_eq!(
+            descriptor_codec_decode_value_type(&tuple, &mut 0),
+            Err(Error::UnexpectedEof)
+        );
+
+        let enumeration = [node(DESCRIPTOR_NODE_ENUM, Some("state"), u32::MAX)];
+        assert_eq!(
+            descriptor_codec_decode_value_type(&enumeration, &mut 0),
+            Err(Error::UnexpectedEof)
+        );
+    }
 }
 
 #[cfg(test)]

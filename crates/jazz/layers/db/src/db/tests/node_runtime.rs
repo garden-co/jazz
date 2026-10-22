@@ -1676,7 +1676,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
     let create_unit = server
         .node()
         .borrow_mut()
-        .commit_unit_for(write.mergeable_tx_id())
+        .stored_commit_unit_for_test(write.mergeable_tx_id())
         .unwrap();
     receiver
         .node
@@ -1707,7 +1707,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
     let update_unit = server
         .node()
         .borrow_mut()
-        .commit_unit_for(bob_update.mergeable_tx_id())
+        .stored_commit_unit_for_test(bob_update.mergeable_tx_id())
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = update_unit else {
         panic!("expected update commit unit");
@@ -1736,7 +1736,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
         .node
         .node
         .borrow_mut()
-        .commit_unit_for(bob_update.mergeable_tx_id())
+        .stored_commit_unit_for_test(bob_update.mergeable_tx_id())
         .unwrap();
     let SyncMessage::CommitUnit {
         versions: receiver_versions,

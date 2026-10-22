@@ -5,9 +5,10 @@
 // below every row API, and a round trip alone cannot tell a 4-byte alias or a
 // 6-byte timestamp apart from the 8-byte forms they replaced.
 
-/// Every raw entry of a closed RocksDB store whose class-CF key frame
-/// (`u32be len | logical name | key`) names `logical`, as `(key, value)` with
-/// the frame removed.
+/// Every raw entry of a closed RocksDB store that belongs to `logical`, as
+/// `(key, value)` with the class-CF frame removed. In the Jazz class layout a
+/// family lives in its class column family, its keys framed by the family's
+/// `u32be` class table id.
 fn compact_storage_raw_entries(
     path: &std::path::Path,
     logical: &str,
@@ -15,23 +16,30 @@ fn compact_storage_raw_entries(
     let options = rocksdb::Options::default();
     let families = rocksdb::DB::list_cf(&options, path).unwrap();
     let db = rocksdb::DB::open_cf_for_read_only(&options, path, &families, false).unwrap();
-    let mut frame = (logical.len() as u32).to_be_bytes().to_vec();
-    frame.extend_from_slice(logical.as_bytes());
-    let mut entries = Vec::new();
-    for family in &families {
-        let handle = db.cf_handle(family).unwrap();
-        for entry in db.iterator_cf(&handle, rocksdb::IteratorMode::Start) {
-            let (key, value) = entry.unwrap();
-            if let Some(rest) = key.strip_prefix(frame.as_slice()) {
-                entries.push((rest.to_vec(), value.to_vec()));
-            }
-        }
-    }
-    entries
+    // The layout always lists the meta class; a system family such as
+    // `jazz_transactions` lives in it, a per-table family in its own class.
+    let classes = groove::storage::StorageLayout::jazz_class_v3()
+        .physical_column_families([logical]);
+    let class_cf = classes
+        .iter()
+        .find(|name| *name != "__groove_class_meta")
+        .unwrap_or(&classes[0])
+        .clone();
+    let frame = groove::storage::class_table_id(logical)
+        .unwrap()
+        .to_be_bytes();
+    let handle = db.cf_handle(&class_cf).unwrap();
+    db.iterator_cf(&handle, rocksdb::IteratorMode::Start)
+        .map(Result::unwrap)
+        .filter_map(|(key, value)| {
+            key.strip_prefix(frame.as_slice())
+                .map(|rest| (rest.to_vec(), value.to_vec()))
+        })
+        .collect()
 }
 
 /// The stored bytes of `field` in one raw row of `table`, located through the
-/// table's physical (storage) record descriptor.
+/// table's record descriptor, which is also its stored layout.
 fn compact_storage_field_bytes(
     storage_table: &groove::schema::TableSchema,
     value: &[u8],
@@ -39,8 +47,8 @@ fn compact_storage_field_bytes(
 ) -> Vec<u8> {
     let (tag, payload) = groove::records::split_variant_record(value).unwrap();
     let descriptor = storage_table
-        .storage_record_schema_for_variant(tag)
-        .expect("stored variant has a storage descriptor");
+        .record_schema_for_variant(tag)
+        .expect("stored variant has a descriptor");
     let index = descriptor.field_index(field).unwrap();
     payload[descriptor.field_span(payload, index).unwrap()].to_vec()
 }

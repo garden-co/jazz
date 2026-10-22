@@ -1435,7 +1435,7 @@ fn public_chat_projections_ship_identical_complete_row_versions() {
         .find(|version| version.table() == "chats" && version.row_uuid() == public_chat)
         .expect("title query must ship public chat payload");
     let canonical = core
-        .query_versions_for_tx(public_tx)
+        .stored_versions_for_tx_for_test(public_tx)
         .unwrap()
         .into_iter()
         .find(|version| version.table() == "chats" && version.row_uuid() == public_chat)

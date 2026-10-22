@@ -1,7 +1,13 @@
 import { rel, reverse } from "./relationships.js";
 import { schemaColumns, allowExternalProvenanceName } from "./dsl.js";
 import { definePermissions } from "./permissions/index.js";
-import { defineApp, defineSchema, defineSliceableApp, defineTable } from "./typed-app.js";
+import {
+  defineApp,
+  defineSchema,
+  defineSliceableApp,
+  defineTable,
+  defineComputed,
+} from "./typed-app.js";
 import type {
   App as TypedApp,
   InsertOf as TypedInsertOf,
@@ -22,6 +28,7 @@ type RuntimeSchemaNamespace = typeof schemaColumns & {
   rel: typeof rel;
   reverse: typeof reverse;
   table: typeof defineTable;
+  computed: typeof defineComputed;
   defineSchema: typeof defineSchema;
   defineApp: typeof defineApp;
   defineSliceableApp: typeof defineSliceableApp;
@@ -34,6 +41,7 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, schemaColumns, {
   rel,
   reverse,
   table: defineTable,
+  computed: defineComputed,
   defineSchema,
   defineApp,
   defineSliceableApp,

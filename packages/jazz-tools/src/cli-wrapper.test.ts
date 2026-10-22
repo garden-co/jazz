@@ -76,6 +76,17 @@ describe("jazz-tools wrapper", () => {
     expect(help).toContain("validate");
     expect(help).not.toMatch(/\bmcp\b/i);
   });
+
+  it.each([["login"], ["apps"], ["teams"]])(
+    "routes Jazz Cloud command %s to the TypeScript CLI",
+    async (command) => {
+      const result = await runWrapper([command, "--help"]);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("Jazz Cloud commands");
+      expect(result.stdout).not.toContain("Jazz distributed database CLI");
+    },
+  );
   it.each([
     ["before command", ["--env-file", ".env.staging", "deploy", "explicit-wrapper-app"]],
     ["after command", ["deploy", "--env-file", ".env.staging", "explicit-wrapper-app"]],

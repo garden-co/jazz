@@ -355,7 +355,7 @@ where
             return Ok(false);
         };
         let mut existing_versions = self
-            .query_versions_for_tx(tx.tx_id)
+            .stored_versions_for_tx_at(tx.tx_id, &existing, versions)
             .await?
             .into_iter()
             .map(|stored| self.version_record_from_row(&stored))
@@ -378,7 +378,8 @@ where
         let versions = canonical_versions(versions);
         if let Some(existing) = self.query_transaction(tx.tx_id).await? {
             let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
+                .stored_versions_for_tx_at(tx.tx_id, &existing, &versions)
+                .await?
                 .into_iter()
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -519,7 +520,8 @@ where
                 }]));
             }
             let mut existing_versions = self
-                .query_versions_for_tx(tx.tx_id).await?
+                .stored_versions_for_tx_at(tx.tx_id, &existing, &versions)
+                .await?
                 .into_iter()
                 .map(|stored| self.version_record_from_row(&stored))
                 .collect::<Result<Vec<_>, Error>>()?;
@@ -994,7 +996,7 @@ where
             // exclusive transaction. Preserve that scope marker even when
             // the redacted write count equals this fragment's length, so a
             // later sibling view can extend the same local projection.
-            stage_transaction_record(
+            self.stage_tx_record(
                 &mut batch,
                 TransactionRecordWrite::Insert {
                     provenance: contribution_merge,
@@ -1038,6 +1040,7 @@ where
                 )?;
                 let source_table_schema = self.table_in_schema_ref(version.table(), author_schema)?;
                 let stored = VersionRow::from_wire_with_schema_version(
+                    &self.authors,
                     source_table_schema,
                     version,
                     authored_column_ids,

@@ -501,6 +501,9 @@ class ForegroundHandle final : public HostObject,
 
   Value get(Runtime &runtime, const PropNameID &name) override {
     const auto property = name.utf8(runtime);
+    if (property == "supportsSnapshotCapture") {
+      return Value(jazz_native_relay_supports_snapshot_capture());
+    }
     if (property == "isClosed") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "isClosed"), 0,
@@ -624,7 +627,8 @@ class ForegroundHandle final : public HostObject,
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(6);
+    names.reserve(7);
+    names.emplace_back(PropNameID::forAscii(runtime, "supportsSnapshotCapture"));
     names.emplace_back(PropNameID::forAscii(runtime, "tick"));
     names.emplace_back(PropNameID::forAscii(runtime, "isClosed"));
     names.emplace_back(PropNameID::forAscii(runtime, "close"));

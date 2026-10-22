@@ -25,9 +25,8 @@ fn widened_projection_descriptor(
                     field.name.clone().ok_or(Error::InvalidStoredValue(
                         "physical projection logical field unnamed",
                     ))?,
-                    // Projections read logical rows: an interned column
-                    // projects its full value, never its stored code.
-                    widen_projection_value_type(&field.value_type, &physical.column_type.logical()),
+                    // An interned column projects its dictionary code.
+                    widen_projection_value_type(&field.value_type, &physical.column_type),
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?,
@@ -63,11 +62,10 @@ pub(super) fn physical_write_descriptor(
                 // Writes target the physical table itself. Unlike read-side
                 // widening, its descriptor must retain the physical enum
                 // registry identities so Groove accepts the variant record;
-                // values are explicitly re-encoded before this point. The
-                // record is logical: Groove interns its author columns when
-                // it stores it.
+                // values are explicitly re-encoded before this point, and
+                // author columns already hold dictionary codes.
                 let _ = logical;
-                Ok((name.clone(), physical.column_type.logical()))
+                Ok((name.clone(), physical.column_type.clone()))
             })
             .collect::<Result<Vec<_>, Error>>()?,
     ))

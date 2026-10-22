@@ -307,7 +307,7 @@ fn physical_composite_index_entry_keys_are_pinned() {
         &families.iter().map(String::as_str).collect::<Vec<_>>(),
     )
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v2())).unwrap();
+    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v3())).unwrap();
     assert!(composite_index_entries(&storage).is_empty());
     drop(storage);
     let keys = hex_keys(open_db_composite_index_entries(&open_rocks_db(
@@ -620,7 +620,7 @@ fn physical_global_current_composite_index_entry_keys_are_pinned() {
         &families.iter().map(String::as_str).collect::<Vec<_>>(),
     )
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v2())).unwrap();
+    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v3())).unwrap();
     let keys = composite_index_entries(&storage)
         .into_iter()
         .filter(|(table, _, _)| table == "jazz_physical_1_global_current")

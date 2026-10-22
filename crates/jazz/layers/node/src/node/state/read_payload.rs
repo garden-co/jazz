@@ -271,7 +271,7 @@ where
             ))?;
         let table = self.table_in_schema_ref(version.table(), schema_version)?;
         let authored_columns = self.authored_columns_for_version(version)?;
-        let record = VersionRecord::from_stored(version, table, schema_version, authored_columns)?;
+        let record = VersionRecord::from_stored(&self.authors, version, table, schema_version, authored_columns)?;
         Ok(record.with_extra_cells(self.union_extra_cells_for_wire(version)?))
     }
 

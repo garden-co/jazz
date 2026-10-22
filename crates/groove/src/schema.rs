@@ -701,27 +701,16 @@ impl TableSchema {
             })
     }
 
-    /// The logical descriptor of one whole-row enum case: what reads,
-    /// subscriptions and writes see. Interned fields have their logical type.
-    /// Stored bytes are laid out by [`Self::storage_record_schema_for_variant`].
+    /// The descriptor of one whole-row enum case. It is both the stored
+    /// layout and what reads, IVM operators and writes see: an interned field
+    /// keeps its [`ValueType::interned`] type and holds its 4-byte dictionary
+    /// code, which is resolved to its value only on demand (see
+    /// [`crate::dictionary`]).
     pub fn record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
-        self.storage_record_schema_for_variant(tag)
-            .map(|descriptor| crate::records::logical_record_descriptor(&descriptor))
-    }
-
-    /// The logical descriptor of this table's full column catalogue.
-    pub fn record_schema(&self) -> RecordDescriptor {
-        crate::records::logical_record_descriptor(&self.storage_record_schema())
-    }
-
-    /// The stored (physical) descriptor of one whole-row enum case: interned
-    /// fields hold their 4-byte codes. Only Groove's storage boundary reads
-    /// stored bytes with it.
-    pub fn storage_record_schema_for_variant(&self, tag: u32) -> Option<RecordDescriptor> {
         #[cfg(test)]
         VARIANT_DESCRIPTOR_BUILDS.with(|count| count.set(count.get() + 1));
         if self.variants.is_empty() {
-            return Some(self.storage_record_schema());
+            return Some(self.record_schema());
         }
         let variant = self.variant(tag)?;
         let fields = if variant.payload_fields.is_empty() {
@@ -746,8 +735,9 @@ impl TableSchema {
         Some(RecordDescriptor::new(fields))
     }
 
-    /// The stored (physical) descriptor of this table's full column catalogue.
-    pub fn storage_record_schema(&self) -> RecordDescriptor {
+    /// The descriptor of this table's full column catalogue, stored and seen
+    /// alike.
+    pub fn record_schema(&self) -> RecordDescriptor {
         RecordDescriptor::new(
             self.columns
                 .iter()

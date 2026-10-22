@@ -801,23 +801,90 @@ where
         Ok(versions)
     }
 
+    /// Every version this node stored for `tx_id`, found through its
+    /// touched-rows list. A settled transaction whose list was released
+    /// ([`releases_touched_rows`]) cannot be listed:
+    /// [`Error::TransactionVersionsReleased`]. Callers that know the rows they
+    /// want read them exactly instead ([`Self::query_tx_version_at`],
+    /// [`Self::stored_versions_for_tx_at`]).
     pub(super) async fn query_versions_for_tx(
         &mut self,
         tx_id: TxId,
     ) -> Result<Vec<VersionRow>, Error> {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
+            #[cfg(test)]
+            record_query_versions_for_tx_call();
+            return Ok(Vec::new());
+        };
+        self.query_listed_versions_for_tx(tx_id, &tx)
+            .await?
+            .ok_or(Error::TransactionVersionsReleased(tx_id))
+    }
+
+    /// [`Self::query_versions_for_tx`] for a loaded transaction; `None` when
+    /// its touched-rows list was released.
+    pub(super) async fn query_listed_versions_for_tx(
+        &mut self,
+        tx_id: TxId,
+        tx: &StoredTransaction,
+    ) -> Result<Option<Vec<VersionRow>>, Error> {
         #[cfg(test)]
         record_query_versions_for_tx_call();
 
-        let Some(tx) = self.query_transaction(tx_id).await? else {
-            return Ok(Vec::new());
+        // A released list is decided by the stored record alone, never by
+        // what the version cache still holds, so a caller that lists a
+        // settled transaction fails the same way warm or cold.
+        let listed = if tx.releases_touched_rows() {
+            match self
+                .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
+                .await?
+            {
+                Some(rows) => Some(rows),
+                None => return Ok(None),
+            }
+        } else {
+            None
         };
-        self.query_versions_for_tx_header(tx_id, tx.node_alias, tx.global_time)
-            .await
+        if let Some(mut versions) = self.cached_tx_versions(tx_id) {
+            versions.sort_by(|left, right| {
+                left.table()
+                    .cmp(right.table())
+                    .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+            });
+            return Ok(Some(versions));
+        }
+        // The list names every history row this node stored for the
+        // transaction; each is one exact history point read. A listed row
+        // that is no longer stored (evicted) is skipped.
+        let touched_rows = match listed {
+            Some(rows) => rows,
+            None => self
+                .load_tx_touched_rows(None, tx_id.time, tx.node_alias)
+                .await?
+                .unwrap_or_default(),
+        };
+        let mut versions = Vec::new();
+        for (table_id, branch_key, row_uuid) in touched_rows.iter() {
+            if let Some(version) = self
+                .query_tx_version_at(tx_id, tx, table_id, branch_key, row_uuid)
+                .await?
+            {
+                versions.push(version);
+            }
+        }
+        versions.sort_by(|left, right| {
+            left.table()
+                .cmp(right.table())
+                .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+        });
+        Ok(Some(versions))
     }
 
-    /// [`Self::query_versions_for_tx`] for a transaction whose alias and seq
-    /// the caller already read from its record, without assembling (and so
-    /// auditing) the whole transaction.
+    /// The versions a transaction whose alias the caller already read from
+    /// its record stored, without assembling (and so auditing) the whole
+    /// transaction. For a transaction that still keeps its touched-rows list
+    /// (pending, or settled before its list is released); a released list
+    /// yields no versions.
     pub(super) async fn query_versions_for_tx_header(
         &mut self,
         tx_id: TxId,
@@ -832,17 +899,15 @@ where
             });
             return Ok(versions);
         }
-        // The transaction record lists every history row this node stored
-        // for it; each is one exact history point read. A listed row that is
-        // no longer stored (evicted) is skipped.
-        let mut versions = Vec::new();
         let touched_rows = self
             .load_tx_touched_rows(None, tx_id.time, node_alias)
-            .await?;
+            .await?
+            .unwrap_or_default();
         let seqs = history_seq_candidates(global_time);
+        let mut versions = Vec::new();
         for (table_id, branch_key, row_uuid) in touched_rows.iter() {
             let storage_table = physical_history_table_name(table_id);
-            let found = self
+            let Some(record) = self
                 .stored_image_record(
                     None,
                     &storage_table,
@@ -852,8 +917,8 @@ where
                     tx_id.time,
                     node_alias,
                 )
-                .await?;
-            let Some(record) = found else {
+                .await?
+            else {
                 continue;
             };
             versions.push(self.decode_stored_physical_history_record(&storage_table, record)?);
@@ -863,6 +928,131 @@ where
                 .cmp(right.table())
                 .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
         });
+        Ok(versions)
+    }
+
+    /// The version `tx_id` stored for one row of one physical table: an exact
+    /// history point read at `(branch, row, seq, tx)`. Needs no touched-rows
+    /// list, so it also reads settled transactions.
+    pub(super) async fn query_tx_version_at(
+        &mut self,
+        tx_id: TxId,
+        tx: &StoredTransaction,
+        table_id: PhysicalTableId,
+        branch_key: &[u8],
+        row_uuid: RowUuid,
+    ) -> Result<Option<VersionRow>, Error> {
+        // A transaction ingested in this turn may still be staged; its
+        // version cache holds exactly what it stored.
+        if let Some(cached) = self.query.tx_versions_cache.get(&tx_id)
+            && let Some(version) = cached.versions.iter().find(|version| {
+                version.row_uuid() == row_uuid
+                    && version.branch_key().canonical_bytes() == branch_key
+                    && self.physical_table_id_for_version(version).ok() == Some(table_id)
+            })
+        {
+            return Ok(Some(version.clone()));
+        }
+        // An accepted image is in history only once superseded; until then it
+        // is the row's global-current record (SPEC 2 §2.7.1).
+        let storage_table = physical_history_table_name(table_id);
+        let Some(record) = self
+            .stored_image_record(
+                None,
+                &storage_table,
+                branch_key,
+                row_uuid,
+                &history_seq_candidates(tx.global_time),
+                tx_id.time,
+                tx.node_alias,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.decode_stored_physical_history_record(&storage_table, record)
+            .map(Some)
+    }
+
+    /// The versions this node stored for a known transaction, to compare with
+    /// a resent or re-delivered copy carrying `versions`: every listed
+    /// version while the transaction keeps its touched-rows list, else the
+    /// stored version at each coordinate of `versions` (exact point reads).
+    /// Once the list is released the transaction is complete and settled, so
+    /// a copy that matches it row for row and in write count is the same
+    /// payload.
+    pub(super) async fn stored_versions_for_tx_at(
+        &mut self,
+        tx_id: TxId,
+        tx: &StoredTransaction,
+        versions: &[VersionRecord],
+    ) -> Result<Vec<VersionRow>, Error> {
+        if let Some(listed) = self.query_listed_versions_for_tx(tx_id, tx).await? {
+            return Ok(listed);
+        }
+        let mut stored = Vec::new();
+        let mut seen = BTreeSet::new();
+        for version in versions {
+            // A table this node cannot resolve holds no stored version.
+            let Ok(table_id) =
+                self.physical_table_id_for_schema(version.schema_version(), version.table())
+            else {
+                continue;
+            };
+            let branch_key = version.branch_key().canonical_bytes();
+            if !seen.insert((table_id, branch_key.clone(), version.row_uuid())) {
+                continue;
+            }
+            if let Some(found) = self
+                .query_tx_version_at(tx_id, tx, table_id, &branch_key, version.row_uuid())
+                .await?
+            {
+                stored.push(found);
+            }
+        }
+        stored.sort_by(|left, right| {
+            left.table()
+                .cmp(right.table())
+                .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+        });
+        Ok(stored)
+    }
+
+    /// The versions of `tx_id` that can witness `row_uuid` under the logical
+    /// name `table`: every listed version while the transaction keeps its
+    /// touched-rows list, else the row's stored version in each physical
+    /// table that name maps to, by exact point reads. A released list only
+    /// ever held default-branch rows, so the default branch is complete.
+    pub(super) async fn tx_versions_for_witness(
+        &mut self,
+        tx_id: TxId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
+            return Ok(Vec::new());
+        };
+        if let Some(listed) = self.query_listed_versions_for_tx(tx_id, &tx).await? {
+            return Ok(listed);
+        }
+        let sources = match self.version_storage_sources(table) {
+            Ok(sources) => sources,
+            Err(Error::TableNotFound(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let default_branch = BranchKey::default().canonical_bytes();
+        let mut versions = Vec::new();
+        for storage_table in sources {
+            let Some(table_id) = physical_version_table_id(&storage_table) else {
+                continue;
+            };
+            if let Some(version) = self
+                .query_tx_version_at(tx_id, &tx, table_id, &default_branch, row_uuid)
+                .await?
+            {
+                versions.push(version);
+            }
+        }
         Ok(versions)
     }
 
@@ -1288,10 +1478,9 @@ where
         let kind =
             tx_kind_from_discriminant(record.get_enum(TransactionRowRecord::FIELD_KIND_IDX)?)?;
         let flags = transaction_flags(record)?;
-        let made_by =
-            RowAuthor::from_record(record.get_record(TransactionRowRecord::FIELD_MADE_BY_IDX)?)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
-                .as_author_subject();
+        let made_by = self.authors.subject(AuthorCode(
+            record.get_dictionary_code(TransactionRowRecord::FIELD_MADE_BY_IDX)?,
+        ))?;
         let permission_subject = transaction_permission_subject(record, made_by)?;
         let fate = fate_from_encoded_fields(record)?;
         let global_time = record
@@ -1517,5 +1706,76 @@ where
         };
         self.decode_history_owned_record(table, storage_table, record)
             .map(Some)
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Every version this node stores for `tx_id`, found by scanning every
+    /// physical history table and its global-current images (an accepted
+    /// image is in history only once superseded, SPEC 2 §2.7.1). Test-only:
+    /// it inspects storage without the touched-rows list, so it also reads
+    /// settled transactions whose list was released. Ordered like
+    /// [`Self::query_versions_for_tx`].
+    pub async fn stored_versions_for_tx_for_test(
+        &mut self,
+        tx_id: TxId,
+    ) -> Result<Vec<VersionRow>, Error> {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
+            return Ok(Vec::new());
+        };
+        let table_ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        let mut versions = Vec::new();
+        for table_id in table_ids {
+            let storage_table = physical_history_table_name(table_id);
+            let mut records = self
+                .database
+                .primary_key_scan_raw(&storage_table, &[])
+                .await?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            records.extend(self.current_image_records(&storage_table, &[]).await?);
+            for record in records {
+                let view = record.borrowed();
+                if view.get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)? != tx_id.time.0
+                    || view.get_u32(HistoryRowRecord::FIELD_TX_NODE_ID_IDX)? != tx.node_alias.0
+                {
+                    continue;
+                }
+                versions.push(self.decode_stored_physical_history_record(&storage_table, record)?);
+            }
+        }
+        versions.sort_by(|left, right| {
+            left.table()
+                .cmp(right.table())
+                .then_with(|| left.row_uuid().cmp(&right.row_uuid()))
+        });
+        Ok(versions)
+    }
+
+    /// [`Self::commit_unit_for`] built from [`Self::stored_versions_for_tx_for_test`],
+    /// so it also rebuilds a settled transaction's unit.
+    pub async fn stored_commit_unit_for_test(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
+        let tx = self
+            .query_transaction(tx_id)
+            .await?
+            .ok_or(Error::MissingTransaction(tx_id))?
+            .tx;
+        let versions = self
+            .stored_versions_for_tx_for_test(tx_id)
+            .await?
+            .iter()
+            .map(|row| self.version_record_from_row(row))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(SyncMessage::CommitUnit { tx, versions })
     }
 }

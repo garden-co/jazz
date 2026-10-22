@@ -271,6 +271,7 @@ pub(super) fn window_record_reaches_output(
     chain: &[NodeId],
     descriptor: RecordDescriptor,
     record: &Bytes,
+    dictionaries: &crate::dictionary::SharedDictionaries,
 ) -> Result<WindowReach, IvmRuntimeError> {
     let mut current = RecordDeltas {
         descriptor,
@@ -303,10 +304,11 @@ pub(super) fn window_record_reaches_output(
                     .fields_contain_indirect_values(delta.raw(), indices)?
                 {
                     unknown = true;
-                } else if !filter
-                    .predicate
-                    .matches(delta.borrowed(&current.descriptor), filter.comparison)?
-                {
+                } else if !filter.predicate.matches(
+                    delta.borrowed(&current.descriptor),
+                    filter.comparison,
+                    dictionaries,
+                )? {
                     return Ok(WindowReach::No);
                 }
             }
@@ -317,6 +319,7 @@ pub(super) fn window_record_reaches_output(
                     &current,
                     None,
                     false,
+                    Some(dictionaries),
                 )?;
             }
             _ => return Err(IvmRuntimeError::UnsupportedOperator),
@@ -338,6 +341,7 @@ pub(super) fn project_window_record(
     chain: &[NodeId],
     descriptor: RecordDescriptor,
     record: &[u8],
+    dictionaries: &crate::dictionary::SharedDictionaries,
 ) -> Result<Option<(RecordDescriptor, Bytes)>, IvmRuntimeError> {
     let mut current = RecordDeltas {
         descriptor,
@@ -359,6 +363,7 @@ pub(super) fn project_window_record(
                     &current,
                     None,
                     false,
+                    Some(dictionaries),
                 )?;
             }
             _ => return Err(IvmRuntimeError::UnsupportedOperator),
@@ -696,7 +701,9 @@ pub(super) fn project_descriptor(
             let value_type = match &project_field.expression {
                 ProjectExpr::RecordField { source, path } => {
                     let index = resolve_field_ref(input, source)?;
-                    let mut ty = input.fields()[index].value_type.clone();
+                    // A sub-field of an interned value is typed by the
+                    // dictionary's logical type and resolved per row.
+                    let mut ty = input.fields()[index].value_type.logical();
                     for name in path {
                         let ValueType::Record(record) = ty else {
                             return Err(IvmRuntimeError::UnsupportedOperator);
@@ -1307,6 +1314,7 @@ pub(super) fn project_record(
     output_desc: RecordDescriptor,
     input_desc: &RecordDescriptor,
     input_record: &[u8],
+    dictionaries: Option<&crate::dictionary::SharedDictionaries>,
 ) -> Result<Vec<u8>, IvmRuntimeError> {
     if projection_uses_raw_copy(expressions, mapping, output_desc) {
         return Ok(output_desc.project_record_raw(
@@ -1324,6 +1332,7 @@ pub(super) fn project_record(
             output_desc,
             input_desc,
             input_record,
+            dictionaries,
         )?);
     }
     Ok(output_desc.create(&values)?)
@@ -1340,6 +1349,7 @@ pub(super) fn project_field_value(
     output_desc: RecordDescriptor,
     input_desc: &RecordDescriptor,
     input_record: &[u8],
+    dictionaries: Option<&crate::dictionary::SharedDictionaries>,
 ) -> Result<Value, IvmRuntimeError> {
     #[cfg(test)]
     PROJECT_VALUE_EVALUATIONS.with(|count| count.set(count.get() + 1));
@@ -1354,7 +1364,17 @@ pub(super) fn project_field_value(
         ProjectExpr::TemplateArgument { .. } => return Err(IvmRuntimeError::UnsupportedOperator),
         ProjectExpr::Field(field) => resolved(field)?,
         ProjectExpr::RecordField { source, path } => {
-            let mut value = resolved(source)?;
+            let source_idx = resolve_field_ref(input_desc, source)?;
+            let mut value = input.get_idx(source_idx)?;
+            let source_type = &input_desc.fields()[source_idx].value_type;
+            if source_type.contains_interned() {
+                // A sub-field is part of the value a code stands for.
+                let dictionaries = dictionaries.ok_or_else(|| {
+                    IvmRuntimeError::UnresolvedDictionaryCode(format!("{source:?}"))
+                })?;
+                value =
+                    super::key_encoding::resolve_interned_value(value, source_type, dictionaries)?;
+            }
             for name in path {
                 let Value::Record(record) = value else {
                     return Err(IvmRuntimeError::UnsupportedOperator);
@@ -1711,6 +1731,13 @@ pub(super) fn raw_projection_fields(
                         RawProjectionField::WrapNullable { source_idx }
                     }
                 }
+                ProjectExpr::RecordField { source, .. }
+                    if input_desc.fields()[resolve_field_ref(input_desc, source)?]
+                        .value_type
+                        .contains_interned() =>
+                {
+                    RawProjectionField::Evaluate
+                }
                 ProjectExpr::RecordField { source, path } => {
                     let source_idx = resolve_field_ref(input_desc, source)?;
                     let mut steps = vec![(*input_desc, source_idx)];
@@ -1961,6 +1988,17 @@ fn aggregate_output_type(
     input: &RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<ValueType, IvmRuntimeError> {
+    if !matches!(aggregate.function, AggregateFunction::Count) {
+        // Sum, average and extremes need values (and their order); a
+        // dictionary code is neither.
+        let value_type = aggregate_expr_value_type(input, aggregate)?;
+        if value_type.contains_interned() {
+            return Err(IvmRuntimeError::UnsupportedInternedOperand {
+                operator: "an aggregate other than count",
+                field: format!("{:?}", aggregate.expression),
+            });
+        }
+    }
     Ok(match aggregate.function {
         AggregateFunction::Count => ValueType::U64,
         AggregateFunction::Avg => ValueType::Nullable(Box::new(ValueType::F64)),

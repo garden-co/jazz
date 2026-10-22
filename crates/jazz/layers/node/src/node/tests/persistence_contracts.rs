@@ -9,7 +9,7 @@ struct TargetedWriteManyFailure {
     write_through: bool,
 }
 
-fn jazz_class_v2_history_physical_target(
+fn jazz_class_v3_history_physical_target(
     logical_cf: &str,
     logical_key: &[u8],
 ) -> (String, Vec<u8>) {
@@ -17,13 +17,10 @@ fn jazz_class_v2_history_physical_target(
         logical_cf.starts_with("jazz_") && logical_cf.ends_with("_history"),
         "physical history target requires a Jazz history column family"
     );
-    let logical_cf_bytes = logical_cf.as_bytes();
-    let logical_cf_len =
-        u32::try_from(logical_cf_bytes.len()).expect("Jazz column-family names fit in u32");
-    let mut physical_key =
-        Vec::with_capacity(4 + logical_cf_bytes.len() + logical_key.len());
-    physical_key.extend_from_slice(&logical_cf_len.to_be_bytes());
-    physical_key.extend_from_slice(logical_cf_bytes);
+    let table_id =
+        groove::storage::class_table_id(logical_cf).expect("history families have a table id");
+    let mut physical_key = Vec::with_capacity(4 + logical_key.len());
+    physical_key.extend_from_slice(&table_id.to_be_bytes());
     physical_key.extend_from_slice(logical_key);
     ("__groove_class_history".to_owned(), physical_key)
 }
