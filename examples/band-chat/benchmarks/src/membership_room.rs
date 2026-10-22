@@ -121,6 +121,7 @@ fn schema() -> JazzSchema {
                     .column("text", ColumnType::Text)
                     .fk_column("senderId", "profiles")
                     .index_only(["chatId", "senderId"])
+                    .composite_index(["chatId", "$createdAt"])
                     .policies(
                         TablePolicies::new()
                             .with_select(any_of([

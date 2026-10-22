@@ -703,7 +703,8 @@ fn schema(policy_activity_updates: bool) -> JazzSchema {
         .fk_column("task", "tasks")
         .fk_column("actor", "users")
         .column("kind", ColumnType::Text)
-        .column("created_at", ColumnType::Timestamp);
+        .column("created_at", ColumnType::Timestamp)
+        .composite_index(["task", "created_at"]);
     let activity = if policy_activity_updates {
         activity.policies(
             TablePolicies::new()
@@ -722,14 +723,16 @@ fn schema(policy_activity_updates: bool) -> JazzSchema {
                 .column("title", ColumnType::Text)
                 .column("status", ColumnType::Text)
                 .fk_column("assignee", "users")
-                .column("updated_at", ColumnType::Timestamp),
+                .column("updated_at", ColumnType::Timestamp)
+                .composite_index(["project", "updated_at"]),
         )
         .table(
             TableSchemaBuilder::new("comments")
                 .fk_column("task", "tasks")
                 .fk_column("author", "users")
                 .column("body", ColumnType::Text)
-                .column("created_at", ColumnType::Timestamp),
+                .column("created_at", ColumnType::Timestamp)
+                .composite_index(["task", "created_at"]),
         )
         .table(activity)
         .build();

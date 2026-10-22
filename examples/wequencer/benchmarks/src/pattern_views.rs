@@ -147,7 +147,8 @@ fn open_db(seed: u64) -> Db {
                 TableSchemaBuilder::new(EDITS)
                     .column("pattern", ColumnType::Uuid)
                     .column("edited_at", ColumnType::Timestamp)
-                    .column("pad", ColumnType::Text),
+                    .column("pad", ColumnType::Text)
+                    .composite_index(["pattern", "edited_at"]),
             )
             .build(),
     )

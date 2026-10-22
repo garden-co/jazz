@@ -181,7 +181,10 @@ fn schema() -> JazzSchema {
                 .fk_column("artist", "artists")
                 .fk_column("catalog", "catalogs")
                 .column("released_at", ColumnType::Timestamp)
-                .index_only(["label", "artist", "catalog", "released_at"]),
+                .index_only(["label", "artist", "catalog", "released_at"])
+                .composite_index(["label", "released_at"])
+                .composite_index(["artist", "released_at"])
+                .composite_index(["catalog", "released_at"]),
         )
         .build();
     JazzSchema::new(&source).expect("BigLabel benchmark schema compiles")

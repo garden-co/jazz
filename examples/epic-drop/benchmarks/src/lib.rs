@@ -224,7 +224,8 @@ fn schema() -> JazzSchema {
                     .column("size_bytes", ColumnType::Integer)
                     .column("owner_id", ColumnType::Text)
                     .column("contents", ColumnType::Bytea)
-                    .index_only(["folder_id"]),
+                    .index_only(["folder_id"])
+                    .composite_index(["folder_id", "name"]),
             )
             .build()
             .allow_all(),

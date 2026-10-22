@@ -223,7 +223,8 @@ fn open_db(seed: u64) -> Db {
                 TableSchemaBuilder::new(MESSAGES)
                     .column("room", ColumnType::Uuid)
                     .column("sent_at", ColumnType::Timestamp)
-                    .column("body", ColumnType::Text),
+                    .column("body", ColumnType::Text)
+                    .composite_index(["room", "sent_at"]),
             )
             .build(),
     )
