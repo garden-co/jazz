@@ -856,23 +856,7 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        if prepared.query.array_subqueries.is_empty() {
-            return Ok(roots);
-        }
-        let inner = self.inner();
-        roots
-            .into_iter()
-            .map(|row| {
-                inner
-                    .node(
-                        prepared,
-                        &prepared.query.table,
-                        &prepared.query.array_subqueries,
-                        row,
-                    )?
-                    .into_nested_row()
-            })
-            .collect()
+        self.inner().nest_relations(prepared, None, roots)
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
@@ -900,6 +884,7 @@ impl Db {
         for row in roots {
             tree.push(inner.node(
                 prepared,
+                None,
                 &prepared.query.table,
                 &prepared.query.array_subqueries,
                 row,
@@ -1700,9 +1685,36 @@ impl Inner {
         Ok(out)
     }
 
+    /// Root rows with each array relation nested in a cell under its
+    /// column name ([`ResultNode::into_nested_row`]), read as `identity`.
+    pub(crate) fn nest_relations(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        roots: Vec<CurrentRow>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if prepared.query.array_subqueries.is_empty() {
+            return Ok(roots);
+        }
+        roots
+            .into_iter()
+            .map(|row| {
+                self.node(
+                    prepared,
+                    identity,
+                    &prepared.query.table,
+                    &prepared.query.array_subqueries,
+                    row,
+                )?
+                .into_nested_row()
+            })
+            .collect()
+    }
+
     fn node(
         &self,
         prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
         table: &str,
         arrays: &[crate::query::ArraySubquery],
         row: CurrentRow,
@@ -1714,13 +1726,19 @@ impl Inner {
             } else {
                 self.cell(table, row.id, &array.outer_column)?
             };
-            let (policy, claims) = self.read_sessions(prepared, None);
+            let (policy, claims) = self.read_sessions(prepared, identity);
             let compiled = Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
                 .compile_children(array, &parent)?;
             let children = self.execute(&compiled, &array.table)?;
             let mut nodes = Vec::with_capacity(children.len());
             for child in children {
-                nodes.push(self.node(prepared, &array.table, &array.nested_arrays, child)?);
+                nodes.push(self.node(
+                    prepared,
+                    identity,
+                    &array.table,
+                    &array.nested_arrays,
+                    child,
+                )?);
             }
             relations.insert(array.column_name.clone(), ResultRelation::Array(nodes));
         }

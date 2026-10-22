@@ -674,11 +674,13 @@ pub(crate) enum Support {
     /// Forward reference `column` → `target.id`.
     Include { column: String, target: String },
     /// Children `table.inner = parent.outer` (all readable ones; the client
-    /// applies the array's own filters and window).
+    /// applies the array's own filters and window), and the support of each
+    /// child (nested arrays).
     Array {
         table: String,
         inner: String,
         outer: String,
+        nested: Vec<Support>,
     },
 }
 
@@ -922,12 +924,25 @@ impl Inner {
                 target: self.schema.stored_table(target)?.to_owned(),
             });
         }
-        for array in &query.array_subqueries {
+        support.extend(self.array_support(table, &query.array_subqueries)?);
+        Ok(support)
+    }
+
+    /// The support of `arrays` read from rows of `parent`, nested arrays
+    /// included.
+    fn array_support(
+        &self,
+        parent: &crate::values::Table,
+        arrays: &[crate::query::ArraySubquery],
+    ) -> Result<Vec<Support>, Error> {
+        let mut support = Vec::with_capacity(arrays.len());
+        for array in arrays {
             let child = self.schema.table(&array.table)?;
             support.push(Support::Array {
                 table: child.stored.clone(),
                 inner: child.stored_name(&array.inner_column).to_owned(),
-                outer: table.stored_name(&array.outer_column).to_owned(),
+                outer: parent.stored_name(&array.outer_column).to_owned(),
+                nested: self.array_support(child, &array.nested_arrays)?,
             });
         }
         Ok(support)
@@ -999,22 +1014,27 @@ impl Inner {
         held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
     ) -> Result<(), Error> {
         for item in support {
-            let (table, column, value) = match item {
+            let (table, column, value, nested) = match item {
                 Support::Include { column, target } => match image_cell(image, column) {
-                    Some(value @ Sql::Blob(_)) => (target, "id", value),
+                    Some(value @ Sql::Blob(_)) => (target, "id", value, &[][..]),
                     _ => continue,
                 },
                 Support::Array {
                     table,
                     inner,
                     outer,
+                    nested,
                 } => match image_cell(image, outer) {
                     Some(Sql::Null) | None => continue,
-                    Some(value) => (table, inner.as_str(), value),
+                    Some(value) => (table, inner.as_str(), value, &nested[..]),
                 },
             };
-            if !watch.insert(wk((table.clone(), column.to_owned(), watch_key(&value)))) {
-                continue; // already shipped and watched
+            // A watched key's rows were shipped with it, and later writes
+            // to them ship as they happen. Nested support is followed
+            // again: a child that joined since may have unwatched children.
+            let fresh = watch.insert(wk((table.clone(), column.to_owned(), watch_key(&value))));
+            if !fresh && nested.is_empty() {
+                continue;
             }
             let filter = if column == "id" {
                 "id = ?1".to_owned()
@@ -1029,16 +1049,27 @@ impl Inner {
                         .or_default()
                         .insert((row, found.key.clone()), can);
                 }
-                if can {
-                    watch.insert(wk((
-                        table.clone(),
-                        "id".to_owned(),
-                        watch_key(&Sql::Blob(found.id.to_vec())),
-                    )));
-                    // Not watched yet, so the replica does not hold it
-                    // (rows it declared on resume are watched already).
-                    out.push(found);
+                if !can {
+                    continue;
                 }
+                let unwatched = watch.insert(wk((
+                    table.clone(),
+                    "id".to_owned(),
+                    watch_key(&Sql::Blob(found.id.to_vec())),
+                )));
+                // Not watched yet, so the replica does not hold it (rows it
+                // declared on resume are watched already).
+                let ship = fresh || unwatched;
+                if nested.is_empty() {
+                    if ship {
+                        out.push(found);
+                    }
+                    continue;
+                }
+                if ship {
+                    out.push(found.clone());
+                }
+                self.follow_support(nested, &found, identity, out, watch, held)?;
             }
         }
         Ok(())
@@ -2083,14 +2114,10 @@ impl Db {
                 .includes
                 .iter()
                 .any(|include| include.path.contains('.'))
-            || query
-                .array_subqueries
-                .iter()
-                .any(|array| !array.nested_arrays.is_empty())
             || query.aggregate.is_some();
         if other_tables {
             return Err(crate::values::unsupported(format!(
-                "a synced read of `{}` that reads further tables (joins, multi-hop includes, nested arrays or aggregates)",
+                "a synced read of `{}` that reads further tables (joins, multi-hop includes or aggregates)",
                 query.table
             )));
         }
