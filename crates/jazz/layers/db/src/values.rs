@@ -131,9 +131,54 @@ pub(crate) fn from_sql(
         (ValueType::Bytes, ValueRef::Text(cell)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
         }
+        // An author record, read as a JSON array of its fields (see
+        // `compile::column_sql`).
+        (ValueType::Record(descriptor), ValueRef::Text(cell)) => {
+            let json = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("record cell: {e}")))?;
+            return Ok(json_record(descriptor, &json));
+        }
         _ => {}
     }
     Ok(decode_fixed(ty, cell))
+}
+
+/// A record from a JSON array of its fields in descriptor order: strings,
+/// uuids as hex, nulls, and nested records.
+fn json_record(
+    descriptor: &crate::records::RecordDescriptor,
+    json: &serde_json::Value,
+) -> Option<Value> {
+    use serde_json::Value as Json;
+    fn field(ty: &ValueType, json: &Json) -> Option<Value> {
+        Some(match (ty, json) {
+            (ValueType::Nullable(_), Json::Null) => Value::Nullable(None),
+            (ValueType::Nullable(inner), json) => {
+                Value::Nullable(Some(Box::new(field(inner, json)?)))
+            }
+            (ValueType::String, Json::String(v)) => Value::String(v.clone()),
+            (ValueType::Uuid, Json::String(v)) => Value::Uuid(v.parse().ok()?),
+            (ValueType::Record(descriptor), json) => json_record(descriptor, json)?,
+            _ => return None,
+        })
+    }
+    let Json::Array(items) = json else {
+        return None;
+    };
+    let fields = descriptor.fields();
+    if items.len() != fields.len() {
+        return None;
+    }
+    let values = fields
+        .iter()
+        .zip(items)
+        .map(|(f, item)| field(&f.value_type, item))
+        .collect::<Option<Vec<_>>>()?;
+    let raw = descriptor.create(&values).ok()?;
+    Some(Value::Record(crate::records::OwnedRecord::new(
+        raw,
+        *descriptor,
+    )))
 }
 
 fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
@@ -210,31 +255,68 @@ pub struct Table {
     pub stored_provenance: Vec<Column>,
 }
 
-/// Provenance as read. Timestamps are Unix ms (u64, as in Jazz); authors
-/// are read by their identity parts, so policies and filters can compare
+/// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
+/// read whole (`$createdBy`: account and identity), by identity, or by
+/// part, so policies and filters can compare `$createdBy.account`,
 /// `$createdBy.identity.subject` and friends.
-pub(crate) const PROVENANCE: [&str; 6] = [
+pub(crate) const PROVENANCE: [&str; 12] = [
     "$createdAt",
     "$updatedAt",
+    "$createdBy",
+    "$createdBy.account",
+    "$createdBy.identity",
     "$createdBy.identity.issuer",
     "$createdBy.identity.subject",
+    "$updatedBy",
+    "$updatedBy.account",
+    "$updatedBy.identity",
     "$updatedBy.identity.issuer",
     "$updatedBy.identity.subject",
 ];
 
 /// Provenance as stored: each author is one code into `_jazz_authors`
-/// instead of its two strings on every row version.
+/// instead of its account and two strings on every row version.
 pub(crate) const STORED_PROVENANCE: [&str; 4] =
     ["$createdAt", "$updatedAt", "$createdBy", "$updatedBy"];
 
-/// The stored author column and identity part behind a readable provenance
-/// column, e.g. `$createdBy.identity.subject` -> (`$createdBy`, `subject`).
+/// An author as interned in `_jazz_authors`: account, issuer, subject.
+pub(crate) type AuthorKey = (uuid::Uuid, String, String);
+
+/// A writer's durable attribution. Every row author has an account (the
+/// `$createdBy` record's `account` is not nullable); a writer without one
+/// (the system, an accountless principal) is attributed to the reserved
+/// system account, as Jazz attributes system writes.
+pub(crate) fn author_key(author: &crate::ids::AuthorSubject) -> AuthorKey {
+    let (issuer, subject) = author.principal_parts();
+    let account = author
+        .account_id()
+        .unwrap_or(jazz_types::account_registry::SYSTEM_ACCOUNT_ID);
+    (account.0, issuer, subject)
+}
+
+/// The stored author column and `_jazz_authors` field behind a readable
+/// provenance column, e.g. `$createdBy.identity.subject` -> (`$createdBy`,
+/// `subject`).
 pub(crate) fn author_part(column: &str) -> Option<(&'static str, &'static str)> {
     Some(match column {
+        "$createdBy.account" => ("$createdBy", "account"),
         "$createdBy.identity.issuer" => ("$createdBy", "issuer"),
         "$createdBy.identity.subject" => ("$createdBy", "subject"),
+        "$updatedBy.account" => ("$updatedBy", "account"),
         "$updatedBy.identity.issuer" => ("$updatedBy", "issuer"),
         "$updatedBy.identity.subject" => ("$updatedBy", "subject"),
+        _ => return None,
+    })
+}
+
+/// The stored author column behind a readable author record, and whether
+/// it is the whole author (else its identity alone).
+pub(crate) fn author_record(column: &str) -> Option<(&'static str, bool)> {
+    Some(match column {
+        "$createdBy" => ("$createdBy", true),
+        "$createdBy.identity" => ("$createdBy", false),
+        "$updatedBy" => ("$updatedBy", true),
+        "$updatedBy.identity" => ("$updatedBy", false),
         _ => return None,
     })
 }
@@ -262,17 +344,27 @@ fn stored_provenance_columns() -> Vec<Column> {
         .collect()
 }
 
+fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
+    match ty {
+        ValueType::Nullable(inner) => inner,
+        ty => ty,
+    }
+}
+
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
         .iter()
         .map(|name| Column {
             name: (*name).to_owned(),
             stored: (*name).to_owned(),
-            ty: if name.ends_with("At") {
-                ValueType::Nullable(Box::new(ValueType::U64))
+            ty: ValueType::Nullable(Box::new(if name.ends_with("At") {
+                ValueType::U64
             } else {
-                ValueType::Nullable(Box::new(ValueType::String))
-            },
+                unwrap_nullable_type(
+                    crate::ids::AuthorSubject::metadata_type(name).expect("an author path"),
+                )
+                .clone()
+            })),
             default: None,
             json: false,
         })
