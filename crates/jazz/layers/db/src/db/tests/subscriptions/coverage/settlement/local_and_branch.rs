@@ -256,42 +256,33 @@ fn include_deleted_subscriptions_return_deleted_rows_on_both_public_apis() {
     }
 }
 
-/// Include-deleted subscriptions of a regular table accept only the current
-/// source, like include-deleted one-shot reads: branch views and snapshots
-/// fail with a typed "not supported yet" error before any registration.
+/// Include-deleted subscriptions of a regular table reject branch views, like
+/// include-deleted one-shot reads, with a typed "not supported yet" error
+/// before any registration.
 #[test]
-fn include_deleted_subscriptions_reject_branch_views_and_snapshots() {
+fn include_deleted_subscriptions_reject_branch_views() {
     let schema = schema();
     let alice = AuthorSubject::for_test_bytes([0x38; 16]);
     let db = open_db(0x38, alice, &schema);
-    let query = Query::from("todos");
-    let include_deleted = |source| ReadOpts {
+    let opts = ReadOpts {
         read_view: ReadViewSpec {
-            source,
+            source: ReadViewSourceSpec::BranchView {
+                head: crate::protocol::BranchSelector::new([(
+                    "branch",
+                    Value::String("draft".to_owned()),
+                )]),
+                base: None,
+            },
             include_deleted: true,
         },
         ..ReadOpts::default()
     };
-    let branch = ReadViewSourceSpec::BranchView {
-        head: crate::protocol::BranchSelector::new([("branch", Value::String("draft".to_owned()))]),
-        base: None,
-    };
-    let snapshot = ReadViewSourceSpec::Snapshot {
-        snapshot: SnapshotRef {
-            owner: NodeUuid::from_bytes([0x38; 16]),
-            global_base: GlobalTime(0),
-            local_base: TxTime(0),
-            dots: Vec::new(),
-        },
-    };
-    for (source, message) in [
-        (branch, "branch views do not support include_deleted yet"),
-        (snapshot, "snapshots do not support include_deleted yet"),
-    ] {
-        let error = expect_error(prepared_subscribe(&db, &query, include_deleted(source)));
-        assert_eq!(error.code, ErrorCode::Query);
-        assert_eq!(error.message, message);
-    }
+    let error = expect_error(prepared_subscribe(&db, &Query::from("todos"), opts));
+    assert_eq!(error.code, ErrorCode::Query);
+    assert_eq!(
+        error.message,
+        "branch views do not support include_deleted yet"
+    );
 }
 
 /// Alice's remote include-deleted subscription receives her deleted todo's

@@ -3560,27 +3560,23 @@ fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
 }
 
 /// Include-deleted subscriptions support the same read views as include-deleted
-/// one-shot reads: the current source, or any source of a history query.
-/// Branch-view and snapshot reads of current tables reject the flag until
-/// they are specified and tested (SPEC 6 §6.6).
+/// reads: the current source, a transaction's snapshot, or any source of a
+/// history query. Branch views of current tables reject the flag, as one-shot
+/// reads do, until they are specified and tested (SPEC 6 §6.6).
 fn ensure_supported_include_deleted_read_view(
     read_view: &ReadViewSpec,
     query_uses_history: bool,
 ) -> Result<(), Error> {
-    if !read_view.include_deleted || query_uses_history {
-        return Ok(());
-    }
-    match read_view.source {
-        ReadViewSourceSpec::Current => Ok(()),
-        ReadViewSourceSpec::BranchView { .. } => Err(Error::new(
+    if read_view.include_deleted
+        && !query_uses_history
+        && matches!(read_view.source, ReadViewSourceSpec::BranchView { .. })
+    {
+        return Err(Error::new(
             ErrorCode::Query,
             "branch views do not support include_deleted yet",
-        )),
-        ReadViewSourceSpec::Snapshot { .. } => Err(Error::new(
-            ErrorCode::Query,
-            "snapshots do not support include_deleted yet",
-        )),
+        ));
     }
+    Ok(())
 }
 
 fn ensure_supported_subscription_read_opts(
