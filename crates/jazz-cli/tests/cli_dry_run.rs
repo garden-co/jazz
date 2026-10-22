@@ -407,6 +407,25 @@ fn open_connected_client(
     ConnectedClient { db, wire, socket }
 }
 
+// Use the protocol encoder to include the outer count and frame-length
+// prefixes in the carrier limit. Splitting preserves the original frame order.
+fn send_websocket_frames(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, frames: &[Vec<u8>]) {
+    if frames.is_empty() {
+        return;
+    }
+    match jazz::wire::encode_websocket_frame_batch(frames) {
+        Ok(batch) => socket
+            .send(Message::Binary(batch.into()))
+            .expect("send binary wire frame batch"),
+        Err(_) if frames.len() > 1 => {
+            let (first, second) = frames.split_at(frames.len() / 2);
+            send_websocket_frames(socket, first);
+            send_websocket_frames(socket, second);
+        }
+        Err(error) => panic!("wire frame cannot fit in a WebSocket carrier: {error}"),
+    }
+}
+
 fn pump_websocket(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
     db: &Db,
@@ -416,13 +435,7 @@ fn pump_websocket(
     for _ in 0..64 {
         block_on(db.tick()).expect("drive client db");
         let frames = wire.drain_outbound();
-        if !frames.is_empty() {
-            socket
-                .send(Message::Binary(
-                    postcard::to_allocvec(&frames).unwrap().into(),
-                ))
-                .expect("send binary wire frame batch");
-        }
+        send_websocket_frames(socket, &frames);
 
         for frame in read_available_binary_frames(socket) {
             saw_server_frames = true;
@@ -441,18 +454,13 @@ fn pump_websocket_once(
 ) -> bool {
     block_on(db.tick()).expect("drive client db");
     let frames = wire.drain_outbound();
-    if !frames.is_empty() {
-        socket
-            .send(Message::Binary(
-                postcard::to_allocvec(&frames)
-                    .expect("encode wire frame batch")
-                    .into(),
-            ))
-            .expect("send binary wire frame batch");
-    }
+    send_websocket_frames(socket, &frames);
 
     let mut saw_server_frames = false;
-    for frame in read_available_binary_frames(socket) {
+    // Apply the first carrier immediately so its credits can return before
+    // waiting for more data. A's initial five-second timeout is for receiving
+    // the gated carrier, not an idle wait after that carrier has arrived.
+    for frame in read_websocket_frame_batch(socket).into_iter().flatten() {
         saw_server_frames = true;
         wire.push_inbound(frame);
     }
@@ -466,15 +474,7 @@ fn pump_websocket_once_allow_close(
 ) {
     block_on(db.tick()).expect("drive client db");
     let frames = wire.drain_outbound();
-    if !frames.is_empty() {
-        socket
-            .send(Message::Binary(
-                postcard::to_allocvec(&frames)
-                    .expect("encode wire frame batch")
-                    .into(),
-            ))
-            .expect("send binary wire frame batch");
-    }
+    send_websocket_frames(socket, &frames);
     for frame in read_available_binary_frames_allow_close(socket) {
         wire.push_inbound(frame);
     }
@@ -1008,10 +1008,19 @@ fn wait_for_settled_reset(
 
 fn read_available_binary_frames(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) -> Vec<Vec<u8>> {
     let mut frames = Vec::new();
+    while let Some(batch) = read_websocket_frame_batch(socket) {
+        frames.extend(batch);
+    }
+    frames
+}
+
+fn read_websocket_frame_batch(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+) -> Option<Vec<Vec<u8>>> {
     loop {
         match socket.read() {
             Ok(Message::Binary(batch)) => {
-                frames.extend(postcard::from_bytes::<Vec<Vec<u8>>>(&batch).unwrap());
+                return Some(postcard::from_bytes::<Vec<Vec<u8>>>(&batch).unwrap());
             }
             Ok(Message::Ping(payload)) => socket.send(Message::Pong(payload)).unwrap(),
             Ok(Message::Pong(_)) => {}
@@ -1022,12 +1031,11 @@ fn read_available_binary_frames(socket: &mut WebSocket<MaybeTlsStream<TcpStream>
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                break;
+                return None;
             }
             Err(error) => panic!("read websocket frame: {error}"),
         }
     }
-    frames
 }
 fn read_available_binary_frames_allow_close(
     socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
@@ -2140,6 +2148,10 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
             .expect("Linux TCP send-buffer ceiling fits in usize"),
     );
     let fixture_payload_bytes = row_count as u64 * PAYLOAD_BYTES as u64;
+    eprintln!(
+        "backpressure fixture: tcp_send_buffer_ceiling_bytes={tcp_send_buffer_ceiling_bytes} \
+         row_count={row_count} fixture_payload_bytes={fixture_payload_bytes}"
+    );
     let make_payload = |index: usize| {
         let prefix = format!("{index:03}:");
         let mut payload = prefix.clone();
@@ -2182,35 +2194,35 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
     for _ in 0..8 {
         block_on(seed.db.tick()).expect("queue backpressure fixture rows");
         let frames = seed.wire.drain_outbound();
-        for chunk in frames.chunks(32) {
-            seed.socket
-                .send(Message::Binary(
-                    postcard::to_allocvec(chunk)
-                        .expect("encode backpressure fixture row batch")
-                        .into(),
-                ))
-                .expect("send backpressure fixture row batch");
-            sent_seed_update = true;
-        }
+        sent_seed_update |= !frames.is_empty();
+        send_websocket_frames(&mut seed.socket, &frames);
     }
     assert!(sent_seed_update, "seed client must send its fixture rows");
 
-    // Settle the fixture before opening A, so A's protocol handshake cannot
+    // Settle the fixture before opening A, so its handshake does not wait
+    // behind the seed upload.
     let settlement_deadline = Instant::now() + Duration::from_secs(15);
-    let mut seed_settled = false;
+    let mut settled_writes = 0;
     while Instant::now() < settlement_deadline {
-        pump_websocket_once_allow_close(&mut seed.socket, &seed.db, &seed.wire);
-        if seeded_writes
-            .iter()
-            .all(|write| block_on(write.wait(DurabilityTier::Global)).is_ok())
-        {
-            seed_settled = true;
+        pump_websocket_once(&mut seed.socket, &seed.db, &seed.wire);
+        settled_writes = 0;
+        for (index, write) in seeded_writes.iter().enumerate() {
+            match block_on(write.wait(DurabilityTier::Global)) {
+                Ok(_) => settled_writes += 1,
+                Err(error) if error.code == jazz::db::ErrorCode::NotObserved => {}
+                Err(error) => panic!("seed fixture write {index} failed: {error}"),
+            }
+        }
+        if settled_writes == row_count {
             break;
         }
     }
-    assert!(
-        seed_settled,
-        "seed fixture writes must settle globally before client A opens"
+    assert_eq!(
+        settled_writes,
+        row_count,
+        "seed fixture writes must settle globally before client A opens; \
+         settled={settled_writes} pending={}",
+        row_count - settled_writes,
     );
 
     let mut stalled = open_connected_client(
@@ -2275,14 +2287,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         block_on(stalled.db.tick()).expect("queue stalled data subscription");
         let frames = stalled.wire.drain_outbound();
         if !frames.is_empty() {
-            stalled
-                .socket
-                .send(Message::Binary(
-                    postcard::to_allocvec(&frames)
-                        .expect("encode stalled data subscription")
-                        .into(),
-                ))
-                .expect("send stalled data subscription");
+            send_websocket_frames(&mut stalled.socket, &frames);
             sent_data_subscription = true;
         }
     }
@@ -2310,14 +2315,7 @@ fn bug_196_backpressured_client_does_not_block_independent_client_and_preserves_
         block_on(stalled.db.tick()).expect("queue A's unread response trigger");
         let frames = stalled.wire.drain_outbound();
         if !frames.is_empty() {
-            stalled
-                .socket
-                .send(Message::Binary(
-                    postcard::to_allocvec(&frames)
-                        .expect("encode A's unread response trigger")
-                        .into(),
-                ))
-                .expect("send A's unread response trigger");
+            send_websocket_frames(&mut stalled.socket, &frames);
             sent_trigger = true;
         }
     }

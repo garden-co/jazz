@@ -21,8 +21,7 @@ export {
 } from "./former-names.ts";
 
 // Hero examples in the docs page's order, then the anonymized adopter
-// workload, then the example apps' browser load times. Engine benchmarks
-// (crates/groove) carry no per-case metadata.
+// workload, then the example apps' browser load times.
 export const benchmarkMetadata = [
   ...textEditorBenchmarks,
   ...stagePlanBenchmarks,

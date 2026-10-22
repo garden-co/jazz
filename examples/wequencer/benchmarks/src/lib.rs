@@ -13,10 +13,9 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, SubscriptionEvent,
     SubscriptionStream, UpdateOptions, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -514,7 +513,8 @@ fn schema() -> JazzSchema {
             TableSchemaBuilder::new("sessions")
                 .column("title", ColumnType::Text)
                 .column("tempo_bpm", ColumnType::Integer)
-                .column("loop_steps", ColumnType::Integer),
+                .column("loop_steps", ColumnType::Integer)
+                .index_only(["$createdAt"]),
         )
         .table(
             TableSchemaBuilder::new("session_members")
@@ -529,7 +529,8 @@ fn schema() -> JazzSchema {
                 .column("position", ColumnType::Integer)
                 .column("name", ColumnType::Text)
                 .column("color", ColumnType::Text)
-                .index_only(["session_id", "position"]),
+                .index_only(["session_id", "position"])
+                .composite_index(["session_id", "position"]),
         )
         .table(
             TableSchemaBuilder::new("steps")
@@ -538,7 +539,8 @@ fn schema() -> JazzSchema {
                 .column("velocity", ColumnType::Integer)
                 .column("enabled", ColumnType::Boolean)
                 .column("probability", ColumnType::Integer)
-                .index_only(["track_id", "position"]),
+                .index_only(["track_id", "position"])
+                .composite_index(["track_id", "position"]),
         )
         .table(
             TableSchemaBuilder::new("transport_observations")
@@ -546,7 +548,8 @@ fn schema() -> JazzSchema {
                 .column("playing", ColumnType::Boolean)
                 .column("bar", ColumnType::Integer)
                 .column("observed_at", ColumnType::Timestamp)
-                .index_only(["session_id", "observed_at"]),
+                .index_only(["session_id", "observed_at"])
+                .composite_index(["session_id", "observed_at"]),
         )
         .table(
             TableSchemaBuilder::new("presence")
@@ -582,11 +585,8 @@ fn open_db() -> (
     let track_table = table("tracks");
     let step_table = table("steps");
     let transport_table = table("transport_observations");
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xe1; 16]),
             author: AuthorSubject::SYSTEM,
