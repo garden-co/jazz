@@ -258,6 +258,16 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
     block_on(client.connect_upstream(client_side));
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    drive(
+        &[&client, &server, &client],
+        client.wait_for_pending_writes(DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(
+        count(&server),
+        3,
+        "every recovered upload reached the server"
+    );
     for tx in txs {
         assert!(tx > LOCAL_BASE);
         drive(

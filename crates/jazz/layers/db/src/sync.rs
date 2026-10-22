@@ -1926,6 +1926,24 @@ impl Db {
         .await
     }
 
+    /// Wait until every transaction pending upload when called (recovered
+    /// ones included) reaches `tier`, failing with the first the server
+    /// rejected. Writes made after the call are not waited for.
+    pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
+        if tier < DurabilityTier::Global || !self.is_client() {
+            return Ok(());
+        }
+        let pending: Vec<u64> = {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            client.pending.iter().map(|p| p.tx).collect()
+        };
+        for tx in pending {
+            self.wait_for_transaction(tx, tier).await?;
+        }
+        Ok(())
+    }
+
     /// Client half of a tick: apply what the server sent, rebase if a
     /// pending transaction settled or a shadowed row changed, then send.
     fn client_tick(&self) -> Result<(), Error> {
