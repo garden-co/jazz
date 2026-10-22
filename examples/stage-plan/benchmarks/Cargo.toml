@@ -31,9 +31,5 @@ name = "stage-plan-tasks-profile"
 path = "src/bin/tasks_profile.rs"
 
 [[bin]]
-name = "stage-plan-tasks-history-depth"
-path = "src/bin/tasks_history_depth.rs"
-
-[[bin]]
 name = "stage-plan-crew-dashboard"
 path = "src/bin/crew_dashboard.rs"

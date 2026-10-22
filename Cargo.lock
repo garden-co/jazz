@@ -1582,6 +1582,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-stage-plan-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-benchmark-guard",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "jazz-example-wequencer-benchmark"
 version = "0.1.0"
 dependencies = [

@@ -40,7 +40,7 @@ use crate::values::{Schema, Table, from_sql, quote, sql_literal, storage, to_sql
 pub use sync::{
     Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RemoteLinkHint,
     SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream,
-    WireTransport, WireTransportAdapter,
+    WireTransport, WireTransportAdapter, duplex,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.

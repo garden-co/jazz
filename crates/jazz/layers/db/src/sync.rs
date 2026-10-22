@@ -29,8 +29,11 @@
 
 use crate::values::query_error;
 use std::cell::Cell as StdCell;
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::future::poll_fn;
+use std::rc::Rc;
 use std::task::Poll;
 use std::time::Instant;
 
@@ -47,6 +50,40 @@ pub const LOCAL_BASE: u64 = 1 << 62;
 pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     fn try_recv(&mut self) -> Option<SyncMessage>;
+}
+
+/// An in-process link (a worker and its tab, or tests): each side's sends
+/// land in the other side's receive queue.
+struct InProcess {
+    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for InProcess {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.outbound.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+/// Two connected in-process transports: (client side, server side).
+pub fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    (
+        Box::new(InProcess {
+            outbound: up.clone(),
+            inbound: down.clone(),
+        }),
+        Box::new(InProcess {
+            outbound: down,
+            inbound: up,
+        }),
+    )
 }
 
 /// A byte-frame transport (a socket).
