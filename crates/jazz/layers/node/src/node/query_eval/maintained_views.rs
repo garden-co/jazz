@@ -1121,6 +1121,11 @@ where
         // publication reloads the original record rather than treating the
         // logical projection as a synthetic version in the read schema.
         let schema_alias = version.schema_version_alias();
+        let row = if version.is_deleted() {
+            row.into_deleted()
+        } else {
+            row
+        };
         let record = super::read_sources::covered_input_record(
             &source_table,
             &runtime_source.descriptor,

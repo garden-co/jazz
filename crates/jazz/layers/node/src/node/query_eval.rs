@@ -1866,6 +1866,15 @@ where
                 .entry(table.name.clone())
                 .or_default()
                 .extend(metadata);
+            // Include-deleted occurrences keep the authority's deletion bit so
+            // a covered deleted image materializes as a deleted row.
+            let descriptor = if source_request.visibility == RowVisibility::IncludeDeleted {
+                let mut fields = descriptor.fields().to_vec();
+                fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
+                RecordDescriptor::new_with_fields(fields)
+            } else {
+                descriptor
+            };
             occurrences.push((source_request.source, descriptor));
         }
         for (table_name, metadata) in table_metadata {
@@ -1877,6 +1886,7 @@ where
                     &table, &metadata,
                 );
             let mut fields = descriptor.fields().to_vec();
+            fields.push(DescriptorField::new("__jazz_deleted", ValueType::Bool));
             fields.push(DescriptorField::new("covered_is_current", ValueType::Bool));
             let descriptor = RecordDescriptor::new_with_fields(fields);
             let id = self.database.allocate_input_source(descriptor.clone());

@@ -6405,7 +6405,7 @@ pub(super) fn covered_input_record(
         descriptor
             .field_index("supplying_branch_key")
             .map(|_| ("supplying_branch_key", source_branch)),
-        None,
+        Some(row.is_deleted()),
     )?;
     values.push(Value::Bool(is_current));
     Ok(descriptor.create(&values)?)
