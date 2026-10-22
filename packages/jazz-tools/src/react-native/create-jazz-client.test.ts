@@ -379,7 +379,7 @@ function encodeSubscriptionDelta(delta: { added: EncodedRow[] }): Uint8Array {
   writeRowBatches(writer, []);
   writer.vec(() => undefined, 0);
   const occurrenceKeys = delta.added.map((row) =>
-    Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0]),
+    Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
   );
   writer.vec((key, index) => key.bytes(occurrenceKeys[index]!), occurrenceKeys.length);
   writer.vec(() => undefined, 0);
