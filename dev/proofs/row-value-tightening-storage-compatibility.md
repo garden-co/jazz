@@ -107,13 +107,13 @@ build at manifest admission, before decoding any row; it does not know
 
 `crates/jazz/tests/storage_per_row_bytes.rs` (1000 todos, each inserted and
 then updated in its own transaction; RocksDB raw key plus value bytes), main
-`f1b7ac03` against this branch:
+`9ed3a362` against this branch:
 
 | store                   | before | after | change |
 | ----------------------- | -----: | ----: | -----: |
-| Core (history complete) |   1259 |  1024 | -18.7% |
-| Writer client           |   1260 |  1024 | -18.7% |
-| Reader client           |    771 |   650 | -15.7% |
+| Core (history complete) |    955 |   752 | -21.3% |
+| Writer client           |    955 |   752 | -21.3% |
+| Reader client           |    603 |   499 | -17.2% |
 
 Average value bytes per entry (keys are unchanged):
 
@@ -122,7 +122,3 @@ Average value bytes per entry (keys are unchanged):
 | `jazz_physical_2_history`        |    179 |   109 | key copies (46), u16 column ids, 1-byte empty `base`, offsets |
 | `jazz_physical_2_global_current` |    149 |   117 | key copies (22), u16 column ids                               |
 | `jazz_transactions`              |     49 |    33 | key copies (16)                                               |
-| `jazz_tx_touched_rows`           |     55 |    39 | key copies (16)                                               |
-
-History images measure 107 bytes for an insert (was 191) and 111 for an
-update (was 167).
