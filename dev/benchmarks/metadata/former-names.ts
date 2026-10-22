@@ -9,8 +9,7 @@
  *   whose numbers changed (the W1 suite, which moved to mimalloc: −7% to
  *   −55%) restart their history instead.
  * - `nightly`: the same name, now measured by the nightly CodSpeed run on main
- *   (a `nightly` bench target, or Groove's `GROOVE_BENCH_SWEEP` sweep), not on
- *   every merge. Its history continues under that name.
+ *   (a `nightly` bench target), not on every merge. Its history continues under that name.
  * - `dropped`: no longer measured. `coveredBy` names the case that measures the
  *   closest operation, when there is one.
  *
@@ -180,17 +179,16 @@ export const formerBenchmarks: ReadonlyMap<string, FormerBenchmark> = new Map([
   ["big_label_ingest_batch_amortization[10]", dropped("big_label_ingest_batch_amortization[100]")],
   ["ingest_walltime_10k", dropped("ingest_walltime_100k")],
 
-  // Groove: the per-merge Engine rows keep only the IVM engines at the larger
-  // size; the rest of the sweep runs nightly (GROOVE_BENCH_SWEEP=1). Each name
-  // repeats once per scenario module.
-  ...sized(["prepared_warm", "prepared_cold", "pull", "snapshot"], [500], nightly),
-  ...sized(["pull", "snapshot"], [5000], nightly),
+  // Groove's IVM engine sweep: the engine was replaced by SQLite, so these
+  // are no longer measured.
+  ...sized(["prepared_warm", "prepared_cold", "pull", "snapshot"], [500], dropped()),
+  ...sized(["pull", "snapshot"], [5000], dropped()),
   ...sized(
     ["ivm", "pull_touched", "snapshot_touched", "sqlite_all", "sqlite_touched"],
     [10],
-    nightly,
+    dropped(),
   ),
-  ...sized(["pull_touched", "sqlite_all", "sqlite_touched"], [100], nightly),
+  ...sized(["pull_touched", "sqlite_all", "sqlite_touched"], [100], dropped()),
 ]);
 
 /** Former name → the per-merge case that measures the same workload, or null. */

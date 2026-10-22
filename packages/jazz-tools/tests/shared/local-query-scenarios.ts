@@ -49,6 +49,11 @@ export const app = schema.defineApp({
 });
 
 export const { orgs, teams, users, todos, bundle_items: bundleItems, bundles } = app;
+export type Org = schema.RowOf<typeof orgs>;
+export type Team = schema.RowOf<typeof teams>;
+export type User = schema.RowOf<typeof users>;
+export type BundleItem = schema.RowOf<typeof bundleItems>;
+export type TodoInsert = schema.InsertOf<typeof todos>;
 export type Todo = schema.RowOf<typeof todos>;
 
 export const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000101";
@@ -294,3 +299,203 @@ export async function assertConditionQuery(
   const expected = [...testCase.expectedTitles].sort();
   expect(actual).toEqual(expected);
 }
+
+export function makeLocalQuery<T>(
+  table: string,
+  body: {
+    conditions?: Array<{ column: string; op: string; value?: unknown }>;
+    includes?: Record<string, boolean | object>;
+    orderBy?: Array<[string, "asc" | "desc"]>;
+    limit?: number;
+    offset?: number;
+    hops?: string[];
+    gather?: {
+      max_depth: number;
+      step_table: string;
+      step_current_column: string;
+      step_conditions: Array<{ column: string; op: string; value: unknown }>;
+      step_hops: string[];
+    };
+  },
+): QueryBuilder<T> {
+  return {
+    _table: table,
+    _schema: todos._schema,
+    _rowType: {} as T,
+    _build() {
+      return JSON.stringify({
+        table,
+        conditions: body.conditions ?? [],
+        includes: body.includes ?? {},
+        orderBy: body.orderBy ?? [],
+        limit: body.limit,
+        offset: body.offset,
+        hops: body.hops,
+        gather: body.gather,
+      });
+    },
+  };
+}
+
+// Live queries observe rows inserted after subscription; snapshot queries above use a fixed seed.
+export const liveConditionCases: Array<{
+  name: string;
+  query: QueryBuilder<Todo>;
+  insert: TodoInsert;
+  insertId?: string;
+}> = [
+  {
+    name: "eq",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "title", op: "eq", value: "eq-hit" }],
+    }),
+    insert: { title: "eq-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
+  },
+  {
+    name: "ne",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "title", op: "ne", value: "blocked" }],
+    }),
+    insert: { title: "ne-hit", done: false, priority: 2, owner_id: undefined, tags: ["x"] },
+  },
+  {
+    name: "gt",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "priority", op: "gt", value: 10 }],
+    }),
+    insert: { title: "gt-hit", done: false, priority: 11, owner_id: undefined, tags: ["x"] },
+  },
+  {
+    name: "gte",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "priority", op: "gte", value: 10 }],
+    }),
+    insert: { title: "gte-hit", done: false, priority: 10, owner_id: undefined, tags: ["x"] },
+  },
+  {
+    name: "lt",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "priority", op: "lt", value: 2 }],
+    }),
+    insert: { title: "lt-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
+  },
+  {
+    name: "lte",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "priority", op: "lte", value: 0 }],
+    }),
+    insert: { title: "lte-hit", done: false, priority: 0, owner_id: undefined, tags: ["x"] },
+  },
+  {
+    name: "isNull",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "priority", op: "isNull" }],
+    }),
+    insert: {
+      title: "null-hit",
+      done: false,
+      priority: undefined,
+      owner_id: undefined,
+      tags: ["x"],
+    },
+  },
+  {
+    name: "contains-array",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "tags", op: "contains", value: "needle" }],
+    }),
+    insert: {
+      title: "contains-array-hit",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["needle", "hay"],
+    },
+  },
+  {
+    name: "contains-text",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "title", op: "contains", value: "needle" }],
+    }),
+    insert: {
+      title: "hay-needle-title",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    },
+  },
+  {
+    name: "contains-text-empty",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "title", op: "contains", value: "" }],
+    }),
+    insert: {
+      title: "any-title",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    },
+  },
+  {
+    name: "in-id",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [
+        {
+          column: "id",
+          op: "in",
+          value: [CONDITION_ALPHA_ID, "00000000-0000-0000-0000-000000000299"],
+        },
+      ],
+    }),
+    insert: {
+      title: "in-id-hit",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    },
+    insertId: CONDITION_ALPHA_ID,
+  },
+  {
+    name: "in-text",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "title", op: "in", value: ["in-text-hit", "other"] }],
+    }),
+    insert: {
+      title: "in-text-hit",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+    },
+  },
+  {
+    name: "in-reference",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
+    }),
+    insert: {
+      title: "in-reference-hit",
+      done: false,
+      priority: 1,
+      owner_id: CONDITION_OWNER_ID,
+      tags: ["x"],
+    },
+  },
+  {
+    name: "eq-bytea",
+    query: makeLocalQuery<Todo>("todos", {
+      conditions: [{ column: "payload", op: "eq", value: [1, 2, 3] }],
+    }),
+    insert: {
+      title: "eq-bytea-hit",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["x"],
+      payload: new Uint8Array([1, 2, 3]),
+    },
+  },
+];

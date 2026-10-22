@@ -6,7 +6,6 @@ import { resolveSchemaSource } from "../schema-source.js";
 import { accountRegistryUrl } from "./context.js";
 import { isProvisionalAccount } from "./enrollment.js";
 import { prepareAccountManager } from "./persistence.js";
-import { settleAccountSelection } from "./selection-durability.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
 const permissions = s.definePermissions(app, ({ policy }) => {
@@ -67,7 +66,7 @@ describe("a retained external account after a reload", () => {
         const storage = browserStorage();
         const firstVisit = await accountManager(appId, server.url, storage);
         await firstVisit.loginOrRegisterJWT(issuer.jwtForUser("alice"));
-        await settleAccountSelection(firstVisit);
+        await firstVisit.settleSelection();
 
         // Reload: the retained account opens before the provider answers.
         const accounts = await accountManager(appId, server.url, storage);

@@ -8,11 +8,10 @@ pub mod policy_graph;
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, block_on};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -182,7 +181,10 @@ fn schema() -> JazzSchema {
                 .fk_column("artist", "artists")
                 .fk_column("catalog", "catalogs")
                 .column("released_at", ColumnType::Timestamp)
-                .index_only(["label", "artist", "catalog", "released_at"]),
+                .index_only(["label", "artist", "catalog", "released_at"])
+                .composite_index(["label", "released_at"])
+                .composite_index(["artist", "released_at"])
+                .composite_index(["catalog", "released_at"]),
         )
         .build();
     JazzSchema::new(&source).expect("BigLabel benchmark schema compiles")
@@ -196,11 +198,8 @@ fn open_db() -> (BenchDb, TableSchema) {
         .find(|table| table.name == "releases")
         .expect("BigLabel schema has releases")
         .clone();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xb1; 16]),
             author: AuthorSubject::SYSTEM,
