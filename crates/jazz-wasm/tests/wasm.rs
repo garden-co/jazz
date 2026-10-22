@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
+use jazz::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};

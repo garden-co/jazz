@@ -9,6 +9,7 @@ members = [
   "crates/jazz/layers/types",
   "crates/jazz-compression",
   "crates/wasm-tracing",
+  "crates/jazz-wasm",
   # Not yet ported to the SQLite engine (stage 2 of the Groove removal):
   # "crates/jazz-native-transport",
   # "crates/jazz-native-relay",
@@ -17,7 +18,6 @@ members = [
   # "crates/jazz-testkit",
   "crates/jazz-otel",
   # "crates/jazz-sim",
-  # "crates/jazz-wasm",
   # "crates/jazz-napi",
   # The old Axum todo server examples expect a Send + Sync JazzClient in shared
   # router state. Core Db ownership is currently local-thread by design;
@@ -48,7 +48,6 @@ exclude = [
   "crates/jazz-cli",
   "crates/jazz-testkit",
   "crates/jazz-sim",
-  "crates/jazz-wasm",
   "crates/jazz-napi",
 ]
 
