@@ -197,6 +197,16 @@ baseline, frozen fresh rather than appended to v5, is:
 - `SupportingRow` appends `is_current: bool` after its version reference. Current
   sources consume admitted current winners; history sources consume all admitted
   content versions.
+- `ReadViewSpec` appends `include_deleted: bool` after its `source`, so
+  `RegisterShapeOptions` encodes as
+  `tier | read_view.source | read_view.include_deleted | binding_source`. A
+  default current registration that used to encode its options as `02 00 00`
+  now encodes `02 00 00 00` (`fixtures/wire_message_frames_v6.json`, `register_shape_todos`). The flag
+  asks the authority to widen only the root current source to include deleted
+  rows (SPEC 6 §6.6) and is part of the read-view key (SPEC 6 §6.5). A peer
+  built before this field sends a three-field options tail; because the options
+  end `RegisterShape`, decoding fails at end of input instead of misreading the
+  fields.
 
 Two result-identity encodings change with history reads. Neither is persisted,
 so neither needs a storage migration:
