@@ -828,34 +828,35 @@ impl Inner {
     ) -> Option<Result<Vec<SortKey>, Error>> {
         let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), false);
         if projected {
-            let keys = rows
-                .iter()
-                .map(|row| {
-                    let mut key = Vec::with_capacity(order.len() + 1);
-                    for by in order {
-                        let value = if by.column == "id" {
-                            Sql::Blob(row.id.0.as_bytes().to_vec())
-                        } else {
-                            match row
-                                .cells
-                                .iter()
-                                .find(|(name, _)| *name == by.column)?
-                                .1
-                                .as_ref()
-                            {
-                                None => Sql::Null,
-                                Some(value) => to_sql(value).ok()??,
-                            }
-                        };
-                        key.push((
-                            value,
-                            matches!(by.direction, crate::query::OrderDirection::Desc),
-                        ));
-                    }
-                    key.push(id_key(row));
-                    Some(key)
-                })
-                .collect::<Option<Vec<_>>>()?;
+            let mut keys = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut key = Vec::with_capacity(order.len() + 1);
+                for by in order {
+                    let value = if by.column == "id" {
+                        Sql::Blob(row.id.0.as_bytes().to_vec())
+                    } else {
+                        match row
+                            .cells
+                            .iter()
+                            .find(|(name, _)| *name == by.column)?
+                            .1
+                            .as_ref()
+                        {
+                            None => Sql::Null,
+                            Some(value) => match self.logical_key(to_sql(value).ok()??) {
+                                Ok(value) => value,
+                                Err(error) => return Some(Err(error)),
+                            },
+                        }
+                    };
+                    key.push((
+                        value,
+                        matches!(by.direction, crate::query::OrderDirection::Desc),
+                    ));
+                }
+                key.push(id_key(row));
+                keys.push(key);
+            }
             return Some(Ok(keys));
         }
         if rows.is_empty() {
@@ -897,25 +898,33 @@ impl Inner {
             Ok(found) => found,
             Err(error) => return Some(Err(storage(error))),
         };
-        let keys = rows
-            .iter()
-            .map(|row| {
-                let values = found.remove(row.id.0.as_bytes().as_slice())?;
-                let mut key: SortKey = values
-                    .into_iter()
-                    .zip(order)
-                    .map(|(value, by)| {
-                        (
-                            value,
-                            matches!(by.direction, crate::query::OrderDirection::Desc),
-                        )
-                    })
-                    .collect();
-                key.push(id_key(row));
-                Some(key)
-            })
-            .collect::<Option<Vec<_>>>()?;
+        let mut keys = Vec::with_capacity(rows.len());
+        for row in rows {
+            let values = found.remove(row.id.0.as_bytes().as_slice())?;
+            let mut key: SortKey = Vec::with_capacity(order.len() + 1);
+            for (value, by) in values.into_iter().zip(order) {
+                let value = match self.logical_key(value) {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
+                key.push((
+                    value,
+                    matches!(by.direction, crate::query::OrderDirection::Desc),
+                ));
+            }
+            key.push(id_key(row));
+            keys.push(key);
+        }
         Some(Ok(keys))
+    }
+
+    /// A sort-key cell as its logical bytes, so keys compare as the `jazz`
+    /// collation orders them: a chunked or tagged cell is read as its value.
+    fn logical_key(&self, value: Sql) -> Result<Sql, Error> {
+        Ok(match value {
+            Sql::Text(cell) => Sql::Text(self.chunks.materialize(&cell)?),
+            value => value,
+        })
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -1072,7 +1081,7 @@ fn sql_order(a: &[(Sql, bool)], b: &[(Sql, bool)]) -> std::cmp::Ordering {
                 x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
             }
             (Sql::Real(x), Sql::Real(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
-            (Sql::Text(x), Sql::Text(y)) => x.as_bytes().cmp(y.as_bytes()),
+            (Sql::Text(x), Sql::Text(y)) => x.cmp(y),
             (Sql::Blob(x), Sql::Blob(y)) => x.cmp(y),
             (x, y) => rank(x).cmp(&rank(y)),
         };

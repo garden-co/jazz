@@ -30,6 +30,7 @@ mod tools {
 
 pub mod compile;
 pub mod db;
+pub(crate) mod large;
 pub mod options;
 pub mod values;
 

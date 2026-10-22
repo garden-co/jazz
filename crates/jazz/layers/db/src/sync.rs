@@ -120,7 +120,9 @@ pub enum Cell {
     Null,
     Int(i64),
     Real(f64),
-    Text(String),
+    /// Raw TEXT bytes: a large-capable cell may be tagged bytes or a chunked
+    /// descriptor, which travel as stored (never as chunk bytes).
+    Text(#[serde(with = "serde_bytes")] Vec<u8>),
     Blob(Vec<u8>),
 }
 
@@ -979,7 +981,10 @@ impl Inner {
             let (issuer, subject) = match cell {
                 Cell::Int(code) => {
                     let (issuer, subject) = self.author_parts(code)?;
-                    (Cell::Text(issuer), Cell::Text(subject))
+                    (
+                        Cell::Text(issuer.into_bytes()),
+                        Cell::Text(subject.into_bytes()),
+                    )
                 }
                 _ => (Cell::Null, Cell::Null),
             };
@@ -1000,7 +1005,7 @@ impl Inner {
                 continue;
             };
             let text = match cell {
-                Cell::Text(text) => Some(text.clone()),
+                Cell::Text(text) => String::from_utf8(text.clone()).ok(),
                 _ => None,
             };
             let entry = parts.entry(stored).or_default();
