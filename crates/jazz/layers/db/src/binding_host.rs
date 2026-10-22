@@ -887,6 +887,55 @@ impl Binding {
         Ok(())
     }
 
+    /// Stage partial large-value updates; they read the row with the
+    /// transaction's earlier writes applied.
+    pub fn update_large_values_in_transaction(
+        &self,
+        id: &str,
+        table: &str,
+        row: &[u8],
+        patch: &[u8],
+        mutations: Vec<LargeValueUpdate>,
+        updated_at_ms: Option<f64>,
+    ) -> HostResult<()> {
+        let id = open_transaction(id)?;
+        let row = row_uuid(row)?;
+        let patch = decode_cells(patch)?;
+        let options = UpdateOptions {
+            updated_at_ms: updated_at_ms
+                .map(|value| checked_u64(value, "updatedAtMs"))
+                .transpose()?,
+            ..Default::default()
+        };
+        block_on(
+            self.db
+                .mergeable_tx_ref(id)
+                .update_with_large_value_mutations(table, row, patch, mutations, options),
+        )?;
+        Ok(())
+    }
+
+    /// Stage an undelete of `row` with `cells`.
+    pub fn restore_in_transaction<O: HostObject>(
+        &self,
+        id: &str,
+        table: &str,
+        row: &[u8],
+        cells: &[u8],
+        options: &O,
+    ) -> HostResult<()> {
+        let id = open_transaction(id)?;
+        let row = row_uuid(row)?;
+        let cells = decode_cells(cells)?;
+        let options = restore_options(options)?;
+        block_on(
+            self.db
+                .mergeable_tx_ref(id)
+                .restore(table, row, Some(cells), options),
+        )?;
+        Ok(())
+    }
+
     // ---- reads ----
 
     /// The row as stored, deleted or not: the write-merge bridge's exact
@@ -1456,6 +1505,13 @@ impl Link {
     /// How many frames are waiting to be sent.
     pub fn outbound_len(&self) -> usize {
         self.queues.outbound.borrow().len()
+    }
+
+    /// A count of the frames waiting to be sent that outlives this borrow,
+    /// for a host that reports it after an async tick.
+    pub fn outbound_counter(&self) -> impl Fn() -> usize + 'static {
+        let outbound = Rc::clone(&self.queues.outbound);
+        move || outbound.borrow().len()
     }
 
     /// Called whenever a frame is queued to send (`None` clears it).

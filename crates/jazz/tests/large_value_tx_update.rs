@@ -21,6 +21,7 @@ use jazz::large_values::{
 };
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::tools::OpenTransactionId;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 const LARGE_BYTES: usize = 200 * 1024;
@@ -307,4 +308,27 @@ fn caller_authored_descriptor_is_still_rejected() {
     let after = committed(&db, row);
     assert_eq!(after["rank"], Value::I32(4));
     assert_large_values_intact(&after);
+}
+
+/// Contract: a restore staged in an open transaction brings a deleted row
+/// back with its large values, and only at commit.
+#[test]
+fn transaction_restore_brings_back_large_values() {
+    let db = open_db();
+    let row = seed(&db);
+    block_on(db.delete("docs", row, Default::default())).expect("delete");
+    let batch = OpenTransactionId::new();
+    block_on(db.begin_mergeable(batch)).expect("begin");
+    block_on(
+        db.mergeable_tx_ref(batch)
+            .restore("docs", row, None, Default::default()),
+    )
+    .expect("stage restore");
+    let query = db.prepare_query(&db.table("docs")).expect("prepare");
+    assert!(
+        db.read(&query).expect("read").is_empty(),
+        "nothing lands before the commit"
+    );
+    block_on(db.commit_mergeable_handle(batch)).expect("commit");
+    assert_large_values_intact(&committed(&db, row));
 }

@@ -387,6 +387,15 @@ pub enum SyncMessage {
         id: u64,
         advice: PermissionAdvice,
     },
+    // client → server
+    /// The schema version the client reads and writes by, sent first on
+    /// every connection. Its queries, writes, row images, evictions and held
+    /// versions use that version's table and column names; the server maps
+    /// them onto its stored rows. A version the server has not admitted is
+    /// named like the server's current schema.
+    Schema {
+        version: [u8; 16],
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -564,6 +573,11 @@ pub(crate) struct Session {
     ingress: (Instant, usize),
     /// Inbound messages held back by the rate limit, in order.
     backlog: VecDeque<SyncMessage>,
+    /// The schema version the client declared (`None`: the current one).
+    version: Option<crate::ids::SchemaVersionId>,
+    /// That version's schema, governed by the current schema's policies,
+    /// as built for the current schema it holds.
+    schema: Option<(Rc<Schema>, Rc<Schema>)>,
 }
 
 impl Session {
@@ -582,6 +596,8 @@ impl Session {
             open: true,
             ingress: (Instant::now(), 0),
             backlog: VecDeque::new(),
+            version: None,
+            schema: None,
         }
     }
 
@@ -855,7 +871,8 @@ const ID_AT_SEQ: &str = "id = ?1 AND +_seq = ?2";
 // ---- stored images ----------------------------------------------------------
 
 impl Inner {
-    /// The supporting tables a remote query reads (see [`Support`]).
+    /// The supporting tables a remote query reads (see [`Support`]), by
+    /// stored table and column names.
     pub(crate) fn support_of(&self, query: &Query) -> Result<Vec<Support>, Error> {
         let table = self.schema.table(&query.table)?;
         let mut support = Vec::new();
@@ -865,15 +882,16 @@ impl Inner {
                 .get(&include.path)
                 .ok_or_else(|| query_error(format!("`{}` is not a reference", include.path)))?;
             support.push(Support::Include {
-                column: include.path.clone(),
-                target: target.clone(),
+                column: table.stored_name(&include.path).to_owned(),
+                target: self.schema.stored_table(target)?.to_owned(),
             });
         }
         for array in &query.array_subqueries {
+            let child = self.schema.table(&array.table)?;
             support.push(Support::Array {
-                table: array.table.clone(),
-                inner: array.inner_column.clone(),
-                outer: array.outer_column.clone(),
+                table: child.stored.clone(),
+                inner: child.stored_name(&array.inner_column).to_owned(),
+                outer: table.stored_name(&array.outer_column).to_owned(),
             });
         }
         Ok(support)
@@ -936,30 +954,31 @@ impl Inner {
         Ok(())
     }
 
-    /// Tables `table`'s read policy reads, as `author` (claims do not change
-    /// which tables a policy names).
+    /// Stored tables stored table `table`'s read policy reads, as `author`
+    /// (claims do not change which tables a policy names).
     fn read_policy_tables(
         &self,
         table: &str,
         author: AuthorSubject,
     ) -> Result<BTreeSet<String>, Error> {
         let schema = self.owner.clone();
-        let table = schema.table(table)?;
+        let table = owned_table(&schema, table)?;
         let session = self.session(author);
         let binding = BTreeMap::new();
         let claims = crate::compile::Session::default();
-        let mut ctx = crate::compile::Ctx::new(&self.schema, None, &claims, &binding);
+        let mut ctx = crate::compile::Ctx::new(&schema, None, &claims, &binding);
         ctx.operation_policy(table, Operation::Select, "a", &session)?;
         let mut tables = ctx.tables;
-        tables.remove(&table.name);
+        tables.remove(&table.stored);
         Ok(tables)
     }
 
     /// Every settled row version in the replica (pending local versions sit
-    /// above `LOCAL_BASE`; their settled images are in the shadow).
+    /// above `LOCAL_BASE`; their settled images are in the shadow), by
+    /// stored table.
     fn held_versions(&self) -> Result<Vec<(String, [u8; 16], Vec<u8>, u64)>, Error> {
         let mut out = Vec::new();
-        for table in self.owner.tables.keys() {
+        for table in self.owner.tables.values().map(|table| &table.stored) {
             let sql = format!(
                 "SELECT id, _b, _seq FROM {} WHERE _seq < ?1 AND _del = 0",
                 quote(table)
@@ -997,7 +1016,7 @@ impl Inner {
         values: &mut HashMap<(String, String), BTreeSet<String>>,
     ) -> Result<bool, Error> {
         let schema = self.owner.clone();
-        let Some(policy) = schema.table(table)?.policy(Operation::Select) else {
+        let Some(policy) = owned_table(&schema, table)?.policy(Operation::Select) else {
             return Ok(true);
         };
         let session = self.session(author);
@@ -1005,6 +1024,7 @@ impl Inner {
         if !super::fanout::policy_pins(policy, &session, &mut pins) {
             return Ok(true);
         }
+        let pins = super::fanout::stored_pins(&schema, pins);
         for dep in deps {
             let Some(Some((column, value))) = pins.get(dep.as_str()) else {
                 return Ok(true);
@@ -1274,7 +1294,7 @@ impl Inner {
         self.drop_row(table, row, key, 0)
     }
 
-    /// The (table, id, key) of the rows a commit at `seq` wrote.
+    /// The (stored table, id, key) of the rows a commit at `seq` wrote.
     fn written_rows(
         &self,
         ops: &[StagedOp],
@@ -1283,7 +1303,8 @@ impl Inner {
         let mut out = BTreeSet::new();
         for op in ops {
             let Some(row) = op.row() else { continue };
-            let sql = format!("SELECT _b FROM {} WHERE {ID_AT_SEQ}", quote(op.table()));
+            let table = self.schema.stored_table(op.table())?;
+            let sql = format!("SELECT _b FROM {} WHERE {ID_AT_SEQ}", quote(table));
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
@@ -1294,7 +1315,7 @@ impl Inner {
                 .collect::<Result<_, _>>()
                 .map_err(storage)?;
             for key in keys {
-                out.insert((op.table().to_owned(), row, key));
+                out.insert((table.to_owned(), row, key));
             }
         }
         Ok(out.into_iter().collect())
@@ -1750,15 +1771,31 @@ impl Db {
                     .map(|image| (table.clone(), *row.0.as_bytes(), key.clone(), image.seq))
             })
             .collect();
-        client
-            .outbox
-            .retain(|m| !matches!(m, SyncMessage::Subscribe { .. } | SyncMessage::Hold { .. }));
+        client.outbox.retain(|m| {
+            !matches!(
+                m,
+                SyncMessage::Subscribe { .. }
+                    | SyncMessage::Hold { .. }
+                    | SyncMessage::Schema { .. }
+            )
+        });
+        let version = *inner.owner.jazz.version_id().as_bytes();
+        let client = inner.client.as_mut().expect("client");
+        client.outbox.insert(0, SyncMessage::Schema { version });
         if resuming {
             let mut rows = shadowed;
             match inner.held_versions() {
                 Ok(held) => rows.extend(held),
                 Err(_) => rows.clear(),
             }
+            // Held rows name tables as this store's schema does.
+            let names = inner.owner.clone();
+            let rows = rows
+                .into_iter()
+                .filter_map(|(table, id, key, seq)| {
+                    Some((names.by_stored(&table)?.name.clone(), id, key, seq))
+                })
+                .collect();
             let client = inner.client.as_mut().expect("client");
             client.outbox.push(SyncMessage::Hold { rows });
         }
@@ -2328,13 +2365,20 @@ impl Db {
             while let Some(message) = queue.pop_front() {
                 match message {
                     SyncMessage::Rows { images } => {
+                        let names = inner.owner.clone();
                         for image in images {
+                            let Some(image) = image_in(&names, image) else {
+                                continue;
+                            };
                             let shadowed = inner.receive_image(image)?;
                             rebase |= shadowed;
                             shadow_changed |= shadowed;
                         }
                     }
                     SyncMessage::Evict { table, id, key } => {
+                        let Ok(table) = inner.owner.stored_table(&table).map(str::to_owned) else {
+                            continue;
+                        };
                         let row = RowUuid::from_bytes(id);
                         let client = inner.client.as_mut().expect("client");
                         if let Some(shadow) =
@@ -2533,6 +2577,29 @@ impl Db {
 }
 
 impl Inner {
+    /// The schema session `index` reads and writes by, when it declared an
+    /// admitted version other than the current one: that version's names,
+    /// governed by the current schema's policies. `None` is the current
+    /// schema (also for a version this store has not admitted).
+    pub(crate) fn session_schema(&mut self, index: usize) -> Option<Rc<Schema>> {
+        let version = self.sessions[index].version?;
+        if version == self.owner.jazz.version_id() {
+            return None;
+        }
+        if let Some((owner, schema)) = &self.sessions[index].schema
+            && Rc::ptr_eq(owner, &self.owner)
+        {
+            return Some(schema.clone());
+        }
+        let jazz = self
+            .admitted
+            .iter()
+            .find(|admitted| admitted.version_id() == version)?;
+        let schema = Rc::new(self.named(jazz).with_policies_of(self.owner.clone()));
+        self.sessions[index].schema = Some((self.owner.clone(), schema.clone()));
+        Some(schema)
+    }
+
     /// Apply one server image; returns whether a rebase is needed (the row
     /// is shadowed by a pending write).
     fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
@@ -2752,6 +2819,9 @@ impl Db {
             }
             let identity = inner.sessions[index].identity;
             let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
+            let names = inner
+                .session_schema(index)
+                .unwrap_or_else(|| inner.owner.clone());
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
             let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
@@ -2813,25 +2883,26 @@ impl Db {
                         continue;
                     };
                     for row in added.iter().chain(updated.iter()) {
+                        let table = names.stored_table(&row.table)?.to_owned();
                         // Unchanged for a resumed client: a version it declared
                         // holding (`Hold` watched it and re-ships it if stale).
                         // A row's seq alone cannot say so: it may have entered
                         // the result while away, through a policy or filter.
                         let unchanged = since.is_some()
                             && watch.contains(&wk((
-                                row.table.to_string(),
+                                table.clone(),
                                 "id".to_owned(),
                                 watch_key(&Sql::Blob(row.id.0.as_bytes().to_vec())),
                             )));
                         if unchanged && support.is_none() {
                             continue;
                         }
-                        let key = (row.table.to_string(), row.id, row.seq);
+                        let key = (table.clone(), row.id, row.seq);
                         if !cache.contains_key(&key) {
                             let id = row.id.0.as_bytes().to_vec();
                             let seq = row.seq as i64;
                             let found =
-                                inner.images_where(&row.table, false, ID_AT_SEQ, &[&id, &seq])?;
+                                inner.images_where(&table, false, ID_AT_SEQ, &[&id, &seq])?;
                             cache.insert(key.clone(), found);
                         }
                         if unchanged {
@@ -2842,7 +2913,8 @@ impl Db {
                     }
                     for gone in removed {
                         let id = gone.row_uuid.0.as_bytes().to_vec();
-                        for image in inner.images_where(&gone.table, false, "id = ?1", &[&id])? {
+                        let table = names.stored_table(&gone.table)?;
+                        for image in inner.images_where(table, false, "id = ?1", &[&id])? {
                             touched.insert((image.table.clone(), gone.row_uuid, image.key.clone()));
                         }
                     }
@@ -2947,6 +3019,9 @@ impl Db {
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
             for message in out {
+                let Some(message) = message_out(&names, message) else {
+                    continue;
+                };
                 // A failed or backed-up client is dropped, never waited
                 // on: one slow client must not stall the others, and its
                 // replica is coherent only with every message. It
@@ -2960,19 +3035,37 @@ impl Db {
         Ok(())
     }
 
+    /// A handle that reads and writes through session `index`'s schema.
+    fn session_db(&self, index: usize) -> Db {
+        let view = self.inner.borrow_mut().session_schema(index);
+        Db {
+            inner: self.inner.clone(),
+            view,
+        }
+    }
+
     fn serve(&self, index: usize, message: SyncMessage) -> Result<(), Error> {
         let identity = self.inner.borrow().sessions[index].identity;
         let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
+        // Queries, writes and held rows name tables and columns as the
+        // client's schema version does.
+        let db = self.session_db(index);
         match message {
+            SyncMessage::Schema { version } => {
+                let mut inner = self.inner.borrow_mut();
+                let session = &mut inner.sessions[index];
+                session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
+                session.schema = None;
+            }
             SyncMessage::Subscribe {
                 id,
                 query,
                 binding,
                 since,
             } => {
-                let prepared = self.prepare_query_bound(&query, binding)?;
+                let prepared = db.prepare_query_bound(&query, binding)?;
                 let windowed = query.limit.is_some() || query.offset > 0;
-                let mut inner = self.inner();
+                let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let (queue, group) = inner.subscribe_member(
                     &prepared,
@@ -2989,8 +3082,9 @@ impl Db {
                 }
             }
             SyncMessage::Hold { rows } => {
-                let mut inner = self.inner.borrow_mut();
-                let schema = inner.owner.clone();
+                let mut inner = db.inner();
+                let names = inner.schema.clone();
+                let owner = inner.owner.clone();
                 let mut watch = std::mem::take(&mut inner.sessions[index].watch);
                 let mut touched = Vec::new();
                 let mut evict = Vec::new();
@@ -3000,9 +3094,14 @@ impl Db {
                     by_table.entry(table).or_default().insert((id, key), seq);
                 }
                 for (name, declared) in by_table {
-                    let Ok(table) = schema.table(&name) else {
+                    let Some(table) = names
+                        .table(&name)
+                        .ok()
+                        .and_then(|table| owner.by_stored(&table.stored))
+                    else {
                         continue;
                     };
+                    let stored = table.stored.clone();
                     let ids: Vec<[u8; 16]> = declared
                         .keys()
                         .map(|(id, _)| *id)
@@ -3019,16 +3118,16 @@ impl Db {
                         match current.get(&(id, key.clone())) {
                             Some(&(now, false, can)) => {
                                 watch.insert(wk((
-                                    name.clone(),
+                                    stored.clone(),
                                     "id".to_owned(),
                                     watch_key(&Sql::Blob(id.to_vec())),
                                 )));
                                 if now != seq || !can {
-                                    touched.push((name.clone(), RowUuid::from_bytes(id), key));
+                                    touched.push((stored.clone(), RowUuid::from_bytes(id), key));
                                 }
                             }
                             _ => evict.push(SyncMessage::Evict {
-                                table: name.clone(),
+                                table: stored.clone(),
                                 id,
                                 key,
                             }),
@@ -3060,8 +3159,9 @@ impl Db {
                 binding,
                 at,
             } => {
-                let prepared = self.prepare_query_bound(&query, binding)?;
-                let mut inner = self.inner();
+                let prepared = db.prepare_query_bound(&query, binding)?;
+                let mut inner = db.inner();
+                let table = inner.schema.stored_table(&query.table)?.to_owned();
                 let read = ReadSpec {
                     cut: at.map(Cut::at),
                     ..ReadSpec::default()
@@ -3071,10 +3171,9 @@ impl Db {
                 for row in &rows {
                     let rid = row.id.0.as_bytes().to_vec();
                     let seq = row.seq as i64;
-                    let mut found =
-                        inner.images_where(&query.table, false, ID_AT_SEQ, &[&rid, &seq])?;
+                    let mut found = inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
                     if found.is_empty() {
-                        found = inner.images_where(&query.table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                        found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
                     }
                     images.extend(found);
                 }
@@ -3118,7 +3217,7 @@ impl Db {
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
-                    None => match self.authorize_commit(policy, kind, ops, (node, tx)) {
+                    None => match db.authorize_commit(policy, kind, ops, (node, tx)) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
                         Err((error, rows)) => {
@@ -3227,14 +3326,16 @@ impl Db {
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
             for op in &ops {
-                if let Some(row) = op.row() {
-                    let id = row.0.as_bytes().to_vec();
-                    for image in inner
-                        .images_where(op.table(), false, "id = ?1", &[&id])
-                        .unwrap_or_default()
-                    {
-                        out.push((op.table().to_owned(), row, image.key));
-                    }
+                let (Some(row), Ok(table)) = (op.row(), inner.schema.stored_table(op.table()))
+                else {
+                    continue;
+                };
+                let id = row.0.as_bytes().to_vec();
+                for image in inner
+                    .images_where(table, false, "id = ?1", &[&id])
+                    .unwrap_or_default()
+                {
+                    out.push((table.to_owned(), row, image.key));
                 }
             }
             out
@@ -3244,7 +3345,9 @@ impl Db {
             for op in &ops {
                 if let Some(row) = op.row()
                     && inner
-                        .newest_seq(op.table(), row)
+                        .schema
+                        .stored_table(op.table())
+                        .and_then(|table| inner.newest_seq(table, row))
                         .map_err(|e| (e, Vec::new()))?
                         .is_some_and(|seq| seq > *snapshot)
                 {
@@ -3262,7 +3365,7 @@ impl Db {
                     shape: Shape([0; 16]),
                     binding_id: Binding([0; 16]),
                     request_claims: None,
-                    schema: None,
+                    schema: self.view.clone(),
                 };
                 let now = inner
                     .run(&prepared, identity, &ReadSpec::default())
@@ -3351,6 +3454,7 @@ fn depends_on_row_id(policy: &PolicyExpr) -> bool {
     }
 }
 
+/// Whether `identity` may read a row of stored table `table`.
 fn readable(
     inner: &Inner,
     table: &str,
@@ -3362,8 +3466,75 @@ fn readable(
         return Ok(true);
     };
     let schema = inner.owner.clone();
-    let table = schema.table(table)?;
+    let table = owned_table(&schema, table)?;
     inner.check(table, row, key, author, Operation::Select)
+}
+
+/// The current schema's table stored as `stored`.
+fn owned_table<'a>(schema: &'a Schema, stored: &str) -> Result<&'a Table, Error> {
+    schema
+        .by_stored(stored)
+        .ok_or_else(|| query_error(format!("unknown table {stored}")))
+}
+
+// ---- names on the wire ------------------------------------------------------
+//
+// Stored images name stored tables and columns, which differ between nodes
+// (each names a renamed table or column after where it first stored it). On
+// the wire a row names its table and columns as the client's schema version
+// does: the server maps its stored names to the session's, the client maps
+// them back to its own. A column the receiving side's schema lacks is left
+// out; provenance (`$...`) is never renamed.
+
+/// An image named by `schema` instead of by stored names; `None` when the
+/// schema has no such table.
+fn image_out(schema: &Schema, mut image: Image) -> Option<Image> {
+    let table = schema.by_stored(&image.table)?;
+    image.table = table.name.clone();
+    image.cells = std::mem::take(&mut image.cells)
+        .into_iter()
+        .filter_map(
+            |(name, cell)| match table.columns.iter().find(|c| c.stored == name) {
+                Some(column) => Some((column.name.clone(), cell)),
+                None => name.starts_with('$').then_some((name, cell)),
+            },
+        )
+        .collect();
+    Some(image)
+}
+
+/// An image named by `schema`, by this store's stored names instead.
+fn image_in(schema: &Schema, mut image: Image) -> Option<Image> {
+    let table = schema.tables.get(&image.table)?;
+    image.table = table.stored.clone();
+    image.cells = std::mem::take(&mut image.cells)
+        .into_iter()
+        .filter_map(
+            |(name, cell)| match table.columns.iter().find(|c| c.name == name) {
+                Some(column) => Some((column.stored.clone(), cell)),
+                None => name.starts_with('$').then_some((name, cell)),
+            },
+        )
+        .collect();
+    Some(image)
+}
+
+/// A server message as the session's schema names rows.
+fn message_out(schema: &Schema, message: SyncMessage) -> Option<SyncMessage> {
+    Some(match message {
+        SyncMessage::Rows { images } => SyncMessage::Rows {
+            images: images
+                .into_iter()
+                .filter_map(|image| image_out(schema, image))
+                .collect(),
+        },
+        SyncMessage::Evict { table, id, key } => SyncMessage::Evict {
+            table: schema.by_stored(&table)?.name.clone(),
+            id,
+            key,
+        },
+        other => other,
+    })
 }
 
 // ---- reads through the binding entry point -------------------------------

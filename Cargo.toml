@@ -13,7 +13,7 @@ members = [
   # Not yet ported to the SQLite engine (stage 2 of the Groove removal):
   # "crates/jazz-native-transport",
   # "crates/jazz-native-relay",
-  # "crates/jazz-cli",
+  "crates/jazz-cli",
   "crates/jazz-server",
   # "crates/jazz-testkit",
   "crates/jazz-otel",
