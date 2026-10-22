@@ -69,13 +69,23 @@ impl StoreSpec {
             None => {
                 let owner: String = storage_owner
                     .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
                     .collect();
                 format!("jazz-{owner}.sqlite")
             }
         };
         // Both VFSes key files by absolute name.
-        let path = if path.starts_with('/') { path } else { format!("/{path}") };
+        let path = if path.starts_with('/') {
+            path
+        } else {
+            format!("/{path}")
+        };
         Ok(Self { backend, path })
     }
 }
@@ -91,7 +101,11 @@ impl Store {
     /// Resolves once every commit so far is in the backing storage.
     pub(crate) async fn flush(&self) -> Result<(), JsValue> {
         match self {
-            Store::IndexedDb(util) => util.delete_db(IDB_BARRIER).map_err(vfs_error)?.await.map_err(vfs_error),
+            Store::IndexedDb(util) => util
+                .delete_db(IDB_BARRIER)
+                .map_err(vfs_error)?
+                .await
+                .map_err(vfs_error),
             // Sync access handles write through on every commit.
             Store::Opfs => Ok(()),
         }
@@ -141,7 +155,9 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
             let util = install_idb().await?;
             // IndexedDB reads are async; SQLite's are not, so the file is
             // loaded whole before opening.
-            util.preload_db(vec![spec.path.clone()]).await.map_err(vfs_error)?;
+            util.preload_db(vec![spec.path.clone()])
+                .await
+                .map_err(vfs_error)?;
             (
                 Store::IndexedDb(Rc::new(util)),
                 FileOptions {
@@ -174,7 +190,10 @@ pub(crate) async fn destroy(spec: &StoreSpec) -> Result<(), JsValue> {
     match spec.backend {
         Backend::IndexedDb => {
             let util = install_idb().await?;
-            util.delete_db(&spec.path).map_err(vfs_error)?.await.map_err(vfs_error)?;
+            util.delete_db(&spec.path)
+                .map_err(vfs_error)?
+                .await
+                .map_err(vfs_error)?;
             // The journal of a closed database is already gone.
         }
         Backend::Opfs => {

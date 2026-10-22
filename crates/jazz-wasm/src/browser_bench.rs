@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{col, eq, lit, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
@@ -117,7 +117,10 @@ pub fn browser_bench_write(n: u32) -> Result<JsValue, JsValue> {
             .map_err(err)?;
         }
         let total = ms(start);
-        Ok(result(&[("writeMs", total), ("perWriteUs", total * 1000.0 / n.max(1) as f64)]))
+        Ok(result(&[
+            ("writeMs", total),
+            ("perWriteUs", total * 1000.0 / n.max(1) as f64),
+        ]))
     })
 }
 
@@ -160,7 +163,9 @@ pub fn browser_bench_read() -> Result<JsValue, JsValue> {
         let docs = all(Query::from("docs"))?;
         let mut doc_bytes = 0usize;
         for row in &docs {
-            if let Some((_, Some(Value::String(body)))) = row.cells().find(|(name, _)| *name == "body") {
+            if let Some((_, Some(Value::String(body)))) =
+                row.cells().find(|(name, _)| *name == "body")
+            {
                 doc_bytes += body.len();
             }
         }

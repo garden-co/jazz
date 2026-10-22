@@ -6,9 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use jazz::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
+use jazz::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
 use jazz_wasm::{
     current_timestamp, derive_user_id, generate_id, mint_anonymous_token, mint_local_first_token,
@@ -110,8 +110,8 @@ fn fixture_db() -> WasmDb {
         .table(
             TableSchema::builder("values")
                 .column("text", ColumnType::Text)
-                .column("bytes", ColumnType::Bytea)
-                .column("json", ColumnType::Json { schema: None })
+                .nullable_column("bytes", ColumnType::Bytea)
+                .nullable_column("json", ColumnType::Json { schema: None })
                 .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::True)
@@ -240,7 +240,15 @@ async fn next_stream_chunk(reader: &JsValue) -> JsValue {
         .expect("call reader.read")
         .dyn_into::<js_sys::Promise>()
         .expect("reader.read returns promise");
-    await_promise(promise).await
+    let result = await_promise(promise).await;
+    assert_ne!(
+        js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+            .expect("read result has done")
+            .as_bool(),
+        Some(true),
+        "the subscription stream ended early"
+    );
+    js_sys::Reflect::get(&result, &JsValue::from_str("value")).expect("read result has value")
 }
 
 fn stream_reader(stream: JsValue) -> JsValue {
