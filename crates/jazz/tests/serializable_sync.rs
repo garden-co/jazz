@@ -422,6 +422,13 @@ fn an_offline_absence_guard_conflicts_when_the_invite_was_taken() {
     let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
     net.go_online(OTHER);
     assert_eq!(seen, 0);
+    let all = net
+        .drive(
+            net.db(OTHER)
+                .wait_for_pending_writes(DurabilityTier::Global),
+        )
+        .unwrap_err();
+    assert_eq!(all.code, ErrorCode::TransactionConflict);
     let error = net.settle(OTHER, receipt.0).unwrap_err();
     assert_eq!(
         error.code,
