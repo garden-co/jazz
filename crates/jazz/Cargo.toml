@@ -77,7 +77,7 @@ tar = "0.4"
 libc = "0.2"
 criterion = "0.5"
 flate2 = "1"
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 insta = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
