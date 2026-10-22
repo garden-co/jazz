@@ -799,16 +799,24 @@ impl WasmDb {
     #[wasm_bindgen(js_name = updateLargeValuesInTransaction)]
     pub fn update_large_values_in_transaction(
         &self,
-        _open_transaction_id: String,
-        _table: String,
-        _row_id: Vec<u8>,
-        _patch: Vec<u8>,
-        _mutations: JsValue,
-        _updated_at_ms: Option<f64>,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        updated_at_ms: Option<f64>,
     ) -> Result<(), JsValue> {
-        Err(not_supported(
-            "partial large-value updates inside a transaction",
-        ))
+        let mutations = large_value_updates(mutations)?;
+        self.binding()?
+            .update_large_values_in_transaction(
+                &open_transaction_id,
+                &table,
+                &row_id,
+                &patch,
+                mutations,
+                updated_at_ms,
+            )
+            .map_err(host_error)
     }
 
     #[wasm_bindgen(js_name = updateLargeValues)]
@@ -820,10 +828,7 @@ impl WasmDb {
         mutations: JsValue,
         updated_at_ms: Option<f64>,
     ) -> Result<WasmWrite, JsValue> {
-        let mutations: Vec<LargeValueUpdate> =
-            serde_wasm_bindgen::from_value(mutations).map_err(|error| {
-                JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
-            })?;
+        let mutations = large_value_updates(mutations)?;
         let inner = self.open_inner()?;
         inner.write(inner.binding.update_large_values(
             &table,
@@ -922,13 +927,21 @@ impl WasmDb {
     #[wasm_bindgen(js_name = restoreInTransaction)]
     pub fn restore_in_transaction(
         &self,
-        _open_transaction_id: String,
-        _table: String,
-        _row_id: Vec<u8>,
-        _cells: Vec<u8>,
-        _options: JsValue,
+        open_transaction_id: String,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        options: JsValue,
     ) -> Result<(), JsValue> {
-        Err(not_supported("restores inside a transaction"))
+        self.binding()?
+            .restore_in_transaction(
+                &open_transaction_id,
+                &table,
+                &row_id,
+                &cells,
+                &self::options(options),
+            )
+            .map_err(host_error)
     }
 
     /// A fresh root runtime owner over `binding`.
@@ -1622,6 +1635,12 @@ fn wasm_read_or_pending(future: WasmReadFuture) -> Result<JsValue, JsValue> {
         Some(bytes) => bytes_to_js(bytes),
         None => Ok(pending.into()),
     }
+}
+
+fn large_value_updates(mutations: JsValue) -> Result<Vec<LargeValueUpdate>, JsValue> {
+    serde_wasm_bindgen::from_value(mutations).map_err(|error| {
+        JsValue::from_str(&format!("invalid partial-value update descriptor: {error}"))
+    })
 }
 
 fn present(value: Option<JsValue>) -> Option<JsValue> {
