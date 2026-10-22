@@ -87,6 +87,17 @@ impl Ctx<'_> {
                 json: false,
             });
         }
+        // Every version reads its current row's deletion (see
+        // `deletion_sql`), carried as columns of the version.
+        for column in ["$deletedAt", "$deletedBy"] {
+            versions.stored_provenance.push(crate::values::Column {
+                name: column.to_owned(),
+                stored: column.to_owned(),
+                ty: ValueType::Nullable(Box::new(ValueType::U64)),
+                default: None,
+                json: false,
+            });
+        }
         let versions = &versions;
         let projection = projection(versions, query.select.as_deref())?;
 
@@ -133,9 +144,17 @@ impl Ctx<'_> {
         };
         let accepted =
             format!("(COALESCE(v.\"$updatedAt\", v.\"$createdAt\") << {HLC_COUNTER_BITS})");
+        let mut deletion = String::new();
+        for column in ["$deletedAt", "$deletedBy"] {
+            deletion.push_str(&format!(
+                ", (SELECT {} FROM {name} AS a WHERE a.id = v.id AND a._b = v._b) AS {}",
+                deletion_sql(table, "a", column),
+                quote(column)
+            ));
+        }
         let source = format!(
             "(SELECT v.id, v._b, v._seq, 0 AS _del{v_stored}, {transaction} AS {}, \
-             {accepted} AS {} FROM (SELECT id, _b, _seq, _c{stored} FROM {name} AS c \
+             {accepted} AS {}{deletion} FROM (SELECT id, _b, _seq, _c{stored} FROM {name} AS c \
              WHERE {current_bound} UNION ALL SELECT id, _b, _seq, _c{stored} FROM {history} AS h \
              WHERE {history_bound}) AS v WHERE {})",
             quote(TRANSACTION_ID_COLUMN),

@@ -196,7 +196,21 @@ baseline, frozen fresh rather than appended to v5, is:
   It is a mandatory v6 variant with no feature bit.
 - `SupportingRow` appends `is_current: bool` after its version reference. Current
   sources consume admitted current winners; history sources consume all admitted
-  content versions.
+  content versions. An include-deleted history source that reads `$deletedAt`
+  or `$deletedBy` also receives the row's current deletion winner as a
+  deletion-layer supporting row with `is_current = true`. Its version witness
+  carries the deletion's authored time as physical milliseconds, as current
+  sources do, while history content witnesses keep packed HLC times.
+- `ReadViewSpec` appends `include_deleted: bool` after its `source`, so
+  `RegisterShapeOptions` encodes as
+  `tier | read_view.source | read_view.include_deleted | binding_source`. A
+  default current registration that used to encode its options as `02 00 00`
+  now encodes `02 00 00 00` (`fixtures/wire_message_frames_v6.json`, `register_shape_todos`). The flag
+  asks the authority to widen only the root current source to include deleted
+  rows (SPEC 6 §6.6) and is part of the read-view key (SPEC 6 §6.5). A peer
+  built before this field sends a three-field options tail; because the options
+  end `RegisterShape`, decoding fails at end of input instead of misreading the
+  fields.
 
 Two result-identity encodings change with history reads. Neither is persisted,
 so neither needs a storage migration:

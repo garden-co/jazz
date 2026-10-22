@@ -225,7 +225,7 @@ impl ReadSpec {
             }
         };
         Ok(Self {
-            include_deleted: opts.include_deleted,
+            include_deleted: opts.read_view.include_deleted,
             view,
             cut,
         })
@@ -245,14 +245,14 @@ pub struct SubscriptionStream {
     gate: Option<sync::Gate>,
     group: Weak<RefCell<fanout::Group>>,
     /// The remote attachment to release on drop.
-    remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>)>,
+    remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>, bool)>,
 }
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding);
+        if let Some((inner, query, binding, include_deleted)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted);
         }
     }
 }
@@ -818,9 +818,11 @@ impl Db {
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let inner = self.inner();
-        // Validate: tables, columns, parameters, supported forms.
+        // Validate: tables, columns, parameters, supported forms. Read
+        // options are not known yet: validate the widest read (deleted rows
+        // included, so their metadata columns are accepted).
         let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, false)?;
+        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
         let shape =
             blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
         let bound = blake3::hash(format!("{binding:?}").as_bytes());
@@ -924,7 +926,7 @@ impl Db {
             Self::remote_shape(&prepared.query)?;
         }
         let remote = if remote_read {
-            self.attach_remote(prepared)
+            self.attach_remote(prepared, read.include_deleted)
         } else {
             None
         };
@@ -957,6 +959,7 @@ impl Db {
             }
             _ => None,
         };
+        let include_deleted = read.include_deleted;
         let mut inner = self.inner();
         let (queue, group) = inner.subscribe_member(prepared, identity, read, settled)?;
         Ok(SubscriptionStream {
@@ -969,6 +972,7 @@ impl Db {
                     self.inner.clone(),
                     prepared.query.clone(),
                     prepared.binding.clone(),
+                    include_deleted,
                 )
             }),
         })
@@ -3681,7 +3685,7 @@ impl TxRef<'_> {
         {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
-            let through = self.db.fetch(prepared, at, None).await;
+            let through = self.db.fetch(prepared, at, false, None).await;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {

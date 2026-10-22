@@ -222,6 +222,21 @@ pub(crate) const PROVENANCE: [&str; 6] = [
     "$updatedBy.identity.subject",
 ];
 
+/// The current deletion of a row, readable with `includeDeleted`: the
+/// deleting version's update stamp, NULL for live and restored rows. Never
+/// stored: a deleted row is its current version with `_del` set, and that
+/// version's update stamp is the deletion's.
+pub(crate) const DELETION: [&str; 3] = [
+    "$deletedAt",
+    "$deletedBy.identity.issuer",
+    "$deletedBy.identity.subject",
+];
+
+/// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
+pub(crate) fn is_deletion(column: &str) -> bool {
+    column == "$deletedAt" || column == "$deletedBy" || column.starts_with("$deletedBy.")
+}
+
 /// Provenance as stored: each author is one code into `_jazz_authors`
 /// instead of its two strings on every row version.
 pub(crate) const STORED_PROVENANCE: [&str; 4] =
@@ -235,6 +250,8 @@ pub(crate) fn author_part(column: &str) -> Option<(&'static str, &'static str)> 
         "$createdBy.identity.subject" => ("$createdBy", "subject"),
         "$updatedBy.identity.issuer" => ("$updatedBy", "issuer"),
         "$updatedBy.identity.subject" => ("$updatedBy", "subject"),
+        "$deletedBy.identity.issuer" => ("$deletedBy", "issuer"),
+        "$deletedBy.identity.subject" => ("$deletedBy", "subject"),
         _ => return None,
     })
 }
@@ -265,6 +282,7 @@ fn stored_provenance_columns() -> Vec<Column> {
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
         .iter()
+        .chain(&DELETION)
         .map(|name| Column {
             name: (*name).to_owned(),
             stored: (*name).to_owned(),

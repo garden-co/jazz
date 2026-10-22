@@ -414,7 +414,6 @@ fn row_ids_for_identity(
 fn opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

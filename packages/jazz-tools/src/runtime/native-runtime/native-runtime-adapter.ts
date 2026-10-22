@@ -2186,14 +2186,11 @@ export class NativeRuntimeAdapter implements Runtime {
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
     this.noteFirstLoadWait(optionsJson);
-    if (queryIncludesDeleted(queryJson)) {
-      throw new Error("Native runtime does not support include_deleted subscriptions yet");
-    }
     const session = readSession(sessionJson);
     const readContext = this.nativeReadContext(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const handle = this.nextSubscriptionId++;
-    const opts = readOptions(tier, false, optionsJson);
+    const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
     this.subscriptions.set(handle, {
       openingAbort: new AbortController(),
       reading: false,
@@ -4896,7 +4893,7 @@ function outputColumnsForTable(
         ? ({
             name: columnName,
             column_type: magicType,
-            nullable: false,
+            nullable: columnName === "$deletedAt" || columnName.startsWith("$deletedBy"),
           } satisfies ColumnDescriptor)
         : undefined;
     })

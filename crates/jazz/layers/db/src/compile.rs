@@ -596,6 +596,17 @@ impl<'a> Ctx<'a> {
         query: &Query,
         include_deleted: bool,
     ) -> Result<Compiled, Error> {
+        if let Some(column) = deletion_column(query) {
+            if !include_deleted {
+                return Err(query_error(format!(
+                    "Reading {column} requires includeDeleted"
+                )));
+            }
+            // includeDeleted widens only the root: joined rows are live.
+            if !query.joins.is_empty() || query.flat_join.is_some() {
+                return Err(unsupported(format!("reading {column} in joins")));
+            }
+        }
         if let Some(source) = crate::schema::history::history_source_table(&query.table) {
             if query.flat_join.is_some()
                 || !query.policy_branches.is_empty()
@@ -1595,16 +1606,25 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
         return Ok(format!("{alias}.id"));
     }
     if let Some((stored, part)) = crate::values::author_part(column) {
+        let code = match stored {
+            "$deletedBy" => deletion_sql(table, alias, stored),
+            _ => stored_sql(alias, stored),
+        };
         return Ok(format!(
-            "(SELECT {part} FROM _jazz_authors WHERE n = {})",
-            stored_sql(alias, stored)
+            "(SELECT {part} FROM _jazz_authors WHERE n = {code})"
         ));
+    }
+    if column == "$deletedAt" {
+        return Ok(deletion_sql(table, alias, column));
     }
     if crate::values::elided_as(column).is_some() {
         return Ok(stored_sql(alias, column));
     }
     if table.column(column).is_none() {
-        if column.starts_with("$createdBy") || column.starts_with("$updatedBy") {
+        if column.starts_with("$createdBy")
+            || column.starts_with("$updatedBy")
+            || column.starts_with("$deletedBy")
+        {
             return Err(unsupported(format!(
                 "`{column}` (author provenance is readable as `.identity.issuer` and `.identity.subject`)"
             )));
@@ -1615,6 +1635,48 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
         )));
     }
     Ok(format!("{alias}.{}", quote(table.stored_name(column))))
+}
+
+/// The first deletion column a query's root selects, filters or orders by.
+fn deletion_column(query: &Query) -> Option<String> {
+    let mut found = query
+        .select
+        .iter()
+        .flatten()
+        .chain(query.order_by.iter().map(|order| &order.column))
+        .find(|column| crate::values::is_deletion(column))
+        .cloned();
+    for filter in &query.filters {
+        if found.is_some() {
+            break;
+        }
+        filter.any_operand(&mut |operand| match operand {
+            Operand::Column(column) if crate::values::is_deletion(column) => {
+                found = Some(column.clone());
+                true
+            }
+            _ => false,
+        });
+    }
+    found
+}
+
+/// `$deletedAt` or the `$deletedBy` author code: the update stamp of a
+/// deleted current version, which the deletion wrote, else NULL. A source
+/// that carries them as columns (history versions, which take them from
+/// their current row) is read directly.
+fn deletion_sql(table: &Table, alias: &str, column: &str) -> String {
+    if table.stored_provenance.iter().any(|c| c.stored == column) {
+        return format!("{alias}.{}", quote(column));
+    }
+    let stamp = match column {
+        "$deletedAt" => "$updatedAt",
+        _ => "$updatedBy",
+    };
+    format!(
+        "CASE WHEN {alias}._del = 1 THEN {} END",
+        stored_sql(alias, stamp)
+    )
 }
 
 /// A stored provenance column; an update stamp left NULL reads as the
