@@ -3146,6 +3146,9 @@ enum BatchKind {
         snapshot: u64,
         reads: Vec<ReadRecord>,
         pinned: bool,
+        /// On a client, its own commits still unsettled at begin: the
+        /// snapshot includes them (reads see what this client wrote).
+        own: Vec<u64>,
     },
 }
 
@@ -3302,12 +3305,13 @@ impl Db {
     /// On a client the snapshot is the server seq the replica is known
     /// complete through.
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
-        let snapshot = {
+        let (snapshot, own) = {
             let inner = self.inner.borrow();
-            inner
+            let snapshot = inner
                 .client
                 .as_ref()
-                .map_or(inner.seq, |client| client.known)
+                .map_or(inner.seq, |client| client.known);
+            (snapshot, inner.unsettled_own())
         };
         self.begin(
             id,
@@ -3315,6 +3319,7 @@ impl Db {
                 snapshot,
                 reads: Vec::new(),
                 pinned: !self.is_client(),
+                own,
             },
         )
     }
@@ -3381,7 +3386,10 @@ impl Db {
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
         let BatchKind::Serializable {
-            snapshot, reads, ..
+            snapshot,
+            reads,
+            own,
+            ..
         } = &batch.kind
         else {
             return Err(rejected(format!("transaction {id:?} is not serializable")));
@@ -3406,6 +3414,7 @@ impl Db {
                 sync::Kind::Serializable {
                     snapshot: *snapshot,
                     reads,
+                    own: own.clone(),
                 },
             );
         }
@@ -3492,7 +3501,9 @@ impl Db {
         };
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
-            BatchKind::Serializable { snapshot, .. } => Some(*snapshot),
+            BatchKind::Serializable { snapshot, own, .. } => {
+                Some(inner.serializable_cut(*snapshot, own)?)
+            }
         };
         if let Some(op) = extra {
             ops.push((inner.schema.clone(), op));
@@ -3503,15 +3514,9 @@ impl Db {
             .execute_batch("SAVEPOINT overlay")
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
-        let result = inner.apply_with_edits(&ops, &edits, own).and_then(|()| {
-            read(
-                &mut inner,
-                snapshot.map(|seq| Cut {
-                    own,
-                    ..Cut::at(seq)
-                }),
-            )
-        });
+        let result = inner
+            .apply_with_edits(&ops, &edits, own)
+            .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
         inner
             .conn
             .execute_batch("ROLLBACK TO overlay; RELEASE overlay")
@@ -3566,14 +3571,14 @@ impl Db {
     fn record_read(&self, id: OpenTransactionId, prepared: &PreparedQuery) -> Result<(), Error> {
         let mut inner = self.inner();
         let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, .. },
+            kind: BatchKind::Serializable { snapshot, own, .. },
             ..
         }) = inner.batches.get(&id)
         else {
             return Ok(());
         };
         let read = ReadSpec {
-            cut: Some(Cut::at(*snapshot)),
+            cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
         let rows = versions(&inner.run(prepared, None, &read)?);

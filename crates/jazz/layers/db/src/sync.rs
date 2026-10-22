@@ -246,7 +246,14 @@ pub struct WireRead {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireKind {
     Mergeable,
-    Serializable { snapshot: u64, reads: Vec<WireRead> },
+    /// `own`: the sender's own commits (by local seq) that were unsettled
+    /// when the transaction began; its snapshot includes them, and the
+    /// authority resolves each to where it settled.
+    Serializable {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -412,7 +419,11 @@ pub enum SyncMessage {
 
 pub(crate) enum Kind {
     Mergeable,
-    Serializable { snapshot: u64, reads: Vec<WireRead> },
+    Serializable {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+    },
 }
 
 struct Pending {
@@ -1634,6 +1645,31 @@ impl Inner {
         }
     }
 
+    /// A serializable transaction's snapshot on this store: the authority's
+    /// state through `snapshot` plus this replica's own commits that were
+    /// unsettled at begin (`own`), wherever each is now: settled at a seq,
+    /// still pending at its local seq, or rejected (then it never happened).
+    pub(crate) fn serializable_cut(&self, snapshot: u64, own: &[u64]) -> Result<Cut, Error> {
+        let mut cut = Cut::at(snapshot);
+        let me = *self.identity.node.as_bytes();
+        for &tx in own {
+            match self.settled(me, tx)? {
+                Some(Some(seq)) => cut.extra.push(seq),
+                Some(None) => {}
+                None => cut.extra.push(tx),
+            }
+        }
+        Ok(cut)
+    }
+
+    /// The own commits a replica's serializable transaction began over:
+    /// those still unsettled (none on the authority).
+    pub(crate) fn unsettled_own(&self) -> Vec<u64> {
+        self.client.as_ref().map_or_else(Vec::new, |client| {
+            client.pending.iter().map(|p| p.tx).collect()
+        })
+    }
+
     /// The cut a snapshot reference reads: the authority's state through
     /// its global base, plus each commit it names individually (a
     /// replica's writes not yet settled when it was captured) wherever
@@ -1971,9 +2007,15 @@ impl Db {
             Ok(wire) => {
                 let kind = match kind {
                     Kind::Mergeable => WireKind::Mergeable,
-                    Kind::Serializable { snapshot, reads } => {
-                        WireKind::Serializable { snapshot, reads }
-                    }
+                    Kind::Serializable {
+                        snapshot,
+                        reads,
+                        own,
+                    } => WireKind::Serializable {
+                        snapshot,
+                        reads,
+                        own,
+                    },
                 };
                 let commit = SyncMessage::Commit {
                     node: client.node,
@@ -3463,8 +3505,27 @@ impl Db {
             }
             out
         };
-        if let WireKind::Serializable { snapshot, reads } = &kind {
+        if let WireKind::Serializable {
+            snapshot,
+            reads,
+            own,
+        } = &kind
+        {
             let inner = self.inner();
+            // The sender's own commits its snapshot included, by local seq
+            // and where each settled here (earlier on this connection, so
+            // before this one).
+            let mut settled = BTreeMap::new();
+            for &tx in own {
+                if let Some(seq) = inner
+                    .settled(origin.0, tx)
+                    .map_err(|e| (e, Vec::new()))?
+                    .flatten()
+                {
+                    settled.insert(tx, seq);
+                }
+            }
+            let in_snapshot = |seq: u64| seq <= *snapshot || settled.values().any(|s| *s == seq);
             for op in &ops {
                 if let Some(row) = op.row()
                     && inner
@@ -3472,7 +3533,7 @@ impl Db {
                         .stored_table(op.table())
                         .and_then(|table| inner.newest_seq(table, row))
                         .map_err(|e| (e, Vec::new()))?
-                        .is_some_and(|seq| seq > *snapshot)
+                        .is_some_and(|seq| !in_snapshot(seq))
                 {
                     let rows = mentioned(&inner);
                     return Err((
@@ -3495,7 +3556,14 @@ impl Db {
                     .map_err(|e| (e, Vec::new()))?;
                 let now: Vec<([u8; 16], u64)> =
                     now.iter().map(|r| (*r.id.0.as_bytes(), r.seq)).collect();
-                if now != read.rows {
+                // A row the sender read at an own commit's local seq is
+                // compared where that commit settled.
+                let then: Vec<([u8; 16], u64)> = read
+                    .rows
+                    .iter()
+                    .map(|(row, seq)| (*row, settled.get(seq).copied().unwrap_or(*seq)))
+                    .collect();
+                if now != then {
                     let rows = mentioned(&inner);
                     return Err((
                         conflict("a row read by the transaction changed since its snapshot"),

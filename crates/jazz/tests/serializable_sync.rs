@@ -557,3 +557,82 @@ fn racing_seat_bookings_never_double_book() {
     );
     assert_eq!(booked, 3, "exactly one accepted booking per seat");
 }
+
+/// The snapshot includes the replica's own writes that were still unsettled
+/// at begin: the transaction reads them, and the authority, resolving each
+/// to where it settled, accepts the commit.
+#[test]
+fn a_serializable_read_sees_the_replicas_own_unsettled_writes() {
+    let mut net = Net::new(1);
+    net.go_offline(OWNER);
+    let db = net.db(OWNER);
+    let invite = block_on(db.insert("invites", code("own"), Default::default())).unwrap();
+
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("own")).unwrap();
+    assert_eq!(
+        block_on(db.serializable_tx_ref(open).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1,
+        "the snapshot holds the replica's own unsettled insert"
+    );
+    // A write after begin is not in the snapshot.
+    block_on(db.insert("invites", code("own"), Default::default())).unwrap();
+    assert_eq!(
+        block_on(db.serializable_tx_ref(open).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1
+    );
+    block_on(db.serializable_tx_ref(open).update(
+        "invites",
+        invite.row_uuid(),
+        code("own, redeemed"),
+        Default::default(),
+    ))
+    .unwrap();
+    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
+    net.go_online(OWNER);
+    // The second insert settles before the commit too, but the read
+    // result changed: the authority rejects it.
+    assert_eq!(
+        net.settle(OWNER, receipt.0).unwrap_err().code,
+        ErrorCode::TransactionConflict
+    );
+}
+
+#[test]
+fn a_commit_over_the_replicas_own_unsettled_writes_is_accepted() {
+    let mut net = Net::new(1);
+    net.go_offline(OWNER);
+    let db = net.db(OWNER);
+    let invite = block_on(db.insert("invites", code("own"), Default::default())).unwrap();
+
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("own")).unwrap();
+    assert_eq!(
+        block_on(db.serializable_tx_ref(open).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1
+    );
+    block_on(db.serializable_tx_ref(open).update(
+        "invites",
+        invite.row_uuid(),
+        code("own"),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(
+        db.serializable_tx_ref(open)
+            .insert("members", code("own"), Default::default()),
+    )
+    .unwrap();
+    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
+    net.go_online(OWNER);
+    assert!(net.settle(OWNER, receipt.0).is_ok());
+    assert_eq!(net.members("own"), 1);
+}
