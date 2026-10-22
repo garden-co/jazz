@@ -35,7 +35,7 @@ pub use fanout::FanoutStats;
 mod large_ops;
 pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
-    LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
@@ -316,6 +316,9 @@ struct Inner {
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
+    /// Upload leases dropped by capabilities or completed/abandoned batches.
+    /// The queue is separate from the owner borrow, so Drop never re-enters it.
+    upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -681,6 +684,7 @@ impl Db {
                 pending_nodes: Vec::new(),
                 derived: Vec::new(),
                 staging: LargeValueStagingPolicy::default(),
+                upload_cleanup: Rc::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner,
@@ -2054,6 +2058,7 @@ impl Inner {
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        self.release_dropped_uploads()?;
         self.conn
             .execute_batch("SAVEPOINT reclaim")
             .map_err(storage)?;
@@ -3060,7 +3065,20 @@ impl Db {
 /// view that staged them) and applied at commit; reads overlay them.
 struct Batch {
     kind: BatchKind,
+    identity: WriteIdentity,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// Hold staged ciphertext until the commit (including its upload record)
+    /// is durable, or the batch is abandoned. Maintenance cannot expire it.
+    uploads: Vec<Rc<large_ops::UploadLease>>,
+}
+
+impl Batch {
+    fn reader(&self) -> Option<AuthorSubject> {
+        match who(self.identity) {
+            Who::Session(author) => Some(author),
+            Who::Local => None,
+        }
+    }
 }
 
 enum BatchKind {
@@ -3093,6 +3111,17 @@ fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, u64)> {
 }
 
 impl StagedOp {
+    fn identity(&self) -> WriteIdentity {
+        match self {
+            Self::Insert(_, _, o) => o.identity,
+            Self::Update(_, _, _, o) => o.identity,
+            Self::Upsert(_, _, _, o) => o.identity,
+            Self::Delete(_, _, o) => o.identity,
+            Self::Restore(_, _, _, o) => o.identity,
+            Self::Move(..) => WriteIdentity::Database,
+        }
+    }
+
     fn table(&self) -> &str {
         match self {
             StagedOp::Insert(t, ..)
@@ -3173,11 +3202,16 @@ impl Inner {
     }
 
     /// Apply staged writes at `seq`, each under the schema that staged it.
-    fn apply_all(&mut self, ops: &[(Rc<Schema>, StagedOp)], seq: u64) -> Result<(), Error> {
+    fn apply_all(
+        &mut self,
+        ops: &[(Rc<Schema>, StagedOp)],
+        seq: u64,
+        identity: WriteIdentity,
+    ) -> Result<(), Error> {
         let active = self.schema.clone();
         let result = ops.iter().try_for_each(|(schema, op)| {
             self.schema = schema.clone();
-            self.apply(op, seq).map(drop)
+            self.apply_as(op, who(identity), seq).map(drop)
         });
         self.schema = active;
         result
@@ -3230,6 +3264,30 @@ impl Db {
         )
     }
 
+    /// Open a serializable batch for an authenticated session on an authority.
+    /// The identity governs its reads, every write and staged upload attachment.
+    /// Replicas author local batches as their database identity; their upstream
+    /// checks permissions against the authenticated transport session.
+    pub async fn begin_serializable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        if self.is_client() {
+            return Err(unsupported(
+                "session-authored serializable batches on a replica",
+            ));
+        }
+        self.begin_serializable(id).await?;
+        self.inner
+            .borrow_mut()
+            .batches
+            .get_mut(&id)
+            .expect("opened")
+            .identity = WriteIdentity::Session(author);
+        Ok(())
+    }
+
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.batches.contains_key(&id) {
@@ -3239,7 +3297,9 @@ impl Db {
             id,
             Batch {
                 kind,
+                identity: WriteIdentity::Database,
                 ops: Vec::new(),
+                uploads: Vec::new(),
             },
         );
         Ok(())
@@ -3276,7 +3336,10 @@ impl Db {
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
-        self.commit_ops(&batch.ops, sync::Kind::Mergeable)
+        if !matches!(batch.kind, BatchKind::Mergeable) {
+            return Err(rejected(format!("transaction {id:?} is not mergeable")));
+        }
+        self.commit_ops(&batch.ops, sync::Kind::Mergeable, batch.identity)
     }
 
     /// Serializable commit: every row the batch writes must still be at a
@@ -3317,6 +3380,7 @@ impl Db {
                     snapshot: *snapshot,
                     reads,
                 },
+                batch.identity,
             );
         }
         {
@@ -3333,7 +3397,7 @@ impl Db {
                 }
             }
             for read in reads {
-                let now = inner.run(&read.prepared, None, &ReadSpec::default())?;
+                let now = inner.run(&read.prepared, batch.reader(), &ReadSpec::default())?;
                 if versions(&now) != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
@@ -3341,21 +3405,28 @@ impl Db {
                 }
             }
         }
-        self.commit_ops(&batch.ops, sync::Kind::Mergeable)
+        self.commit_ops(&batch.ops, sync::Kind::Mergeable, batch.identity)
     }
 
     fn commit_ops(
         &self,
         ops: &[(Rc<Schema>, StagedOp)],
         kind: sync::Kind,
+        identity: WriteIdentity,
     ) -> Result<TxReceipt, Error> {
-        self.with_upload(|| self.commit_ops_now(ops, kind))
+        if self.is_client() && identity != WriteIdentity::Database {
+            return Err(unsupported(
+                "session-authored serializable batches on a replica",
+            ));
+        }
+        self.with_upload(|| self.commit_ops_now(ops, kind, identity))
     }
 
     fn commit_ops_now(
         &self,
         ops: &[(Rc<Schema>, StagedOp)],
         kind: sync::Kind,
+        identity: WriteIdentity,
     ) -> Result<TxReceipt, Error> {
         let seq = {
             let mut inner = self.inner();
@@ -3365,7 +3436,7 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            if let Err(error) = inner.apply_all(ops, seq) {
+            if let Err(error) = inner.apply_all(ops, seq, identity) {
                 inner
                     .conn
                     .execute_batch("ROLLBACK TO commit_batch; RELEASE commit_batch")
@@ -3402,6 +3473,7 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let mut ops = batch.ops.clone();
+        let identity = batch.identity;
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
             BatchKind::Serializable { snapshot, .. } => Some(*snapshot),
@@ -3415,7 +3487,7 @@ impl Db {
             .execute_batch("SAVEPOINT overlay")
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
-        let result = inner.apply_all(&ops, own).and_then(|()| {
+        let result = inner.apply_all(&ops, own, identity).and_then(|()| {
             read(
                 &inner,
                 snapshot.map(|seq| Cut {
@@ -3433,6 +3505,17 @@ impl Db {
     }
 
     fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
+        {
+            let inner = self.inner.borrow();
+            let batch = inner
+                .batches
+                .get(&id)
+                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            let identity = op.identity();
+            if identity != WriteIdentity::Database && identity != batch.identity {
+                return Err(rejected("write identity differs from its transaction"));
+            }
+        }
         // Validate against the overlay now, so errors surface at the call.
         self.in_overlay(id, Some(op.clone()), |_, _| Ok(()))?;
         let mut inner = self.inner();
@@ -3448,10 +3531,12 @@ impl Db {
 
     fn record_read(&self, id: OpenTransactionId, prepared: &PreparedQuery) -> Result<(), Error> {
         let mut inner = self.inner();
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, .. },
-            ..
-        }) = inner.batches.get(&id)
+        let Some(
+            batch @ Batch {
+                kind: BatchKind::Serializable { snapshot, .. },
+                ..
+            },
+        ) = inner.batches.get(&id)
         else {
             return Ok(());
         };
@@ -3459,7 +3544,7 @@ impl Db {
             cut: Some(Cut::at(*snapshot)),
             ..ReadSpec::default()
         };
-        let rows = versions(&inner.run(prepared, None, &read)?);
+        let rows = versions(&inner.run(prepared, batch.reader(), &read)?);
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, .. },
             ..
@@ -3570,7 +3655,7 @@ impl TxRef<'_> {
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
             inner.run(
                 prepared,
-                None,
+                inner.batches.get(&self.id).and_then(Batch::reader),
                 &ReadSpec {
                     cut,
                     ..ReadSpec::default()
