@@ -19,7 +19,9 @@ pub struct Principal {
 }
 
 impl Principal {
-    fn validate(&self, allow_local_first: bool) -> Result<(), AccountError> {
+    /// Check the principal names a valid identity; `allow_local_first`
+    /// admits local-first principals (a UUID subject).
+    pub fn validate(&self, allow_local_first: bool) -> Result<(), AccountError> {
         if allow_local_first && self.issuer == crate::identity::LOCAL_FIRST_ISSUER {
             if uuid::Uuid::parse_str(&self.subject).is_ok() {
                 return Ok(());
@@ -118,7 +120,7 @@ pub enum AccountError {
 
 /// Authenticated registry operation. The server supplies the principal and time;
 /// neither is trusted from the request body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AccountCommand {
     /// Register a verified local-first founding identity deterministically.
     FoundLocalFirst {

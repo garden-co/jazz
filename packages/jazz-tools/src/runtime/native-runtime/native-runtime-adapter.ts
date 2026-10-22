@@ -1,3 +1,4 @@
+import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
@@ -4981,7 +4982,7 @@ function outputColumnsForTable(
   arraySubqueries: readonly QueryArraySubquery[],
   rootTerminal = true,
 ): ColumnDescriptor[] {
-  const tableSchema = schema[table];
+  const tableSchema = resolveQueryTable(schema, table);
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
   const wildcard = select === undefined;
   const selected = select ?? tableSchema.columns.map((column) => column.name);
@@ -5297,11 +5298,62 @@ function coerceQueryPredicate(
   if (filter.op === "Not") {
     return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
   }
+  if (isHistoryTable(table) && "column" in filter) {
+    if (filter.column === "$transactionId") {
+      throw new Error("History $transactionId predicates do not accept user-provided values");
+    }
+    if (filter.column === "$acceptedAt") {
+      if (filter.op === "In") {
+        return {
+          op: "Any",
+          predicates: filter.values.map((value) =>
+            coerceQueryPredicate(table, { column: filter.column, op: "Eq", value }, schema),
+          ),
+        };
+      }
+      if (isQueryPredicateCmp(filter)) {
+        const value = coerceQueryLiteral(table, filter.column, filter.value, schema);
+        if (value.type !== "Timestamp" || !Number.isSafeInteger(value.value)) {
+          throw new Error(
+            "History $acceptedAt predicates require a valid Date or integer milliseconds",
+          );
+        }
+        const lower = BigInt(value.value) << 18n;
+        const upper = lower + (1n << 18n) - 1n;
+        const bound = (op: "Gt" | "Gte" | "Lt" | "Lte", boundary: bigint): QueryPredicate => {
+          if (boundary < 0n || boundary > (1n << 64n) - 1n) {
+            const matches =
+              boundary < 0n ? op === "Gt" || op === "Gte" : op === "Lt" || op === "Lte";
+            return { op: matches ? "All" : "Any", predicates: [] };
+          }
+          return { column: filter.column, op, value: { type: "U64", value: boundary } };
+        };
+        switch (filter.op) {
+          case "Eq":
+            return { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] };
+          case "Ne":
+            return {
+              op: "Not",
+              predicate: { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] },
+            };
+          case "Gt":
+            return bound("Gt", upper);
+          case "Gte":
+            return bound("Gte", lower);
+          case "Lt":
+            return bound("Lt", lower);
+          case "Lte":
+            return bound("Lte", upper);
+        }
+      }
+    }
+  }
   if (filter.op === "In") {
     const columnType =
       filter.column === "id"
         ? ({ type: "Uuid" } as const)
-        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === filter.column)
+            ?.column_type;
     if (columnType?.type === "Array") {
       return {
         op: "Any",
@@ -5329,7 +5381,8 @@ function coerceQueryPredicate(
     const columnType =
       filter.column === "id"
         ? ({ type: "Uuid" } as const)
-        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === filter.column)
+            ?.column_type;
     return {
       ...filter,
       value:
@@ -5339,7 +5392,7 @@ function coerceQueryPredicate(
     };
   }
   if (filter.op === "EnumMatch") {
-    const columnType = schema[table]?.columns.find(
+    const columnType = resolveQueryTable(schema, table)?.columns.find(
       (entry) => entry.name === filter.column,
     )?.column_type;
     if (columnType?.type !== "EnumPayload") {
@@ -5624,7 +5677,8 @@ function coerceQueryLiteral(
     column === "id"
       ? ({ type: "Uuid" } as const)
       : (magicColumnType(column) ??
-        schema[table]?.columns.find((entry) => entry.name === column)?.column_type);
+        resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
+          ?.column_type);
   if (columnType?.type === "Bytea" && value.type === "Array") {
     return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
   }
@@ -5632,7 +5686,8 @@ function coerceQueryLiteral(
     const elementType =
       column === "id"
         ? { type: "Uuid" as const }
-        : schema[table]?.columns.find((entry) => entry.name === column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
+            ?.column_type;
     const elementColumnType = elementType?.type === "Array" ? elementType.element : elementType;
     return {
       type: "Array",
@@ -6163,7 +6218,7 @@ function nativeRowFieldPlans(
   const cached = projectedColumns ? undefined : cache.get(cacheKey);
   if (cached) return cached;
 
-  const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
+  const columns = projectedColumns ?? resolveQueryTable(schema, batch.table)?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const projectedNames = projectedColumns
     ? new Set(projectedColumns.map((column) => column.name))
@@ -6220,7 +6275,9 @@ const RELATION_SNAPSHOT_METADATA_FIELDS = new Set([
 function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): RowState[] {
   return rows.map((row) => {
     if (!row.valuesByColumn) return row;
-    const schemaColumns = new Set((schema[row.table]?.columns ?? []).map((column) => column.name));
+    const schemaColumns = new Set(
+      (resolveQueryTable(schema, row.table)?.columns ?? []).map((column) => column.name),
+    );
     const valuesByColumn = new Map(row.valuesByColumn);
     const metadataValues = new Set<Value>();
     for (const field of RELATION_SNAPSHOT_METADATA_FIELDS) {
@@ -6330,7 +6387,13 @@ function decodeBytes(
     case "Integer":
       return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
-      return { type: "BigInt", value: view.getBigInt64(0, true) };
+      return {
+        type: "BigInt",
+        value:
+          nonNullableStorageType(storageType)?.tag === 3
+            ? view.getBigUint64(0, true)
+            : view.getBigInt64(0, true),
+      };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":

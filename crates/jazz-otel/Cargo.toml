@@ -23,7 +23,8 @@ jazz = { workspace = true, default-features = false, features = [
   "testing",
   "transport-compression-zstd",
 ] }
-jazz-testkit = { path = "../jazz-testkit" }
+# Ported back with jazz-testkit (stage 2 of the Groove removal):
+# jazz-testkit = { path = "../jazz-testkit" }
 jazz-server = { path = "../jazz-server", features = ["test"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 opentelemetry_sdk = { version = "0.31", features = ["testing"] }
