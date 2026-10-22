@@ -107,13 +107,13 @@ pub(super) fn read_descriptor(input: &mut &[u8]) -> Result<RecordDescriptor, Str
     read_fields(input, &mut 1024, 0)
 }
 
-fn take<'a, T: serde::Deserialize<'a>>(input: &mut &'a [u8]) -> Result<T, String> {
+pub(super) fn take<'a, T: serde::Deserialize<'a>>(input: &mut &'a [u8]) -> Result<T, String> {
     let (value, rest) = postcard::take_from_bytes(input).map_err(|error| error.to_string())?;
     *input = rest;
     Ok(value)
 }
 
-fn count(input: &mut &[u8], budget: usize) -> Result<usize, String> {
+pub(super) fn count(input: &mut &[u8], budget: usize) -> Result<usize, String> {
     let count: usize = take(input)?;
     if count > budget || count > input.len() {
         return Err("binding descriptor node limit exceeded".to_owned());
@@ -140,7 +140,11 @@ fn read_fields(
     Ok(RecordDescriptor::new_with_fields(fields))
 }
 
-fn read_type(input: &mut &[u8], budget: &mut usize, depth: usize) -> Result<ValueType, String> {
+pub(super) fn read_type(
+    input: &mut &[u8],
+    budget: &mut usize,
+    depth: usize,
+) -> Result<ValueType, String> {
     if *budget == 0 || depth >= 128 {
         return Err("binding descriptor node or depth limit exceeded".to_owned());
     }
