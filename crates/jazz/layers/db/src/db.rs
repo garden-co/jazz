@@ -335,7 +335,9 @@ struct Inner {
 #[derive(Clone, Copy, Debug)]
 pub struct FileOptions {
     /// `synchronous = FULL` (every commit survives power loss) instead of
-    /// `NORMAL` (WAL stays consistent; the newest commits may be lost).
+    /// `NORMAL` (WAL stays consistent; the newest commits may be lost on
+    /// power loss, never on a process crash). `NORMAL` is the default, as
+    /// unsynced WAL writes were for the RocksDB store.
     pub synchronous_full: bool,
     /// Page cache bound per connection, in KiB.
     pub cache_kib: u64,
@@ -344,7 +346,7 @@ pub struct FileOptions {
 impl Default for FileOptions {
     fn default() -> Self {
         Self {
-            synchronous_full: true,
+            synchronous_full: false,
             cache_kib: 8 * 1024,
         }
     }
