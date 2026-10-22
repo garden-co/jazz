@@ -98,7 +98,7 @@ use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-pub use key_free::KeyFreeLayout;
+pub use key_free::{EncodedKeyPart, KeyByteOrder, KeyFreeLayout};
 pub use macros::{FieldKind, RecordField, U48, assert_record_field_layout};
 pub use transcode::RecordTranscoder;
 pub(crate) use transcode::{logical_record_descriptor, validate_dictionary_value};

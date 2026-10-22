@@ -1830,8 +1830,8 @@ pub use batch::*;
 pub(crate) use encoding::stored_table_row;
 use encoding::*;
 pub(crate) use encoding::{
-    decode_primary_key_values, index_record_descriptor, persisted_index_column_value,
-    persisted_index_primary_key,
+    index_record_descriptor, key_free_row_to_full, persisted_index_column_value,
+    persisted_index_primary_key, shared_key_free_layout,
 };
 pub use query::GraphOutputDescriptors;
 use schema_admission::*;

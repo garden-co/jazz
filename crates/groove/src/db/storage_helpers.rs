@@ -1052,9 +1052,11 @@ where
                 }
             };
             let old = match &layout.key_free {
-                Some(key_free) if from_storage => bytes::Bytes::from(key_free.to_full(
+                Some(key_free) if from_storage => bytes::Bytes::from(key_free_row_to_full(
+                    table_schema,
+                    key_free,
+                    write.key(),
                     payload,
-                    &decode_primary_key_values(table_schema, write.key())?,
                 )?),
                 _ => bytes::Bytes::copy_from_slice(payload),
             };

@@ -201,8 +201,13 @@ impl NodeState {
         table: &crate::schema::TableSchema,
         rows: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
     ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
-        let mut grouped =
-            HashMap::<u32, (TableDelta, Option<crate::records::KeyFreeLayout>)>::default();
+        let mut grouped = HashMap::<
+            u32,
+            (
+                TableDelta,
+                Option<std::rc::Rc<crate::records::KeyFreeLayout>>,
+            ),
+        >::default();
         for (key, stored) in rows {
             let (variant_tag, payload) = crate::records::split_variant_record(stored)?;
             let (group, layout) = match grouped.entry(variant_tag) {
@@ -215,10 +220,14 @@ impl NodeState {
                     let descriptor = table
                         .record_schema_for_variant(variant_tag)
                         .ok_or_else(unknown)?;
-                    let key_fields = table
+                    table
                         .primary_key_fields_for_variant(variant_tag)
                         .ok_or_else(unknown)?;
-                    let layout = crate::records::KeyFreeLayout::new(descriptor, &key_fields)?;
+                    let layout = crate::db::shared_key_free_layout(table, variant_tag, descriptor)
+                        .map_err(|error| match error {
+                            crate::db::Error::RecordEncoding(error) => error.into(),
+                            _ => unknown(),
+                        })?;
                     entry.insert((
                         TableDelta {
                             table: table.name.clone(),
@@ -231,14 +240,16 @@ impl NodeState {
                 }
             };
             let record = match layout {
-                Some(layout) => {
-                    let key = crate::db::decode_primary_key_values(table, key).map_err(|_| {
-                        IvmRuntimeError::InvalidStoredRowKey {
-                            table: table.name.clone(),
-                        }
-                    })?;
-                    Bytes::from(layout.to_full(payload, &key)?)
-                }
+                Some(layout) => Bytes::from(
+                    crate::db::key_free_row_to_full(table, layout, key, payload).map_err(
+                        |error| match error {
+                            crate::db::Error::RecordEncoding(error) => error.into(),
+                            _ => IvmRuntimeError::InvalidStoredRowKey {
+                                table: table.name.clone(),
+                            },
+                        },
+                    )?,
+                ),
                 None => Bytes::copy_from_slice(payload),
             };
             group.deltas.push(RecordDelta { record, weight: 1 });

@@ -282,9 +282,7 @@ impl Database {
         let (variant_tag, payload) = split_variant_record(&stored)?;
         let layout = self.stored_row_layout(table, variant_tag)?;
         let record = match &layout.key_free {
-            Some(key_free) => {
-                key_free.to_full(payload, &decode_primary_key_values(table, &key)?)?
-            }
+            Some(key_free) => key_free_row_to_full(table, key_free, &key, payload)?,
             None => payload.to_vec(),
         };
         Ok(EncodedKeyValue::from_variant(
@@ -320,31 +318,185 @@ pub(crate) fn key_free_layout(
                 .unwrap_or_default(),
         });
     };
-    Ok(records::KeyFreeLayout::new(descriptor, &key_fields)?)
+    let layout = records::KeyFreeLayout::new(descriptor, &key_fields)?;
+    Ok(layout.map(|layout| match encoded_key_parts(table) {
+        Some(parts) => layout.with_encoded_key(&parts),
+        None => layout,
+    }))
 }
 
-/// Decode a row's encoded primary key into its parts, in key order. Stored
-/// rows leave these fields out; reads restore them from the key.
-pub(crate) fn decode_primary_key_values(
+thread_local! {
+    /// Key-free layouts by table variant shape. Descriptors are interned for
+    /// the life of the process, so layouts derived from them are too.
+    #[allow(clippy::type_complexity)]
+    static SHARED_KEY_FREE_LAYOUTS: RefCell<
+        HashMap<(RecordDescriptor, Vec<usize>, Vec<PrimaryKeyType>), Option<Rc<records::KeyFreeLayout>>>,
+    > = RefCell::new(HashMap::new());
+}
+
+/// [`key_free_layout`], built once per thread for each record descriptor
+/// and primary key.
+pub(crate) fn shared_key_free_layout(
     table: &TableSchema,
-    key: &[u8],
-) -> Result<Vec<Value>, Error> {
-    let Some(primary_key) = &table.primary_key else {
-        return Ok(Vec::new());
-    };
-    let mut remaining = key;
-    let values = primary_key
+    variant_tag: u32,
+    descriptor: RecordDescriptor,
+) -> Result<Option<Rc<records::KeyFreeLayout>>, Error> {
+    let key_fields = table
+        .primary_key_fields_for_variant(variant_tag)
+        .unwrap_or_default();
+    let key_types = table
+        .primary_key
+        .iter()
+        .flat_map(|key| &key.columns)
+        .map(|column| column.key_type.clone())
+        .collect::<Vec<_>>();
+    let cache_key = (descriptor, key_fields, key_types);
+    if let Some(layout) =
+        SHARED_KEY_FREE_LAYOUTS.with(|layouts| layouts.borrow().get(&cache_key).cloned())
+    {
+        return Ok(layout);
+    }
+    let layout = key_free_layout(table, variant_tag, descriptor)?.map(Rc::new);
+    SHARED_KEY_FREE_LAYOUTS.with(|layouts| layouts.borrow_mut().insert(cache_key, layout.clone()));
+    Ok(layout)
+}
+
+/// The encoding of each primary-key part in a row's key, when every part
+/// has a fixed width (see [`encode_primary_key_part`]).
+fn encoded_key_parts(table: &TableSchema) -> Option<Vec<records::EncodedKeyPart>> {
+    use records::{EncodedKeyPart, KeyByteOrder};
+    let part = |tag, width, order| Some(EncodedKeyPart { tag, width, order });
+    table
+        .primary_key
+        .as_ref()?
         .columns
         .iter()
-        .map(|column| decode_primary_key_part(&mut remaining, &column.key_type.column_type()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|column| match column.key_type {
+            PrimaryKeyType::Integer(IntegerKeyType::U8) => part(0, 1, KeyByteOrder::Same),
+            PrimaryKeyType::Integer(IntegerKeyType::U16) => part(1, 2, KeyByteOrder::Reversed),
+            PrimaryKeyType::Integer(IntegerKeyType::U32) => part(2, 4, KeyByteOrder::Reversed),
+            PrimaryKeyType::Integer(IntegerKeyType::U64) => part(3, 8, KeyByteOrder::Reversed),
+            PrimaryKeyType::Uuid => part(10, 16, KeyByteOrder::Same),
+            // A bool key byte must be checked; strings and bytes vary in width.
+            PrimaryKeyType::Bool | PrimaryKeyType::String | PrimaryKeyType::Bytes => None,
+        })
+        .collect()
+}
+
+/// Rebuild one keyed table row's full record from its stored bytes, copying
+/// the primary-key fields across from the row's encoded key.
+pub(crate) fn key_free_row_to_full(
+    table: &TableSchema,
+    layout: &records::KeyFreeLayout,
+    key: &[u8],
+    stored: &[u8],
+) -> Result<Vec<u8>, Error> {
+    if let Some(full) = layout.to_full_from_encoded_key(stored, key) {
+        return Ok(full);
+    }
+    let parts = primary_key_parts(table, key)?;
+    if parts.len() != layout.key_fields().len() {
+        return Err(Error::InvalidDirectRecordStoreKey(format!(
+            "primary key of table {} has {} parts, its rows {}",
+            table.name,
+            parts.len(),
+            layout.key_fields().len()
+        )));
+    }
+    let full = layout.full();
+    layout.to_full_with(stored, |part, index, output| {
+        append_primary_key_part_as_field(parts[part], full, index, output)
+    })
+}
+
+/// Split a row's encoded primary key into its encoded parts, in key order.
+fn primary_key_parts<'k>(
+    table: &TableSchema,
+    key: &'k [u8],
+) -> Result<smallvec::SmallVec<[&'k [u8]; 2]>, Error> {
+    let Some(primary_key) = &table.primary_key else {
+        return Ok(smallvec::SmallVec::new());
+    };
+    let mut remaining = key;
+    let mut parts = smallvec::SmallVec::new();
+    for column in &primary_key.columns {
+        let before = remaining;
+        let width = match &column.key_type {
+            PrimaryKeyType::Integer(IntegerKeyType::U8) | PrimaryKeyType::Bool => Some(1),
+            PrimaryKeyType::Integer(IntegerKeyType::U16) => Some(2),
+            PrimaryKeyType::Integer(IntegerKeyType::U32) => Some(4),
+            PrimaryKeyType::Integer(IntegerKeyType::U64) => Some(8),
+            PrimaryKeyType::Uuid => Some(16),
+            PrimaryKeyType::String | PrimaryKeyType::Bytes => None,
+        };
+        match width {
+            Some(width) => {
+                take_key_bytes(&mut remaining, 1 + width)?;
+            }
+            None => {
+                decode_primary_key_part(&mut remaining, &column.key_type.column_type())?;
+            }
+        }
+        parts.push(&before[..before.len() - remaining.len()]);
+    }
     if !remaining.is_empty() {
         return Err(Error::InvalidDirectRecordStoreKey(format!(
             "trailing bytes after the primary key of table {}",
             table.name
         )));
     }
-    Ok(values)
+    Ok(parts)
+}
+
+/// Append one encoded primary-key part as the record encoding of field
+/// `index` of `descriptor`. Fixed-width parts are transcoded byte for byte
+/// (the key is big-endian and order-preserving, records little-endian);
+/// others are decoded and encoded.
+fn append_primary_key_part_as_field(
+    mut part: &[u8],
+    descriptor: RecordDescriptor,
+    index: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), Error> {
+    let value_type = &descriptor
+        .fields()
+        .get(index)
+        .ok_or_else(|| records::Error::FieldIndexOutOfBounds {
+            index,
+            len: descriptor.fields().len(),
+        })?
+        .value_type;
+    let mut reversed = |part: &mut &[u8], tag: u8, width: usize, sign: u8| {
+        expect_key_tag(part, tag)?;
+        let bytes = take_key_bytes(part, width)?;
+        output.extend(bytes.iter().rev());
+        let last = output.len() - 1;
+        output[last] ^= sign;
+        Ok::<_, Error>(())
+    };
+    match value_type {
+        records::ValueType::U8 => reversed(&mut part, 0, 1, 0)?,
+        records::ValueType::U16 => reversed(&mut part, 1, 2, 0)?,
+        records::ValueType::U32 => reversed(&mut part, 2, 4, 0)?,
+        records::ValueType::U64 => reversed(&mut part, 3, 8, 0)?,
+        records::ValueType::U48 => reversed(&mut part, 16, 6, 0)?,
+        records::ValueType::I32 => reversed(&mut part, 14, 4, 0x80)?,
+        records::ValueType::I64 => reversed(&mut part, 13, 8, 0x80)?,
+        records::ValueType::Uuid => {
+            expect_key_tag(&mut part, 10)?;
+            output.extend_from_slice(take_key_bytes(&mut part, 16)?);
+        }
+        _ => {
+            let value = decode_primary_key_part(&mut part, value_type)?;
+            descriptor.encode_field_into(index, &value, output)?;
+        }
+    }
+    if !part.is_empty() {
+        return Err(Error::InvalidDirectRecordStoreKey(
+            "trailing bytes after a primary key part".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Rebuild the full encoded primary key of one durable index entry.
@@ -978,4 +1130,53 @@ pub(crate) fn stored_table_row(table: &TableSchema, values: &[Value]) -> (Vec<u8
         None => record,
     };
     (key, records::encode_variant_record(0, &stored))
+}
+
+#[cfg(test)]
+mod key_part_tests {
+    use super::*;
+    use crate::records::ValueType;
+
+    #[test]
+    fn key_parts_transcode_to_the_field_encoding_of_their_values() {
+        let cases = [
+            (ValueType::U8, Value::U8(0xab)),
+            (ValueType::U16, Value::U16(0x1234)),
+            (ValueType::U32, Value::U32(0x1234_5678)),
+            (ValueType::U64, Value::U64(0x0102_0304_0506_0708)),
+            (ValueType::U48, Value::U48(0x0102_0304_0506)),
+            (ValueType::I32, Value::I32(-7)),
+            (ValueType::I32, Value::I32(i32::MAX)),
+            (ValueType::I64, Value::I64(i64::MIN)),
+            (ValueType::I64, Value::I64(42)),
+            (ValueType::Bool, Value::Bool(true)),
+            (ValueType::Uuid, Value::Uuid(uuid::Uuid::from_u128(0xfeed))),
+            (ValueType::String, Value::String("key".to_owned())),
+            (ValueType::Bytes, Value::Bytes(vec![0, 1, 0xff])),
+        ];
+        for (value_type, value) in cases {
+            let descriptor = RecordDescriptor::new([("k", value_type)]);
+            let mut key = Vec::new();
+            encode_primary_key_part(&mut key, &value).unwrap();
+            let mut transcoded = Vec::new();
+            append_primary_key_part_as_field(&key, descriptor, 0, &mut transcoded).unwrap();
+            let mut encoded = Vec::new();
+            descriptor
+                .encode_field_into(0, &value, &mut encoded)
+                .unwrap();
+            assert_eq!(transcoded, encoded, "{value:?}");
+            let mut wrong_tag = key.clone();
+            wrong_tag[0] ^= 0x40;
+            assert!(
+                append_primary_key_part_as_field(&wrong_tag, descriptor, 0, &mut Vec::new())
+                    .is_err()
+            );
+            let mut trailing = key.clone();
+            trailing.push(0);
+            assert!(
+                append_primary_key_part_as_field(&trailing, descriptor, 0, &mut Vec::new())
+                    .is_err()
+            );
+        }
+    }
 }
