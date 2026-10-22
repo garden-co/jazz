@@ -785,10 +785,19 @@ async fn recursive_relations_agree_with_the_held_plan() {
     assert_eq!(lives[0], lives[1]);
 }
 
-fn author(name: &str) -> Value {
+/// The authors every interned database knows, in interning order: a name's
+/// code is its index.
+const AUTHORS: [&str; 3] = ["alice", "bob", "carol"];
+
+fn author_bytes(name: &str) -> Vec<u8> {
     let descriptor = RecordDescriptor::new([("name", ColumnType::String)]);
-    let raw = descriptor.create(&[Value::String(name.into())]).unwrap();
-    Value::Record(groove::records::OwnedRecord::new(raw, descriptor))
+    descriptor.create(&[Value::String(name.into())]).unwrap()
+}
+
+/// An author as a row holds it: the dictionary code of `name`.
+fn author(name: &str) -> Value {
+    let code = AUTHORS.iter().position(|known| *known == name).unwrap();
+    Value::U32(code as u32)
 }
 
 /// Docs and notes whose `author` is interned: rows store a dictionary code.
@@ -816,6 +825,10 @@ async fn open_interned(stored: bool, budget: Option<usize>) -> Database {
     let mut db = Database::new(schema, storage).await.unwrap();
     db.set_stored_arrangements_enabled(stored);
     db.set_cache_memory_budget(budget);
+    for (code, name) in AUTHORS.into_iter().enumerate() {
+        let interned = db.dictionaries().intern("authors", &author_bytes(name));
+        assert_eq!(interned.unwrap(), code as u32);
+    }
     apply(&mut db, |batch| {
         for (id, project) in [(1, 1), (2, 1), (3, 2)] {
             batch.insert("docs", doc(id, project, 0));

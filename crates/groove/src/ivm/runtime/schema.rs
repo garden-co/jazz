@@ -102,7 +102,7 @@ impl IvmRuntime {
         }
         self.schema.validate_table_interning(&table)?;
         self.table_storage_descriptors
-            .insert(table.name.clone(), table.storage_record_schema());
+            .insert(table.name.clone(), table.record_schema());
         if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
@@ -172,7 +172,7 @@ impl IvmRuntime {
         }
         table_schema.variants.push(variant_tag);
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.storage_record_schema());
+            .insert(table.to_owned(), table_schema.record_schema());
         let descriptor = table_schema
             .record_schema_for_variant(version)
             .expect("the newly registered variant exists");
@@ -254,7 +254,7 @@ impl IvmRuntime {
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         self.table_storage_descriptors
-            .insert(table.to_owned(), table_schema.storage_record_schema());
+            .insert(table.to_owned(), table_schema.record_schema());
         if !table_schema.has_variants() {
             // Registry evolution changes column types; the plain-table
             // descriptor must follow, as registration keeps it.
@@ -648,6 +648,7 @@ impl IvmRuntime {
                 &input,
                 raw_projection.as_deref(),
                 *omit_unrepresentable_enum_rows,
+                None,
             )?,
             VariantProjectionCase::Enum {
                 tag,
@@ -662,6 +663,7 @@ impl IvmRuntime {
                 projection.output,
                 &input,
                 raw_projection.as_deref(),
+                None,
             )?,
             VariantProjectionCase::Ignore { .. } => return Ok(None),
         };

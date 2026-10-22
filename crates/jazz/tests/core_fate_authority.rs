@@ -175,6 +175,210 @@ fn visible_titles(db: &Db, tier: DurabilityTier) -> Vec<String> {
     .collect()
 }
 
+/// Alice's upload backlog must keep consuming Core's fates and returned credits
+/// when the bounded outbound queue fills, so every write can settle globally.
+///
+/// Alice --fill upload queue--> Core --fates/credits--> Alice --remaining writes--> Core
+#[test]
+fn upstream_write_backpressure_keeps_receiving_fates_and_credits() {
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+        schema.clone(),
+        identity(0xc0, AuthorSubject::SYSTEM),
+    ))
+    .unwrap();
+    let alice = open_db(0xa1, author(0xa1), &schema);
+    let wire = QueuedWireTransport::default();
+    let session = connect_client_to_core(&mut core, &alice, &wire, author(0xa1));
+
+    // Exceed both the logical queue and the initial physical-frame allowance
+    // before returning any peer credit. Small rows exercise the same flow
+    // control as a large fixture without depending on Linux TCP buffer sizes.
+    let count = 2 * jazz::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES;
+    let writes = (0..count)
+        .map(|index| {
+            block_on(alice.insert(
+                "todos",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String(format!("write {index}"))),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]),
+                Default::default(),
+            ))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+
+    block_on(alice.tick()).unwrap();
+    assert!(
+        alice.sync_metrics_for_test().transport_backpressure_retries > 0,
+        "the upload backlog must reach transport backpressure"
+    );
+
+    for _ in 0..count {
+        pump_client_core(&alice, &wire, &mut core, session);
+        if writes
+            .iter()
+            .all(|write| block_on(write.wait(DurabilityTier::Global)).is_ok())
+        {
+            return;
+        }
+    }
+    for (index, write) in writes.iter().enumerate() {
+        block_on(write.wait(DurabilityTier::Global))
+            .unwrap_or_else(|error| panic!("write {index} did not settle: {error}"));
+    }
+}
+
+/// Alice must apply Bob's view update while her uploads and a subscription
+/// replacement are queued, then reopen the retired view without losing rows.
+///
+/// Alice --subscribe--> Core <--write-- Bob
+/// Alice --fill uploads, close/reopen view--> [backpressure]
+/// Alice <--old view updates-- Core; uploads drain before the replacement opens.
+#[test]
+fn upstream_backpressure_allows_view_updates_during_subscription_replacement() {
+    use jazz::db::SubscriptionEvent;
+    use jazz::query::{col, eq, lit};
+
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+        schema.clone(),
+        identity(0xc0, AuthorSubject::SYSTEM),
+    ))
+    .unwrap();
+    let alice = open_db(0xa1, author(0xa1), &schema);
+    let bob = open_db(0xb1, author(0xb1), &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let bob_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, author(0xa1));
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, author(0xb1));
+    let remote = ReadOpts {
+        tier: ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let active_query = alice
+        .prepare_query(&Query::from("todos").filter(eq(col("completed"), lit(true))))
+        .unwrap();
+    let replaced_query = alice
+        .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("from Bob"))))
+        .unwrap();
+    let mut active = block_on(alice.subscribe(&active_query, remote.clone())).unwrap();
+    let mut retired = block_on(alice.subscribe(&replaced_query, remote.clone())).unwrap();
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    for stream in [&mut active, &mut retired] {
+        assert!(matches!(
+            stream.try_next_event(),
+            Some(SubscriptionEvent::Delta {
+                reset: true,
+                settled: true,
+                tier: DurabilityTier::Global,
+                added,
+                ..
+            }) if added.is_empty()
+        ));
+    }
+
+    // Core has produced updates for both old subscriptions, but Alice has
+    // not read them when she retires one and queues its replacement below.
+    let bob_write = block_on(bob.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("from Bob".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump_client_core(&bob, &bob_wire, &mut core, bob_session);
+    block_on(bob_write.wait(DurabilityTier::Global)).unwrap();
+    let late_frames = core.take_frames(alice_session).unwrap();
+    assert!(!late_frames.is_empty());
+
+    let count = 2 * jazz::wire::channels::MAX_CHANNEL_QUEUED_MESSAGES;
+    let writes = (0..count)
+        .map(|index| {
+            block_on(alice.insert(
+                "todos",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String(format!("queued {index}"))),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]),
+                Default::default(),
+            ))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    block_on(alice.tick()).unwrap();
+    assert!(alice.sync_metrics_for_test().transport_backpressure_retries > 0);
+    block_on(retired.close()).unwrap();
+    let mut replacement = block_on(alice.subscribe(&replaced_query, remote)).unwrap();
+
+    let retries_before = alice.sync_metrics_for_test().transport_backpressure_retries;
+    for frame in late_frames {
+        alice_wire.push_inbound(frame);
+    }
+    block_on(alice.tick()).unwrap();
+    assert!(
+        alice.sync_metrics_for_test().transport_backpressure_retries > retries_before,
+        "this tick must encounter backpressure before applying the inbound view"
+    );
+    assert_eq!(
+        block_on(writes.last().unwrap().wait(DurabilityTier::Global))
+            .unwrap_err()
+            .code,
+        jazz::db::ErrorCode::NotObserved,
+        "the upload backlog must still be pending, not rejected"
+    );
+    let Some(SubscriptionEvent::Delta {
+        reset: false,
+        settled: true,
+        tier: DurabilityTier::Global,
+        added,
+        updated,
+        removed,
+        ..
+    }) = active.try_next_event()
+    else {
+        panic!("Alice must receive Bob's update before her upload backlog drains");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), bob_write.row_uuid());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    for _ in 0..count {
+        pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+        if writes
+            .iter()
+            .all(|write| block_on(write.wait(DurabilityTier::Global)).is_ok())
+        {
+            break;
+        }
+    }
+    for write in writes {
+        block_on(write.wait(DurabilityTier::Global)).unwrap();
+    }
+    // Subscription commands follow the uploads and their read barrier.
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    let Some(SubscriptionEvent::Delta {
+        reset: true,
+        settled: true,
+        tier: DurabilityTier::Global,
+        added,
+        ..
+    }) = replacement.try_next_event()
+    else {
+        panic!("the replacement must open after the queued uploads settle");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), bob_write.row_uuid());
+    assert!(
+        active.try_next_event().is_none(),
+        "no duplicate active-view rows"
+    );
+}
+
 /// Alice's complete write reaches Global durability and Bob's maintained view.
 /// Bob subscribes → core settles opening → Alice uploads → core publishes to Bob.
 #[test]
@@ -898,6 +1102,84 @@ fn many_writer_nodes_resolve_authors_and_merge_heads_at_the_core() {
             titles.contains(&format!("shared by {last:02x}")),
             "{titles:?}"
         );
+    }
+}
+
+/// Author codes are node-local: each node allocates them in the order it
+/// first sees an author. Alice's node codes alice=0, bob=1 and Bob's node
+/// codes bob=0, alice=1, so a code that crossed the wire unresolved would
+/// name the wrong author on the other side.
+#[test]
+fn author_codes_allocated_in_different_orders_resolve_to_the_same_authors() {
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorSubject::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let alice_author = author(0xa1);
+    let bob_author = author(0xb1);
+    let insert = |db: &Db, title: &str| {
+        block_on(db.insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.to_owned())),
+                ("completed".to_owned(), Value::Bool(false)),
+            ]),
+            Default::default(),
+        ))
+        .unwrap()
+    };
+
+    let alice = open_db(0xa1, alice_author, &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_core(&mut core, &alice, &alice_wire, alice_author);
+    let alice_write = insert(&alice, "by alice");
+    pump_client_core(&alice, &alice_wire, &mut core, alice_session);
+    assert!(block_on(alice_write.wait(DurabilityTier::Global)).is_ok());
+
+    // Bob writes before he hears of Alice, so his node codes bob first.
+    let bob = open_db(0xb1, bob_author, &schema);
+    let bob_write = insert(&bob, "by bob");
+    let bob_wire = QueuedWireTransport::default();
+    let bob_session = connect_client_to_core(&mut core, &bob, &bob_wire, bob_author);
+
+    let remote = ReadOpts {
+        tier: ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let subscriptions = [
+        (&alice, &alice_wire, alice_session),
+        (&bob, &bob_wire, bob_session),
+    ]
+    .map(|(db, wire, session)| {
+        let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+        let subscription = block_on(db.subscribe(&prepared, remote.clone())).unwrap();
+        (db, wire, session, prepared, subscription)
+    });
+    for _ in 0..3 {
+        for (db, wire, session, _, _) in &subscriptions {
+            pump_client_core(db, wire, &mut core, *session);
+        }
+    }
+    assert!(block_on(bob_write.wait(DurabilityTier::Global)).is_ok());
+
+    for (db, _, _, prepared, _) in &subscriptions {
+        let rows = block_on(db.all(prepared, remote.clone())).unwrap();
+        assert_eq!(rows.len(), 2, "both rows reach both clients");
+        for row in &rows {
+            let Some(Value::String(title)) = row.cell(&schema.tables[0], "title") else {
+                panic!("every row has a title");
+            };
+            let expected = match title.as_str() {
+                "by alice" => alice_author,
+                "by bob" => bob_author,
+                other => panic!("unexpected row {other}"),
+            };
+            let provenance = db.row_provenance(row).unwrap().unwrap();
+            assert_eq!(provenance.created_by, expected, "{title}");
+            assert_eq!(provenance.updated_by, expected, "{title}");
+        }
     }
 }
 

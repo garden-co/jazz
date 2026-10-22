@@ -1427,6 +1427,10 @@ fn comparable_value_types(left: &ValueType, right: &ValueType) -> bool {
     if left == right {
         return true;
     }
+    // An interned column compares by the value its code stands for.
+    if left.contains_interned() || right.contains_interned() {
+        return comparable_value_types(&left.logical(), &right.logical());
+    }
     let left_unwrapped = match left {
         ValueType::Nullable(inner) => inner.as_ref(),
         value_type => value_type,

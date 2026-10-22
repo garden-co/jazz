@@ -792,20 +792,13 @@ pub(super) async fn recursive_delta(
         let full_table_deltas = match runtime.evaluation_inputs.as_deref_mut() {
             Some(inputs) => snapshot_table_deltas_from_inputs(
                 runtime.schema,
-                runtime.dictionaries,
                 runtime.graph,
                 inputs,
                 nodes.seed,
             )?,
             None => {
-                snapshot_table_deltas(
-                    runtime.schema,
-                    runtime.dictionaries,
-                    runtime.graph,
-                    runtime.storage,
-                    nodes.seed,
-                )
-                .await?
+                snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, nodes.seed)
+                    .await?
             }
         };
         runtime
@@ -1234,14 +1227,7 @@ pub(super) async fn hydrate_recursive_arrangements(
     let full_table_deltas = if runtime.evaluation_inputs.is_some() {
         Vec::new()
     } else {
-        snapshot_table_deltas(
-            runtime.schema,
-            runtime.dictionaries,
-            runtime.graph,
-            runtime.storage,
-            step,
-        )
-        .await?
+        snapshot_table_deltas(runtime.schema, runtime.graph, runtime.storage, step).await?
     };
     if std::env::var_os("JAZZ_CLOSURE_TRACE").is_some() {
         let records = full_table_deltas
@@ -1275,7 +1261,6 @@ pub(super) async fn hydrate_recursive_arrangements(
 
 pub(super) async fn snapshot_table_deltas(
     schema: &crate::schema::DatabaseSchema,
-    dictionaries: &crate::dictionary::SharedDictionaries,
     graph: &IvmGraph,
     storage: &dyn OrderedKvStorage,
     root: NodeId,
@@ -1287,7 +1272,7 @@ pub(super) async fn snapshot_table_deltas(
         let table_schema = schema
             .table(&source.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
-        let storage_descriptor = table_schema.storage_record_schema();
+        let storage_descriptor = table_schema.record_schema();
         let store = super::record_store_for_table(storage, table_schema, &storage_descriptor);
         let mut cursor = match &source.scan {
             None => Some(store.scan(ScanBounds::Prefix(Vec::new())).await?),
@@ -1309,7 +1294,6 @@ pub(super) async fn snapshot_table_deltas(
         }
         output.extend(NodeState::group_source_rows(
             table_schema,
-            dictionaries,
             stored_records.iter().map(Vec::as_slice),
         )?);
     }
@@ -1318,7 +1302,6 @@ pub(super) async fn snapshot_table_deltas(
 
 fn snapshot_table_deltas_from_inputs(
     schema: &crate::schema::DatabaseSchema,
-    dictionaries: &crate::dictionary::SharedDictionaries,
     graph: &IvmGraph,
     inputs: &mut EvaluationInputs,
     root: NodeId,
@@ -1345,11 +1328,7 @@ fn snapshot_table_deltas_from_inputs(
         let table_schema = schema
             .table(&source.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(source.table.clone()))?;
-        output.extend(NodeState::group_source_rows(
-            table_schema,
-            dictionaries,
-            stored_records,
-        )?);
+        output.extend(NodeState::group_source_rows(table_schema, stored_records)?);
     }
     Ok(output)
 }
@@ -1583,7 +1562,6 @@ impl HydrationEvaluator<'_> {
                     Some(inputs) => NodeState::update_table_source_from_inputs(
                         table,
                         self.schema,
-                        self.dictionaries,
                         self.variant_projections,
                         &output_desc,
                         inputs,
@@ -1603,7 +1581,6 @@ impl HydrationEvaluator<'_> {
                     Some(inputs) => super::NodeState::update_index_source_from_inputs(
                         index,
                         self.schema,
-                        self.dictionaries,
                         self.variant_projections,
                         &output_desc,
                         inputs,
@@ -1662,7 +1639,7 @@ impl HydrationEvaluator<'_> {
                 )),
                 OpType::Filter(filter) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
-                    NodeState::update_filter(filter, output_desc, &input)
+                    NodeState::update_filter(filter, output_desc, &input, self.dictionaries)
                 }
                 OpType::MapProject(project) => {
                     let input = self.eval_unary_input(graph_node, node).await?;
@@ -1675,6 +1652,7 @@ impl HydrationEvaluator<'_> {
                         &input,
                         fields.as_ref(),
                         false,
+                        Some(self.dictionaries),
                     );
                     #[cfg(feature = "cold-settle-attribution")]
                     if let Ok(output) = &result {
@@ -1884,18 +1862,15 @@ impl HydrationEvaluator<'_> {
             .schema
             .table(&table.table)
             .ok_or_else(|| IvmRuntimeError::TableNotFound(table.table.clone()))?;
-        let storage_descriptor = table_schema.storage_record_schema();
+        let storage_descriptor = table_schema.record_schema();
         let store = super::record_store_for_table(self.storage, table_schema, &storage_descriptor);
         let mut scan = store.scan(ScanBounds::Prefix(Vec::new())).await?;
         let mut stored_records = Vec::<Vec<u8>>::new();
         while let Some(batch) = scan.next_batch().await? {
             stored_records.extend(batch.into_iter().map(|(_, record)| record));
         }
-        let table_deltas = NodeState::group_source_rows(
-            table_schema,
-            self.dictionaries,
-            stored_records.iter().map(Vec::as_slice),
-        )?;
+        let table_deltas =
+            NodeState::group_source_rows(table_schema, stored_records.iter().map(Vec::as_slice))?;
         NodeState::update_table_source(
             table,
             self.schema,

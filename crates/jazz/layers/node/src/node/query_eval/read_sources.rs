@@ -6,6 +6,7 @@
 //! rows.
 
 use super::*;
+use crate::node::author_codes::AuthorCodes;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
 use std::sync::{Arc, Mutex};
 use std::{future::Future, pin::Pin};
@@ -626,6 +627,7 @@ where
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &self.node.authors,
                 &table,
                 rows.clone(),
                 schema_version_alias,
@@ -957,6 +959,7 @@ where
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let (opening, opening_descriptor, opening_metadata) =
                     inline_current_graph_with_source_metadata(
+                        &self.node.authors,
                         &table,
                         frozen_base_rows,
                         schema_version_alias,
@@ -988,6 +991,7 @@ where
                 } else {
                     let (frozen_base_deletions, deletion_descriptor, deletion_metadata) =
                         inline_current_graph_with_source_metadata(
+                            &self.node.authors,
                             &table,
                             frozen_base_deleted_rows,
                             schema_version_alias,
@@ -1134,7 +1138,7 @@ where
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let (base_graph, descriptor, metadata) = if request.requirements.metadata.is_empty() {
                 (
-                    inline_current_graph(&table, rows)
+                    inline_current_graph(&self.node.authors, &table, rows)
                         .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?,
                     current_row_descriptor(&table),
                     BTreeMap::new(),
@@ -1146,6 +1150,7 @@ where
                     .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 inline_current_graph_with_source_metadata(
+                    &self.node.authors,
                     &table,
                     rows,
                     schema_version_alias,
@@ -1282,6 +1287,7 @@ where
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             let (base, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &self.node.authors,
                 &table,
                 rows,
                 schema_version_alias,
@@ -1399,6 +1405,7 @@ where
                 .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let (base, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &self.node.authors,
                 &table,
                 rows,
                 schema_version_alias,
@@ -2185,6 +2192,7 @@ where
             .await
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
         let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+            &self.node.authors,
             &table,
             rows.clone(),
             schema_version_alias,
@@ -2374,6 +2382,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 .filter_map(|(row_uuid, row)| row.as_ref().map(|row| (*row_uuid, row)))
                 .map(|(row_uuid, row)| {
                     inline_current_record_for_output(
+                        &self.node.authors,
                         &resolved.table_schema,
                         &descriptor,
                         row,
@@ -2948,6 +2957,7 @@ where
         // and snapshot sources. Build their descriptor and declarations with
         // the graph so version identity survives schema projection.
         let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+            &self.node.authors,
             table,
             rows,
             schema_version_alias,
@@ -4913,9 +4923,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             current_row_column_field(column, value_type)
         }))
         .chain([
-            records::DescriptorField::new("$createdBy", RowAuthor::value_type()),
+            records::DescriptorField::new("$createdBy", crate::schema::interned_author_type()),
             records::DescriptorField::new("$createdAt", ValueType::U64),
-            records::DescriptorField::new("$updatedBy", RowAuthor::value_type()),
+            records::DescriptorField::new("$updatedBy", crate::schema::interned_author_type()),
             records::DescriptorField::new("$updatedAt", ValueType::U64),
             records::DescriptorField::new("tx_time", ValueType::U64),
             records::DescriptorField::new("tx_node_id", ValueType::U64),
@@ -4940,9 +4950,9 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
                 "authored_columns",
                 ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::U64)))),
             ),
-            records::DescriptorField::new("created_by", RowAuthor::value_type()),
+            records::DescriptorField::new("created_by", crate::schema::interned_author_type()),
             records::DescriptorField::new("created_at", ValueType::U64),
-            records::DescriptorField::new("updated_by", RowAuthor::value_type()),
+            records::DescriptorField::new("updated_by", crate::schema::interned_author_type()),
             records::DescriptorField::new("updated_at", ValueType::U64),
         ]);
         if let Some(SourceMetadataFields::VersionWitnesses {
@@ -6191,6 +6201,7 @@ pub(super) fn empty_authorized_row_id_graph() -> GraphBuilder {
 }
 
 fn inline_current_record(
+    authors: &AuthorCodes,
     table: &TableSchema,
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
@@ -6203,9 +6214,9 @@ fn inline_current_record(
     let provenance = row.provenance()?.ok_or(Error::InvalidStoredValue(
         "physical current source row is missing provenance",
     ))?;
-    values.push(row_author_value(provenance.created_by)?);
+    values.push(authors.value(provenance.created_by)?);
     values.push(Value::U64(provenance.created_at));
-    values.push(row_author_value(provenance.updated_by)?);
+    values.push(authors.value(provenance.updated_by)?);
     values.push(Value::U64(provenance.updated_at));
     let (tx_time, tx_node_alias) = row
         .projected_tx_alias()
@@ -6221,17 +6232,22 @@ fn inline_current_record(
     Ok(descriptor.create(&values)?)
 }
 
-fn inline_current_graph(table: &TableSchema, rows: Vec<CurrentRow>) -> Result<GraphBuilder, Error> {
+fn inline_current_graph(
+    authors: &AuthorCodes,
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+) -> Result<GraphBuilder, Error> {
     let descriptor = current_row_descriptor(table);
     let records = rows
         .iter()
-        .map(|row| inline_current_record(table, &descriptor, row))
+        .map(|row| inline_current_record(authors, table, &descriptor, row))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
 #[cfg(test)]
 pub(super) fn inline_current_graph_with_source_metadata_for_test(
+    authors: &AuthorCodes,
     table: &TableSchema,
     rows: Vec<CurrentRow>,
     schema_version_alias: SchemaVersionAlias,
@@ -6246,6 +6262,7 @@ pub(super) fn inline_current_graph_with_source_metadata_for_test(
     Error,
 > {
     inline_current_graph_with_source_metadata(
+        authors,
         table,
         rows,
         schema_version_alias,
@@ -6259,6 +6276,7 @@ pub(super) fn inline_current_graph_with_source_metadata_for_test(
 // Visibility determines the descriptor even when there are no rows. Deleted
 // state itself belongs to CurrentRow; it is not supplied separately by callers.
 pub(super) fn inline_current_graph_with_source_metadata(
+    authors: &AuthorCodes,
     table: &TableSchema,
     rows: Vec<CurrentRow>,
     schema_version_alias: SchemaVersionAlias,
@@ -6286,6 +6304,7 @@ pub(super) fn inline_current_graph_with_source_metadata(
         .iter()
         .map(|row| {
             inline_current_record_with_source_metadata_and_deletion(
+                authors,
                 table,
                 &descriptor,
                 row,
@@ -6389,6 +6408,7 @@ pub(super) fn covered_input_source_metadata(
 /// input. Its descriptor is the compiler's union of metadata required by that
 /// table's consumers within this authority scope, not a result collector.
 pub(super) fn covered_input_record(
+    authors: &AuthorCodes,
     table: &TableSchema,
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
@@ -6397,6 +6417,7 @@ pub(super) fn covered_input_record(
     is_current: bool,
 ) -> Result<Vec<u8>, Error> {
     let mut values = inline_current_values_with_source_metadata_and_deletion(
+        authors,
         table,
         descriptor,
         row,
@@ -6412,6 +6433,7 @@ pub(super) fn covered_input_record(
 }
 
 fn inline_current_record_with_source_metadata_and_deletion(
+    authors: &AuthorCodes,
     table: &TableSchema,
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
@@ -6421,6 +6443,7 @@ fn inline_current_record_with_source_metadata_and_deletion(
     deletion_marker: Option<bool>,
 ) -> Result<Vec<u8>, Error> {
     let values = inline_current_values_with_source_metadata_and_deletion(
+        authors,
         table,
         descriptor,
         row,
@@ -6435,6 +6458,7 @@ fn inline_current_record_with_source_metadata_and_deletion(
 /// The field values [`inline_current_record_with_source_metadata_and_deletion`]
 /// encodes, in `descriptor` order.
 fn inline_current_values_with_source_metadata_and_deletion(
+    authors: &AuthorCodes,
     table: &TableSchema,
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
@@ -6465,9 +6489,9 @@ fn inline_current_values_with_source_metadata_and_deletion(
         "physical current source row is missing provenance",
     ))?;
     values.extend([
-        row_author_value(provenance.created_by)?,
+        authors.value(provenance.created_by)?,
         Value::U64(provenance.created_at),
-        row_author_value(provenance.updated_by)?,
+        authors.value(provenance.updated_by)?,
         Value::U64(provenance.updated_at),
     ]);
     let (tx_time, tx_node_alias) = row
@@ -6486,9 +6510,9 @@ fn inline_current_values_with_source_metadata_and_deletion(
             Value::String("content".to_owned()),
             Value::U64(schema_version_alias.0),
             Value::Nullable(None),
-            row_author_value(provenance.created_by)?,
+            authors.value(provenance.created_by)?,
             Value::U64(provenance.created_at),
-            row_author_value(provenance.updated_by)?,
+            authors.value(provenance.updated_by)?,
             Value::U64(provenance.updated_at),
         ]);
     }
@@ -6512,6 +6536,7 @@ fn inline_current_values_with_source_metadata_and_deletion(
 /// name from the row's inline current-source values, adjusting only nullable
 /// wrapping; any field the inline shape cannot supply fails the encoding.
 fn inline_current_record_for_output(
+    authors: &AuthorCodes,
     table: &TableSchema,
     output: &RecordDescriptor,
     row: &CurrentRow,
@@ -6532,6 +6557,7 @@ fn inline_current_record_for_output(
     let inline =
         current_row_descriptor_with_hidden_source_fields_for_branch(table, &metadata, false);
     let values = inline_current_values_with_source_metadata_and_deletion(
+        authors,
         table,
         &inline,
         row,
@@ -6573,9 +6599,15 @@ fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescript
                 )
             }))
             .chain([
-                ("$createdBy".to_owned(), RowAuthor::value_type()),
+                (
+                    "$createdBy".to_owned(),
+                    crate::schema::interned_author_type(),
+                ),
                 ("$createdAt".to_owned(), ValueType::U64),
-                ("$updatedBy".to_owned(), RowAuthor::value_type()),
+                (
+                    "$updatedBy".to_owned(),
+                    crate::schema::interned_author_type(),
+                ),
                 ("$updatedAt".to_owned(), ValueType::U64),
                 ("tx_time".to_owned(), ValueType::U64),
                 ("tx_node_id".to_owned(), ValueType::U64),

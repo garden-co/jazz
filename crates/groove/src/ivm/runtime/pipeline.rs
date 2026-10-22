@@ -79,7 +79,12 @@ pub(super) struct PendingPipeline {
 }
 
 impl PendingPipeline {
-    fn row(&mut self, index: usize, budget: &mut usize) -> bool {
+    fn row(
+        &mut self,
+        index: usize,
+        budget: &mut usize,
+        dictionaries: &crate::dictionary::SharedDictionaries,
+    ) -> bool {
         let delta = &self.input.deltas[index];
         // 0 = source, 1/2 = reusable scratch. Byte-preserving projections keep
         // the current location; only the descriptor changes in the next stage.
@@ -109,9 +114,11 @@ impl PendingPipeline {
             };
             let result = match stage {
                 Stage::VirtualProject => continue,
-                Stage::RoutedFilter(filter, routes) => filter
-                    .predicate
-                    .matches(routes.record(raw), filter.comparison),
+                Stage::RoutedFilter(filter, routes) => {
+                    filter
+                        .predicate
+                        .matches(routes.record(raw), filter.comparison, dictionaries)
+                }
                 Stage::Materialize(routes) => {
                     if routes.reuses_input {
                         continue;
@@ -137,9 +144,11 @@ impl PendingPipeline {
                         result.map(|_| true)
                     }
                 }
-                Stage::Filter(filter, descriptor) => filter
-                    .predicate
-                    .matches(BorrowedRecord::new(raw, descriptor), filter.comparison),
+                Stage::Filter(filter, descriptor) => filter.predicate.matches(
+                    BorrowedRecord::new(raw, descriptor),
+                    filter.comparison,
+                    dictionaries,
+                ),
                 Stage::Project {
                     project,
                     input,
@@ -160,6 +169,7 @@ impl PendingPipeline {
                             prepared.as_deref(),
                             *omit_unrepresentable,
                             &mut self.output,
+                            Some(dictionaries),
                         ) {
                             Ok(Some(span)) => {
                                 self.spans.push((span, delta.weight));
@@ -187,6 +197,7 @@ impl PendingPipeline {
                             prepared.as_deref(),
                             *omit_unrepresentable,
                             destination,
+                            Some(dictionaries),
                         );
                         location = if location == 1 { 2 } else { 1 };
                         result.map(|span| span.is_some())
@@ -406,10 +417,11 @@ impl TickEvaluator<'_> {
             // and fallback kernels enter their own operator phase.
             #[cfg(feature = "cold-settle-attribution")]
             let _phase = tracing::trace_span!("cold.phase.op_map").entered();
+            let dictionaries = self.dictionaries;
             let batch = pending.get_mut(&tail).expect("prepared pipeline");
             let mut budget = 256;
             while batch.next < batch.input.deltas.len() && budget > 0 {
-                if !batch.row(batch.next, &mut budget) {
+                if !batch.row(batch.next, &mut budget, dictionaries) {
                     break;
                 }
                 batch.next += 1;

@@ -203,6 +203,7 @@ where
             )?;
             // The write's cells as a row; its identity takes no part.
             let incoming = VersionRow::from_wire_with_schema_version(
+                &self.authors,
                 &table_schema,
                 version,
                 authored,

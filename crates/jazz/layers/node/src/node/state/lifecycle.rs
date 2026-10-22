@@ -838,6 +838,7 @@ impl NodeState {
                 pending_foreign_transactions: BTreeSet::new(),
             },
             rejections: RejectionTracking::default(),
+            authors: author_codes::AuthorCodes::new(database.dictionaries()),
             database: DatabaseSlot::new(database),
             local_chunk_reader,
             chunk_resolver,
@@ -1076,9 +1077,7 @@ where
         *revision = revision
             .checked_add(1)
             .expect("session claim revision overflow must stop authorization delivery");
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_policy_authorization();
     }
 
     /// Scope one node-locked operation to this subscriber's admitted claims.
@@ -1882,13 +1881,8 @@ where
     /// does not restart this node. Keep recovered durable facts intact while
     /// dropping handles and plans that were compiled against the old registry.
     fn invalidate_runtime_handles_after_database_rebuild(&mut self) {
-        self.query.query_shape_cache.clear();
-        self.query.compiled_query_program_cache.clear();
-        self.query.query_program_templates.clear();
-        self.query.supported_query_program_requests.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        self.query.policy_authorization_graph_replacements.clear();
+        self.query.clear_prepared_query_plans();
+        self.query.clear_policy_authorization();
         self.query.tx_versions_cache.clear();
         self.query.tx_version_tables_cache_order.clear();
         self.query.tx_version_tables_cache_order_set.clear();
