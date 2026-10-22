@@ -49,13 +49,16 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// edges to its children are kept apart from the children themselves, so
 /// nodes may arrive in any order (a replica fetches parents first, an
 /// upload may send leaves first) and a node is held while any stored
-/// branch, cell root, staging count or upload receipt names it.
+/// branch, cell root, pushed-node receipt or local upload lease names it.
 /// A root's `base` is the descriptor of its tree (no edit tail) once this
 /// store built or validated it; later descriptors over the same root are
 /// checked against it instead of walking the tree again.
 /// `_jazz_lv_receipt` holds nodes a client pushed ahead of the commit that
 /// references them, until `expires` (ms); `_jazz_lv_unpushed` holds nodes
-/// this replica wrote that its upstream may not have yet.
+/// this replica wrote that its upstream may not have yet; `_jazz_lv_upload`
+/// leases a local streaming upload's nodes (`_jazz_lv_upload_node`) until
+/// its row commits, it is aborted, or it goes untouched past the staging
+/// policy's maximum age.
 pub(crate) const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS _jazz_lv_node (locator BLOB PRIMARY KEY, hash BLOB NOT NULL, \
  bytes BLOB NOT NULL) WITHOUT ROWID;
@@ -63,14 +66,19 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_edge (child BLOB NOT NULL, parent BLOB NOT N
  PRIMARY KEY (child, parent)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_edge_parent ON _jazz_lv_edge (parent);
 CREATE TABLE IF NOT EXISTS _jazz_lv_root (root BLOB PRIMARY KEY, durable INTEGER NOT NULL \
- DEFAULT 0, staged INTEGER NOT NULL DEFAULT 0, base BLOB) WITHOUT ROWID;
+ DEFAULT 0, base BLOB) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_receipt (locator BLOB PRIMARY KEY, \
  expires INTEGER NOT NULL) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_receipt_expires ON _jazz_lv_receipt (expires);
 CREATE TABLE IF NOT EXISTS _jazz_lv_unpushed (locator BLOB PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_upload (id BLOB PRIMARY KEY, touched INTEGER NOT NULL) \
+ WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_upload_node (id BLOB NOT NULL, locator BLOB NOT NULL, \
+ PRIMARY KEY (id, locator)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_locator ON _jazz_lv_upload_node (locator);
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE ON _jazz_lv_root \
- WHEN NEW.durable = 0 AND NEW.staged = 0 BEGIN \
+ WHEN NEW.durable = 0 BEGIN \
  INSERT OR IGNORE INTO _jazz_lv_reclaim (root) VALUES (NEW.root); END;
 ";
 
@@ -186,16 +194,16 @@ fn corrupt(error: lv::Error) -> Error {
     Error::new(ErrorCode::Storage, format!("large value: {error}"))
 }
 
+const MISSING: &str = "large-value chunks are not available locally yet; they were requested \
+     from upstream, so retry after the next sync tick";
+
 pub(crate) fn missing() -> Error {
-    Error::new(
-        ErrorCode::NotObserved,
-        "large-value chunks are not available locally yet; they were requested from upstream, so retry after the next sync tick",
-    )
+    Error::new(ErrorCode::NotObserved, MISSING)
 }
 
 /// Whether `error` is a statement that needed chunks this store lacks.
 pub(crate) fn is_missing(error: &Error) -> bool {
-    error.code == ErrorCode::NotObserved
+    error.code == ErrorCode::NotObserved && error.message == MISSING
 }
 
 /// Verified chunks this process has read or written, and the way to read
@@ -382,7 +390,16 @@ impl Chunks {
     /// local holds is recorded as demand and fails the read.
     pub(crate) fn run<T>(
         &self,
+        attempt: impl FnMut(&mut ChunkInputs) -> Result<T, AttemptError>,
+    ) -> Result<T, Error> {
+        self.run_reading(attempt, |_| {})
+    }
+
+    /// [`Self::run`], reporting the size of each node it reads.
+    fn run_reading<T>(
+        &self,
         mut attempt: impl FnMut(&mut ChunkInputs) -> Result<T, AttemptError>,
+        read: impl Fn(usize),
     ) -> Result<T, Error> {
         let mut inputs = ChunkInputs::default();
         loop {
@@ -393,7 +410,10 @@ impl Chunks {
                     let mut absent = Vec::new();
                     for request in inputs.take_missing_chunks() {
                         match self.get(&request)? {
-                            Some(bytes) => inputs.install_verified_chunk(request, bytes),
+                            Some(bytes) => {
+                                read(bytes.len());
+                                inputs.install_verified_chunk(request, bytes)
+                            }
                             None => absent.push(request),
                         }
                     }
@@ -717,71 +737,109 @@ fn store_chunk(
     Ok(())
 }
 
-/// Chunk `reader` into stored nodes without holding the value whole, and
-/// hold the root with a staging receipt until [`release_receipt`]. Outside
-/// a transaction the nodes commit at once and a file store reads them back
+/// Open a local streaming upload's lease. Until [`end_upload`] or
+/// [`expire_uploads`], every node staged under `id` is held from
+/// reclamation, so the row that will reference the finished value never
+/// races the reclaimer.
+pub(crate) fn begin_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result<(), Error> {
+    conn.execute(
+        "INSERT INTO _jazz_lv_upload (id, touched) VALUES (?1, ?2)",
+        rusqlite::params![id.as_slice(), now],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Renew `id`'s lease; false once it was ended or expired.
+pub(crate) fn touch_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result<bool, Error> {
+    let renewed = conn
+        .prepare_cached("UPDATE _jazz_lv_upload SET touched = ?2 WHERE id = ?1")
+        .and_then(|mut statement| statement.execute(rusqlite::params![id.as_slice(), now]))
+        .map_err(storage)?;
+    Ok(renewed > 0)
+}
+
+/// Store the nodes an upload finalized, held by its lease. Outside a
+/// transaction the nodes commit at once and a file store reads them back
 /// from the file, so they are not cached; an in-memory store (whose cache
 /// is its only readable copy) or an open transaction caches them pinned.
-pub(crate) fn stream(
+pub(crate) fn stage_upload(
     conn: &Connection,
     chunks: &Chunks,
-    kind: LargeValueKind,
-    reader: impl std::io::Read,
+    id: &[u8; 32],
+    staged: &[lv::StagedChunk],
     replica: bool,
-) -> Result<LargeValueRef, Error> {
+) -> Result<(), Error> {
     let cache = (!conn.is_autocommit() || chunks.in_memory()).then_some(chunks);
-    conn.execute_batch("SAVEPOINT jazz_lv_stream")
+    conn.execute_batch("SAVEPOINT jazz_lv_upload")
         .map_err(storage)?;
-    let mut failure = None;
-    let streamed = lv::prepare_streaming(kind, reader, |chunk| {
-        store_chunk(conn, cache, &chunk)
-            .and_then(|()| {
-                if replica {
-                    mark_unpushed(conn, &chunk.node_ref.locator)?;
-                }
-                Ok(())
-            })
-            .map_err(|error| {
-                failure = Some(error);
-                // The real cause is in `failure`.
-                lv::Error::MalformedNode
-            })
+    let result = staged.iter().try_for_each(|chunk| {
+        store_chunk(conn, cache, chunk)?;
+        if replica {
+            mark_unpushed(conn, &chunk.node_ref.locator)?;
+        }
+        conn.prepare_cached(
+            "INSERT OR IGNORE INTO _jazz_lv_upload_node (id, locator) VALUES (?1, ?2)",
+        )
+        .and_then(|mut statement| {
+            statement.execute([id.as_slice(), chunk.node_ref.locator.as_bytes().as_slice()])
+        })
+        .map_err(storage)?;
+        Ok(())
     });
-    let value = match streamed {
-        Ok((value, _)) => conn
-            .execute(
-                "INSERT INTO _jazz_lv_root (root, staged) VALUES (?1, 1) \
-                 ON CONFLICT (root) DO UPDATE SET staged = staged + 1",
-                [value.root.locator.as_bytes().as_slice()],
-            )
-            .map_err(storage)
-            .and_then(|_| record_base(conn, &value).map(|()| value)),
+    match result {
+        Ok(()) => conn
+            .execute_batch("RELEASE jazz_lv_upload")
+            .map_err(storage),
         Err(error) => {
-            Err(failure.unwrap_or_else(|| Error::new(ErrorCode::WriteRejected, error.to_string())))
-        }
-    };
-    match value {
-        Ok(value) => {
-            conn.execute_batch("RELEASE jazz_lv_stream")
-                .map_err(storage)?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK TO jazz_lv_stream; RELEASE jazz_lv_stream");
+            let _ = conn.execute_batch("ROLLBACK TO jazz_lv_upload; RELEASE jazz_lv_upload");
             Err(error)
         }
     }
 }
 
-/// Spend the staging receipt [`stream`] issued for `root`. Once no cell
-/// references it either, the tree is queued for reclamation.
-pub(crate) fn release_receipt(conn: &Connection, root: &LargeValueRef) -> Result<(), Error> {
+/// Record the finished value's tail-free base, so binding it trusts it.
+pub(crate) fn finish_upload(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
+    record_base(conn, value)
+}
+
+/// Drop `id`'s lease. Its nodes are queued for reclamation, which keeps
+/// whatever a committed row now references.
+pub(crate) fn end_upload(conn: &Connection, id: &[u8; 32]) -> Result<(), Error> {
     conn.execute(
-        "UPDATE _jazz_lv_root SET staged = staged - 1 WHERE root = ?1 AND staged > 0",
-        [root.root.locator.as_bytes().as_slice()],
+        "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
+         SELECT locator FROM _jazz_lv_upload_node WHERE id = ?1",
+        [id.as_slice()],
     )
+    .and_then(|_| {
+        conn.execute(
+            "DELETE FROM _jazz_lv_upload_node WHERE id = ?1",
+            [id.as_slice()],
+        )
+    })
+    .and_then(|_| conn.execute("DELETE FROM _jazz_lv_upload WHERE id = ?1", [id.as_slice()]))
     .map_err(storage)?;
     Ok(())
+}
+
+/// End every upload not touched since `before` (ms); returns how many.
+pub(crate) fn expire_uploads(conn: &Connection, before: i64) -> Result<usize, Error> {
+    let ids: Vec<Vec<u8>> = conn
+        .prepare("SELECT id FROM _jazz_lv_upload WHERE touched <= ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_map([before], |row| row.get(0))?
+                .collect::<Result<_, _>>()
+        })
+        .map_err(storage)?;
+    for id in &ids {
+        let id: [u8; 32] = id
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::new(ErrorCode::Storage, "large value: malformed upload id"))?;
+        end_upload(conn, &id)?;
+    }
+    Ok(ids.len())
 }
 
 /// One stored node: (object hash, encoded bytes).
@@ -921,9 +979,6 @@ pub(crate) fn install_fetched(
     )
 }
 
-/// How long a pushed node waits for the commit that references it.
-pub(crate) const RECEIPT_TTL_MS: i64 = 10 * 60 * 1000;
-
 /// Store a node a client pushed ahead of its commit, held by a receipt
 /// until `expires`.
 pub(crate) fn receive_pushed(
@@ -976,6 +1031,7 @@ impl lv::chunks::ChunkProvider for Stored<'_> {
     ) -> lv::chunks::ChunkFuture<'_, Result<Bytes, lv::chunks::ChunkError>> {
         let found = match node(self.0, &request.locator) {
             Ok(Some((hash, bytes))) if hash.as_slice() == request.object_hash => {
+                lv::record_finalize_validation_bytes(bytes.len());
                 Ok(Bytes::from(bytes))
             }
             Ok(_) => Err(lv::chunks::ChunkError::Unavailable),
@@ -1020,8 +1076,10 @@ pub(crate) fn admit(
             let mut offset = 0;
             while offset < base.byte_length {
                 let end = (offset + WINDOW).min(base.byte_length);
-                let window =
-                    chunks.run(|inputs| lv::byte_range_attempt(&base, offset..end, inputs))?;
+                let window = chunks.run_reading(
+                    |inputs| lv::byte_range_attempt(&base, offset..end, inputs),
+                    lv::record_finalize_validation_bytes,
+                )?;
                 validator
                     .push(&window)
                     .map_err(|e| rejected(e.to_string()))?;
@@ -1034,7 +1092,10 @@ pub(crate) fn admit(
         }
     }
     if !value.edit_tail.is_empty() {
-        chunks.run(|inputs| lv::validate_edit_tail_attempt(value, inputs))?;
+        chunks.run_reading(
+            |inputs| lv::validate_edit_tail_attempt(value, inputs),
+            lv::record_finalize_validation_bytes,
+        )?;
     }
     Ok(())
 }
@@ -1080,9 +1141,10 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
         let referenced: bool = conn
             .query_row(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_root WHERE root = ?1 \
-                 AND (durable > 0 OR staged > 0)) \
+                 AND durable > 0) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
-                 OR EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = ?1)",
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = ?1) \
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE locator = ?1)",
                 [&locator],
                 |r| r.get(0),
             )
@@ -1377,5 +1439,39 @@ mod tests {
         expire_receipts(&conn, 1_000).unwrap();
         while reclaim(&conn, &chunks, 64).unwrap() > 0 {}
         assert_eq!(count(), 0, "nothing referenced them");
+    }
+
+    #[test]
+    fn ended_uploads_keep_only_what_a_row_references() {
+        let (conn, chunks) = chunks();
+        let count = || {
+            conn.query_row("SELECT count(*) FROM _jazz_lv_node", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let kept = lv::prepare(LargeValueKind::String, &text(9, 300_000)).unwrap();
+        let dropped = lv::prepare(LargeValueKind::String, &text(10, 300_000)).unwrap();
+        for (id, built) in [([1; 32], &kept), ([2; 32], &dropped)] {
+            begin_upload(&conn, &id, 1_000).unwrap();
+            stage_upload(&conn, &chunks, &id, &built.staged_chunks, false).unwrap();
+        }
+        let staged = count();
+        // An expiry pass before the leases age out keeps both uploads.
+        assert_eq!(expire_uploads(&conn, 999).unwrap(), 0);
+        while reclaim(&conn, &chunks, 64).unwrap() > 0 {}
+        assert_eq!(count(), staged, "the leases hold every staged node");
+        // The first upload's row commits; the second is abandoned.
+        conn.execute(
+            "INSERT INTO _jazz_lv_root (root, durable) VALUES (?1, 1)",
+            [kept.value_ref.root.locator.as_bytes().as_slice()],
+        )
+        .unwrap();
+        end_upload(&conn, &[1; 32]).unwrap();
+        assert!(touch_upload(&conn, &[2; 32], 1_500).unwrap());
+        assert_eq!(expire_uploads(&conn, 1_500).unwrap(), 1);
+        assert!(!touch_upload(&conn, &[2; 32], 2_000).unwrap());
+        while reclaim(&conn, &chunks, 64).unwrap() > 0 {}
+        assert_eq!(count(), kept.staged_chunks.len() as i64);
     }
 }
