@@ -2209,12 +2209,15 @@ fn emit_historical_load_gate(coalesced: bool, config: &Config, error: &impl std:
     emit_object(fields);
 }
 
-fn is_known_historical_implicit_include_coverage_gap(error: &impl std::fmt::Debug) -> bool {
-    let error = format!("{error:?}");
-    error.contains("QueryCapability(")
-        && error.contains("gaps: [Source(Coverage)]")
-        && error.contains("HistoryCut")
-        && error.contains("ImplicitRootReference")
+fn is_known_historical_implicit_include_coverage_gap(error: &jazz::node::Error) -> bool {
+    let jazz::node::Error::QueryCapability(report) = error else {
+        return false;
+    };
+    // Historical reads omit auxiliary sources. The diagnostic now identifies
+    // the failed source request rather than the enclosing read view and closure.
+    report.contains("gaps: [Source(Coverage)]")
+        && report.contains(r#"table: \"canvases\""#)
+        && report.contains(r#"\"reference:canvas\""#)
 }
 
 fn emit_db_surface_summary(coalesced: bool, config: &Config, summary: &DbSurfaceSummary) {

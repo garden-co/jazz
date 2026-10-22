@@ -362,7 +362,7 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
-            .with_cut(read.cut)
+            .with_cut(read.cut.clone())
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -850,7 +850,13 @@ impl Inner {
         projected: bool,
         rows: &[CurrentRow],
     ) -> Option<Result<Vec<SortKey>, Error>> {
-        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), false);
+        // Same tie-break as the compiled ORDER BY: id in the last key's
+        // direction.
+        let tie_desc = matches!(
+            order.last().map(|by| by.direction),
+            Some(crate::query::OrderDirection::Desc)
+        );
+        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
         if projected {
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
@@ -898,18 +904,14 @@ impl Inner {
                 Err(error) => return Some(Err(error)),
             }
         }
-        let marks = vec!["?"; rows.len()].join(", ");
         let sql = format!(
-            "SELECT t.id{columns} FROM {} AS t WHERE t.id IN ({marks})",
+            "SELECT t.id{columns} FROM {} AS t WHERE t.id IN (SELECT unhex(value) FROM json_each(?1))",
             quote(&table.name)
         );
-        let ids: Vec<Vec<u8>> = rows
-            .iter()
-            .map(|row| row.id.0.as_bytes().to_vec())
-            .collect();
+        let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
             let mut statement = self.conn.prepare_cached(&sql)?;
-            let found = statement.query_map(params_from_iter(ids.iter()), |r| {
+            let found = statement.query_map([&ids], |r| {
                 let id: Vec<u8> = r.get(0)?;
                 let values = (1..=order.len())
                     .map(|i| r.get::<_, Sql>(i))
@@ -923,12 +925,18 @@ impl Inner {
             Err(error) => return Some(Err(storage(error))),
         };
         let mut keys = Vec::with_capacity(rows.len());
+        // Reads on past missing chunks, so one round trip asks for them all.
+        let mut blocked = false;
         for row in rows {
             let values = found.remove(row.id.0.as_bytes().as_slice())?;
             let mut key: SortKey = Vec::with_capacity(order.len() + 1);
             for (value, by) in values.into_iter().zip(order) {
                 let value = match self.logical_key(value) {
                     Ok(value) => value,
+                    Err(error) if crate::large::is_missing(&error) => {
+                        blocked = true;
+                        Sql::Null
+                    }
                     Err(error) => return Some(Err(error)),
                 };
                 key.push((
@@ -938,6 +946,9 @@ impl Inner {
             }
             key.push(id_key(row));
             keys.push(key);
+        }
+        if blocked {
+            return Some(Err(crate::large::missing()));
         }
         Some(Ok(keys))
     }
