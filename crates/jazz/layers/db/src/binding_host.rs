@@ -1458,6 +1458,13 @@ impl Link {
         self.queues.outbound.borrow().len()
     }
 
+    /// A count of the frames waiting to be sent that outlives this borrow,
+    /// for a host that reports it after an async tick.
+    pub fn outbound_counter(&self) -> impl Fn() -> usize + 'static {
+        let outbound = Rc::clone(&self.queues.outbound);
+        move || outbound.borrow().len()
+    }
+
     /// Called whenever a frame is queued to send (`None` clears it).
     pub fn set_outbound_ready(&self, ready: Option<Box<dyn Fn()>>) {
         *self.queues.outbound_ready.borrow_mut() = ready;

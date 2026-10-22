@@ -226,13 +226,38 @@ fn two_bindings_sync_over_frames_the_host_carries() {
         .insert("notes", &title("from the server"), &none())
         .unwrap();
     let delta = binding_host::event_chunk(drive(&links, client.next_event(&mut stream))).unwrap();
-    assert!(matches!(delta, EventChunk::Delta { reset: false, .. }));
+    let EventChunk::Delta {
+        delta,
+        reset: false,
+        ..
+    } = delta
+    else {
+        panic!("expected an incremental delta, got {delta:?}");
+    };
+    let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+    assert_eq!(
+        added[0].rows[0].cells["title"],
+        Value::String("from the server".to_owned())
+    );
 
     // Reads, advice and snapshots resolve through the same progress.
     let read = client
         .all(query, &json!({ "tier": "remote" }), None, None, None)
         .unwrap();
-    assert!(!drive(&links, read).unwrap().is_empty());
+    let rows = jazz::binding_codec::decode_rows(&drive(&links, read).unwrap()).unwrap();
+    let mut read_titles = rows
+        .iter()
+        .flat_map(|batch| &batch.rows)
+        .map(|row| row.cells["title"].clone())
+        .collect::<Vec<_>>();
+    read_titles.sort_by_key(|title| format!("{title:?}"));
+    assert_eq!(
+        read_titles,
+        [
+            Value::String("from the server".to_owned()),
+            Value::String("hello".to_owned())
+        ]
+    );
     let (_, advice) = client.request_permission_advice(
         binding_host::advice::insert("notes".to_owned(), &title("may I")).unwrap(),
     );
