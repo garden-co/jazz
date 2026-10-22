@@ -415,9 +415,9 @@ async fn wasm_initialization_seals_are_owner_bound_single_use_and_unpublished() 
     db.begin_transaction(open.clone(), "exclusive".into(), None, None)
         .unwrap();
     let descriptor = RecordDescriptor::new([
-        ("text", jazz::groove::records::ValueType::String),
-        ("bytes", jazz::groove::records::ValueType::Bytes),
-        ("json", jazz::groove::records::ValueType::String),
+        ("text", jazz::records::ValueType::String),
+        ("bytes", jazz::records::ValueType::Bytes),
+        ("json", jazz::records::ValueType::String),
     ]);
     let raw = descriptor
         .create(&[
@@ -426,10 +426,9 @@ async fn wasm_initialization_seals_are_owner_bound_single_use_and_unpublished() 
             Value::String("{\"sealed\":true}".into()),
         ])
         .unwrap();
-    let cells = jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
-        raw, descriptor,
-    ))
-    .unwrap();
+    let cells =
+        jazz::binding_codec::encode_named_cells(&jazz::records::OwnedRecord::new(raw, descriptor))
+            .unwrap();
     let row = db
         .insert_in_transaction(open.clone(), "values".into(), cells.clone(), JsValue::NULL)
         .unwrap();
@@ -446,9 +445,7 @@ async fn wasm_initialization_seals_are_owner_bound_single_use_and_unpublished() 
         .publish_initialization_transaction(token.clone())
         .is_err());
     let rows = db.local_current_row("values".into(), row.clone()).unwrap();
-    assert!(postcard::from_bytes::<Vec<DecodedRowBatch>>(&rows)
-        .unwrap()
-        .is_empty());
+    assert!(jazz::binding_codec::decode_rows(&rows).unwrap().is_empty());
     let status = await_promise(
         db.initialization_transaction_status(vec![reserved])
             .unwrap(),
@@ -466,7 +463,7 @@ async fn wasm_initialization_seals_are_owner_bound_single_use_and_unpublished() 
     assert!(db.publish_initialization_transaction(token).is_err());
     await_promise(db.tick()).await;
     let rows = db.local_current_row("values".into(), row).unwrap();
-    let values = values_from_batches(&postcard::from_bytes::<Vec<DecodedRowBatch>>(&rows).unwrap());
+    let values = values_from_batches(&jazz::binding_codec::decode_rows(&rows).unwrap());
     assert_eq!(values["text"], Value::String("sealed payload".into()));
     assert_eq!(values["bytes"], Value::Bytes(vec![1, 2, 3]));
     await_promise(db.close()).await;
