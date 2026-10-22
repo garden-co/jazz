@@ -7,8 +7,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::records::Value;
-use groove::schema::ColumnType;
+use jazz_types::column_schema::ColumnType;
+use jazz_types::records::Value;
 use thiserror::Error;
 
 use crate::ids::SchemaVersionId;

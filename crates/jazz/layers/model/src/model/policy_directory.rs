@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use groove::records::{
+use jazz_types::records::{
     EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ScalarEnumSchema, Value,
     ValueType,
 };
@@ -189,7 +189,7 @@ fn encode_policy_claim_node(
         Value::Nullable(Some(value)) => container(POLICY_CLAIM_NULLABLE, vec![value])?,
         Value::Tuple(values) => container(POLICY_CLAIM_TUPLE, values.iter().collect())?,
         Value::Array(values) => container(POLICY_CLAIM_ARRAY, values.iter().collect())?,
-        Value::Record(_) | Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
+        Value::Record(_) | Value::Enum(_) | Value::U48(_) => {
             return Err(
                 "policy binding directory does not admit engine-owned claim values".to_owned(),
             );

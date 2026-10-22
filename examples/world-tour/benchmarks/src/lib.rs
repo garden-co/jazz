@@ -7,10 +7,9 @@
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, gte, lit, lte};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -62,11 +61,8 @@ impl Fixture {
             .find(|table| table.name == "venues")
             .expect("WorldTour benchmark schema has venues")
             .clone();
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x57; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -199,7 +195,6 @@ impl Fixture {
     fn calendar_window_venue_names(&self, query: &PreparedQuery) -> Vec<String> {
         assert_eq!(
             query
-                .shape()
                 .query()
                 .includes
                 .iter()

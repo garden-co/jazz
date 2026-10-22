@@ -8,15 +8,14 @@ use std::collections::BTreeMap;
 
 use std::cell::Cell;
 
+use jazz::db::CurrentRow;
 use jazz::db::{
     Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream,
     UpdateOptions, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -238,8 +237,10 @@ impl Fixture {
             "cursors",
             row_id(3, 1),
             BTreeMap::from([
-                ("x".into(), Value::I32(step)),
-                ("y".into(), Value::I32(step * 2)),
+                // Off the seeded positions, so every move changes the row:
+                // a write that leaves the cells as they were shows no delta.
+                ("x".into(), Value::I32(1_000 + step)),
+                ("y".into(), Value::I32(1_000 + step * 2)),
             ]),
             UpdateOptions::default(),
         ))
@@ -365,11 +366,8 @@ fn open_db() -> (BenchDb, TableSchema) {
         .find(|table| table.name == "shapes")
         .expect("shapes table")
         .clone();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
             author: AuthorSubject::SYSTEM,

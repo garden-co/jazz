@@ -553,7 +553,7 @@ fn validate_binding_value(value: &Value) -> Result<(), QueryError> {
             record.descriptor().clone(),
         )))?,
         // U48 is an engine-owned stamp width, never a public query binding.
-        Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
+        Value::Enum(_) | Value::U48(_) => {
             return Err(QueryError::OperandTypeMismatch);
         }
         _ => {}
@@ -639,7 +639,7 @@ fn value_type(value: &Value) -> Result<ColumnType, QueryError> {
             validate_public_column_type(&column_type)?;
             Ok(column_type)
         }
-        Value::Enum(_) | Value::Large(_) | Value::U48(_) => Err(QueryError::OperandTypeMismatch),
+        Value::Enum(_) | Value::U48(_) => Err(QueryError::OperandTypeMismatch),
     }
 }
 
@@ -677,7 +677,6 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         (Value::Enum(_), _) => false,
         // Indirect descriptors are engine-owned and cannot be supplied as a
         // public query binding; callers bind the ordinary logical primitive.
-        (Value::Large(_), _) => false,
         _ => false,
     }
 }
@@ -749,16 +748,6 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             put_bytes(bytes, value.record().raw());
         }
         Value::U48(value) => put_tagged(bytes, 19, &value.to_be_bytes()),
-        Value::Large(value) => {
-            bytes.push(18);
-            bytes.push(match value.kind {
-                groove::large_values::LargeValueKind::Bytes => 0,
-                groove::large_values::LargeValueKind::String => 1,
-                groove::large_values::LargeValueKind::Json => 2,
-            });
-            bytes.push(value.format_version);
-            bytes.extend_from_slice(&value.logical_hash.0);
-        }
     }
 }
 
@@ -813,15 +802,15 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                 // Equal display names must not alias distinct typed columns.
                 match &field.identity {
                     None => bytes.push(0),
-                    Some(groove::records::FieldIdentity::Name(name)) => {
+                    Some(jazz_types::records::FieldIdentity::Name(name)) => {
                         bytes.push(1);
                         put_str(bytes, name);
                     }
-                    Some(groove::records::FieldIdentity::Slot(slot)) => {
+                    Some(jazz_types::records::FieldIdentity::Slot(slot)) => {
                         bytes.push(2);
                         bytes.extend_from_slice(&slot.to_be_bytes());
                     }
-                    Some(groove::records::FieldIdentity::NamedSlot { name, slot }) => {
+                    Some(jazz_types::records::FieldIdentity::NamedSlot { name, slot }) => {
                         bytes.push(3);
                         put_str(bytes, name);
                         bytes.extend_from_slice(&slot.to_be_bytes());

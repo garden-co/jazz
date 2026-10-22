@@ -20,10 +20,9 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SeededRowIdSource, SubscriptionEvent,
     SubscriptionStream, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -90,20 +89,8 @@ impl LiveRoomsFixture {
         }
         let stats = self.db.runtime_stats_for_test();
         assert_eq!(stats.active_subscriptions, self.rooms_open);
-        let receipts = self.db.maintained_subscription_size_receipts_for_test();
-        assert_eq!(receipts.len(), self.rooms_open);
-        let total = |field: &dyn Fn(usize) -> usize| (0..receipts.len()).map(field).sum::<usize>();
-        let source_witnesses = total(&|i| receipts[i].footprint.version_identities)
-            + total(&|i| receipts[i].footprint.versions_bytes);
-        assert_eq!(
-            source_witnesses, 0,
-            "storage-backed room views retain source witnesses"
-        );
-        assert!(
-            total(&|i| receipts[i].footprint.replacement_entries) > 0
-                && total(&|i| receipts[i].footprint.replacements_bytes) > 0,
-            "storage-backed room views must retain replacement witnesses"
-        );
+        // jazz-sqlite: Groove maintained-view footprint receipts (source and
+        // replacement witnesses) have no SQLite counterpart; assertion dropped.
         OpenRooms {
             fixture: self,
             streams,
@@ -241,12 +228,9 @@ fn open_db(seed: u64) -> Db {
             .build(),
     )
     .expect("live-rooms schema compiles");
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes((0x7600_u128 + seed as u128).to_be_bytes()),
                 author: WRITER,

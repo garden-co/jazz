@@ -1,0 +1,1087 @@
+//! Subscription fan-out: shared execution and keyed invalidation.
+//!
+//! Subscriptions whose compiled SQL and parameters are identical share one
+//! live result (a `Group`); a session-independent shape (a public feed) is
+//! one group however many identities watch it. Each group declares
+//! `Watch`es: the tables it reads, narrowed where the query or its read
+//! policy pins a column to one value (a root filter `room = R`, a policy
+//! `EXISTS memberships WHERE member = session.user`). A commit's changed
+//! rows (old and new images) wake only the groups whose watches they hit;
+//! woken groups re-run and diff. Watches are sound by construction: a key
+//! is used only where every way the table reaches the result goes through
+//! that equality; everything else watches the whole table.
+
+use super::*;
+
+pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
+
+/// What a group reads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum Watch {
+    Table(String),
+    /// Rows of `table` whose `column` holds the canonical value.
+    Key(String, String, String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GroupKey {
+    sql: String,
+    params: String,
+    /// Set only when the SQL depends on the identity's session.
+    identity: Option<String>,
+}
+
+struct Member {
+    queue: Weak<RefCell<VecDeque<SubscriptionEvent>>>,
+    shape: Shape,
+    bound: bool,
+    /// Where this member's `settled` flag comes from, and the last value
+    /// it was told.
+    settled: sync::SettledBy,
+    told: std::cell::Cell<bool>,
+}
+
+/// One shared live result.
+pub(super) struct Group {
+    key: GroupKey,
+    prepared: PreparedQuery,
+    identity: Option<AuthorSubject>,
+    read: ReadSpec,
+    pub(super) rows: Vec<CurrentRow>,
+    members: Vec<Member>,
+    watches: Vec<Watch>,
+    /// An unbounded single-table result whose rows' membership depends only
+    /// on the rows themselves: a commit that changes only root rows is
+    /// applied by re-checking those ids, not by re-running the query.
+    recheck: bool,
+    /// Sort keys parallel to `rows`, built on the first re-check.
+    keys: Vec<SortKey>,
+    /// Optional includes whose target table nothing else in the query
+    /// reads: (target, root column). A change to a target row cannot move
+    /// the result, only refresh the rows that reference it.
+    includes: Vec<(String, String)>,
+}
+
+type SortKey = Vec<(Sql, bool)>;
+
+impl Group {
+    fn live(&self) -> bool {
+        self.members.iter().any(|m| m.queue.strong_count() > 0)
+    }
+}
+
+/// Counters for the fan-out bench and tests.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FanoutStats {
+    pub groups: usize,
+    pub shared_joins: u64,
+    pub woken: u64,
+    pub skipped: u64,
+}
+
+#[derive(Default)]
+pub(super) struct Fanout {
+    next: u64,
+    groups: HashMap<u64, Rc<RefCell<Group>>>,
+    by_key: HashMap<GroupKey, u64>,
+    tables: HashMap<String, BTreeSet<u64>>,
+    keys: HashMap<(String, String, String), BTreeSet<u64>>,
+    key_columns: HashMap<String, BTreeSet<String>>,
+    stats: FanoutStats,
+    /// Bumped by every dropped stream, so `collect` scans only when needed.
+    pub(super) dropped: Rc<std::cell::Cell<usize>>,
+}
+
+/// The canonical form of a stored SQL value, for watch matching.
+fn canon(value: &Sql) -> String {
+    format!("{value:?}")
+}
+
+fn canon_value(value: &Value) -> Option<String> {
+    to_sql(value).ok().flatten().map(|sql| canon(&sql))
+}
+
+impl Fanout {
+    fn index(&mut self, gid: u64, watches: &[Watch]) {
+        for watch in watches {
+            match watch {
+                Watch::Table(table) => {
+                    self.tables.entry(table.clone()).or_default().insert(gid);
+                }
+                Watch::Key(table, column, value) => {
+                    self.keys
+                        .entry((table.clone(), column.clone(), value.clone()))
+                        .or_default()
+                        .insert(gid);
+                    self.key_columns
+                        .entry(table.clone())
+                        .or_default()
+                        .insert(column.clone());
+                }
+            }
+        }
+    }
+
+    fn unindex(&mut self, gid: u64, watches: &[Watch]) {
+        for watch in watches {
+            match watch {
+                Watch::Table(table) => {
+                    if let Some(set) = self.tables.get_mut(table) {
+                        set.remove(&gid);
+                    }
+                }
+                Watch::Key(table, column, value) => {
+                    let key = (table.clone(), column.clone(), value.clone());
+                    if let Some(set) = self.keys.get_mut(&key) {
+                        set.remove(&gid);
+                        if set.is_empty() {
+                            self.keys.remove(&key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn drop_group(&mut self, gid: u64) {
+        if let Some(group) = self.groups.remove(&gid) {
+            let group = group.borrow();
+            self.by_key.remove(&group.key);
+            self.unindex(gid, &group.watches);
+        }
+    }
+
+    /// Forget groups no live subscription holds.
+    pub(super) fn collect(&mut self) {
+        if self.dropped.replace(0) == 0 {
+            return;
+        }
+        let dead: Vec<u64> = self
+            .groups
+            .iter()
+            .filter(|(_, g)| !g.borrow().live())
+            .map(|(id, _)| *id)
+            .collect();
+        for gid in dead {
+            self.drop_group(gid);
+        }
+        self.key_columns.clear();
+        for (table, column, _) in self.keys.keys() {
+            self.key_columns
+                .entry(table.clone())
+                .or_default()
+                .insert(column.clone());
+        }
+    }
+
+    pub(super) fn live_members(&self) -> Vec<(Shape, bool)> {
+        self.groups
+            .values()
+            .flat_map(|g| {
+                g.borrow()
+                    .members
+                    .iter()
+                    .filter(|m| m.queue.strong_count() > 0)
+                    .map(|m| (m.shape, m.bound))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub(super) fn stats(&self) -> FanoutStats {
+        FanoutStats {
+            groups: self.groups.len(),
+            ..self.stats.clone()
+        }
+    }
+
+    /// Tell members whose remote answered without changing their rows.
+    pub(super) fn flush_settled(&mut self) {
+        for group in self.groups.values() {
+            let group = group.borrow();
+            for member in &group.members {
+                if member.settled.get()
+                    && !member.told.get()
+                    && let Some(queue) = member.queue.upgrade()
+                {
+                    member.told.set(true);
+                    let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
+                    if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+                        *settled = true;
+                    }
+                    queue.borrow_mut().push_back(event);
+                }
+            }
+        }
+    }
+}
+
+impl Inner {
+    /// Open a subscription: join the group with identical SQL, or start one.
+    pub(super) fn subscribe_member(
+        &mut self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: ReadSpec,
+        settled: sync::SettledBy,
+    ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
+        let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
+        let key = GroupKey {
+            sql: compiled.sql.clone(),
+            params: format!("{:?}", compiled.params),
+            identity: session_used.then(|| format!("{identity:?}")),
+        };
+        let now = settled.get();
+        let member = |queue: &Queue| Member {
+            queue: Rc::downgrade(queue),
+            shape: prepared.shape,
+            bound: !prepared.binding.is_empty(),
+            settled: settled.clone(),
+            told: std::cell::Cell::new(now),
+        };
+        let open = |rows: &[CurrentRow]| {
+            let mut event = opening(rows);
+            if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+                *settled = now;
+            }
+            event
+        };
+        if let Some(handle) = self
+            .fan
+            .by_key
+            .get(&key)
+            .and_then(|gid| self.fan.groups.get(gid))
+            .cloned()
+        {
+            let mut group = handle.borrow_mut();
+            let queue: Queue = Rc::new(RefCell::new(VecDeque::from([open(&group.rows)])));
+            group.members.push(member(&queue));
+            self.fan.stats.shared_joins += 1;
+            return Ok((queue, Rc::downgrade(&handle)));
+        }
+        let rows = self.execute(&compiled, &prepared.query.table)?;
+        let watches = self.watches(prepared, identity, &read, &compiled)?;
+        let recheck = recheckable(&prepared.query, &read, &compiled);
+        let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
+        let queue: Queue = Rc::new(RefCell::new(VecDeque::from([open(&rows)])));
+        let gid = self.fan.next;
+        self.fan.next += 1;
+        self.fan.index(gid, &watches);
+        self.fan.by_key.insert(key.clone(), gid);
+        let handle = Rc::new(RefCell::new(Group {
+            key,
+            prepared: prepared.clone(),
+            identity,
+            read,
+            rows,
+            members: vec![member(&queue)],
+            watches,
+            recheck,
+            keys: Vec::new(),
+            includes,
+        }));
+        let weak = Rc::downgrade(&handle);
+        self.fan.groups.insert(gid, handle);
+        Ok((queue, weak))
+    }
+
+    /// The optional includes that only shape output: their target is read
+    /// by nothing else (no policy, join, array or required include), and
+    /// their column is projected.
+    fn output_only_includes(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+    ) -> Result<Vec<(String, String)>, Error> {
+        let query = &prepared.query;
+        if query.includes.iter().all(|include| include.require) {
+            return Ok(Vec::new());
+        }
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let root = schema.table(&query.table)?;
+        let mut bare = prepared.clone();
+        bare.query.includes.retain(|include| include.require);
+        let others = self.compile_tracked(&bare, identity, read)?.0.tables;
+        let mut out = Vec::new();
+        for include in query.includes.iter().filter(|include| !include.require) {
+            let column = include.path.split('.').next().unwrap_or_default();
+            let Some(target) = root.references.get(column) else {
+                continue;
+            };
+            if *target != query.table
+                && !others.contains(target)
+                && compiled.projection.iter().any(|(name, _)| name == column)
+            {
+                out.push((target.clone(), column.to_owned()));
+            }
+        }
+        Ok(out)
+    }
+
+    fn compile_tracked(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<(Compiled, bool), Error> {
+        let (policy, claims) = self.read_sessions(prepared, identity);
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
+            .with_view(read.view.clone())
+            .with_cut(read.cut)
+            .compile_query(&prepared.query, read.include_deleted)?;
+        let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
+        Ok((compiled, used))
+    }
+
+    /// The watches of one subscription; see the module docs for soundness.
+    fn watches(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        compiled: &Compiled,
+    ) -> Result<Vec<Watch>, Error> {
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        // Under a branch view, inherited rows read with the head's branch
+        // columns, so a key on a branch column would miss base changes.
+        let keyable = |table: &str, column: &str| {
+            read.view.is_none()
+                || schema
+                    .table(table)
+                    .is_ok_and(|t| !t.branch_by.iter().any(|c| c == column))
+        };
+        let query = &prepared.query;
+        let root = schema.table(&query.table)?;
+        // Tables the query itself reaches (joins, arrays, includes,
+        // reachability): these always watch the whole table.
+        let mut structural = BTreeSet::new();
+        for join in &query.joins {
+            structural.insert(join.table.clone());
+        }
+        fn arrays(out: &mut BTreeSet<String>, list: &[crate::query::ArraySubquery]) {
+            for array in list {
+                out.insert(array.table.clone());
+                arrays(out, &array.nested_arrays);
+            }
+        }
+        arrays(&mut structural, &query.array_subqueries);
+        for include in &query.includes {
+            let column = include.path.split('.').next().unwrap_or_default();
+            if let Some(target) = root.references.get(column) {
+                structural.insert(target.clone());
+            }
+        }
+        for reach in &query.reachable {
+            structural.insert(reach.access_table.clone());
+            structural.insert(reach.edge_table.clone());
+        }
+        // Policy evidence pinned by a session equality.
+        let mut pinned: HashMap<String, Option<(String, String)>> = HashMap::new();
+        let session = identity.and_then(|author| self.read_sessions(prepared, Some(author)).0);
+        if let Some(session) = session.filter(|s| !s.system) {
+            match root.policy(Operation::Select) {
+                Some(policy) if policy_pins(policy, &session, &mut pinned) => {}
+                _ => pinned.clear(),
+            }
+        }
+        if pinned.contains_key(&root.name) {
+            pinned.clear();
+        }
+        // A read policy that requires `column = session value` of the row
+        // itself pins the root too: other rows cannot enter the result.
+        let policy_root_key = identity
+            .and_then(|author| self.read_sessions(prepared, Some(author)).0)
+            .filter(|s| !s.system)
+            .and_then(|session| {
+                root.policy(Operation::Select)
+                    .and_then(|p| row_pin(p, &session))
+            });
+        let mut watches = Vec::new();
+        let root_key = if structural.contains(&root.name) {
+            None
+        } else {
+            root_key(query, &prepared.binding).or(policy_root_key)
+        }
+        .filter(|(column, _)| keyable(&root.name, column));
+        watches.push(match root_key {
+            Some((column, value)) => Watch::Key(root.name.clone(), column, value),
+            None => Watch::Table(root.name.clone()),
+        });
+        let mut reads = compiled.tables.clone();
+        reads.extend(structural.iter().cloned());
+        for table in reads {
+            if table == root.name {
+                continue;
+            }
+            watches.push(match pinned.get(&table) {
+                Some(Some((column, value)))
+                    if !structural.contains(&table) && keyable(&table, column) =>
+                {
+                    Watch::Key(table.clone(), column.clone(), value.clone())
+                }
+                _ => Watch::Table(table.clone()),
+            });
+        }
+        watches.sort();
+        watches.dedup();
+        Ok(watches)
+    }
+
+    /// Wake the groups a commit's changed rows hit, re-run and diff them.
+    pub(super) fn dispatch(&mut self, mut changes: Vec<(String, RowUuid, Vec<u8>)>) {
+        changes.sort();
+        changes.dedup();
+        // Per woken group: the root rows that woke it, or `None` once any
+        // other table's row did (then it re-runs).
+        let mut woken: BTreeMap<u64, Option<BTreeSet<RowUuid>>> = BTreeMap::new();
+        // Per woken group: include targets that changed, as (root column, id).
+        let mut targets: BTreeMap<u64, BTreeSet<(String, RowUuid)>> = BTreeMap::new();
+        let groups = &self.fan.groups;
+        let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid| {
+            for gid in gids {
+                let Some(group) = groups.get(gid) else {
+                    continue;
+                };
+                let group = group.borrow();
+                let root = group.prepared.query.table == table;
+                let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
+                let columns: Vec<&String> = group
+                    .includes
+                    .iter()
+                    .filter(|(target, _)| target == table)
+                    .map(|(_, column)| column)
+                    .collect();
+                if !root && !columns.is_empty() {
+                    let found = targets.entry(*gid).or_default();
+                    found.extend(columns.into_iter().map(|column| (column.clone(), row)));
+                    continue;
+                }
+                match (entry, root) {
+                    (Some(ids), true) => {
+                        ids.insert(row);
+                    }
+                    (entry, _) => *entry = None,
+                }
+            }
+        };
+        for (table, row, key) in &changes {
+            if let Some(groups) = self.fan.tables.get(table) {
+                wake(groups, table, *row);
+            }
+            let Some(columns) = self.fan.key_columns.get(table) else {
+                continue;
+            };
+            for image in self.images(table, *row, key, columns) {
+                for (column, value) in image {
+                    if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
+                        wake(groups, table, *row);
+                    }
+                }
+            }
+        }
+        for image in std::mem::take(&mut *self.gone.borrow_mut()) {
+            let row = RowUuid::from_bytes(image.id);
+            if let Some(groups) = self.fan.tables.get(&image.table) {
+                wake(groups, &image.table, row);
+            }
+            let Some(columns) = self.fan.key_columns.get(&image.table) else {
+                continue;
+            };
+            for (column, cell) in &image.cells {
+                if columns.contains(column)
+                    && let Some(groups) = self.fan.keys.get(&(
+                        image.table.clone(),
+                        column.clone(),
+                        canon(&Sql::from(cell)),
+                    ))
+                {
+                    wake(groups, &image.table, row);
+                }
+            }
+        }
+        self.fan.stats.woken += woken.len() as u64;
+        self.fan.stats.skipped += (self.fan.groups.len() - woken.len()) as u64;
+        let groups: Vec<_> = woken
+            .into_iter()
+            .filter_map(|(gid, ids)| Some((gid, self.fan.groups.get(&gid).cloned()?, ids)))
+            .collect();
+        for (gid, group, ids) in groups {
+            let mut group = group.borrow_mut();
+            // Only include targets changed: the result's rows are as before.
+            if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
+                self.refresh_group(&mut group, ids.as_ref());
+            }
+            if let Some(changed) = targets.remove(&gid) {
+                refresh_includes(&mut group, &changed);
+            }
+        }
+    }
+
+    /// Re-run every group (schema changed); watches are rebuilt because
+    /// they can depend on session values.
+    /// The active schema changed: every subscription re-runs and restates
+    /// its rows (a reset), since their shape may have changed.
+    pub(super) fn reset_everything(&mut self) {
+        self.refresh_where(|_| true, true);
+    }
+
+    /// `author`'s claims changed: re-run only the groups whose policy or
+    /// claim operands read them. A group with no policy identity takes its
+    /// claims from this node's own author; one with request claims carries
+    /// its own and is unaffected.
+    pub(super) fn refresh_identity(&mut self, author: AuthorSubject) {
+        let own = self.identity.author;
+        self.refresh_where(
+            |group| {
+                group.prepared.request_claims.is_none()
+                    && (group.identity == Some(author)
+                        || (group.identity.is_none() && author == own))
+            },
+            false,
+        );
+    }
+
+    fn refresh_where(&mut self, affected: impl Fn(&Group) -> bool, reset: bool) {
+        let groups: Vec<(u64, Rc<RefCell<Group>>)> = self
+            .fan
+            .groups
+            .iter()
+            .filter(|(_, g)| affected(&g.borrow()))
+            .map(|(id, g)| (*id, g.clone()))
+            .collect();
+        for (gid, group) in groups {
+            let mut group = group.borrow_mut();
+            let old = std::mem::take(&mut group.watches);
+            self.fan.unindex(gid, &old);
+            let watches = self
+                .compile(&group.prepared, group.identity, &group.read)
+                .and_then(|compiled| {
+                    self.watches(&group.prepared, group.identity, &group.read, &compiled)
+                })
+                .unwrap_or(old);
+            self.fan.index(gid, &watches);
+            group.watches = watches;
+            if reset {
+                self.reset_group(&mut group);
+            } else {
+                self.refresh_group(&mut group, None);
+            }
+        }
+    }
+
+    /// Old (pre-commit, from history) and new (current) values of the
+    /// watched key columns of one changed row. "New" covers the row on every
+    /// branch: a copy-on-write head row replaces, in a branch view, the base
+    /// row a subscription saw, so the base image must wake it too.
+    pub(super) fn images(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        columns: &BTreeSet<String>,
+    ) -> Vec<Vec<(String, String)>> {
+        let read = |sql: String,
+                    params: &[&dyn rusqlite::ToSql]|
+         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
+            let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
+                return Vec::new();
+            };
+            let names: Vec<String> = statement
+                .column_names()
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+            let rows = statement.query_map(params, |r| {
+                let mut seq = 0;
+                let mut branch = Vec::new();
+                let mut out = Vec::new();
+                for (i, name) in names.iter().enumerate() {
+                    if name == "_seq" {
+                        seq = r.get(i)?;
+                    } else if name == "_b" {
+                        branch = r.get(i)?;
+                    } else if columns.contains(name) {
+                        out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
+                    }
+                }
+                Ok((seq, branch, out))
+            });
+            rows.map(|rows| rows.filter_map(Result::ok).collect())
+                .unwrap_or_default()
+        };
+        let id = row.0.as_bytes().to_vec();
+        let current = read(
+            format!("SELECT * FROM {} WHERE id = ?1", quote(table)),
+            &[&id],
+        );
+        let seq = current
+            .iter()
+            .find(|(_, branch, _)| branch.as_slice() == key)
+            .map_or(i64::MAX, |(seq, _, _)| *seq);
+        let old = read(
+            format!(
+                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC LIMIT 1",
+                quote(&format!("{table}__h"))
+            ),
+            &[&id, &key, &seq],
+        );
+        current
+            .into_iter()
+            .chain(old)
+            .map(|(_, _, image)| image)
+            .collect()
+    }
+
+    /// Apply a commit that changed only the root rows `ids` to an
+    /// unbounded result in place: re-check those ids and splice them in by
+    /// the query's order (sort keys are kept per row), emitting a delta for
+    /// just those rows. O(changed · log n) comparisons plus memmoves, not a
+    /// re-run and full diff. `None` when the order cannot be compared from
+    /// the rows (then the caller re-runs).
+    fn recheck_rows(
+        &self,
+        group: &mut Group,
+        ids: &BTreeSet<RowUuid>,
+    ) -> Option<Result<Option<SubscriptionEvent>, Error>> {
+        let order = group.prepared.query.order_by.clone();
+        let compiled = match self.compile(&group.prepared, group.identity, &group.read) {
+            Ok(compiled) => compiled,
+            Err(error) => return Some(Err(error)),
+        };
+        if order.iter().any(|key| {
+            key.column != "id"
+                && !compiled
+                    .projection
+                    .iter()
+                    .any(|(name, _)| *name == key.column)
+        }) {
+            return None;
+        }
+        let sort_key = |row: &CurrentRow| -> Option<SortKey> {
+            let mut key = Vec::with_capacity(order.len() + 1);
+            for by in &order {
+                let value = if by.column == "id" {
+                    Sql::Blob(row.id.0.as_bytes().to_vec())
+                } else {
+                    match row
+                        .cells
+                        .iter()
+                        .find(|(name, _)| *name == by.column)?
+                        .1
+                        .as_ref()
+                    {
+                        None => Sql::Null,
+                        Some(value) => to_sql(value).ok()??,
+                    }
+                };
+                key.push((
+                    value,
+                    matches!(by.direction, crate::query::OrderDirection::Desc),
+                ));
+            }
+            key.push((Sql::Blob(row.id.0.as_bytes().to_vec()), false));
+            Some(key)
+        };
+        if group.keys.len() != group.rows.len() {
+            group.keys = group
+                .rows
+                .iter()
+                .map(sort_key)
+                .collect::<Option<Vec<_>>>()?;
+        }
+        // The same query narrowed to the changed ids, as a root filter, so
+        // SQLite seeks them by primary key instead of sorting the view.
+        let mut prepared = group.prepared.clone();
+        prepared.query.filters.push(crate::query::Predicate::In(
+            crate::query::Operand::Column("id".to_owned()),
+            ids.iter()
+                .map(|id| crate::query::Operand::Literal(Value::Uuid(id.0)))
+                .collect(),
+        ));
+        prepared.query.order_by.clear();
+        let narrowed = match self.compile(&prepared, group.identity, &group.read) {
+            Ok(compiled) => compiled,
+            Err(error) => return Some(Err(error)),
+        };
+        let fresh = match self.execute(&narrowed, &group.prepared.query.table) {
+            Ok(rows) => rows,
+            Err(error) => return Some(Err(error)),
+        };
+        let fresh: Vec<(SortKey, CurrentRow)> = fresh
+            .into_iter()
+            .map(|row| Some((sort_key(&row)?, row)))
+            .collect::<Option<_>>()?;
+        // Before: where each changed id sat, and what it showed.
+        let before: HashMap<RowUuid, (usize, CurrentRow)> = group
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| ids.contains(&row.id))
+            .map(|(i, row)| (row.id, (i, row.clone())))
+            .collect();
+        let mut positions: Vec<usize> = before.values().map(|(i, _)| *i).collect();
+        positions.sort_unstable_by(|a, b| b.cmp(a));
+        for at in positions {
+            group.rows.remove(at);
+            group.keys.remove(at);
+        }
+        let fresh_ids: BTreeSet<RowUuid> = fresh.iter().map(|(_, row)| row.id).collect();
+        for (key, row) in fresh {
+            let at = group
+                .keys
+                .partition_point(|other| sql_order(other, &key) == std::cmp::Ordering::Less);
+            group.keys.insert(at, key);
+            group.rows.insert(at, row);
+        }
+        let mut added = Vec::new();
+        let mut updated = Vec::new();
+        for (index, row) in group
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| fresh_ids.contains(&row.id))
+        {
+            match before.get(&row.id) {
+                None => added.push(SubscriptionOutputRow {
+                    row: row.clone(),
+                    previous_index: None,
+                    index,
+                }),
+                Some((previous, prior))
+                    if prior.cells != row.cells || prior.deleted != row.deleted =>
+                {
+                    updated.push(SubscriptionOutputRow {
+                        row: row.clone(),
+                        previous_index: Some(*previous),
+                        index,
+                    })
+                }
+                Some(_) => {}
+            }
+        }
+        let mut removed: Vec<RemovedRow> = before
+            .iter()
+            .filter(|(id, _)| !fresh_ids.contains(id))
+            .map(|(id, (index, row))| RemovedRow {
+                table: row.table.to_string(),
+                row_uuid: *id,
+                index: *index,
+            })
+            .collect();
+        removed.sort_by_key(|row| row.index);
+        if added.is_empty() && updated.is_empty() && removed.is_empty() {
+            return Some(Ok(None));
+        }
+        Some(Ok(Some(delta(false, added, updated, removed))))
+    }
+
+    fn reset_group(&self, group: &mut Group) {
+        match self.run(&group.prepared, group.identity, &group.read) {
+            Ok(rows) => {
+                group.push(opening(&rows));
+                group.rows = rows;
+                group.keys.clear();
+            }
+            Err(error) => group.push(SubscriptionEvent::Rejected {
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) {
+        if let Some(ids) = ids.filter(|_| group.recheck) {
+            match self.recheck_rows(group, ids) {
+                Some(Ok(Some(event))) => return group.push(event),
+                Some(Ok(None)) => return,
+                Some(Err(error)) => {
+                    return group.push(SubscriptionEvent::Rejected {
+                        reason: error.to_string(),
+                    });
+                }
+                None => {}
+            }
+        }
+        let rows = match self.run(&group.prepared, group.identity, &group.read) {
+            Ok(rows) => rows,
+            Err(error) => {
+                let event = SubscriptionEvent::Rejected {
+                    reason: error.to_string(),
+                };
+                group.push(event);
+                return;
+            }
+        };
+        if let Some(event) = diff(&group.rows, &rows) {
+            group.push(event);
+            group.rows = rows;
+            group.keys.clear();
+        }
+    }
+}
+
+/// Report as updated the result rows that reference a changed include
+/// target, so their output (built with the target) is read again.
+fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
+    let refers = |row: &CurrentRow| {
+        row.cells.iter().any(|(name, value)| match value {
+            Some(Value::Uuid(id)) => changed.contains(&(name.clone(), RowUuid(*id))),
+            _ => false,
+        })
+    };
+    let updated: Vec<SubscriptionOutputRow> = group
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| refers(row))
+        .map(|(index, row)| SubscriptionOutputRow {
+            row: row.clone(),
+            previous_index: Some(index),
+            index,
+        })
+        .collect();
+    if !updated.is_empty() {
+        group.push(delta(false, Vec::new(), updated, Vec::new()));
+    }
+}
+
+impl Group {
+    fn push(&mut self, event: SubscriptionEvent) {
+        self.members.retain(|m| m.queue.strong_count() > 0);
+        for member in &self.members {
+            if let Some(queue) = member.queue.upgrade() {
+                let mut event = event.clone();
+                if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+                    *settled = member.settled.get();
+                    member.told.set(*settled);
+                }
+                queue.borrow_mut().push_back(event);
+            }
+        }
+    }
+}
+
+/// Whether a group may apply root-only commits by re-checking ids: an
+/// unbounded, single-table query (no joins, arrays, required includes,
+/// aggregates, windows), outside branch views and cuts, whose compiled SQL
+/// reads its root table exactly once (a read policy that looks at other
+/// rows of the same table would let one row's change move another).
+fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
+    query.limit.is_none()
+        && query.offset == 0
+        && query.aggregate.is_none()
+        && query.joins.is_empty()
+        && query.flat_join.is_none()
+        && query.reachable.is_empty()
+        && query.inherits.is_empty()
+        && query.array_subqueries.is_empty()
+        && query.includes.iter().all(|include| !include.require)
+        && read.view.is_none()
+        && read.cut.is_none()
+        && !compiled.aggregate
+        && compiled.sql.matches(&quote(&query.table)).count() == 1
+}
+
+/// SQLite's ORDER BY comparison of two sort keys (NULL < numbers < text <
+/// blobs; text and blobs bytewise), each part ascending or descending.
+fn sql_order(a: &[(Sql, bool)], b: &[(Sql, bool)]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn rank(value: &Sql) -> u8 {
+        match value {
+            Sql::Null => 0,
+            Sql::Integer(_) | Sql::Real(_) => 1,
+            Sql::Text(_) => 2,
+            Sql::Blob(_) => 3,
+        }
+    }
+    for ((x, desc), (y, _)) in a.iter().zip(b) {
+        let ordering = match (x, y) {
+            (Sql::Integer(x), Sql::Integer(y)) => x.cmp(y),
+            (Sql::Integer(x), Sql::Real(y)) => {
+                (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal)
+            }
+            (Sql::Real(x), Sql::Integer(y)) => {
+                x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal)
+            }
+            (Sql::Real(x), Sql::Real(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+            (Sql::Text(x), Sql::Text(y)) => x.as_bytes().cmp(y.as_bytes()),
+            (Sql::Blob(x), Sql::Blob(y)) => x.cmp(y),
+            (x, y) => rank(x).cmp(&rank(y)),
+        };
+        let ordering = if *desc { ordering.reverse() } else { ordering };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
+pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
+    let added = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| SubscriptionOutputRow {
+            row: row.clone(),
+            previous_index: None,
+            index,
+        })
+        .collect();
+    delta(true, added, Vec::new(), Vec::new())
+}
+
+/// The keyed diff of two results, or `None` when nothing changed.
+fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
+    let old: HashMap<RowUuid, (usize, &CurrentRow)> = before
+        .iter()
+        .enumerate()
+        .map(|(i, row)| (row.id, (i, row)))
+        .collect();
+    let new: BTreeSet<RowUuid> = after.iter().map(|row| row.id).collect();
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    for (index, row) in after.iter().enumerate() {
+        match old.get(&row.id) {
+            None => added.push(SubscriptionOutputRow {
+                row: row.clone(),
+                previous_index: None,
+                index,
+            }),
+            Some((previous, prior)) if prior.cells != row.cells || prior.deleted != row.deleted => {
+                updated.push(SubscriptionOutputRow {
+                    row: row.clone(),
+                    previous_index: Some(*previous),
+                    index,
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    let removed: Vec<RemovedRow> = before
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !new.contains(&row.id))
+        .map(|(index, row)| RemovedRow {
+            table: row.table.to_string(),
+            row_uuid: row.id,
+            index,
+        })
+        .collect();
+    if added.is_empty() && updated.is_empty() && removed.is_empty() {
+        return None;
+    }
+    Some(delta(false, added, updated, removed))
+}
+
+/// A top-level `column = literal/param` filter on the root table.
+fn root_key(query: &Query, binding: &BTreeMap<String, Value>) -> Option<(String, String)> {
+    use crate::query::{Operand, Predicate};
+    for filter in &query.filters {
+        let Predicate::Eq(left, right) = filter else {
+            continue;
+        };
+        let (column, other) = match (left, right) {
+            (Operand::Column(c), other) | (other, Operand::Column(c)) => (c, other),
+            _ => continue,
+        };
+        let value = match other {
+            Operand::Literal(value) => value.clone(),
+            Operand::Param(name) => match binding.get(name) {
+                Some(value) => value.clone(),
+                None => continue,
+            },
+            _ => continue,
+        };
+        if let Some(value) = canon_value(&value) {
+            return Some((column.clone(), value));
+        }
+    }
+    None
+}
+
+/// Collect `EXISTS table WHERE column = session.path AND ..` pins of a read
+/// policy. Returns false when the policy has a form this analysis does not
+/// understand (then no table is pinned). A table seen twice with different
+/// pins, or nested inside another EXISTS, is not pinned.
+pub(super) fn policy_pins(
+    policy: &PolicyExpr,
+    session: &Session,
+    pins: &mut HashMap<String, Option<(String, String)>>,
+) -> bool {
+    use crate::tools::PolicyValue;
+    match policy {
+        PolicyExpr::And(list) | PolicyExpr::Or(list) => {
+            list.iter().all(|p| policy_pins(p, session, pins))
+        }
+        // A pin bounds which rows can change an EXISTS's value, whatever
+        // surrounds it, so negation keeps it sound.
+        PolicyExpr::Not(inner) => policy_pins(inner, session, pins),
+        PolicyExpr::Exists { table, condition } => {
+            let conjuncts: Vec<&PolicyExpr> = match condition.as_ref() {
+                PolicyExpr::And(list) => list.iter().collect(),
+                other => vec![other],
+            };
+            let mut pin = None;
+            for conjunct in &conjuncts {
+                match conjunct {
+                    PolicyExpr::Cmp {
+                        column,
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(path),
+                    } if path.first().map(String::as_str) != Some("__jazz_outer_row") => {
+                        if pin.is_none() {
+                            pin = session
+                                .resolve(path)
+                                .as_ref()
+                                .and_then(canon_value)
+                                .map(|v| (column.clone(), v));
+                        }
+                    }
+                    PolicyExpr::Exists { .. }
+                    | PolicyExpr::ExistsRel { .. }
+                    | PolicyExpr::Inherits { .. }
+                    | PolicyExpr::InheritsReferencing { .. }
+                    | PolicyExpr::Not(_)
+                    | PolicyExpr::Or(_) => {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            match pins.get(table) {
+                Some(existing) if *existing != pin => {
+                    pins.insert(table.clone(), None);
+                }
+                _ => {
+                    pins.insert(table.clone(), pin);
+                }
+            }
+            true
+        }
+        PolicyExpr::ExistsRel { .. }
+        | PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. } => false,
+        // Everything else reads only the protected row (and the session).
+        _ => true,
+    }
+}
+
+/// `column = session value` required of the protected row itself: the
+/// policy is that comparison, or a conjunction containing it.
+fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
+    use crate::tools::PolicyValue;
+    match policy {
+        PolicyExpr::Cmp {
+            column,
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(path),
+        } if path.first().map(String::as_str) != Some("__jazz_outer_row") => session
+            .resolve(path)
+            .as_ref()
+            .and_then(canon_value)
+            .map(|value| (column.clone(), value)),
+        PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
+        _ => None,
+    }
+}

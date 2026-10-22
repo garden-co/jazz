@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
-use jazz::groove::large_values::INLINE_VALUE_MAX_BYTES;
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+/// The largest value the previous engine stored inline; the workloads keep
+/// their payload sizes relative to it.
+const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -22,7 +23,8 @@ saxophone carrying the melody; start with a ballad, then something with a slow s
 
 pub struct Fixture {
     db: BenchDb,
-    storage: TestStorage,
+    // The file-backed store a restart reopens.
+    dir: tempfile::TempDir,
     assistant: RowUuid,
     attachment: RowUuid,
     attachment_bytes: usize,
@@ -54,9 +56,8 @@ impl Fixture {
             "exercise the indirect large-value path"
         );
         let schema = schema();
-        let refs = schema.column_families();
-        let storage = TestStorage::new(&refs.iter().map(String::as_str).collect::<Vec<_>>());
-        let db = open(schema.clone(), storage.clone());
+        let dir = tempfile::tempdir().expect("create MusicAgent database directory");
+        let db = open(schema.clone(), &dir);
         let conversation = row_id(1);
         let assistant = row_id(2);
         let attachment = row_id(3);
@@ -126,7 +127,7 @@ impl Fixture {
             .expect("prepare transcript");
         Self {
             db,
-            storage,
+            dir,
             assistant,
             attachment,
             attachment_bytes,
@@ -203,7 +204,7 @@ impl Fixture {
     }
 
     pub fn restarted_transcript(&self) -> Vec<String> {
-        let reopened = open(schema(), self.storage.clone());
+        let reopened = open(schema(), &self.dir);
         let query = reopened
             .prepare_query(&transcript_query())
             .expect("prepare restarted transcript");
@@ -253,15 +254,18 @@ fn schema() -> JazzSchema {
     .expect("MusicAgent schema compiles")
 }
 
-fn open(schema: JazzSchema, storage: TestStorage) -> BenchDb {
-    block_on(Db::open(DbConfig::new(
-        schema,
-        storage,
-        DbIdentity {
-            node: NodeUuid::from_bytes([0x41; 16]),
-            author: AuthorSubject::for_test_bytes([0x51; 16]),
-        },
-    )))
+fn open(schema: JazzSchema, dir: &tempfile::TempDir) -> BenchDb {
+    block_on(Db::open_at(
+        DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x41; 16]),
+                author: AuthorSubject::for_test_bytes([0x51; 16]),
+            },
+        ),
+        &dir.path().join("music-agent.sqlite"),
+        Default::default(),
+    ))
     .expect("open MusicAgent database")
 }
 

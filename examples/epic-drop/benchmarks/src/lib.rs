@@ -5,11 +5,12 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
-use jazz::groove::large_values::INLINE_VALUE_MAX_BYTES;
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+/// The largest value the previous engine stored inline; the workloads keep
+/// their payload sizes relative to it.
+const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -175,9 +176,7 @@ fn numbered_file_id(index: usize) -> RowUuid {
 
 fn open_seeded_db() -> BenchDb {
     let schema = schema();
-    let refs = schema.column_families();
-    let storage = TestStorage::new(&refs.iter().map(String::as_str).collect::<Vec<_>>());
-    let db = open(schema, storage);
+    let db = open(schema);
     insert_folder(&db);
     db
 }
@@ -233,10 +232,9 @@ fn schema() -> JazzSchema {
     .expect("EpicDrop benchmark schema compiles")
 }
 
-fn open(schema: JazzSchema, storage: TestStorage) -> BenchDb {
+fn open(schema: JazzSchema) -> BenchDb {
     block_on(Db::open(DbConfig::new(
         schema,
-        storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0xe1; 16]),
             author: AuthorSubject::for_test_bytes([0xe2; 16]),
