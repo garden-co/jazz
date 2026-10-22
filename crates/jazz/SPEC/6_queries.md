@@ -984,19 +984,26 @@ rows complete only relative to the node's own visible-current knowledge
 subscription's settled subscription result set; an unresolvable result-set entry is an
 invariant violation, not a degraded answer (`INV-QUERY-12`).
 An include-deleted read, one-shot or subscription, widens only the root
-current-row source: deleted root rows may be returned and marked deleted, while
-joins, reachability access tables, reachability edge tables, include payloads
-and policy dependencies continue to use ordinary visible-current witnesses. A
-subscription carries the flag in its `ReadViewSpec` (§6.5), so the authority
-admits deleted root rows under the include-deleted read policy and the
-subscriber marks each covered deleted row deleted. Deleting, restoring or
+current-row source: deleted root rows may be returned, while joins,
+reachability access tables, reachability edge tables, include payloads and
+policy dependencies continue to use ordinary visible-current witnesses. A
+one-shot read marks returned deleted rows deleted. A subscription carries the
+flag in its `ReadViewSpec` (§6.5), so the authority admits deleted root rows
+under the include-deleted read policy; the covered input carries the
+authority's deletion bit, which keeps deleted rows out of the subscriber's
+visible-current join and include witnesses, but published subscription rows
+are not marked deleted. Subscription deletion state is exposed through the
+`$deletedAt`/`$deletedBy` columns instead (#4182). Deleting, restoring or
 revoking access to a row updates the subscription like any other change: a
 restoration replaces the deleted row with the live one, and a row whose read
 policy no longer holds, including because its granting row was deleted, leaves
-the result. Include-deleted reads of current tables support the current source
-and a transaction's snapshot: branch-view read views reject `include_deleted`
-with a "not supported yet" error, for one-shot reads and subscriptions alike.
-History queries keep their own branch selection.
+the result. Include-deleted reads of current tables differ by read path. Plain
+one-shot reads support only the current source and reject every other read
+view (branch views and snapshots) with a "not supported yet" error.
+Subscriptions, and transaction reads, which register as snapshot
+subscriptions, accept the current source and any snapshot; they reject branch
+views with a "not supported yet" error. History queries keep their own branch
+selection.
 
 Inside an open exclusive transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,

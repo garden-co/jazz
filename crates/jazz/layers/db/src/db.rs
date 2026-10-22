@@ -3559,10 +3559,11 @@ fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     ))
 }
 
-/// Include-deleted subscriptions support the same read views as include-deleted
-/// reads: the current source, a transaction's snapshot, or any source of a
-/// history query. Branch views of current tables reject the flag, as one-shot
-/// reads do, until they are specified and tested (SPEC 6 §6.6).
+/// Include-deleted subscriptions support the current source, any snapshot
+/// (transaction reads register as snapshot subscriptions), or any source of a
+/// history query. Branch views of current tables reject the flag until they are
+/// specified and tested (SPEC 6 §6.6). Plain one-shot reads are narrower: they
+/// reject every non-current source of a current-table query with the flag.
 fn ensure_supported_include_deleted_read_view(
     read_view: &ReadViewSpec,
     query_uses_history: bool,
