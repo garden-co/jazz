@@ -788,7 +788,7 @@ mod tests {
         let big = text(1, 200 * 1024);
         let mut deep = big.clone();
         deep[150_000] = b'A';
-        let mut logical = vec![
+        let mut logical = [
             Vec::new(),
             b"a".to_vec(),
             big[..9].to_vec(),
