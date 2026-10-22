@@ -1,3 +1,4 @@
+import { resolveQueryTable } from "./history-relation.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { encryptedSchemas } from "../e2ee/encrypted-schema.js";
 
@@ -12,7 +13,7 @@ export function resolveSelectedColumns(
   schema: WasmSchema,
   projection: readonly string[] | undefined,
 ): string[] {
-  const table = encryptedSchemas.get(schema)?.logical[tableName] ?? schema[tableName];
+  const table = resolveQueryTable(encryptedSchemas.get(schema)?.logical ?? schema, tableName);
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }

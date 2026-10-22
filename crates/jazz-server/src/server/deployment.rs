@@ -4,12 +4,13 @@ use super::{
     catalogue::DeploymentResponse,
     routes::http::{PublishMigrationRequest, lower_migration},
 };
+use crate::runtime::StorageConfig;
 use axum::http::StatusCode;
 use jazz::tools::{
     deployment::{self, DeploymentError},
     public_schema::{Schema, SchemaHash, TableName, TablePolicies},
 };
-use jazz::{protocol::CatalogueSnapshot, schema::JazzSchema, serving::StorageConfig};
+use jazz::{protocol::CatalogueSnapshot, schema::JazzSchema};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -234,7 +235,6 @@ pub(crate) async fn deploy(
         let probe = ServerRuntimeHandle::start_with_storage(
             initial_schema.clone(),
             StorageConfig::InMemory,
-            None,
         )
         .map_err(DeployError::internal)?;
         let result = probe.validate_deployment_snapshot(snapshot.clone()).await;
