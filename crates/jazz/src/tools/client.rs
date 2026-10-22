@@ -287,7 +287,7 @@ impl Forwarder {
             });
             let id = match held {
                 Some(at) => decoder.key(&self.rows.remove(at))?,
-                None => occurrence_key(row.row_uuid, &row.joined),
+                None => jazz_db::values::occurrence_key(row.row_uuid, row.version, &row.joined),
             };
             delta.removed.push(OrderedRemoved {
                 id,
@@ -1840,7 +1840,11 @@ impl Decoder<'_> {
                 NodeUuid(*node),
             )));
         }
-        Ok(occurrence_key(row.row_uuid(), row.joined_rows()))
+        Ok(jazz_db::values::occurrence_key(
+            row.row_uuid(),
+            row.root_version(),
+            row.joined_rows(),
+        ))
     }
 
     fn values(&self, row: &CurrentRow) -> Result<Vec<QueryResultField>> {
@@ -1903,17 +1907,6 @@ fn projected(query: &Query, table: &TableSchema) -> Vec<String> {
         );
     }
     columns
-}
-
-/// A row's occurrence: the row itself, or a flat join's root followed by
-/// its joined source rows.
-fn occurrence_key(root: RowUuid, joined: &[RowUuid]) -> ResultKey {
-    let id = |row: &RowUuid| ObjectId::from_uuid(row.0);
-    ResultKey::from_occurrence(if joined.is_empty() {
-        OutputOccurrenceId::single_source(id(&root))
-    } else {
-        OutputOccurrenceId::new(id(&root), joined.iter().map(id))
-    })
 }
 
 /// A projected cell by name; an unwritten cell reads as null.

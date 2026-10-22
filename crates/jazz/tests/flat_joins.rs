@@ -136,7 +136,7 @@ fn tuples(rows: &[CurrentRow]) -> Vec<(String, String, Vec<RowUuid>)> {
             (
                 cell(row, "users.name").unwrap_or_default(),
                 cell(row, "posts.title").unwrap_or_default(),
-                row.joined_rows().to_vec(),
+                row.joined_rows().iter().map(|joined| joined.row).collect(),
             )
         })
         .collect()
@@ -245,7 +245,15 @@ fn flat_join_subscriptions_address_occurrences() {
         {
             added.extend(a.iter().map(|row| tuples(std::slice::from_ref(&row.row))));
             updated.extend(u.iter().map(|row| tuples(std::slice::from_ref(&row.row))));
-            removed.extend(r.iter().map(|row| (row.row_uuid, row.joined.clone())));
+            removed.extend(r.iter().map(|row| {
+                (
+                    row.row_uuid,
+                    row.joined
+                        .iter()
+                        .map(|joined| joined.row)
+                        .collect::<Vec<_>>(),
+                )
+            }));
         }
     }
     assert_eq!(added.concat(), [tuple("bob", "b2", post(5))]);
@@ -326,4 +334,134 @@ fn synced_flat_join_ships_joined_rows() {
     pump(&server, &client);
     let rows = block_on(client.all(&prepared, opts)).unwrap();
     assert_eq!(tuples(&rows).last(), Some(&tuple("bob", "b2", post(5))));
+}
+
+/// A history source lists each version of its rows: a current row joined
+/// to its own history is one occurrence per version, each keyed by it.
+#[test]
+fn flat_join_with_history_lists_every_version() {
+    let db = open(schema(None), 1);
+    seed(&db);
+    block_on(db.update(
+        "posts",
+        post(1),
+        BTreeMap::from([("title".to_owned(), text("a1, edited"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let query = Query::from("posts")
+        .flat_join("history.posts", "posts.id", "history.posts.id")
+        .filter(eq(col("posts.title"), lit("a1, edited")));
+    let rows = read(&db, &query);
+    let titles: Vec<_> = rows
+        .iter()
+        .map(|row| cell(row, "history.posts.title").unwrap_or_default())
+        .collect();
+    assert_eq!(titles, ["a1", "a1, edited"]);
+    assert!(
+        rows.iter()
+            .all(|row| row.joined_rows()[0].version.is_some())
+    );
+    assert_ne!(rows[0].joined_rows(), rows[1].joined_rows());
+
+    // An unbounded history source is refused.
+    let unbounded =
+        Query::from("posts").flat_join("history.posts", "posts.title", "history.posts.title");
+    assert!(error_of(&db, &unbounded).contains("without a bounded row access path"));
+}
+
+/// A synced history join ships the versions and their origins.
+#[test]
+fn synced_flat_join_with_history_ships_versions() {
+    let server = open(schema(None), 0);
+    seed(&server);
+    block_on(server.update(
+        "posts",
+        post(1),
+        BTreeMap::from([("title".to_owned(), text("a1, edited"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let client = open(schema(None), 1);
+    let (client_side, server_side) = duplex();
+    let _ = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let query = Query::from("posts")
+        .flat_join("history.posts", "posts.id", "history.posts.id")
+        .filter(eq(col("posts.id"), lit(Value::Uuid(post(1).0))));
+    let on_server = read(&server, &query);
+    assert_eq!(on_server.len(), 2);
+    let prepared = client.prepare_query(&query).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let opts = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let rows = block_on(client.all(&prepared, opts)).unwrap();
+    assert_eq!(tuples(&rows).len(), 2);
+
+    // A writer's uploaded edit, then a reader's one-shot remote read,
+    // bounded by the join alone.
+    let writer = open(schema(None), 3);
+    let (client_side, server_side) = duplex();
+    let _ = block_on(writer.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xb0; 16]));
+    let posts = writer.prepare_query(&Query::from("posts")).unwrap();
+    let _held = block_on(writer.subscribe(&posts, ReadOpts::default())).unwrap();
+    pump(&server, &writer);
+    block_on(writer.update(
+        "posts",
+        post(3),
+        BTreeMap::from([("title".to_owned(), text("b1, edited"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &writer);
+    let fresh = open(schema(None), 2);
+    let (client_side, server_side) = duplex();
+    let _ = block_on(fresh.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xa1; 16]));
+    let posts = fresh.prepare_query(&Query::from("posts")).unwrap();
+    let _ready = block_on(fresh.subscribe(&posts, ReadOpts::default())).unwrap();
+    pump(&server, &fresh);
+    let query = Query::from("posts").flat_join("history.posts", "posts.id", "history.posts.id");
+    let remote = ReadOpts {
+        tier: ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let bytes = postcard::to_allocvec(&query).unwrap();
+    let read = fresh.all_serialized_query(
+        &bytes,
+        remote,
+        None,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| fresh.detach_query(attachment),
+    );
+    let mut read = std::pin::pin!(read);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let rows = loop {
+        use std::future::Future;
+        if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            match result.unwrap() {
+                jazz::db::SerializedReadResult::Rows(rows) => break rows,
+                other => panic!("{other:?}"),
+            }
+        }
+        pump(&server, &fresh);
+    };
+    assert_eq!(rows.len(), 6, "four posts, two with two versions");
+
+    // So does a subscription of the same join.
+    let prepared = fresh.prepare_query(&query).unwrap();
+    let _stream = block_on(fresh.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &fresh);
+    let local = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    assert_eq!(block_on(fresh.all(&prepared, local)).unwrap().len(), 6);
 }

@@ -955,7 +955,54 @@ pub struct CurrentRow {
     pub(crate) types: Arc<[ValueType]>,
     /// A flat join's joined source rows in declared order, after the root
     /// (`id`): with it, the row's occurrence. Empty for other reads.
-    pub(crate) joined: Arc<[RowUuid]>,
+    pub(crate) joined: Arc<[JoinedRow]>,
+    /// A flat join's root version when the root is a history source.
+    pub(crate) version: Option<SourceVersion>,
+}
+
+/// A history version's transaction identity, `(tx, node)` as its
+/// `$transactionId` reads.
+pub type SourceVersion = (u64, crate::ids::NodeUuid);
+
+/// A row's result key: the row itself, or a flat join's root followed by
+/// its joined source rows, each with its history version if it has one.
+/// Relations arrive as nested rows, not joined outputs.
+pub fn occurrence_key(
+    root: RowUuid,
+    version: Option<SourceVersion>,
+    joined: &[JoinedRow],
+) -> jazz_types::object::ResultKey {
+    use jazz_types::object::{ObjectId, OutputOccurrenceId, ResultKey, SourceOccurrenceId};
+    let source = |row: RowUuid, version: Option<SourceVersion>| {
+        let id = ObjectId::from_uuid(row.0);
+        match version {
+            Some((tx, node)) => SourceOccurrenceId::history(id, jazz_types::time::TxTime(tx), node),
+            None => SourceOccurrenceId::current(id),
+        }
+    };
+    if joined.is_empty() && version.is_none() {
+        return ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+            root.0,
+        )));
+    }
+    ResultKey::from_occurrence(
+        OutputOccurrenceId::from_source_occurrences(
+            source(root, version),
+            joined
+                .iter()
+                .map(|joined| source(joined.row, joined.version)),
+            [],
+        )
+        .expect("an occurrence without union arms is valid"),
+    )
+}
+
+/// One joined source row of a flat-join occurrence: the row, and its
+/// version when the source is a history relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JoinedRow {
+    pub row: RowUuid,
+    pub version: Option<SourceVersion>,
 }
 
 impl CurrentRow {
@@ -969,8 +1016,13 @@ impl CurrentRow {
 
     /// A flat join's joined source rows in declared order (the root is
     /// [`Self::row_uuid`]); empty for other reads.
-    pub fn joined_rows(&self) -> &[RowUuid] {
+    pub fn joined_rows(&self) -> &[JoinedRow] {
         &self.joined
+    }
+
+    /// A flat join's root version, when its root is a history source.
+    pub fn root_version(&self) -> Option<SourceVersion> {
+        self.version
     }
 
     pub fn is_deleted(&self) -> bool {

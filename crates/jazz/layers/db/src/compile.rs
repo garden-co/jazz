@@ -611,9 +611,11 @@ impl<'a> Ctx<'a> {
                 return Err(unsupported(format!("reading {column} in joins")));
             }
         }
+        if query.flat_join.is_some() {
+            return self.compile_flat_join(query);
+        }
         if let Some(source) = crate::schema::history::history_source_table(&query.table) {
-            if query.flat_join.is_some()
-                || !query.policy_branches.is_empty()
+            if !query.policy_branches.is_empty()
                 || !query.inherits.is_empty()
                 || query.relation.is_some()
             {
@@ -784,6 +786,11 @@ impl<'a> Ctx<'a> {
     /// tuple is its occurrence. Filters name qualified columns, or
     /// unqualified ones only one source has, and each conjunct reads one
     /// source. Ordered by the occurrence.
+    ///
+    /// A `history.<table>` source lists its rows' versions (gated by the
+    /// current row, as a history read is), so each version is its own
+    /// occurrence. It must be bounded by row id: an id filter, or a join
+    /// key on its `id` whose other side reads a bounded source.
     fn compile_flat_join(mut self, query: &Query) -> Result<Compiled, Error> {
         let Some(flat_join) = &query.flat_join else {
             unreachable!("compile_flat_join on a query without one")
@@ -806,29 +813,42 @@ impl<'a> Ctx<'a> {
         if let Some((_, feature)) = combined.iter().find(|(present, _)| *present) {
             return Err(unsupported(format!("flat joins with {feature}")));
         }
-        let mut sources: Vec<(String, &'a Table, String)> = vec![(
+        let mut declared = vec![(
             flat_join
                 .root_alias
                 .clone()
                 .unwrap_or_else(|| query.table.clone()),
-            self.table(&query.table)?,
+            query.table.clone(),
             "t".to_owned(),
         )];
         for source in &flat_join.sources {
-            if crate::schema::history::history_source_table(&source.table).is_some() {
-                return Err(unsupported("flat joins with history sources on SQLite"));
-            }
             let name = source.alias.clone().unwrap_or_else(|| source.table.clone());
-            if sources.iter().any(|(seen, ..)| *seen == name) {
+            if declared.iter().any(|(seen, ..)| *seen == name) {
                 return Err(query_error(format!("flat join duplicate source `{name}`")));
             }
-            let table = self.table(&source.table)?;
             let alias = self.alias("f");
-            sources.push((name, table, alias));
+            declared.push((name, source.table.clone(), alias));
         }
-        let resolve = |sources: &[(String, &'a Table, String)],
-                       column: &str|
-         -> Result<(usize, String), Error> {
+        // Each source as it reads: a history source as its versions (whose
+        // SQL waits for its bound), others as their table.
+        let mut sources: Vec<FlatSource<'a>> = Vec::with_capacity(declared.len());
+        for (name, table, alias) in declared {
+            let history = crate::schema::history::history_source_table(&table);
+            let base = self.table(history.unwrap_or(&table))?;
+            let (table, sql) = match history {
+                Some(_) => (history::versions_table(base), None),
+                None => (base.clone(), Some(self.source(base)?)),
+            };
+            sources.push(FlatSource {
+                name,
+                base,
+                table,
+                alias,
+                history: history.is_some(),
+                sql,
+            });
+        }
+        let resolve = |sources: &[FlatSource], column: &str| -> Result<(usize, String), Error> {
             let (scope, field) = match column.find(".$") {
                 Some(at) => (&column[..at], &column[at + 1..]),
                 None => column.rsplit_once('.').unwrap_or(("", column)),
@@ -837,13 +857,13 @@ impl<'a> Ctx<'a> {
                 field == "id" || field == "_id" || column_sql(table, "t", field).is_ok()
             };
             let public = |field: &str| if field == "_id" { "id" } else { field }.to_owned();
-            if let Some(at) = sources.iter().position(|(name, ..)| name == scope) {
-                if !has(sources[at].1, field) {
+            if let Some(at) = sources.iter().position(|source| source.name == scope) {
+                if !has(&sources[at].table, field) {
                     return Err(query_error(format!("unknown flat join column `{column}`")));
                 }
                 return Ok((at, public(field)));
             }
-            let mut found = (0..sources.len()).filter(|&at| has(sources[at].1, column));
+            let mut found = (0..sources.len()).filter(|&at| has(&sources[at].table, column));
             match (found.next(), found.next()) {
                 (Some(at), None) => Ok((at, public(column))),
                 (Some(_), Some(_)) => Err(query_error(format!(
@@ -852,29 +872,21 @@ impl<'a> Ctx<'a> {
                 (None, _) => Err(query_error(format!("unknown flat join column `{column}`"))),
             }
         };
-        let mut joins = String::new();
-        let mut wheres = vec!["t._del = 0".to_owned()];
+        let mut keys = Vec::with_capacity(flat_join.sources.len());
         for (at, source) in flat_join.sources.iter().enumerate() {
-            let (left, left_column) = resolve(&sources[..=at], &source.on.left)?;
-            let (right, right_column) = resolve(&sources, &source.on.right)?;
-            if right != at + 1 {
+            let left = resolve(&sources[..=at], &source.on.left)?;
+            let right = resolve(&sources, &source.on.right)?;
+            if right.0 != at + 1 {
                 return Err(query_error(format!(
                     "flat join condition `{}` must name the joined source `{}`",
                     source.on.right,
-                    sources[at + 1].0
+                    sources[at + 1].name
                 )));
             }
-            let (_, left_table, left_alias) = &sources[left];
-            let (_, right_table, right_alias) = &sources[right];
-            let on = self.join_key(
-                (left_table, left_alias, &left_column),
-                (right_table, right_alias, &right_column),
-            )?;
-            let source_sql = self.source(right_table)?;
-            joins.push_str(&format!(
-                " JOIN {source_sql} AS {right_alias} ON {right_alias}._del = 0 AND {on}"
-            ));
+            keys.push((left, right));
         }
+        // Filters, each conjunct routed to the one source it reads.
+        let mut routed: Vec<(usize, Predicate)> = Vec::new();
         for filter in &query.filters {
             let mut conjuncts = Vec::new();
             flatten_all(filter, &mut conjuncts);
@@ -882,10 +894,10 @@ impl<'a> Ctx<'a> {
                 if matches!(conjunct, Predicate::EnumMatch { .. }) {
                     return Err(unsupported("enum-match filters in flat joins"));
                 }
-                let mut routed = conjunct.clone();
+                let mut predicate = conjunct.clone();
                 let mut reads = BTreeSet::new();
                 let mut failed = None;
-                routed.for_each_operand_mut(&mut |operand| {
+                predicate.for_each_operand_mut(&mut |operand| {
                     if let Operand::Column(column) = operand {
                         match resolve(&sources, column) {
                             Ok((at, field)) => {
@@ -902,34 +914,109 @@ impl<'a> Ctx<'a> {
                 if reads.len() > 1 {
                     return Err(unsupported("flat join filters spanning multiple sources"));
                 }
-                let at = reads.first().copied().unwrap_or(0);
-                let (_, table, alias) = &sources[at];
-                wheres.push(self.predicate(&routed, table, alias)?);
+                routed.push((reads.first().copied().unwrap_or(0), predicate));
             }
+        }
+        // Bound history sources until none is left: by an id filter, else
+        // by a key on their id whose other side is bound.
+        while let Some(at) = sources.iter().position(|source| source.sql.is_none()) {
+            let mut bound = routed
+                .iter()
+                .filter(|(source, _)| *source == at)
+                .find_map(|(_, predicate)| history::bounding_id(predicate))
+                .map(history::HistoryBound::Filter);
+            if bound.is_none() {
+                for ((left, left_column), (right, right_column)) in &keys {
+                    let other = match (*left == at, *right == at) {
+                        (true, false) if left_column == "id" => (*right, right_column),
+                        (false, true) if right_column == "id" => (*left, left_column),
+                        _ => continue,
+                    };
+                    let source = &sources[other.0];
+                    let Some(sql) = &source.sql else { continue };
+                    let b = self.alias("b");
+                    bound = Some(history::HistoryBound::Ids(format!(
+                        "SELECT {} FROM {sql} AS {b} WHERE {b}._del = 0",
+                        column_sql(&source.table, &b, other.1)?
+                    )));
+                    break;
+                }
+            }
+            let Some(bound) = bound else {
+                return Err(query_error(
+                    "unsupported relation query: Reading history without a bounded row access \
+                     path is not supported in history queries yet",
+                ));
+            };
+            let base = sources[at].base;
+            let (sql, _) = self.history_source(&base.name, bound, false)?;
+            sources[at].sql = Some(sql);
+        }
+        let sql_of = |source: &FlatSource| source.sql.clone().expect("every source is bound");
+        let mut joins = String::new();
+        for ((left, left_column), (right, right_column)) in &keys {
+            let (left, right) = (&sources[*left], &sources[*right]);
+            if (left.history || right.history)
+                && (is_array(&left.table, left_column) || is_array(&right.table, right_column))
+            {
+                return Err(unsupported("flat joins of history on array columns"));
+            }
+            let on = self.join_key(
+                (&left.table, &left.alias, left_column),
+                (&right.table, &right.alias, right_column),
+            )?;
+            joins.push_str(&format!(
+                " JOIN {} AS {alias} ON {alias}._del = 0 AND {on}",
+                sql_of(right),
+                alias = right.alias
+            ));
+        }
+        let mut wheres = vec!["t._del = 0".to_owned()];
+        for (at, predicate) in &routed {
+            let source = &sources[*at];
+            wheres.push(self.predicate(predicate, &source.table, &source.alias)?);
         }
         if let Some(session) = self.policy {
-            for (_, table, alias) in &sources {
-                wheres.push(self.read_policy(table, alias, session)?);
+            // History sources are gated by their current rows already.
+            for source in sources.iter().filter(|source| !source.history) {
+                wheres.push(self.read_policy(&source.table, &source.alias, session)?);
             }
         }
-        let mut ids = String::new();
+        let version = |source: &FlatSource| match source.history {
+            true => format!(
+                "{}.{}",
+                source.alias,
+                quote(crate::schema::history::TRANSACTION_ID_COLUMN)
+            ),
+            false => "NULL".to_owned(),
+        };
+        let mut ids = format!(", {}", version(&sources[0]));
         let mut order = vec!["t.id".to_owned()];
+        if sources[0].history {
+            order.push("t._seq".to_owned());
+        }
         let mut projection = Vec::new();
         let mut columns = String::new();
-        for (at, (name, table, alias)) in sources.iter().enumerate() {
+        for (at, source) in sources.iter().enumerate() {
             if at > 0 {
-                ids.push_str(&format!(", {alias}.id"));
-                order.push(format!("{alias}.id"));
+                ids.push_str(&format!(", {}.id, {}", source.alias, version(source)));
+                order.push(format!("{}.id", source.alias));
+                if source.history {
+                    order.push(format!("{}._seq", source.alias));
+                }
             }
-            for (column, ty) in crate::compile::projection(table, None)? {
-                columns.push_str(&format!(", {}", column_sql(table, alias, &column)?));
-                projection.push((format!("{name}.{column}"), ty));
+            for (column, ty) in crate::compile::projection(&source.table, None)? {
+                columns.push_str(&format!(
+                    ", {}",
+                    column_sql(&source.table, &source.alias, &column)?
+                ));
+                projection.push((format!("{}.{column}", source.name), ty));
             }
         }
-        let root = self.source(sources[0].1)?;
         let sql = format!(
-            "SELECT t.id, t._seq, t._del{ids}{columns} FROM {root} AS t{joins} \
+            "SELECT t.id, t._seq, t._del{ids}{columns} FROM {} AS t{joins} \
              WHERE {} ORDER BY {}",
+            sql_of(&sources[0]),
             and(&wheres),
             order.join(", ")
         );
@@ -1859,6 +1946,20 @@ fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<(String, V
             })
             .collect(),
     }
+}
+
+/// One source of a flat join.
+struct FlatSource<'a> {
+    /// Its effective name: alias or table.
+    name: String,
+    /// The schema table it reads (a history source's table).
+    base: &'a Table,
+    /// What it reads as: the table, or a history source's versions.
+    table: Table,
+    alias: String,
+    history: bool,
+    /// Its SQL source; a history source's waits for its bound.
+    sql: Option<String>,
 }
 
 /// The conjuncts of a filter: an `All` contributes each of its parts.

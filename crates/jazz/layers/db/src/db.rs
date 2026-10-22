@@ -173,7 +173,9 @@ pub struct RemovedRow {
     pub table: String,
     pub row_uuid: RowUuid,
     /// A flat join's joined source rows ([`CurrentRow::joined_rows`]).
-    pub joined: Vec<RowUuid>,
+    pub joined: Vec<crate::values::JoinedRow>,
+    /// A flat join's root version ([`CurrentRow::root_version`]).
+    pub version: Option<crate::values::SourceVersion>,
     pub index: usize,
 }
 
@@ -1697,15 +1699,33 @@ impl Inner {
             };
             let seq: i64 = row.get(1).map_err(storage)?;
             let deleted: i64 = row.get(2).map_err(storage)?;
+            // A flat join: the root's version, then each joined row and
+            // its version.
+            let flat = compiled.joined > 0;
+            let version = |at: usize| -> Result<Option<crate::values::SourceVersion>, Error> {
+                let Some(tx) = row.get::<_, Option<Vec<u8>>>(at).map_err(storage)? else {
+                    return Ok(None);
+                };
+                let corrupt = || Error::new(ErrorCode::Storage, "transaction identity");
+                let (time, node) = tx.split_at_checked(8).ok_or_else(corrupt)?;
+                Ok(Some((
+                    u64::from_be_bytes(time.try_into().map_err(|_| corrupt())?),
+                    crate::ids::NodeUuid(uuid::Uuid::from_slice(node).map_err(|_| corrupt())?),
+                )))
+            };
+            let root_version = if flat { version(3)? } else { None };
             let joined = (0..compiled.joined)
                 .map(|i| {
-                    let id: Vec<u8> = row.get(3 + i).map_err(storage)?;
-                    uuid::Uuid::from_slice(&id)
-                        .map(RowUuid)
-                        .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+                    let id: Vec<u8> = row.get(4 + 2 * i).map_err(storage)?;
+                    Ok(crate::values::JoinedRow {
+                        row: uuid::Uuid::from_slice(&id)
+                            .map(RowUuid)
+                            .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
+                        version: version(5 + 2 * i)?,
+                    })
                 })
-                .collect::<Result<Arc<[RowUuid]>, Error>>()?;
-            let first = 3 + compiled.joined;
+                .collect::<Result<Arc<[_]>, Error>>()?;
+            let first = if flat { 4 + 2 * compiled.joined } else { 3 };
             let cells = compiled
                 .projection
                 .iter()
@@ -1732,6 +1752,7 @@ impl Inner {
                 cells: Arc::new(cells),
                 types: types.clone(),
                 joined,
+                version: root_version,
             });
         }
         if blocked {
