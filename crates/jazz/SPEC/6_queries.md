@@ -621,15 +621,20 @@ source-id vector above. A `UNION ALL` relation arm additionally contributes its
 stable normalized arm label immediately before that arm's source-row id. This
 typed `(arm-label, row-id)` carrier is retained below the public projection and
 is used by Root grouping, maintained membership, reset snapshots, and
-`ResultKey`. Every ResultKey uses one complete version-1 typed encoding:
-`1 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
-(position:u32be | label_length:u32be | label:utf8)*`, where source position
-zero is the root and joined sources are positions one through `joined_count`.
-Ordinary results carry
-zero joined rows and arms; ordinary joins carry zero arms; union occurrences
-carry their ordered arm records. Empty, duplicate-position, or out-of-range
-discriminators are malformed. The former concatenated-UUID and tag-2 encodings
-are unreleased superseded formats and MUST be rejected.
+`ResultKey`. All ResultKeys use one encoding:
+`2 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
+(position:u32be | label_length:u32be | label:utf8)* |
+(has_transaction:u8 [tx_time:u64be | tx_node:16]) × (1 + joined_count)`, where
+source position zero is the root and joined sources are positions one through
+`joined_count`. There is one transaction flag per source position, written in
+position order (root first, then each joined source). A flag is 0 for a current
+source and 1 for a history source version, which is then followed by that
+version's `tx_time` and `tx_node`; the root and any joined source may each be
+history versions. Other flag values are malformed.
+Ordinary results carry zero joined rows and arms; ordinary joins carry zero
+arms; union occurrences carry their ordered arm records. Empty,
+duplicate-position, or out-of-range discriminators are malformed. Previous
+encodings MUST be rejected; Rust and TypeScript migrate together.
 Nested non-recursive unions compose their stable semantic arm labels into one
 typed path component; sibling insertion or reordering therefore does not rekey
 unchanged arms. Sibling arm labels MUST be non-empty and unique within their
@@ -643,11 +648,20 @@ labels supplied by their normalized source. A builder without such declared
 identity MUST reject that shape; it MUST NOT invent an ordinal merely to retain
 duplicate derivations.
 
+A history root's optional transaction uses the full packed HLC and originating
+node UUID, with no node-local aliases. History joins and union arms remain
+unsupported. `fixtures/result-key.json` pins a history key and the binding golden
+fixture covers current and union keys. These ephemeral keys are neither
+persisted nor sent by the active peer protocol, so no backward-compatible
+decoder or storage migration is required.
+
 Public subscription transports MUST carry the opaque versioned `ResultKey`
 sidecar aligned with added, updated, and removed rows. They MUST validate the
-alignment and key encoding before applying a delta. Serializing the legacy
-two-field `OutputOccurrenceId` alone is insufficient because its byte-compatible
-form intentionally does not carry typed union-arm discriminators.
+alignment and key encoding before applying a delta. Direct serialization of
+`OutputOccurrenceId` MUST delegate to `ResultKey` and preserve union-arm and
+history-version discriminators. There is no separate field-based occurrence
+encoding or typed-row member variant. The retired two-field representation is
+not supported.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`
@@ -755,8 +769,11 @@ produces `[rowB, rowB]`, while a missing B produces `[rowA]`.
 
 Explicit `order_by` overrides the default primary ordering for the result boundary
 where it appears. Ordered row-valued results remain total and replay-stable:
-after the user-declared order terms, ties are broken by ascending row id unless
-the query surface later exposes an explicit, stable tie policy. Child-local
+after the user-declared order terms, ties are broken by row id in the direction
+of the last declared term (ascending when that term is ascending, descending when
+it is descending) unless the query surface later exposes an explicit, stable tie
+policy. Following the last term's direction lets one declared index, which ends
+in the row id, supply the whole order in either scan direction. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
 parents or sibling relation payloads. The row id used for relation defaults and explicit ordering ties
 is the child source row id, and its ordering is independently evaluated within
