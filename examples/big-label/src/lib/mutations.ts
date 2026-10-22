@@ -27,7 +27,7 @@ export class CatalogNumberTakenError extends Error {
 
 /**
  * Inserts or updates a release. Catalogue numbers are unique per label: the
- * exclusive transaction reads the number's current holders, and the
+ * serializable transaction reads the number's current holders, and the
  * authority rejects the write if a concurrent transaction changed that read.
  * This protects writes made through this function; the permissions don't
  * enforce uniqueness on their own.
@@ -38,7 +38,7 @@ export function saveRelease(
   release: { id: string; isNew: boolean },
   fields: ReleaseFields,
 ) {
-  return db.exclusiveTransaction(async (tx) => {
+  return db.serializableTransaction(async (tx) => {
     const holders = await tx.all(
       app.releases.where({ organizationId, catalogNumber: fields.catalogNumber }),
     );
@@ -89,11 +89,11 @@ export class ArtistHasReleasesError extends Error {
 
 /**
  * Deletes an artist that has no releases. Jazz has no foreign-key restrict
- * yet, so the exclusive transaction reads the artist's releases and the
+ * yet, so the serializable transaction reads the artist's releases and the
  * authority rejects the delete if one was added concurrently.
  */
 export function deleteArtist(db: Db, organizationId: string, artistId: string) {
-  return db.exclusiveTransaction(async (tx) => {
+  return db.serializableTransaction(async (tx) => {
     const releases = await tx.all(app.releases.where({ organizationId, artistId }).limit(1));
     if (releases.length > 0) throw new ArtistHasReleasesError();
     tx.delete(app.artists, artistId);

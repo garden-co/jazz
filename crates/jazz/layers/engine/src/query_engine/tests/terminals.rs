@@ -1453,7 +1453,7 @@ fn payload_coverage_is_split_into_small_terminal_facts() {
             fate_field: "fate".to_owned(),
         }),
     };
-    let view_complete = ProgramFactKey::ViewCompleteExclusiveCoverage {
+    let view_complete = ProgramFactKey::ViewCompleteSerializableCoverage {
         view: program_scope(),
         result: None,
         tier: DurabilityTier::Global,

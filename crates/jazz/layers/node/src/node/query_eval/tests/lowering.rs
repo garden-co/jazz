@@ -2,7 +2,7 @@
 
 use super::*;
 #[test]
-fn exclusive_join_shape_uses_shared_snapshot_lowering() {
+fn serializable_join_shape_uses_shared_snapshot_lowering() {
     let schema = schema();
     let (_client_dir, mut client) =
         open_node_with_uuid(NodeUuid::from_bytes([1; 16]), schema.clone());
@@ -36,7 +36,7 @@ fn exclusive_join_shape_uses_shared_snapshot_lowering() {
         .unwrap();
 
     let open = OpenTransactionId::new();
-    client.open_exclusive(open).unwrap();
+    client.open_serializable(open).unwrap();
     let rows = client
         .tx_query(open, &shape, &binding)
         .unwrap()

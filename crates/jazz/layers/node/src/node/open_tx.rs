@@ -1,11 +1,11 @@
 //! Open transaction lifecycle and snapshot-overlay reads. This module owns
-//! `tx_read`, `tx_query`, mergeable/exclusive write staging, and commit-unit
+//! `tx_read`, `tx_query`, mergeable/serializable write staging, and commit-unit
 //! construction for open transactions; authority-side validation and fate
 //! assignment live in [`super::ingest`], while query execution helpers live in
 //! [`super::query_eval`]. It is the node API layer used by the `Db` facade before
 //! writes become protocol commit units.
 
-use super::query_eval::{ExclusiveSourceReads, NarrowedSourceRead};
+use super::query_eval::{NarrowedSourceRead, SerializableSourceReads};
 use super::*;
 use crate::tx::{BranchViewCopyEvidence, BranchWriteIntent, BranchWriteOperation};
 
@@ -13,11 +13,11 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    /// Open an exclusive transaction over the current snapshot.
-    pub async fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
+    /// Open a serializable transaction over the current snapshot.
+    pub async fn open_serializable(&mut self, id: OpenTransactionId) -> Result<(), Error> {
         self.open_transaction(
             id,
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 made_by: AuthorSubject::SYSTEM,
                 permission_subject: AuthorSubject::SYSTEM,
             },
@@ -27,27 +27,27 @@ where
     }
 
     #[cfg(feature = "testing")]
-    /// Open an exclusive transaction for a synthetic test identity.
-    pub async fn open_exclusive_for_test(
+    /// Open a serializable transaction for a synthetic test identity.
+    pub async fn open_serializable_for_test(
         &mut self,
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
-        self.open_exclusive_for_identity(id, made_by).await
+        self.open_serializable_for_identity(id, made_by).await
     }
 
     #[doc(hidden)]
-    pub async fn open_exclusive_for_identity(
+    pub async fn open_serializable_for_identity(
         &mut self,
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
-        self.open_exclusive_with_identity(id, made_by, made_by)
+        self.open_serializable_with_identity(id, made_by, made_by)
             .await
     }
 
     #[doc(hidden)]
-    pub async fn open_exclusive_with_identity(
+    pub async fn open_serializable_with_identity(
         &mut self,
         id: OpenTransactionId,
         made_by: AuthorSubject,
@@ -55,7 +55,7 @@ where
     ) -> Result<(), Error> {
         self.open_transaction(
             id,
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 made_by,
                 permission_subject,
             },
@@ -91,7 +91,7 @@ where
                 made_by,
                 permission_subject: Some(subject),
             } => Ok(subject != made_by),
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 made_by,
                 permission_subject,
             } => Ok(permission_subject != made_by),
@@ -100,10 +100,10 @@ where
     }
 
     #[doc(hidden)]
-    pub fn transaction_is_exclusive(&self, id: OpenTransactionId) -> Result<bool, Error> {
+    pub fn transaction_is_serializable(&self, id: OpenTransactionId) -> Result<bool, Error> {
         Ok(matches!(
             self.open_tx(id)?.kind,
-            OpenTransactionKind::Exclusive { .. }
+            OpenTransactionKind::Serializable { .. }
         ))
     }
 
@@ -113,7 +113,7 @@ where
         id: OpenTransactionId,
     ) -> Result<AuthorSubject, Error> {
         Ok(match self.open_tx(id)?.kind {
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 permission_subject, ..
             } => permission_subject,
             OpenTransactionKind::Mergeable {
@@ -123,17 +123,17 @@ where
         })
     }
 
-    /// Return the permission subject bound to an open exclusive transaction.
-    pub fn exclusive_transaction_permission_subject(
+    /// Return the permission subject bound to an open serializable transaction.
+    pub fn serializable_transaction_permission_subject(
         &self,
         id: OpenTransactionId,
     ) -> Result<AuthorSubject, Error> {
         match self.open_tx(id)?.kind {
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 permission_subject, ..
             } => Ok(permission_subject),
             OpenTransactionKind::Mergeable { .. } => Err(Error::InvalidMergeableCommit(
-                "open transaction is not exclusive",
+                "open transaction is not serializable",
             )),
         }
     }
@@ -192,7 +192,7 @@ where
             }
         }
         dots.extend(self.pending_foreign_transaction_ids().await?);
-        Snapshot::exclusive_base(
+        Snapshot::serializable_base(
             self.node_uuid,
             self.clock.committed_global_time,
             local_base,
@@ -269,7 +269,7 @@ where
         Ok(())
     }
 
-    /// Read a row inside an exclusive transaction.
+    /// Read a row inside a serializable transaction.
     pub async fn tx_read(
         &mut self,
         tx_id: OpenTransactionId,
@@ -375,7 +375,7 @@ where
         Ok(())
     }
 
-    /// Classify an explicit exclusive insert target that the transaction's
+    /// Classify an explicit serializable insert target that the transaction's
     /// overlaid point read reports as absent: a committed or staged deletion
     /// still occupies the id. The staged overlay is keyed by `(table, row)`,
     /// so the same row UUID in another table never counts.
@@ -415,7 +415,7 @@ where
         )
     }
 
-    /// Read all current rows inside an exclusive transaction.
+    /// Read all current rows inside a serializable transaction.
     pub async fn tx_current_rows(
         &mut self,
         tx_id: OpenTransactionId,
@@ -443,13 +443,13 @@ where
             .await
     }
 
-    /// Offer `reads` to the sources of the query an open exclusive
+    /// Offer `reads` to the sources of the query an open serializable
     /// transaction is about to evaluate. Returns the narrowing in effect
     /// before, which [`Self::withdraw_tx_narrowed_source_reads`] restores.
     pub(super) fn offer_tx_narrowed_source_reads(
         &mut self,
         tx_id: OpenTransactionId,
-        reads: ExclusiveSourceReads,
+        reads: SerializableSourceReads,
     ) -> Result<SourceNarrowing, Error> {
         let narrowing = &mut self.open_tx_mut(tx_id)?.source_narrowing;
         let offered = SourceNarrowing {
@@ -474,15 +474,15 @@ where
 
     /// Claim the read of `source`, a source beyond its query's root: the
     /// narrowed read offered for it, or nothing for sync payload or while a
-    /// narrowed read is being recorded. An exclusive transaction reads such a source no other way:
-    /// its query already failed with [`Error::UnsupportedExclusiveRead`] if a
+    /// narrowed read is being recorded. A serializable transaction reads such a source no other way:
+    /// its query already failed with [`Error::UnsupportedSerializableRead`] if a
     /// source had no narrowed read (garden-co/jazz#3694).
     pub(super) fn claim_tx_source_read(
         &mut self,
         tx_id: OpenTransactionId,
         source: &crate::node::query_engine::SourceId,
     ) -> Result<(), Error> {
-        let exclusive = self.transaction_is_exclusive(tx_id)?;
+        let serializable = self.transaction_is_serializable(tx_id)?;
         let narrowing = &mut self.open_tx_mut(tx_id)?.source_narrowing;
         if narrowing.recording || narrowing.payload.contains(source) {
             return Ok(());
@@ -493,7 +493,7 @@ where
                 narrowing.claimed.push(read);
                 Ok(())
             }
-            None if exclusive => Err(Error::UnsupportedExclusiveRead(format!(
+            None if serializable => Err(Error::UnsupportedSerializableRead(format!(
                 "`{}` beyond the root of its query",
                 source.table
             ))),
@@ -642,7 +642,7 @@ where
         Ok(current)
     }
 
-    /// Stage a row write inside an exclusive transaction.
+    /// Stage a row write inside a serializable transaction.
     pub async fn tx_write<V: Into<Value>>(
         &mut self,
         tx_id: OpenTransactionId,
@@ -708,7 +708,7 @@ where
         .await
     }
 
-    /// Stage an exclusive row replacement whose `staged_large_cells` columns
+    /// Stage a serializable row replacement whose `staged_large_cells` columns
     /// hold descriptors of Groove roots this transaction staged itself for a
     /// partial large-value update (#2087). The transaction takes ownership of
     /// those roots: commit publishes them, and a later replacement of the
@@ -728,10 +728,10 @@ where
     ) -> Result<(), Error> {
         if !matches!(
             self.open_tx(tx_id)?.kind,
-            OpenTransactionKind::Exclusive { .. }
+            OpenTransactionKind::Serializable { .. }
         ) {
             return Err(Error::InvalidMergeableCommit(
-                "open transaction is not exclusive",
+                "open transaction is not serializable",
             ));
         }
         self.table_in_schema_ref(table, write_schema_version)?;
@@ -1221,31 +1221,32 @@ where
             }))
     }
 
-    /// Commit an exclusive transaction and return its sync commit unit.
-    pub async fn commit_exclusive_bound(
+    /// Commit a serializable transaction and return its sync commit unit.
+    pub async fn commit_serializable_bound(
         &mut self,
         open_batch_id: OpenTransactionId,
         now_ms: u64,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let OpenTransactionKind::Exclusive { made_by, .. } = self.open_tx(open_batch_id)?.kind
+        let OpenTransactionKind::Serializable { made_by, .. } = self.open_tx(open_batch_id)?.kind
         else {
             return Err(Error::OpenTransactionIdentityMismatch);
         };
-        self.commit_exclusive(open_batch_id, made_by, now_ms).await
+        self.commit_serializable(open_batch_id, made_by, now_ms)
+            .await
     }
 
-    /// Commit a bound exclusive transaction at a synchronously reserved local
+    /// Commit a bound serializable transaction at a synchronously reserved local
     /// identity after all cold serializability and large-value checks finish.
-    pub async fn commit_exclusive_bound_at(
+    pub async fn commit_serializable_bound_at(
         &mut self,
         open_batch_id: OpenTransactionId,
         reserved: TxId,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        let OpenTransactionKind::Exclusive { made_by, .. } = self.open_tx(open_batch_id)?.kind
+        let OpenTransactionKind::Serializable { made_by, .. } = self.open_tx(open_batch_id)?.kind
         else {
             return Err(Error::OpenTransactionIdentityMismatch);
         };
-        self.commit_exclusive_inner(
+        self.commit_serializable_inner(
             open_batch_id,
             made_by,
             reserved.time.physical_ms(),
@@ -1254,18 +1255,18 @@ where
         .await
     }
 
-    /// Commit an exclusive transaction and return its sync commit unit.
-    pub async fn commit_exclusive(
+    /// Commit a serializable transaction and return its sync commit unit.
+    pub async fn commit_serializable(
         &mut self,
         open_batch_id: OpenTransactionId,
         made_by: AuthorSubject,
         now_ms: u64,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        self.commit_exclusive_inner(open_batch_id, made_by, now_ms, None)
+        self.commit_serializable_inner(open_batch_id, made_by, now_ms, None)
             .await
     }
 
-    async fn commit_exclusive_inner(
+    async fn commit_serializable_inner(
         &mut self,
         open_batch_id: OpenTransactionId,
         made_by: AuthorSubject,
@@ -1273,17 +1274,17 @@ where
         reserved: Option<TxId>,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
         let (provenance_subject, permission_subject) = match self.open_tx(open_batch_id)?.kind {
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 made_by: bound_made_by,
                 permission_subject,
             } if bound_made_by != made_by => return Err(Error::OpenTransactionIdentityMismatch),
-            OpenTransactionKind::Exclusive {
+            OpenTransactionKind::Serializable {
                 made_by,
                 permission_subject,
             } => (made_by, permission_subject),
             OpenTransactionKind::Mergeable { .. } => {
                 return Err(Error::InvalidMergeableCommit(
-                    "open transaction is not exclusive",
+                    "open transaction is not serializable",
                 ));
             }
         };
@@ -1291,7 +1292,7 @@ where
             .map_err(|_| Error::UnadmittedWriteAuthor)?
             .as_author_subject();
         if !self
-            .open_exclusive_is_locally_serializable(open_batch_id)
+            .open_serializable_is_locally_serializable(open_batch_id)
             .await?
         {
             return Err(Error::TransactionConflict);
@@ -1306,7 +1307,7 @@ where
             if let Some(provenance_ms) = write.now_ms {
                 TxTime::from_physical_ms(provenance_ms).map_err(|_| {
                     Error::InvalidMergeableCommit(
-                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                        "serializable write now_ms exceeds packed HLC physical-millisecond range",
                     )
                 })?;
             }
@@ -1327,7 +1328,7 @@ where
         let mut versions = Vec::with_capacity(open_tx.writes.len());
         let mut claimed_large_values = BTreeSet::new();
         let mut superseded_large_values = open_tx.superseded_large_values;
-        for (write, has_content) in coalesce_exclusive_writes(open_tx.writes) {
+        for (write, has_content) in coalesce_serializable_writes(open_tx.writes) {
             let snapshot_content = self
                 .snapshot_winner(
                     write.schema_version,
@@ -1339,7 +1340,7 @@ where
             self.table_in_schema_ref(&write.table, write.schema_version)?;
             let PendingCells::Replace(mut cells) = write.cells.clone() else {
                 return Err(Error::InvalidMergeableCommit(
-                    "exclusive transaction cannot contain update patches",
+                    "serializable transaction cannot contain update patches",
                 ));
             };
             let snapshot_row = self
@@ -1369,7 +1370,7 @@ where
                     }
                     _ => {
                         return Err(Error::InvalidMergeableCommit(
-                            "exclusive transaction contains an unverified large-value descriptor",
+                            "serializable transaction contains an unverified large-value descriptor",
                         ));
                     }
                 }
@@ -1410,7 +1411,7 @@ where
             let provenance_at =
                 TxTime::from_physical_ms(write.now_ms.unwrap_or(now_ms)).map_err(|_| {
                     Error::InvalidMergeableCommit(
-                        "exclusive write now_ms exceeds packed HLC physical-millisecond range",
+                        "serializable write now_ms exceeds packed HLC physical-millisecond range",
                     )
                 })?;
             let (created_by, created_at) = snapshot_content
@@ -1437,7 +1438,7 @@ where
         }
         let tx = Transaction {
             tx_id,
-            kind: TxKind::Exclusive,
+            kind: TxKind::Serializable,
             n_total_writes: versions.len().try_into().map_err(|_| {
                 Error::InvalidMergeableCommit("transaction write count exceeds u32")
             })?,
@@ -1472,7 +1473,7 @@ where
         Ok((publication, SyncMessage::CommitUnit { tx, versions }))
     }
 
-    async fn open_exclusive_is_locally_serializable(
+    async fn open_serializable_is_locally_serializable(
         &mut self,
         open_batch_id: OpenTransactionId,
     ) -> Result<bool, Error> {
@@ -1901,7 +1902,10 @@ where
     }
 
     /// Return whether local transaction time advanced after this transaction opened.
-    pub fn open_exclusive_snapshot_moved(&self, tx_id: OpenTransactionId) -> Result<bool, Error> {
+    pub fn open_serializable_snapshot_moved(
+        &self,
+        tx_id: OpenTransactionId,
+    ) -> Result<bool, Error> {
         Ok(self.tx_time_high_water() > self.open_tx(tx_id)?.base_snapshot.local_base)
     }
 
@@ -2330,7 +2334,7 @@ pub enum TransactionInsertTargetState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenTransactionKind {
-    Exclusive {
+    Serializable {
         made_by: AuthorSubject,
         permission_subject: AuthorSubject,
     },
@@ -2742,7 +2746,7 @@ pub(super) struct SnapshotRow {
 /// One row has one image per transaction: merge a row's staged content
 /// replacement with its staged delete/restore event, in staging order.
 /// Returns each merged write with whether it carries replacement content.
-fn coalesce_exclusive_writes(writes: StagedWrites) -> Vec<(PendingWrite, bool)> {
+fn coalesce_serializable_writes(writes: StagedWrites) -> Vec<(PendingWrite, bool)> {
     let mut merged: Vec<(PendingWrite, bool)> = Vec::with_capacity(writes.len());
     let mut merged_positions =
         BTreeMap::<(String, RowUuid, SchemaVersionId, BranchSelector), usize>::new();

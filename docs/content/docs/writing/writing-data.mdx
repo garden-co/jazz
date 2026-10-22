@@ -322,7 +322,7 @@ garbage-collected.
 ## Transactions
 
 Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
-for normal local-first work. Use an exclusive transaction only when the authority must check the
+for normal local-first work. Use a serializable transaction only when the authority must check the
 whole operation against one stable view of the data.
 
 See [Transactions](/docs/writing/transactions) for examples, error handling and the differences

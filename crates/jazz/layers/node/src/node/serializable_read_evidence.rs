@@ -1,4 +1,4 @@
-//! `jazz.exclusive-read-evidence.v2`: an exclusive transaction's snapshot and
+//! `jazz.exclusive-read-evidence.v2`: a serializable transaction's snapshot and
 //! read sets, kept in `jazz_transactions` slots 5-8 while its fate is pending.
 //!
 //! Outbox and relay recovery rebuild commit units from storage. Without the
@@ -14,7 +14,8 @@
 //! (garden-co/jazz#3768). The snapshot, row-read and absent-read slots keep
 //! their v1 bytes and `format_v1 = 1`. A v1 predicate-read slot is refused:
 //! it cannot say what an aggregate read returned.
-//! See SPEC 2 §2.8 and `dev/proofs/exclusive-read-evidence-storage-compatibility.md`.
+//! The family id and record names keep their pre-rename spelling for format
+//! compatibility. See SPEC 2 §2.8 and `dev/proofs/exclusive-read-evidence-storage-compatibility.md`.
 
 use super::Error;
 use crate::ids::{NodeUuid, RowUuid};
@@ -222,13 +223,13 @@ fn encode_predicate_reads(reads: &[PredicateRead]) -> Result<Option<Vec<u8>>, Er
 
 /// Storage values for slots 5-8 of a `jazz_transactions` row.
 ///
-/// Evidence is kept only for an exclusive transaction whose fate is still
+/// Evidence is kept only for a serializable transaction whose fate is still
 /// pending: that is the only time a stored unit may be retransmitted for
 /// validation. It is all-or-nothing; any component that v1 cannot represent
 /// leaves every slot null, which fails closed exactly as before this format.
 pub(super) fn evidence_slot_values(tx: &Transaction, pending: bool) -> Result<[Value; 4], Error> {
     let none = || [slot(None), slot(None), slot(None), slot(None)];
-    if !pending || tx.kind != TxKind::Exclusive {
+    if !pending || tx.kind != TxKind::Serializable {
         return Ok(none());
     }
     let Some(snapshot) = &tx.base_snapshot else {
@@ -320,7 +321,7 @@ fn versioned_reads(
 }
 
 fn decode_query(bytes: &[u8]) -> Result<Query, Error> {
-    let what = "noncanonical exclusive predicate query";
+    let what = "noncanonical serializable predicate query";
     let (query, rest): (Query, &[u8]) =
         postcard::take_from_bytes(bytes).map_err(|_| invalid(what))?;
     if !rest.is_empty() || postcard::to_allocvec(&query).map_err(|_| invalid(what))? != bytes {
@@ -330,7 +331,7 @@ fn decode_query(bytes: &[u8]) -> Result<Query, Error> {
 }
 
 fn decode_base_snapshot(bytes: &[u8]) -> Result<Snapshot, Error> {
-    let what = "invalid exclusive base snapshot v1";
+    let what = "invalid serializable base snapshot v1";
     let values = canonical_values(&base_snapshot_descriptor(), bytes, what)?;
     let [
         Value::U8(FORMAT_V1),
@@ -356,7 +357,7 @@ fn decode_base_snapshot(bytes: &[u8]) -> Result<Snapshot, Error> {
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Snapshot::exclusive_base(
+    Snapshot::serializable_base(
         NodeUuid(*owner),
         GlobalTime(*global_base),
         TxTime(*local_base),
@@ -366,7 +367,7 @@ fn decode_base_snapshot(bytes: &[u8]) -> Result<Snapshot, Error> {
 }
 
 fn decode_row_reads(bytes: &[u8]) -> Result<Vec<RowRead>, Error> {
-    let what = "invalid exclusive row reads v1";
+    let what = "invalid serializable row reads v1";
     versioned_reads(&row_reads_descriptor(), FORMAT_V1, bytes, what)?
         .into_iter()
         .map(|read| match read.as_slice() {
@@ -386,7 +387,7 @@ fn decode_row_reads(bytes: &[u8]) -> Result<Vec<RowRead>, Error> {
 }
 
 fn decode_absent_reads(bytes: &[u8]) -> Result<Vec<AbsentRead>, Error> {
-    let what = "invalid exclusive absent reads v1";
+    let what = "invalid serializable absent reads v1";
     versioned_reads(&absent_reads_descriptor(), FORMAT_V1, bytes, what)?
         .into_iter()
         .map(|read| match read.as_slice() {
@@ -400,7 +401,7 @@ fn decode_absent_reads(bytes: &[u8]) -> Result<Vec<AbsentRead>, Error> {
 }
 
 fn decode_predicate_reads(bytes: &[u8]) -> Result<Vec<PredicateRead>, Error> {
-    let what = "invalid exclusive predicate reads v2";
+    let what = "invalid serializable predicate reads v2";
     versioned_reads(
         &predicate_reads_descriptor(),
         PREDICATE_READS_FORMAT_V2,
@@ -422,7 +423,7 @@ fn decode_predicate_reads(bytes: &[u8]) -> Result<Vec<PredicateRead>, Error> {
             if BindingId(uuid::Uuid::new_v5(&crate::query::QUERY_NAMESPACE, bindings))
                 != BindingId(*binding_id)
             {
-                return Err(invalid("exclusive predicate binding id mismatch"));
+                return Err(invalid("serializable predicate binding id mismatch"));
             }
             let aggregate_result = match aggregate_result.as_deref() {
                 None => None,
@@ -440,7 +441,7 @@ fn decode_predicate_reads(bytes: &[u8]) -> Result<Vec<PredicateRead>, Error> {
             // The result is canonical and matches the shape, or the
             // stored evidence is corrupt.
             if super::aggregate_read_result::aggregate_read_malformation(&read).is_some() {
-                return Err(invalid("invalid exclusive aggregate read result"));
+                return Err(invalid("invalid serializable aggregate read result"));
             }
             Ok(read)
         }
@@ -467,7 +468,7 @@ pub(super) fn decode_evidence_slots(
         && (row_read_set.is_some() || absent_read_set.is_some() || predicate_read_set.is_some())
     {
         return Err(invalid(
-            "exclusive read sets stored without a base snapshot",
+            "serializable read sets stored without a base snapshot",
         ));
     }
     Ok(StoredEvidence {
@@ -532,12 +533,12 @@ mod tests {
     fn fixture() -> Transaction {
         Transaction {
             tx_id: TxId::new(TxTime::from(20), node(1)),
-            kind: TxKind::Exclusive,
+            kind: TxKind::Serializable,
             n_total_writes: 1,
             made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             base_snapshot: Some(
-                Snapshot::exclusive_base(
+                Snapshot::serializable_base(
                     node(1),
                     GlobalTime(3),
                     TxTime::from(12),
@@ -604,7 +605,7 @@ mod tests {
     /// row-read and absent-read slots keep their v1 bytes; the predicate-read
     /// slot is v2 and carries the aggregate read's `count = 3` result.
     #[test]
-    fn exclusive_read_evidence_v2_bytes_are_pinned() {
+    fn serializable_read_evidence_v2_bytes_are_pinned() {
         let tx = fixture();
         let slots = encoded(&tx);
         let actual = slots.each_ref().map(|slot| hex(slot.as_deref().unwrap()));
@@ -624,11 +625,11 @@ mod tests {
         assert_eq!(decoded.predicate_read_set, tx.predicate_read_set);
     }
 
-    /// Evidence exists only for a pending exclusive transaction, and is
+    /// Evidence exists only for a pending serializable transaction, and is
     /// all-or-nothing: a predicate read v1 cannot represent stores nothing,
     /// which fails closed exactly like a row without evidence.
     #[test]
-    fn exclusive_read_evidence_is_written_only_when_replayable() {
+    fn serializable_read_evidence_is_written_only_when_replayable() {
         let tx = fixture();
         let none = [None, None, None, None];
         assert_eq!(
@@ -668,7 +669,7 @@ mod tests {
     /// Malformed, non-canonical and unknown-version bytes are rejected as
     /// corrupt storage instead of being read as weaker evidence.
     #[test]
-    fn exclusive_read_evidence_rejects_malformed_noncanonical_and_unknown_versions() {
+    fn serializable_read_evidence_rejects_malformed_noncanonical_and_unknown_versions() {
         let tx = fixture();
         let good = encoded(&tx);
         let rejects = |slots: [Option<Vec<u8>>; 4]| {

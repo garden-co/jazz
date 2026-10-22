@@ -75,7 +75,7 @@ describe("ensurePersonalCanvas", () => {
     expect(left).toBe(right);
     expect(await membershipsOf(account)).toHaveLength(1);
 
-    // Across processes the exclusive transaction decides: bypass the dedupe.
+    // Across processes the serializable transaction decides: bypass the dedupe.
     const racer = crypto.randomUUID();
     const [a, b] = await Promise.all([
       seedPersonalCanvas(db, racer, "Hedy"),

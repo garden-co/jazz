@@ -373,7 +373,7 @@ pub(super) fn fact_public_fields(
             ProgramFactSchema::CompleteTxPayloadCoverage(_) => {
                 "complete transaction coverage facts are not prepared yet"
             }
-            ProgramFactSchema::ViewCompleteExclusiveCoverage(_) => {
+            ProgramFactSchema::ViewCompleteSerializableCoverage(_) => {
                 "view-complete coverage facts are not prepared yet"
             }
             ProgramFactSchema::PolicyDecision(_) => "policy decision facts are not prepared yet",

@@ -211,7 +211,7 @@ fn maintained_snapshot_view_compiles_remote_delivery_witnesses() {
 }
 
 #[test]
-fn exclusive_snapshot_applies_same_cut_to_policy_relation_sources() {
+fn serializable_snapshot_applies_same_cut_to_policy_relation_sources() {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -238,7 +238,7 @@ fn exclusive_snapshot_applies_same_cut_to_policy_relation_sources() {
     commit_global_issue(&mut node, 0, "open", reader, 1);
     node.record_authoritative_settled_through(GlobalTime(1));
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive_for_identity(tx_id, reader).unwrap();
+    node.open_serializable_for_identity(tx_id, reader).unwrap();
 
     commit_global_cells(
         &mut node,
@@ -1124,8 +1124,8 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
     );
     let same_tx_open = OpenTransactionId::new();
     server
-        .open_exclusive(same_tx_open)
-        .expect("open exclusive transaction for paired content and restoration");
+        .open_serializable(same_tx_open)
+        .expect("open serializable transaction for paired content and restoration");
     server
         .tx_write(
             same_tx_open,
@@ -1148,7 +1148,7 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         )
         .expect("stage restoration register sibling in paired transaction");
     let (same_tx_restore, _) = server
-        .commit_exclusive_settled(same_tx_open, AuthorSubject::SYSTEM, 6)
+        .commit_serializable_settled(same_tx_open, AuthorSubject::SYSTEM, 6)
         .expect("commit content and restoration together");
     server
         .apply_fate_update(

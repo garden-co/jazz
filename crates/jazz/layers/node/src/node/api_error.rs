@@ -63,7 +63,7 @@ pub enum ErrorCode {
     Query,
     /// Write was rejected.
     WriteRejected,
-    /// An exclusive transaction's fixed snapshot was invalidated locally.
+    /// A serializable transaction's fixed snapshot was invalidated locally.
     TransactionConflict,
     /// Storage failed.
     Storage,
@@ -138,7 +138,7 @@ impl From<crate::node::Error> for Error {
             }
             crate::node::Error::SnapshotHistoryUnavailable => ErrorCode::NotObserved,
             crate::node::Error::Groove(_) => ErrorCode::Storage,
-            crate::node::Error::Query(_) | crate::node::Error::UnsupportedExclusiveRead(_) => {
+            crate::node::Error::Query(_) | crate::node::Error::UnsupportedSerializableRead(_) => {
                 ErrorCode::Query
             }
             crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,

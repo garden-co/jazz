@@ -324,7 +324,7 @@ where
                 // already been checked against its server-issued one-binding
                 // capability; a multiplexed relay has passed the corresponding
                 // transport admission check for this request.
-                // Both transaction kinds need this authorization. Exclusive
+                // Both transaction kinds need this authorization. Serializable
                 // writes also validate their read sets at terminal ingest, but
                 // that cannot replace authorization under the delegated session.
                 let permission_subject = match ingest_context.trust {

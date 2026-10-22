@@ -25,7 +25,7 @@ the Jazz design system.
   the larger quantity where both have the product.
 - **An idempotent checkout.** Shipping details live on the cart row (they sync too). Reaching the
   review step mints an idempotency key; "Place order" sends only that key. The backend reads the
-  cart, prices and stock at the authority in one exclusive transaction, and derives the order id
+  cart, prices and stock at the authority in one serializable transaction, and derives the order id
   from (account, key), so double clicks, network retries and racing requests all return the same
   order and never decrement stock twice.
 - **Payments behind an interface.** `PaymentProvider` has two implementations, chosen by

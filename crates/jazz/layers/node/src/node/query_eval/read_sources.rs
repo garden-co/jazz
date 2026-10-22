@@ -50,7 +50,7 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// Refresh dependencies of programs embedded inside resolved sources.
     pub(super) nested_program_dependencies: lowering::PolicyDependencyFootprint,
     /// Whether these sources feed a policy-authorization subplan, which an
-    /// exclusive transaction records no read for (garden-co/jazz#3694).
+    /// serializable transaction records no read for (garden-co/jazz#3694).
     pub(super) policy_subplan: bool,
     /// The candidate transaction's own writes, overlaid on the committed
     /// evidence a write-policy subplan reads (`INV-RLS-9`). Empty for every

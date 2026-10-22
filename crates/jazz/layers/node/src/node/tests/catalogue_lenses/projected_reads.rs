@@ -791,7 +791,7 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
 #[test]
 fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     // The physical key and bounded-source selection are intentionally internal;
-    // user-visible historical rows and exclusive rejection cover their semantics.
+    // user-visible historical rows and serializable rejection cover their semantics.
     let base = schema();
     let renamed_schema = renamed_tasks_schema();
     let renamed = SchemaVersion::new(renamed_schema);
@@ -810,11 +810,11 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     )
     .unwrap();
 
-    let exclusive = OpenTransactionId::new();
-    core.open_exclusive(exclusive).unwrap();
-    assert_eq!(core.tx_current_rows(exclusive, "todos").unwrap().len(), 1);
+    let serializable = OpenTransactionId::new();
+    core.open_serializable(serializable).unwrap();
+    assert_eq!(core.tx_current_rows(serializable, "todos").unwrap().len(), 1);
     core.tx_write(
-        exclusive,
+        serializable,
         "todos",
         row(0x58),
         title_cells("conflicting transaction"),
@@ -880,7 +880,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     assert_eq!(changes.len(), 2);
 
     assert!(matches!(
-        core.commit_exclusive_settled(exclusive, AuthorSubject::SYSTEM, 12),
+        core.commit_serializable_settled(serializable, AuthorSubject::SYSTEM, 12),
         Err(Error::TransactionConflict)
     ));
 

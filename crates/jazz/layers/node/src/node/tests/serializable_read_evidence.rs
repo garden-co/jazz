@@ -1,6 +1,6 @@
 /// The read-evidence slots of `tx_id`'s `jazz_pending_transactions` record, as
 /// stored; all null when the transaction has no pending record.
-fn stored_exclusive_evidence_slots(node: &NodeState, tx_id: TxId) -> Vec<Value> {
+fn stored_serializable_evidence_slots(node: &NodeState, tx_id: TxId) -> Vec<Value> {
     pending_record_evidence_slots(node, tx_id).unwrap_or_else(|| vec![Value::Nullable(None); 4])
 }
 
@@ -28,7 +28,7 @@ fn pending_record_evidence_slots(node: &NodeState, tx_id: TxId) -> Option<Vec<Va
 }
 
 /// Internal because the contract is the durable audit row: a pending
-/// exclusive transaction keeps its read evidence, the unit rebuilt from
+/// serializable transaction keeps its read evidence, the unit rebuilt from
 /// storage after a reopen is the unit that was published, and the evidence
 /// is dropped once the authority settles the fate.
 ///
@@ -38,7 +38,7 @@ fn pending_record_evidence_slots(node: &NodeState, tx_id: TxId) -> Option<Vec<Va
 ///    └── commit_unit_for == published unit ──► core ──accepted──► evidence cleared
 /// ```
 #[test]
-fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
+fn serializable_evidence_is_stored_while_pending_and_cleared_at_settlement() {
     let (client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     commit_mergeable_global(
@@ -55,7 +55,7 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
         .unwrap();
 
     let open_id = OpenTransactionId::new();
-    client.open_exclusive(open_id).unwrap();
+    client.open_serializable(open_id).unwrap();
     assert!(client.tx_read(open_id, "todos", row(1)).unwrap().is_some());
     assert!(client.tx_read(open_id, "todos", row(2)).unwrap().is_none());
     assert_eq!(client.tx_query(open_id, &shape, &binding).unwrap().len(), 1);
@@ -63,7 +63,7 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
         .tx_write(open_id, "todos", row(1), title_cells("next"), None)
         .unwrap();
     let (tx_id, unit) = client
-        .commit_exclusive_settled(open_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(open_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let SyncMessage::CommitUnit { tx, .. } = &unit else {
         panic!("expected commit unit");
@@ -85,7 +85,7 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
     );
     assert!(
         pending_record_evidence_slots(&client, tx_id)
-            .expect("a pending exclusive transaction keeps a pending record")
+            .expect("a pending serializable transaction keeps a pending record")
             .iter()
             .all(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
@@ -140,7 +140,7 @@ fn exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement() {
 /// Internal fixture: no current writer can put evidence on a mergeable row,
 /// so plant one and check that reading it is refused as corrupt storage.
 #[test]
-fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
+fn mergeable_transaction_row_with_serializable_evidence_is_rejected() {
     let (dir, mut writer) = open_node_with_uuid(node(1));
     let tx_id = writer
         .commit_mergeable_settled(
@@ -150,13 +150,13 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
     let stored = writer.query_transaction(tx_id).unwrap().unwrap();
     assert_eq!(stored.global_time, None, "the planted record must be read");
     let snapshot =
-        crate::tx::Snapshot::exclusive_base(node(1), GlobalTime(0), TxTime::from(1), Vec::new())
+        crate::tx::Snapshot::serializable_base(node(1), GlobalTime(0), TxTime::from(1), Vec::new())
             .unwrap();
-    let mut exclusive = stored.tx.clone();
-    exclusive.kind = TxKind::Exclusive;
-    exclusive.base_snapshot = Some(snapshot);
+    let mut serializable = stored.tx.clone();
+    serializable.kind = TxKind::Serializable;
+    serializable.base_snapshot = Some(snapshot);
     let [base, ..] =
-        super::super::exclusive_read_evidence::evidence_slot_values(&exclusive, true).unwrap();
+        super::super::serializable_read_evidence::evidence_slot_values(&serializable, true).unwrap();
     assert_eq!(
         pending_transaction_values(
             stored.node_alias,
@@ -187,39 +187,39 @@ fn mergeable_transaction_row_with_exclusive_evidence_is_rejected() {
     assert!(matches!(
         crate::local_executor::block_on(reopened.query_transaction(tx_id)),
         Err(Error::InvalidStoredValue(
-            "mergeable transaction carries exclusive read evidence"
+            "mergeable transaction carries serializable read evidence"
         ))
     ));
 }
 
-/// The author of a pending exclusive transaction keeps its read evidence, but
+/// The author of a pending serializable transaction keeps its read evidence, but
 /// view carriers never ship it. When Core's view of the accepted transaction
 /// reaches the author (as a browser worker relays it back to the tab), the
 /// stored evidence must not make the bundle look like a conflicting payload.
 ///
 /// ```
-/// alice ──commit exclusive (pending, evidence stored)──► core ──accept
+/// alice ──commit serializable (pending, evidence stored)──► core ──accept
 ///   ▲                                                      │
 ///   └──────────── view update (bundle, no evidence) ◄──────┘
 /// ```
 #[test]
-fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence() {
+fn view_bundle_for_a_pending_serializable_transaction_matches_its_stored_evidence() {
     let (_alice_dir, mut alice) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let shape = Query::from("todos").validate(&schema()).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let open_id = OpenTransactionId::new();
-    alice.open_exclusive(open_id).unwrap();
+    alice.open_serializable(open_id).unwrap();
     assert!(alice.tx_read(open_id, "todos", row(1)).unwrap().is_none());
     alice
         .tx_write(open_id, "todos", row(1), title_cells("one"), None)
         .unwrap();
     let (tx_id, unit) = alice
-        .commit_exclusive_settled(open_id, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(open_id, AuthorSubject::SYSTEM, 10)
         .unwrap();
     assert!(
-        stored_exclusive_evidence_slots(&alice, tx_id)
+        stored_serializable_evidence_slots(&alice, tx_id)
             .iter()
             .any(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
@@ -265,7 +265,7 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
     );
 }
 
-/// A relay stores downstream exclusive units it did not author. A genuine
+/// A relay stores downstream serializable units it did not author. A genuine
 /// unit keeps its evidence across a relay restart and is forwarded intact.
 /// A malformed one (a binding id that does not match its bindings) is stored
 /// without evidence, so the row still decodes: the relay can replay it, the
@@ -275,7 +275,7 @@ fn view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence()
 /// alice ──unit──► relay (stored, restart) ──commit_unit_for──► core ──fate──► relay
 /// ```
 #[test]
-fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
+fn relay_stores_only_decodable_serializable_evidence_and_replays_after_restart() {
     let (_alice_dir, mut alice) = open_node_with_uuid(node(1));
     let (relay_dir, mut relay) = open_node_with_uuid(node(5));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -288,7 +288,7 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
         .unwrap();
     let mut commit = |alice: &mut NodeState, row_byte: u8, time: u64| {
         let open_id = OpenTransactionId::new();
-        alice.open_exclusive(open_id).unwrap();
+        alice.open_serializable(open_id).unwrap();
         assert!(
             alice
                 .tx_query(open_id, &shape, &binding)
@@ -299,7 +299,7 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
             .tx_write(open_id, "todos", row(row_byte), title_cells("new"), None)
             .unwrap();
         let (tx_id, unit) = alice
-            .commit_exclusive_settled(open_id, AuthorSubject::SYSTEM, time)
+            .commit_serializable_settled(open_id, AuthorSubject::SYSTEM, time)
             .unwrap();
         let SyncMessage::CommitUnit { tx, versions } = unit else {
             panic!("expected commit unit");
@@ -323,12 +323,12 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
         .ingest_relay_commit_unit(bad_tx, bad_versions)
         .unwrap();
     assert!(
-        stored_exclusive_evidence_slots(&relay, good_id)
+        stored_serializable_evidence_slots(&relay, good_id)
             .iter()
             .all(|slot| matches!(slot, Value::Nullable(Some(_))))
     );
     assert!(
-        stored_exclusive_evidence_slots(&relay, bad_id)
+        stored_serializable_evidence_slots(&relay, bad_id)
             .iter()
             .all(|slot| *slot == Value::Nullable(None))
     );
@@ -353,7 +353,7 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
         (
             bad_id,
             bad_unit,
-            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            Fate::Rejected(RejectionReason::SerializationConflict),
         ),
     ] {
         let [fate] = core
@@ -364,7 +364,7 @@ fn relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart() {
         relay.apply_sync_message_settled(fate).unwrap();
         assert_eq!(relay.transaction_state_settled(tx_id).unwrap().0, expected);
         assert!(
-            stored_exclusive_evidence_slots(&relay, tx_id)
+            stored_serializable_evidence_slots(&relay, tx_id)
                 .iter()
                 .all(|slot| *slot == Value::Nullable(None))
         );

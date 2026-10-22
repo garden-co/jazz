@@ -327,7 +327,7 @@ impl PeerState {
                 peer_complete_tx_payloads: self.acknowledged_complete_tx_payloads(),
                 known_state: plan.known_state,
                 leave_scan_after: plan.leave_scan_after,
-                complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                complete_serializable_payloads: self.ship_complete_serializable_payloads
                     && self.role == PeerRole::Relay,
                 previous_result_set: BTreeSet::new(),
                 result_member_adds: plan.adds,

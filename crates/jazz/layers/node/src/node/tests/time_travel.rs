@@ -240,7 +240,7 @@ fn historical_read_handle_requires_server_when_local_history_is_partial() {
 fn snapshot_reads_survive_mid_tx_current_winner_shift() {
     // The snapshot covered set is fixed at open time: an uncovered lawful
     // child may become the current winner, but it must not change reads
-    // inside the already-open exclusive transaction.
+    // inside the already-open serializable transaction.
     let (_dir, mut node_under_test) = open_node_with_uuid(node(3));
     let row = row(7);
     let high = TxId::new(TxTime::from(100), node(1));
@@ -267,7 +267,7 @@ fn snapshot_reads_survive_mid_tx_current_winner_shift() {
         .unwrap();
 
     let tx_id = OpenTransactionId::new();
-    node_under_test.open_exclusive(tx_id).unwrap();
+    node_under_test.open_serializable(tx_id).unwrap();
     assert_eq!(
         node_under_test
             .tx_read(tx_id, "todos", row)
@@ -335,13 +335,13 @@ fn open_transactions_read_unsettled_relay_versions_present_at_open() {
     );
     node_under_test.abandon_tx(mergeable).unwrap();
 
-    let exclusive = OpenTransactionId::new();
-    node_under_test.open_exclusive(exclusive).unwrap();
+    let serializable = OpenTransactionId::new();
+    node_under_test.open_serializable(serializable).unwrap();
     assert_eq!(
         node_under_test
-            .tx_read(exclusive, "todos", row)
+            .tx_read(serializable, "todos", row)
             .unwrap()
-            .expect("the unsettled row is visible to an exclusive transaction")
+            .expect("the unsettled row is visible to a serializable transaction")
             .get("title")
             .unwrap(),
         &v("pending")

@@ -153,7 +153,7 @@ where
         let mut global_time_records_scanned = 0usize;
         // Nullable index keys order `None` before `Some`. Range over only the
         // `Some` bucket so local pending/rejected transactions cannot make
-        // recovery O(total transactions). The range end is exclusive, hence
+        // recovery O(total transactions). The range end is serializable, hence
         // the separate exact lookup preserves the prior u64::MAX behavior.
         let first_global_time = Value::Nullable(Some(Box::new(Value::U64(0))));
         let last_global_time = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
@@ -276,13 +276,13 @@ where
     }
 }
 
-// Historical exclusive-read evidence fixture support.
+// Historical serializable-read evidence fixture support.
 #[cfg(any(test, feature = "testing"))]
 impl<S: OrderedKvStorage> NodeState<S> {
     /// Rewrite a pending transaction's records as a build from before
     /// `jazz.exclusive-read-evidence.v1` wrote them: no read evidence.
     #[doc(hidden)]
-    pub async fn persist_without_exclusive_read_evidence_for_test(&mut self, tx_id: TxId) {
+    pub async fn persist_without_serializable_read_evidence_for_test(&mut self, tx_id: TxId) {
         let stored = self.query_transaction(tx_id).await.unwrap().unwrap();
         let mut tx = stored.tx.clone();
         tx.base_snapshot = None;
