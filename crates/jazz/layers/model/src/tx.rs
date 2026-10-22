@@ -10,7 +10,7 @@ use crate::model::branch::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
-use groove::records::{OwnedRecord, Value};
+use jazz_types::records::{OwnedRecord, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Immutable transaction payload before upstream fate state are learned.
@@ -511,8 +511,8 @@ pub enum RejectionReason {
 impl RejectionReason {
     /// Physical payload type shared by transaction audit and retry records.
     #[doc(hidden)]
-    pub fn storage_value_type() -> groove::records::ValueType {
-        use groove::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
+    pub fn storage_value_type() -> jazz_types::records::ValueType {
+        use jazz_types::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
         ValueType::Enum(Box::new(
             EnumSchema::new(
                 "jazz_rejection_reason",
@@ -540,8 +540,8 @@ impl RejectionReason {
 
     /// Encode only the payload belonging to this rejection kind.
     #[doc(hidden)]
-    pub fn to_storage_value(&self) -> Result<Value, groove::records::Error> {
-        use groove::records::{EnumValue, ValueType};
+    pub fn to_storage_value(&self) -> Result<Value, jazz_types::records::Error> {
+        use jazz_types::records::{EnumValue, ValueType};
         let (tag, fields) = match self {
             Self::ClientClockTooFarAhead => (0, vec![]),
             Self::AuthorizationDenied => (1, vec![]),
@@ -568,8 +568,8 @@ impl RejectionReason {
 
     /// Decode the exact case payload; missing or unrelated fields are invalid.
     #[doc(hidden)]
-    pub fn from_storage_value(value: Value) -> Result<Self, groove::records::Error> {
-        use groove::records::{Error, ValueType};
+    pub fn from_storage_value(value: Value) -> Result<Self, jazz_types::records::Error> {
+        use jazz_types::records::{Error, ValueType};
         let Value::Enum(value) = value else {
             return Err(Error::NonCanonicalRecord);
         };
@@ -1015,7 +1015,7 @@ pub struct PredicateRead {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct AggregateReadResult(#[serde(with = "serde_bytes")] pub Vec<u8>);
 
-groove::define_record! {
+jazz_types::define_record! {
     struct HistoryRowRecord {
         0 => row_uuid: RowUuid,
         1 => tx_time: u64,
@@ -1029,18 +1029,18 @@ groove::define_record! {
     }
 }
 
-groove::define_record! {
+jazz_types::define_record! {
     struct RejectedTransactionRowRecord {
         0 => time: u64,
         1 => node_id: u64,
         2 => kind: TxKind,
         3 => made_by: RowAuthor,
-        4 => rejection_reason: groove::records::EnumValue,
+        4 => rejection_reason: jazz_types::records::EnumValue,
         5 => user_metadata: Option<String>,
     }
 }
 
-groove::define_record! {
+jazz_types::define_record! {
     struct RejectedVersionRowRecord {
         0 => tx_time: u64,
         1 => tx_node_id: u64,
@@ -1087,7 +1087,7 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
 }
 
 fn rejection_reason_from_rejected_record(
-    record: groove::records::BorrowedRecord<'_>,
+    record: jazz_types::records::BorrowedRecord<'_>,
 ) -> Result<RejectionReason, &'static str> {
     RejectionReason::from_storage_value(
         record
@@ -1100,7 +1100,7 @@ fn rejection_reason_from_rejected_record(
 #[cfg(test)]
 mod rejection_storage_tests {
     use super::*;
-    use groove::records::{EnumValue, RecordDescriptor, ValueType};
+    use jazz_types::records::{EnumValue, RecordDescriptor, ValueType};
 
     /// Alice's rejection keeps its exact case payload across storage.
     /// Codec-level coverage is needed to construct invalid bytes unavailable
@@ -1388,23 +1388,23 @@ mod contribution_tests {
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
-groove::impl_record_field_enum!(TxKind {
+jazz_types::impl_record_field_enum!(TxKind {
     TxKind::Mergeable = 0,
     TxKind::Exclusive = 1,
 });
 // jazz.transaction-durability.v2: None=0, Local=1, Global=2.
 // The storage codec profile rejects earlier roots before these tags are read.
-groove::impl_record_field_enum!(DurabilityTier {
+jazz_types::impl_record_field_enum!(DurabilityTier {
     DurabilityTier::None = 0,
     DurabilityTier::Local = 1,
     DurabilityTier::Global = 2,
 });
 
-groove::impl_record_field_enum!(DeletionEvent {
+jazz_types::impl_record_field_enum!(DeletionEvent {
     DeletionEvent::Deleted = 0,
     DeletionEvent::Restored = 1,
 });
-groove::impl_record_field_enum!(MergeAspect {
+jazz_types::impl_record_field_enum!(MergeAspect {
     MergeAspect::Content = 0,
     MergeAspect::Deletion = 1,
 });
