@@ -178,6 +178,7 @@ fn source_lookup(
         match value {
             NormalizedValueRef::RowId(RowIdRef::Source(source)) => Some((source, "id")),
             NormalizedValueRef::SourceField { source, field } => Some((source, field)),
+            NormalizedValueRef::Magic { source, column } => Some((source, column.name())),
             _ => None,
         }
     }
@@ -1090,10 +1091,15 @@ fn param_route_field(param: &str) -> String {
 }
 
 fn source_value_ref(value: &NormalizedValueRef) -> bool {
-    matches!(
-        value,
-        NormalizedValueRef::SourceField { .. } | NormalizedValueRef::RowId(RowIdRef::Source(_))
-    )
+    match value {
+        // Whole authors and identities are records. Their equality must stay
+        // a predicate, rather than becoming an ordered binding-route key.
+        NormalizedValueRef::Magic { column, .. } => collect_by_ordered_scalar(column.value_type()),
+        NormalizedValueRef::SourceField { .. } | NormalizedValueRef::RowId(RowIdRef::Source(_)) => {
+            true
+        }
+        _ => false,
+    }
 }
 
 fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {

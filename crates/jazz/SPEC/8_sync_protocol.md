@@ -196,7 +196,11 @@ baseline, frozen fresh rather than appended to v5, is:
   It is a mandatory v6 variant with no feature bit.
 - `SupportingRow` appends `is_current: bool` after its version reference. Current
   sources consume admitted current winners; history sources consume all admitted
-  content versions.
+  content versions. An include-deleted history source that reads `$deletedAt`
+  or `$deletedBy` also receives the row's current deletion winner as a
+  deletion-layer supporting row with `is_current = true`. Its version witness
+  carries the deletion's authored time as physical milliseconds, as current
+  sources do, while history content witnesses keep packed HLC times.
 - `ReadViewSpec` appends `include_deleted: bool` after its `source`, so
   `RegisterShapeOptions` encodes as
   `tier | read_view.source | read_view.include_deleted | binding_source`. A

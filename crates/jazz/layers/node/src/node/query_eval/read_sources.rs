@@ -8,6 +8,7 @@
 use super::*;
 use crate::node::author_codes::AuthorCodes;
 use crate::node::query_engine::{BranchViewSourceBase, current_row_field_names};
+use crate::schema::magic::{MagicColumn, ProvenanceEvent};
 use std::sync::{Arc, Mutex};
 use std::{future::Future, pin::Pin};
 
@@ -772,30 +773,23 @@ where
                         live_base,
                     )
                     .await?;
-                let content_version = request
-                    .requirements
-                    .metadata
-                    .iter()
-                    .any(|requirement| {
-                        matches!(
-                            requirement,
-                            SourceMetadataRequirement::VersionPayloads
-                                | SourceMetadataRequirement::VersionWitnesses
-                                | SourceMetadataRequirement::Provenance(_)
-                        )
-                    })
-                    .then(|| ContentVersionSource {
-                        graph: content.clone().project_fields(
-                            maintained_view_history_storage_field_names(&table)
-                                .into_iter()
-                                .map(ProjectField::named)
-                                .chain(std::iter::once(ProjectField::renamed(
-                                    "branch_key",
-                                    "supplying_branch_key",
-                                ))),
-                        ),
-                        row_uuid_field: "row_uuid".to_owned(),
-                    });
+                let content_version = (request.requirements.needs_version_witnesses()
+                    || request
+                        .requirements
+                        .metadata
+                        .contains(&SourceMetadataRequirement::VersionPayloads))
+                .then(|| ContentVersionSource {
+                    graph: content.clone().project_fields(
+                        maintained_view_history_storage_field_names(&table)
+                            .into_iter()
+                            .map(ProjectField::named)
+                            .chain(std::iter::once(ProjectField::renamed(
+                                "branch_key",
+                                "supplying_branch_key",
+                            ))),
+                    ),
+                    row_uuid_field: "row_uuid".to_owned(),
+                });
                 let deletion_register = request
                     .requirements
                     .metadata
@@ -1097,30 +1091,23 @@ where
                     },
                     routing_fields,
                     requires_result_payload: true,
-                    content_version: request
-                        .requirements
-                        .metadata
-                        .iter()
-                        .any(|requirement| {
-                            matches!(
-                                requirement,
-                                SourceMetadataRequirement::VersionPayloads
-                                    | SourceMetadataRequirement::VersionWitnesses
-                                    | SourceMetadataRequirement::Provenance(_)
-                            )
-                        })
-                        .then(|| ContentVersionSource {
-                            graph: head_content.project_fields(
-                                maintained_view_history_storage_field_names(&table)
-                                    .into_iter()
-                                    .map(ProjectField::named)
-                                    .chain(std::iter::once(ProjectField::renamed(
-                                        "branch_key",
-                                        "supplying_branch_key",
-                                    ))),
-                            ),
-                            row_uuid_field: "row_uuid".to_owned(),
-                        }),
+                    content_version: (request.requirements.needs_version_witnesses()
+                        || request
+                            .requirements
+                            .metadata
+                            .contains(&SourceMetadataRequirement::VersionPayloads))
+                    .then(|| ContentVersionSource {
+                        graph: head_content.project_fields(
+                            maintained_view_history_storage_field_names(&table)
+                                .into_iter()
+                                .map(ProjectField::named)
+                                .chain(std::iter::once(ProjectField::renamed(
+                                    "branch_key",
+                                    "supplying_branch_key",
+                                ))),
+                        ),
+                        row_uuid_field: "row_uuid".to_owned(),
+                    }),
                     deletion_register: None,
                     authorized_deletion_preimage: None,
                 });
@@ -2294,9 +2281,144 @@ where
                         source_resolution_error(request, SourceGap::LocalAvailabilityInput)
                     })?;
             }
+            if let Some(column) = requested_deletion_column(request) {
+                if request.visibility != RowVisibility::IncludeDeleted {
+                    return Err(QueryError::UnsupportedRelationQuery(format!(
+                        "Reading {column} requires includeDeleted"
+                    ))
+                    .into());
+                }
+                // Re-project every field the source graph carries, not only the
+                // row shape: policy claim parameters ride along as routing
+                // fields that downstream operators still read.
+                let source_descriptor = self
+                    .node
+                    .database
+                    .graph_output_descriptor(&resolved.graph)?;
+                resolved.graph =
+                    with_deletion_metadata(resolved.graph, &source_descriptor, request)?;
+                resolved.row_shape.descriptor = self
+                    .node
+                    .database
+                    .graph_output_descriptor(&resolved.graph)?;
+            }
+            (
+                resolved.graph,
+                resolved.row_shape.descriptor,
+                resolved.row_shape.metadata,
+            ) = with_requested_author_paths(
+                resolved.graph,
+                resolved.row_shape.descriptor,
+                resolved.row_shape.metadata,
+                &request.requirements,
+            )?;
             Ok(resolved)
         })
     }
+}
+
+pub(super) fn requested_deletion_column(request: &SourceRequest) -> Option<&'static str> {
+    deletion_metadata_columns(request)
+        .next()
+        .map(|(name, _, _)| name)
+}
+
+fn deletion_metadata_columns(
+    request: &SourceRequest,
+) -> impl Iterator<Item = (&'static str, &'static str, ValueType)> + '_ {
+    request
+        .requirements
+        .magic_fields
+        .iter()
+        .filter(|column| column.is_deletion())
+        .map(|column| column.root())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|column| {
+            let MagicColumn::Provenance { value, .. } = column else {
+                unreachable!()
+            };
+            let source = MagicColumn::Provenance {
+                event: ProvenanceEvent::Update,
+                value,
+            };
+            (column.name(), source.name(), source.value_type().clone())
+        })
+}
+
+/// Both fields come from the same deletion winner and remain opt-in.
+///
+/// `source_descriptor` holds the `$updatedAt`/`$updatedBy` fields the deleted
+/// arm projects. The live arm's typed null takes the stored type from it, not
+/// the logical magic-column type: stored authors are interned, and both union
+/// arms must agree on the physical descriptor.
+pub(super) fn deletion_metadata_projections(
+    request: &SourceRequest,
+    source_descriptor: &RecordDescriptor,
+    source_prefix: Option<&str>,
+) -> Vec<ProjectField> {
+    deletion_metadata_columns(request)
+        .map(|(name, source, ty)| {
+            let mut field = match source_prefix {
+                Some(prefix) => {
+                    ProjectField::nullable(format!("{prefix}{source}"), user_column_field(name))
+                }
+                None => {
+                    // Resolve `source` as the deleted arm's field reference does.
+                    let stored = source_descriptor
+                        .field_index(source)
+                        .or_else(|| {
+                            source_descriptor
+                                .fields()
+                                .iter()
+                                .position(|field| field.name.as_deref() == Some(source))
+                        })
+                        .map(|index| source_descriptor.fields()[index].value_type.clone())
+                        .unwrap_or(ty);
+                    ProjectField::null_typed(
+                        user_column_field(name),
+                        ValueType::Nullable(Box::new(stored)),
+                    )
+                }
+            };
+            field.output_identity = records::FieldIdentity::Name(name.to_owned());
+            field
+        })
+        .collect()
+}
+
+pub(super) fn with_deletion_metadata(
+    graph: GraphBuilder,
+    descriptor: &RecordDescriptor,
+    request: &SourceRequest,
+) -> Result<GraphBuilder, Error> {
+    let fields = descriptor.fields();
+    let project = |deleted: bool| {
+        fields
+            .iter()
+            .map(|field| ProjectField {
+                expression: groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::stored_name(
+                    field.name.clone().expect("named source field"),
+                )),
+                output_name: field.name.clone().expect("named source field"),
+                output_identity: field.identity.clone().expect("source identity"),
+            })
+            .chain(deletion_metadata_projections(
+                request,
+                descriptor,
+                deleted.then_some(""),
+            ))
+            .collect::<Vec<_>>()
+    };
+    Ok(GraphBuilder::union([
+        graph
+            .clone()
+            .filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(true)))
+            .project_fields(project(true)),
+        graph
+            .filter(PredicateExpr::eq("__jazz_deleted", Value::Bool(false)))
+            .project_fields(project(false)),
+    ]))
 }
 
 impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
@@ -2536,7 +2658,9 @@ where
                 data: DataSource::Current,
                 ..
             } => {
-                let param_binding_mode = if binding_source_shape.is_some() {
+                let param_binding_mode = if request.visibility == RowVisibility::Visible
+                    && binding_source_shape.is_some()
+                {
                     ParamBindingMode::RetainAllParams
                 } else {
                     ParamBindingMode::InlineAllReachableSeeds
@@ -2550,7 +2674,7 @@ where
                     binding_source_shape,
                     binding_user_params,
                     binding_claim_params,
-                    RowVisibility::Visible,
+                    request.visibility,
                 )
             }
             SourceExpr::VisibleCurrent { .. }
@@ -3058,7 +3182,7 @@ where
     /// as without the lookup: exact, at the cost of the branches' rows
     /// outside the prefix. Only the trusted include-deleted read hands an
     /// index path to a step source.
-    async fn live_branch_view_registers(
+    pub(super) async fn live_branch_view_registers(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -4379,7 +4503,7 @@ pub(super) fn trace_capability_compile(
 pub(super) fn with_requested_author_paths(
     graph: GraphBuilder,
     descriptor: RecordDescriptor,
-    mut metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
     requirements: &SourceRequirements,
 ) -> Result<
     (
@@ -4390,40 +4514,41 @@ pub(super) fn with_requested_author_paths(
     Error,
 > {
     let missing = requirements
-        .metadata
+        .magic_fields
         .iter()
-        .filter_map(|requirement| match requirement {
-            SourceMetadataRequirement::AuthorPath(name) if !metadata.contains_key(requirement) => {
-                Some(name.clone())
-            }
-            _ => None,
+        .filter_map(|column| {
+            let path = column.author_path()?;
+            let root = column.root().name();
+            (descriptor.field_index(column.name()).is_none()
+                && descriptor.field_index(root).is_some())
+            .then_some((*column, root, path))
         })
         .collect::<Vec<_>>();
     if missing.is_empty() {
         return Ok((graph, descriptor, metadata));
     }
     let mut fields = descriptor.fields().to_vec();
-    let mut projection = descriptor_field_names(&descriptor)?
-        .into_iter()
-        .map(ProjectField::named)
+    let mut projection = descriptor
+        .fields()
+        .iter()
+        .map(|field| ProjectField {
+            expression: groove::ivm::ProjectExpr::Field(groove::ivm::FieldRef::stored_name(
+                field.name.clone().expect("named source field"),
+            )),
+            output_name: field.name.clone().expect("named source field"),
+            output_identity: field.identity.clone().expect("source identity"),
+        })
         .collect::<Vec<_>>();
-    for name in missing {
-        let (root, path) = AuthorSubject::metadata_path(&name).expect("validated author path");
+    for (column, root, path) in missing {
         projection.push(ProjectField::record_field(
             root,
             path.iter().copied(),
-            name.clone(),
+            column.name(),
         ));
         fields.push(records::DescriptorField::new(
-            name.clone(),
-            AuthorSubject::metadata_type(&name)
-                .expect("validated author path")
-                .clone(),
+            column.name(),
+            column.value_type().clone(),
         ));
-        metadata.insert(
-            SourceMetadataRequirement::AuthorPath(name.clone()),
-            SourceMetadataFields::Provenance { field: name },
-        );
     }
     Ok((
         graph.project_fields(projection),
@@ -4442,24 +4567,9 @@ fn current_source_projection(
     BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
 ) {
     let mut fields = canonical_current_source_fields(table, false);
-    for requirement in &requirements.metadata {
-        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
-            let (root, path) = AuthorSubject::metadata_path(name).expect("validated author path");
-            fields.push(ProjectField::record_field(
-                root,
-                path.iter().copied(),
-                name.clone(),
-            ));
-        }
-    }
+
     let mut metadata = BTreeMap::new();
-    let needs_version_witnesses = requirements
-        .metadata
-        .contains(&SourceMetadataRequirement::VersionWitnesses)
-        || requirements
-            .metadata
-            .iter()
-            .any(|requirement| matches!(requirement, SourceMetadataRequirement::Provenance(_)));
+    let needs_version_witnesses = requirements.needs_version_witnesses();
     let needs_settle_position = requirements
         .metadata
         .contains(&SourceMetadataRequirement::SettlePosition);
@@ -4511,28 +4621,6 @@ fn current_source_projection(
                 coverage_field: "coverage".to_owned(),
             },
         );
-    }
-    for requirement in &requirements.metadata {
-        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
-            metadata.insert(
-                requirement.clone(),
-                SourceMetadataFields::Provenance {
-                    field: name.clone(),
-                },
-            );
-        }
-        if let SourceMetadataRequirement::Provenance(field) = requirement {
-            metadata.insert(
-                SourceMetadataRequirement::Provenance(*field),
-                SourceMetadataFields::Provenance {
-                    // Every resolver branch normalizes storage names before it
-                    // exposes this source. Metadata therefore names the
-                    // canonical field on the resolved graph, never the
-                    // physical storage column used below that boundary.
-                    field: source_provenance_field(*field).to_owned(),
-                },
-            );
-        }
     }
 
     (fields, metadata)
@@ -4719,15 +4807,6 @@ fn canonical_current_source_fields(
         ]);
     }
     fields
-}
-
-fn source_provenance_field(field: ProvenanceField) -> &'static str {
-    match field {
-        ProvenanceField::CreatedAt => "$createdAt",
-        ProvenanceField::CreatedBy => "$createdBy",
-        ProvenanceField::UpdatedAt => "$updatedAt",
-        ProvenanceField::UpdatedBy => "$updatedBy",
-    }
 }
 
 fn storage_to_canonical_current_source_fields(
@@ -4931,16 +5010,7 @@ fn current_row_descriptor_with_hidden_source_fields_for_branch_and_deletion(
             records::DescriptorField::new("tx_node_id", ValueType::U64),
         ])
         .collect::<Vec<_>>();
-    for requirement in metadata.keys() {
-        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
-            fields.push(records::DescriptorField::new(
-                name.clone(),
-                AuthorSubject::metadata_type(name)
-                    .expect("author path")
-                    .clone(),
-            ));
-        }
-    }
+
     if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
         fields.extend([
             records::DescriptorField::new("table", ValueType::String),
@@ -6130,6 +6200,9 @@ fn normalized_program_equality(
 fn normalized_program_source_field(value: &NormalizedValueRef) -> Option<(SourceId, String)> {
     match value {
         NormalizedValueRef::SourceField { source, field } => Some((source.clone(), field.clone())),
+        NormalizedValueRef::Magic { source, column } => {
+            Some((source.clone(), column.name().to_owned()))
+        }
         NormalizedValueRef::RowId(RowIdRef::Source(source)) => {
             Some((source.clone(), "id".to_owned()))
         }
@@ -6223,12 +6296,6 @@ fn inline_current_record(
         .unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
-    append_author_projection_values(
-        &mut values,
-        descriptor,
-        provenance.created_by,
-        provenance.updated_by,
-    )?;
     Ok(descriptor.create(&values)?)
 }
 
@@ -6331,13 +6398,7 @@ pub(super) fn inline_source_metadata(
     // table sources.  Inline candidates must expose that full capability too:
     // a provenance-only requirement still needs the hidden version fields the
     // query program uses to prove and evaluate the source.
-    let needs_version_witnesses = requirements
-        .metadata
-        .contains(&SourceMetadataRequirement::VersionWitnesses)
-        || requirements
-            .metadata
-            .iter()
-            .any(|requirement| matches!(requirement, SourceMetadataRequirement::Provenance(_)));
+    let needs_version_witnesses = requirements.needs_version_witnesses();
     if needs_version_witnesses {
         metadata.insert(
             SourceMetadataRequirement::VersionWitnesses,
@@ -6371,24 +6432,7 @@ pub(super) fn inline_source_metadata(
             },
         );
     }
-    for requirement in &requirements.metadata {
-        if let SourceMetadataRequirement::AuthorPath(name) = requirement {
-            metadata.insert(
-                requirement.clone(),
-                SourceMetadataFields::Provenance {
-                    field: name.clone(),
-                },
-            );
-        }
-        if let SourceMetadataRequirement::Provenance(field) = requirement {
-            metadata.insert(
-                SourceMetadataRequirement::Provenance(*field),
-                SourceMetadataFields::Provenance {
-                    field: source_provenance_field(*field).to_owned(),
-                },
-            );
-        }
-    }
+
     metadata
 }
 
@@ -6498,12 +6542,6 @@ fn inline_current_values_with_source_metadata_and_deletion(
         .projected_tx_alias()
         .unwrap_or((TxTime(0), NodeAlias(0)));
     values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
-    append_author_projection_values(
-        &mut values,
-        descriptor,
-        provenance.created_by,
-        provenance.updated_by,
-    )?;
     if descriptor.field_index("table").is_some() {
         values.extend([
             Value::String(table.name.clone()),
@@ -6894,42 +6932,6 @@ mod tests {
             None,
         );
     }
-}
-
-fn row_author_value(author: AuthorSubject) -> Result<Value, Error> {
-    Ok(RowAuthor::from_persisted_subject(author)
-        .map_err(|_| Error::UnadmittedWriteAuthor)?
-        .to_value())
-}
-
-fn append_author_projection_values(
-    values: &mut Vec<Value>,
-    descriptor: &RecordDescriptor,
-    created_by: AuthorSubject,
-    updated_by: AuthorSubject,
-) -> Result<(), Error> {
-    for field in descriptor.fields() {
-        let Some(name) = field.name.as_deref() else {
-            continue;
-        };
-        let Some((root, path)) = AuthorSubject::metadata_path(name) else {
-            continue;
-        };
-        let author = if root == "$createdBy" {
-            created_by
-        } else {
-            updated_by
-        };
-        let mut value = row_author_value(author)?;
-        for member in path {
-            let Value::Record(record) = value else {
-                unreachable!("validated author record")
-            };
-            value = record.get(member).expect("validated author field");
-        }
-        values.push(value);
-    }
-    Ok(())
 }
 
 /// The normalized source occurrence of a query's only root-level `join_via`.

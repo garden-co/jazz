@@ -1913,6 +1913,15 @@ impl CurrentRow {
                         match public_name
                             .or_else(|| Self::physical_application_name(field).map(str::to_owned))
                         {
+                            Some(output_name)
+                                if (output_name == "$deletedAt"
+                                    || output_name.starts_with("$deletedBy")) =>
+                            {
+                                CurrentRowPublicationField::ResultField {
+                                    name: output_name,
+                                    visibility: CurrentRowResultVisibility::PublicProvenance,
+                                }
+                            }
                             Some(output_name) => {
                                 CurrentRowPublicationField::UnresolvedSourceCell { output_name }
                             }
@@ -2337,6 +2346,27 @@ impl CurrentRow {
             binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
         for column in columns {
+            if column == "$deletedAt" || column.starts_with("$deletedBy") {
+                if let Some(value) = self
+                    .raw_field(column)
+                    .or_else(|| self.raw_field(&user_column_field(column)))
+                {
+                    descriptor_fields.push(records::DescriptorField::new(
+                        column.clone(),
+                        if column == "$deletedAt" {
+                            records::ValueType::Nullable(Box::new(records::ValueType::U64))
+                        } else {
+                            AuthorSubject::metadata_type(column)
+                                .expect("validated author field")
+                                .clone()
+                        },
+                    ));
+                    values.push(value);
+                    binding_fields.push(CurrentRowBindingRole::LogicalField);
+                    binding_field_names.push(None);
+                }
+                continue;
+            }
             if AuthorSubject::metadata_path(column).is_none() {
                 continue;
             }
