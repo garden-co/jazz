@@ -436,7 +436,8 @@ impl Inner {
         }
         arrays(&mut structural, &query.array_subqueries, &stored)?;
         for source in query.flat_join.iter().flat_map(|flat| &flat.sources) {
-            structural.insert(stored(&source.table)?);
+            let table = &source.table;
+            structural.insert(stored(history_source_table(table).unwrap_or(table))?);
         }
         for include in &query.includes {
             let column = include.path.split('.').next().unwrap_or_default();
@@ -866,6 +867,7 @@ impl Inner {
                 table: row.table.to_string(),
                 row_uuid: *id,
                 joined: Vec::new(),
+                version: None,
                 index: *index,
             })
             .collect();
@@ -881,6 +883,7 @@ impl Inner {
                     table: row.table.to_string(),
                     row_uuid: row.id,
                     joined: Vec::new(),
+                    version: None,
                     index,
                 })
             }));
@@ -1056,6 +1059,7 @@ impl Inner {
                             table: row.table.to_string(),
                             row_uuid: row.id,
                             joined: row.joined.to_vec(),
+                            version: row.version,
                             index,
                         })
                         .collect();
@@ -1254,7 +1258,7 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 /// What identifies a result row across runs: its id, plus its seq for a
 /// history read, whose versions share their row's id, and a flat join's
 /// joined rows (the occurrence).
-type RowKey = (RowUuid, u64, Arc<[RowUuid]>);
+type RowKey = (RowUuid, u64, Arc<[crate::values::JoinedRow]>);
 
 fn row_key(row: &CurrentRow) -> RowKey {
     let version = if is_history_table(&row.table) {
@@ -1305,6 +1309,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
             table: row.table.to_string(),
             row_uuid: row.id,
             joined: row.joined.to_vec(),
+            version: row.version,
             index,
         })
         .collect();
