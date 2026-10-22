@@ -5,6 +5,12 @@ use jazz::account_registry::{AccountCommand, AccountCommandResult, Assignment, P
 use std::{path::PathBuf, sync::mpsc};
 use tokio::sync::oneshot;
 
+/// Tests can make the next journal append fail after it commits.
+#[cfg(test)]
+type Failpoint = std::sync::Arc<std::sync::atomic::AtomicBool>;
+#[cfg(not(test))]
+type Failpoint = ();
+
 enum Request {
     Execute(
         AccountCommand,
@@ -28,6 +34,8 @@ pub(crate) struct AccountRegistryOwner {
     /// watch closes (and every subscriber re-checks and fails closed) if that
     /// thread exits for any reason, including a panic.
     changes: tokio::sync::watch::Receiver<u64>,
+    #[cfg(test)]
+    failpoint: Failpoint,
 }
 
 impl AccountRegistryOwner {
@@ -43,11 +51,17 @@ impl AccountRegistryOwner {
                     None => SqliteKv::memory(),
                 };
                 let registry = storage.and_then(|storage| {
-                    StoredAccountRegistry::open(storage).map_err(|error| error.to_string())
+                    #[cfg(test)]
+                    let failpoint = storage.failpoint();
+                    #[cfg(not(test))]
+                    let failpoint: Failpoint = ();
+                    StoredAccountRegistry::open(storage)
+                        .map(|registry| (registry, failpoint))
+                        .map_err(|error| error.to_string())
                 });
                 let mut registry = match registry {
-                    Ok(registry) => {
-                        if ready.send(Ok(())).is_err() {
+                    Ok((registry, failpoint)) => {
+                        if ready.send(Ok(failpoint)).is_err() {
                             return;
                         }
                         registry
@@ -101,14 +115,30 @@ impl AccountRegistryOwner {
                 }
             })
             .map_err(|error| error.to_string())?;
-        opened
+        #[cfg_attr(not(test), allow(clippy::let_unit_value))]
+        let _failpoint = opened
             .recv()
             .map_err(|_| "account registry owner exited during startup".to_owned())??;
         Ok(Self {
             sender,
             changes,
             closed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            failpoint: _failpoint,
         })
+    }
+
+    /// Tests: the next journal append commits and then reports a failure.
+    #[cfg(test)]
+    pub(crate) fn fail_next_append_for_test(&self) {
+        self.failpoint
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Tests: whether the injected failure is still waiting for an append.
+    #[cfg(test)]
+    pub(crate) fn append_failure_pending_for_test(&self) -> bool {
+        self.failpoint.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {

@@ -4,7 +4,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value as JsonValue, json};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -209,7 +209,6 @@ pub struct JazzServer {
     admin_secret: String,
     backend_secret: String,
     host: IpAddr,
-    client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     embedded_jwks_server: Option<TestJwtIssuer>,
     auth_clock: crate::middleware::auth::AuthClock,
 }
@@ -275,7 +274,7 @@ impl JazzServer {
             ..Default::default()
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         let mut server_builder =
             apply_storage_mode(server_builder, storage_data_dir, persistent_storage);
 
@@ -358,7 +357,6 @@ impl JazzServer {
             admin_secret,
             host,
             backend_secret,
-            client_data_dirs: Mutex::new(Vec::new()),
             embedded_jwks_server: None,
             auth_clock: crate::middleware::auth::AuthClock::default(),
         };
@@ -398,6 +396,20 @@ impl JazzServer {
     /// that need to inspect or drive internal server state.
     pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
         self.state.clone()
+    }
+
+    /// A JWT for `user_id` from the embedded test issuer, at the server's
+    /// auth clock. Subjects are opaque strings, kept intact so callers
+    /// exercise the same issuer-scoped identity boundary as production.
+    pub fn jwt_for_user(&self, user_id: impl AsRef<str>) -> String {
+        self.require_built_in_jwt_helpers();
+        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
+        TestJwtIssuer::jwt_for_user_with_options_at(
+            user_id.as_ref(),
+            json!({"role": "user"}),
+            TestJwtOptions::default(),
+            now,
+        )
     }
 
     fn require_built_in_jwt_helpers(&self) {
@@ -655,10 +667,7 @@ mod tests {
     #[tokio::test]
     async fn default_jazz_server_keeps_built_in_jwt_helpers_enabled() {
         let server = JazzServer::start().await.expect("start test server");
-        let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
-
-        assert!(context.jwt_token.is_some());
-        assert!(context.admin_secret.is_none());
+        assert!(!server.jwt_for_user("default-helper-user").is_empty());
 
         assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
     }
@@ -680,7 +689,7 @@ mod tests {
         assert_eq!(health.status(), StatusCode::OK);
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            server.make_client_context_for_user(Schema::new(), "external-helper-user")
+            server.jwt_for_user("external-helper-user")
         }))
         .expect_err("external JWKS mode should reject built-in JWT helpers");
         let message = if let Some(message) = panic.downcast_ref::<String>() {

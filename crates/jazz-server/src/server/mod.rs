@@ -470,7 +470,6 @@ mod tests {
             websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
             max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
             core_server_shell_storage_config: None,
-            storage_factory: None,
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             runtime_catalogue_before_publication_hook: StdMutex::new(None),
             runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),

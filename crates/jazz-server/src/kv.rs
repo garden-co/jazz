@@ -15,6 +15,10 @@ pub(crate) type KvResult<T> = Result<T, String>;
 
 pub(crate) struct SqliteKv {
     conn: Mutex<Connection>,
+    /// Tests: the next conditional write commits and then reports an error,
+    /// the ambiguous outcome a failed flush has.
+    #[cfg(test)]
+    fail_next_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SqliteKv {
@@ -42,6 +46,8 @@ impl SqliteKv {
         .map_err(sql)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            #[cfg(test)]
+            fail_next_write: Default::default(),
         })
     }
 
@@ -67,7 +73,20 @@ impl SqliteKv {
                 .map_err(sql)?;
         }
         tx.commit().map_err(sql)?;
+        #[cfg(test)]
+        if self
+            .fail_next_write
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected failure after the write committed".to_owned());
+        }
         Ok(existing)
+    }
+
+    /// Tests: the switch that fails the next conditional write.
+    #[cfg(test)]
+    pub(crate) fn failpoint(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.fail_next_write)
     }
 
     /// Write every pair in one transaction: all or none.
