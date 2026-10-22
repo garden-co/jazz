@@ -2604,6 +2604,11 @@ impl Inner {
                 cells.extend(branch);
                 return self.insert(table_name, cells, Some(row), &Target::Root, who, seq);
             }
+            // A replica may not hold the row (it may not even be allowed
+            // to read it): the write goes to the authority, which decides.
+            Located::Absent { .. } if self.client.is_some() => {
+                return Ok(WriteHandle { row, seq });
+            }
             Located::Absent { .. } | Located::Row { deleted: true, .. } if !upsert => {
                 return Err(rejected(format!(
                     "{verb} target {row:?} does not exist in `{table_name}`"
@@ -2731,6 +2736,8 @@ impl Inner {
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true), false)?;
             }
+            // As for a patch: a replica leaves an unknown row to the authority.
+            Located::Absent { .. } if self.client.is_some() => {}
             _ => {
                 return Err(rejected(format!(
                     "DELETE target {row:?} does not exist in `{table_name}`"
