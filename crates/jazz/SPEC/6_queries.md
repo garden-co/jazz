@@ -993,10 +993,10 @@ subscriber marks each covered deleted row deleted. Deleting, restoring or
 revoking access to a row updates the subscription like any other change: a
 restoration replaces the deleted row with the live one, and a row whose read
 policy no longer holds, including because its granting row was deleted, leaves
-the result. Include-deleted reads of current tables support only the current
-source: branch-view and snapshot read views reject `include_deleted` with a
-"not supported yet" error, for one-shot reads and subscriptions alike. History
-queries keep their own branch selection.
+the result. Include-deleted reads of current tables support the current source
+and a transaction's snapshot: branch-view read views reject `include_deleted`
+with a "not supported yet" error, for one-shot reads and subscriptions alike.
+History queries keep their own branch selection.
 
 Inside an open exclusive transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,
