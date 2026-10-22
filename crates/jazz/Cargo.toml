@@ -9,7 +9,7 @@ autobenches = false
 # Jazz is the common semantic library. Process and target shells select
 # transport and compression capabilities explicitly.
 default = []
-runtime = ["jazz-model/runtime"]
+runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime"]
 # See jazz-db's `sql-trace`.
 sql-trace = ["jazz-db/sql-trace"]
 # See jazz-db's `durable-object-limits`.
