@@ -181,16 +181,16 @@ fn history_keeps_each_versions_provenance() {
         "$updatedAt",
     );
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
+    block_on(db.begin_serializable(open)).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     block_on(db.update("notes", row(1), body("b"), Default::default())).unwrap();
-    let at_snapshot = block_on(db.exclusive_tx_ref(open).all_prepared(&select)).unwrap();
+    let at_snapshot = block_on(db.serializable_tx_ref(open).all_prepared(&select)).unwrap();
     assert_eq!(
         u64_cell(&at_snapshot[0], "$updatedAt"),
         first,
         "the as-of read sees the old version's stamp"
     );
-    db.abandon_exclusive_handle(open).unwrap();
+    db.abandon_serializable_handle(open).unwrap();
 }
 
 fn subject_cell(row: &jazz::db::CurrentRow, name: &str) -> String {

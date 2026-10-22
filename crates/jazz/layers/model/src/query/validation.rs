@@ -400,6 +400,124 @@ fn validate_query_with_schema_version_as(
 
 type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8>);
 
+impl Query {
+    /// Whether any flat-join source reads retained history.
+    #[doc(hidden)]
+    pub fn uses_history(&self) -> bool {
+        std::iter::once(&self.table)
+            .chain(
+                self.flat_join
+                    .iter()
+                    .flat_map(|join| join.sources.iter().map(|source| &source.table)),
+            )
+            .any(|table| crate::schema::history::is_history_table(&table))
+    }
+
+    /// A conjunctive finite row constraint bounds a primary-key source.
+    #[doc(hidden)]
+    pub fn primary_key_operands(&self) -> Option<Vec<&Operand>> {
+        fn bounded_id(predicate: &Predicate) -> Option<Vec<&Operand>> {
+            let supplied =
+                |value: &Operand| matches!(value, Operand::Literal(_) | Operand::Param(_));
+            match predicate {
+                Predicate::All(predicates) => predicates.iter().find_map(bounded_id),
+                // Validation canonicalizes an empty IN list to false.
+                Predicate::Any(predicates) if predicates.is_empty() => Some(Vec::new()),
+                Predicate::Eq(Operand::Column(column), value)
+                | Predicate::Eq(value, Operand::Column(column)) => {
+                    (column == "id" && supplied(value)).then(|| vec![value])
+                }
+                Predicate::In(Operand::Column(column), values) => {
+                    (column == "id" && values.iter().all(supplied)).then(|| values.iter().collect())
+                }
+                _ => None,
+            }
+        }
+        self.filters.iter().find_map(bounded_id)
+    }
+}
+
+fn supplied_transaction_id(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            predicates.iter().any(supplied_transaction_id)
+        }
+        Predicate::Not(predicate)
+        | Predicate::EnumMatch {
+            payload: predicate, ..
+        } => supplied_transaction_id(predicate),
+        predicate => {
+            predicate.any_operand(&mut |operand| {
+                matches!(operand,
+                Operand::Column(column) if column.rsplit('.').next() == Some("$transactionId"))
+            }) && predicate.any_operand(&mut |operand| {
+                matches!(operand, Operand::Literal(_) | Operand::Param(_))
+            })
+        }
+    }
+}
+
+fn validate_history_query(
+    query: &Query,
+    schema: &RuntimeSchema,
+    role: RelationProjectionRole,
+) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    let source_name = crate::schema::history::history_source_table(&query.table)
+        .ok_or_else(|| QueryError::UnknownTable(query.table.clone()))?;
+    let source = schema_table(schema, source_name)
+        .map_err(|_| QueryError::UnknownTable(query.table.clone()))?;
+    let history = crate::schema::history::HistoryRelationSchema::new(source);
+    let unsupported = |pattern: &str| {
+        QueryError::UnsupportedRelationQuery(format!(
+            "Reading {pattern} is not supported in history queries yet"
+        ))
+    };
+    if !query.joins.is_empty()
+        || !query.includes.is_empty()
+        || !query.array_subqueries.is_empty()
+        || !query.reachable.is_empty()
+        || !query.inherits.is_empty()
+        || !query.policy_branches.is_empty()
+        || query.relation.is_some()
+    {
+        return Err(unsupported("joins or relationships"));
+    }
+    if let Some(aggregate) = &query.aggregate
+        && aggregate
+            .group_by
+            .iter()
+            .chain(
+                aggregate
+                    .aggregates
+                    .iter()
+                    .filter_map(|output| output.column.as_ref()),
+            )
+            .any(|column| column.starts_with('$'))
+    {
+        return Err(unsupported("aggregates over history metadata"));
+    }
+    if query.flat_join.is_none() && query.primary_key_operands().is_none() {
+        return Err(unsupported(
+            "history without an id equality or IN constraint",
+        ));
+    }
+    if query.filters.iter().any(supplied_transaction_id) {
+        return Err(unsupported("user-provided $transactionId predicates"));
+    }
+    if query
+        .order_by
+        .iter()
+        .any(|order| order.column == "$transactionId")
+    {
+        return Err(unsupported("ordering by $transactionId"));
+    }
+    // This is a query-local descriptor, never a writable catalogue table.
+    let table = history.table_schema();
+    let mut schema = schema.clone();
+    schema.tables.push(table);
+    validate_query_canonical_parts_as(query, &schema, role)
+}
+
 fn validate_query_canonical_parts(
     query: &Query,
     schema: &RuntimeSchema,
@@ -1014,6 +1132,39 @@ fn validate_query_canonical_parts_as(
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    if query.uses_history() && query.filters.iter().any(supplied_transaction_id) {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "Reading user-provided $transactionId predicates is not supported in history queries yet".into()));
+    }
+    let history_names = std::iter::once(&query.table)
+        .chain(
+            query
+                .flat_join
+                .iter()
+                .flat_map(|join| join.sources.iter().map(|source| &source.table)),
+        )
+        .filter(|name| {
+            crate::schema::history::is_history_table(&name)
+                && !schema.tables.iter().any(|table| &table.name == *name)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !history_names.is_empty() {
+        let mut virtual_schema = schema.clone();
+        for name in &history_names {
+            let base = crate::schema::history::history_source_table(&name).unwrap();
+            let source =
+                schema_table(schema, base).map_err(|_| QueryError::UnknownTable(name.clone()))?;
+            if name != &query.table {
+                let history = crate::schema::history::HistoryRelationSchema::new(source);
+                virtual_schema.tables.push(history.table_schema());
+            }
+        }
+        if history_names.contains(&query.table) {
+            return validate_history_query(query, &virtual_schema, role);
+        }
+        return validate_query_canonical_parts_as(query, &virtual_schema, role);
+    }
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
@@ -1836,6 +1987,11 @@ fn validate_aggregate_order_by(
 fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), QueryError> {
     match column {
         "id" => Ok(()),
+        name if crate::schema::history::is_history_table(&table.name)
+            && crate::schema::history::HistoryMetadataColumn::contains(name) =>
+        {
+            column_type(table, column).map(|_| ())
+        }
         name if executable_magic_column_type(name)?.is_some() => Ok(()),
         name if name.starts_with('$') => Err(unknown_column(&table.name, &name)),
         name => column_type(table, name).map(|_| ()),
@@ -1844,10 +2000,7 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
 
 /// Borrows the table: validation runs for every policy and subscription, and
 /// copying a table schema per lookup dominated its cost.
-fn schema_table<'a>(
-    schema: &'a RuntimeSchema,
-    name: &str,
-) -> Result<&'a TableSchema, QueryError> {
+fn schema_table<'a>(schema: &'a RuntimeSchema, name: &str) -> Result<&'a TableSchema, QueryError> {
     schema
         .tables
         .iter()

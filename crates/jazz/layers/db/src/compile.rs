@@ -98,10 +98,109 @@ fn unwrap_nullable(value: Value) -> Option<Value> {
 /// An operand ready for SQL.
 enum Term {
     Sql(String),
+    /// A large-capable column's cell: compared through its sort key, with
+    /// what the key cannot answer decided in Rust ([`Prep`]).
+    Large(LargeColumn),
+    /// A bound value (literal, parameter, session or claim value): its
+    /// placeholder and the value itself.
+    Bound(String, Sql),
     /// A session or claim value the identity does not have.
     Missing,
     /// NaN: unordered against everything, SQLite cannot store it.
     NaN,
+}
+
+impl Term {
+    /// The SQL of a present operand.
+    fn sql(&self) -> Option<&str> {
+        match self {
+            Term::Sql(sql) | Term::Bound(sql, _) => Some(sql),
+            Term::Large(column) => Some(&column.cell),
+            Term::Missing | Term::NaN => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LargeColumn {
+    cell: String,
+    table: String,
+    column: String,
+    kind: jazz_types::large_values::LargeValueKind,
+}
+
+/// A question about chunked cells that their sort key cannot answer,
+/// answered in Rust before the statement runs. Each writes its answers to
+/// `_jazz_lv_scratch` under its slot, which the statement reads. The slot
+/// is a hash of the question, so the same query compiles to the same SQL.
+#[derive(Clone, Debug)]
+pub enum Prep {
+    /// The chunked cells of `table.column` that pass `test`.
+    Match {
+        slot: i64,
+        table: String,
+        column: String,
+        test: MatchTest,
+    },
+    /// Ranks for the chunked cells of `table.column` that share a sort key
+    /// with another: their order by full logical value.
+    Rank {
+        slot: i64,
+        table: String,
+        column: String,
+    },
+    /// A content id for every chunked cell of these columns, so cells of
+    /// one logical value (built differently) compare equal.
+    Class {
+        slot: i64,
+        columns: Vec<(String, String)>,
+    },
+}
+
+/// What a chunked cell is matched against: an inline-form cell.
+#[derive(Clone, Debug)]
+pub enum MatchTest {
+    Contains(Vec<u8>),
+    Cmp(CmpOp, Vec<u8>),
+}
+
+impl MatchTest {
+    /// Names the test by its literal's hash, so a long literal costs one
+    /// hash, not a formatted dump.
+    fn question(&self) -> String {
+        match self {
+            MatchTest::Contains(literal) => format!("contains {}", blake3::hash(literal)),
+            MatchTest::Cmp(op, literal) => format!("{op:?} {}", blake3::hash(literal)),
+        }
+    }
+}
+
+impl Prep {
+    fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
+        let hash = blake3::hash(question.as_bytes());
+        // 52 bits: exact as a JS number (Durable Objects).
+        let slot =
+            i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) & ((1 << 52) - 1);
+        make(slot)
+    }
+
+    pub fn slot(&self) -> i64 {
+        match self {
+            Prep::Match { slot, .. } | Prep::Rank { slot, .. } | Prep::Class { slot, .. } => *slot,
+        }
+    }
+}
+
+/// SQL: whether `cell` is among a prep's answers.
+fn scratch_has(slot: i64, cell: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))"
+    )
+}
+
+/// SQL: a prep's answer value for `cell`.
+fn scratch_value(slot: i64, cell: &str) -> String {
+    format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))")
 }
 
 /// SQL text plus its positional parameters.
@@ -119,22 +218,43 @@ pub struct Ctx<'a> {
     pub view: Option<View>,
     /// An as-of cut every table is read through.
     pub cut: Option<Cut>,
+    /// Questions the statement needs answered first.
+    pub preps: Vec<Prep>,
     next_alias: usize,
 }
 
 /// A frozen snapshot: the state as of commit `seq`, plus the open
-/// transaction's own staged writes (written at `own`).
-#[derive(Clone, Copy, Debug)]
+/// transaction's own staged writes (written at `own`), plus the versions
+/// written by the individual commits in `extra` (a replica's own writes
+/// that were not yet in `seq` when the snapshot was taken).
+#[derive(Clone, Debug, Default)]
 pub struct Cut {
     pub seq: u64,
     pub own: u64,
+    pub extra: Vec<u64>,
 }
 
-/// A head branch, optionally composed over a live base branch.
+impl Cut {
+    pub fn at(seq: u64) -> Self {
+        Self {
+            seq,
+            ..Self::default()
+        }
+    }
+
+    /// Whether a version written at `seq` is in the cut.
+    pub fn sees(&self, seq: u64) -> bool {
+        seq <= self.seq || seq == self.own || self.extra.contains(&seq)
+    }
+}
+
+/// A head branch, optionally composed over a base branch that is live or
+/// frozen at `base_cut`.
 #[derive(Clone, Debug)]
 pub struct View {
     pub head: crate::protocol::BranchSelector,
     pub base: Option<crate::protocol::BranchSelector>,
+    pub base_cut: Option<Cut>,
 }
 
 /// A compiled root query.
@@ -146,6 +266,11 @@ pub struct Compiled {
     pub tables: BTreeSet<String>,
     /// Rows are aggregate groups: column 0 is the group key, hashed to an id.
     pub aggregate: bool,
+    /// Run before the statement.
+    pub preps: Vec<Prep>,
+    /// The statement with prefix-tie ranks in its order, used instead when
+    /// a rank prep finds chunked values sharing a sort key.
+    pub ranked_sql: Option<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -164,6 +289,7 @@ impl<'a> Ctx<'a> {
             tables: BTreeSet::new(),
             view: None,
             cut: None,
+            preps: Vec::new(),
             next_alias: 0,
         }
     }
@@ -183,12 +309,36 @@ impl<'a> Ctx<'a> {
     /// they are; for rows changed since, the newest superseded image at or
     /// before the cut stands in. Rows created after the cut have neither.
     fn rows(&mut self, table: &Table, columns: &str) -> String {
+        self.rows_at(table, columns, self.cut.clone())
+    }
+
+    fn rows_at(&mut self, table: &Table, columns: &str, cut: Option<Cut>) -> String {
         let name = quote(&table.name);
-        let Some(cut) = self.cut else {
+        let Some(cut) = cut else {
             return name;
         };
         let seq = self.bind(Sql::Integer(cut.seq as i64));
         let own = self.bind(Sql::Integer(cut.own as i64));
+        // Seqs are integers, so the extra commits are inlined.
+        let extra = cut
+            .extra
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (visible, h_visible, newer) = if extra.is_empty() {
+            (
+                format!("_seq <= {seq} OR _seq = {own}"),
+                format!("h2._seq <= {seq}"),
+                format!("c._seq > {seq} AND c._seq <> {own}"),
+            )
+        } else {
+            (
+                format!("_seq <= {seq} OR _seq = {own} OR _seq IN ({extra})"),
+                format!("(h2._seq <= {seq} OR h2._seq IN ({extra}))"),
+                format!("c._seq > {seq} AND c._seq <> {own} AND c._seq NOT IN ({extra})"),
+            )
+        };
         let history = quote(&format!("{}__h", table.name));
         let h_columns = columns
             .replace("rid, ", "")
@@ -197,11 +347,11 @@ impl<'a> Ctx<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "(SELECT {columns} FROM {name} WHERE _seq <= {seq} OR _seq = {own} \
+            "(SELECT {columns} FROM {name} WHERE {visible} \
              UNION ALL SELECT NULL, {h_columns} FROM {history} AS h JOIN {name} AS c \
-             ON c.id = h.id AND c._b = h._b WHERE c._seq > {seq} AND c._seq <> {own} \
+             ON c.id = h.id AND c._b = h._b WHERE {newer} \
              AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
-             WHERE h2.id = h.id AND h2._b = h._b AND h2._seq <= {seq}))"
+             WHERE h2.id = h.id AND h2._b = h._b AND {h_visible}))"
         )
     }
 
@@ -246,7 +396,8 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 let base = self.bind(Sql::Blob(table.selector_key(&base)?));
-                let base_rows = self.rows(table, &columns);
+                let base_cut = view.base_cut.clone().or_else(|| self.cut.clone());
+                let base_rows = self.rows_at(table, &columns, base_cut);
                 let head_rows = self.rows(table, &columns);
                 format!(
                     "(SELECT {columns} FROM {rows} WHERE _b = {head} UNION ALL SELECT {inherited} \
@@ -270,7 +421,7 @@ impl<'a> Ctx<'a> {
     fn value_term(&mut self, value: &Value) -> Result<Term, Error> {
         Ok(match to_sql(value)? {
             None => Term::NaN,
-            Some(sql) => Term::Sql(self.bind(sql)),
+            Some(sql) => Term::Bound(self.bind(sql.clone()), sql),
         })
     }
 
@@ -303,13 +454,29 @@ impl<'a> Ctx<'a> {
         use crate::query::AggregateFunction as F;
         let mut projection = Vec::new();
         let mut outputs = Vec::new();
+        // (the group's cell, what rows group by, what groups order by)
         let group = match &aggregate.group_by {
             Some(column) => {
                 let sql = column_sql(table, alias, column)?;
                 let ty = table.column(column).expect("checked").ty.clone();
                 projection.push((column.clone(), ty));
                 outputs.push(sql.clone());
-                Some(sql)
+                Some(match self.column_term(table, alias, column)? {
+                    // Cells of one logical value group together even when
+                    // their chunk trees differ.
+                    Term::Large(large) => {
+                        let columns = vec![(large.table.clone(), large.column.clone())];
+                        let question = format!("class {columns:?}");
+                        let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
+                        let by = format!(
+                            "(CASE WHEN COALESCE({}, 0) THEN {} ELSE {sql} END)",
+                            crate::large::chunked_sql(&sql),
+                            scratch_value(slot, &sql)
+                        );
+                        (sql.clone(), by, crate::large::key_sql(&sql))
+                    }
+                    _ => (sql.clone(), sql.clone(), sql),
+                })
             }
             None => None,
         };
@@ -366,7 +533,7 @@ impl<'a> Ctx<'a> {
                 OrderDirection::Desc => "DESC",
             };
             let term = if aggregate.group_by.as_deref() == Some(key.column.as_str()) {
-                group.clone().expect("grouped")
+                group.clone().expect("grouped").2
             } else if aggregate.aggregates.iter().any(|a| a.alias == key.column) {
                 quote(&key.column)
             } else {
@@ -378,9 +545,9 @@ impl<'a> Ctx<'a> {
             keys.push(format!("{term} {direction}"));
         }
         let (key, group_by) = match &group {
-            Some(sql) => {
-                keys.push(format!("{sql} ASC"));
-                (sql.clone(), format!(" GROUP BY {sql}"))
+            Some((sql, by, order)) => {
+                keys.push(format!("{order} ASC"));
+                (sql.clone(), format!(" GROUP BY {by}"))
             }
             None => ("NULL".to_owned(), String::new()),
         };
@@ -400,10 +567,12 @@ impl<'a> Ctx<'a> {
         );
         Ok(Compiled {
             sql,
+            ranked_sql: None,
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: true,
+            preps: self.preps,
         })
     }
 
@@ -522,25 +691,29 @@ impl<'a> Ctx<'a> {
             }
             return self.compile_aggregate(query, aggregate, table, alias, &wheres);
         }
-        let order = order_sql(table, alias, &query.order_by)?;
+        let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
         let columns = projection
             .iter()
             .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
             .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
-        let sql = format!(
-            "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {} AS {alias} WHERE {} \
-             ORDER BY {order} LIMIT {limit} OFFSET {offset}",
-            self.source(table)?,
-            and(&wheres),
-        );
+        let source = self.source(table)?;
+        let statement = |order: &str| {
+            format!(
+                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                and(&wheres),
+            )
+        };
         Ok(Compiled {
-            sql,
+            sql: statement(&order),
+            ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
+            preps: self.preps,
         })
     }
 
@@ -564,7 +737,7 @@ impl<'a> Ctx<'a> {
         let projection = projection(child, array.select.as_deref())?;
         let alias = "t";
         let parent = match self.value_term(parent)? {
-            Term::Sql(sql) => sql,
+            Term::Bound(sql, _) => sql,
             _ => "NULL".to_owned(),
         };
         let mut wheres = vec![
@@ -580,25 +753,29 @@ impl<'a> Ctx<'a> {
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(child, alias, session)?);
         }
-        let order = order_sql(child, alias, &array.order_by)?;
+        let (order, ranked_order) = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
             .iter()
             .map(|(name, _)| Ok(format!(", {}", column_sql(child, alias, name)?)))
             .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(array.offset as i64));
-        let sql = format!(
-            "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {} AS {alias} WHERE {} \
-             ORDER BY {order} LIMIT {limit} OFFSET {offset}",
-            self.source(child)?,
-            and(&wheres),
-        );
+        let source = self.source(child)?;
+        let statement = |order: &str| {
+            format!(
+                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                and(&wheres),
+            )
+        };
         Ok(Compiled {
-            sql,
+            sql: statement(&order),
+            ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
+            preps: self.preps,
         })
     }
 
@@ -620,8 +797,8 @@ impl<'a> Ctx<'a> {
         let access = self.table(&via.access_table)?;
         let edges = self.table(&via.edge_table)?;
         let seed = match self.operand(&via.from, table, alias)? {
-            Term::Sql(sql) => sql,
             Term::Missing | Term::NaN => return Ok("0".to_owned()),
+            term => term.sql().expect("present").to_owned(),
         };
         let r = self.alias("reach");
         let e = self.alias("e");
@@ -673,7 +850,7 @@ impl<'a> Ctx<'a> {
 
     fn operand(&mut self, operand: &Operand, table: &Table, alias: &str) -> Result<Term, Error> {
         match operand {
-            Operand::Column(column) => Ok(Term::Sql(column_sql(table, alias, column)?)),
+            Operand::Column(column) => self.column_term(table, alias, column),
             Operand::Param(name) => {
                 let value = self
                     .binding
@@ -727,17 +904,17 @@ impl<'a> Ctx<'a> {
                     .iter()
                     .map(|option| self.operand(option, table, alias))
                     .collect::<Result<Vec<_>, _>>()?;
-                in_list(left, options)
+                self.in_list(left, options)?
             }
             Predicate::Contains(l, r) => {
                 let l = self.operand(l, table, alias)?;
                 let r = self.operand(r, table, alias)?;
-                contains(l, r)
+                self.contains(l, r)
             }
             Predicate::IsNull(operand) => match self.operand(operand, table, alias)? {
-                Term::Sql(sql) => format!("({sql} IS NULL)"),
                 Term::Missing => "1".to_owned(),
                 Term::NaN => "0".to_owned(),
+                term => format!("({} IS NULL)", term.sql().expect("present")),
             },
             Predicate::EnumMatch { .. } => {
                 return Err(unsupported("enum payload predicates on SQLite"));
@@ -755,7 +932,7 @@ impl<'a> Ctx<'a> {
     ) -> Result<String, Error> {
         let left = self.operand(left, table, alias)?;
         let right = self.operand(right, table, alias)?;
-        Ok(cmp(op, left, right))
+        self.cmp(op, left, right)
     }
 
     // ---- policies -------------------------------------------------------
@@ -823,7 +1000,7 @@ impl<'a> Ctx<'a> {
                 let column = path
                     .get(1)
                     .ok_or_else(|| query_error("outer row reference without a column"))?;
-                Ok(Term::Sql(column_sql(table, alias, column)?))
+                self.column_term(table, alias, column)
             }
             PolicyValue::SessionRef(path) => {
                 let value = session.resolve(path);
@@ -863,15 +1040,15 @@ impl<'a> Ctx<'a> {
             }
             PolicyExpr::Not(inner) => format!("(NOT COALESCE({}, 0))", recurse(self, inner)?),
             PolicyExpr::Cmp { column, op, value } => {
-                let left = Term::Sql(column_sql(table, alias, column)?);
+                let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
-                cmp(op.clone(), left, right)
+                self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::SessionCmp { path, op, value } => {
                 let left = session.resolve(path);
                 let left = self.present(left)?;
                 let right = self.value_term(&public_value(value)?)?;
-                cmp(op.clone(), left, right)
+                self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::IsNull { column } => {
                 format!("({} IS NULL)", column_sql(table, alias, column)?)
@@ -882,15 +1059,15 @@ impl<'a> Ctx<'a> {
             PolicyExpr::SessionIsNull { path } => bool_sql(session.resolve(path).is_none()),
             PolicyExpr::SessionIsNotNull { path } => bool_sql(session.resolve(path).is_some()),
             PolicyExpr::Contains { column, value } => {
-                let left = Term::Sql(column_sql(table, alias, column)?);
+                let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
-                contains(left, right)
+                self.contains(left, right)
             }
             PolicyExpr::In {
                 column,
                 session_path,
             } => {
-                let left = Term::Sql(column_sql(table, alias, column)?);
+                let left = self.column_term(table, alias, column)?;
                 let options = match session.resolve(session_path) {
                     Some(Value::Array(values)) => values
                         .iter()
@@ -899,15 +1076,15 @@ impl<'a> Ctx<'a> {
                     Some(value) => vec![self.value_term(&value)?],
                     None => Vec::new(),
                 };
-                in_list(left, options)
+                self.in_list(left, options)?
             }
             PolicyExpr::InList { column, values } => {
-                let left = Term::Sql(column_sql(table, alias, column)?);
+                let left = self.column_term(table, alias, column)?;
                 let options = values
                     .iter()
                     .map(|value| self.policy_value(value, outer, session))
                     .collect::<Result<Vec<_>, _>>()?;
-                in_list(left, options)
+                self.in_list(left, options)?
             }
             PolicyExpr::SessionInList { path, values } => {
                 let left = session.resolve(path);
@@ -916,7 +1093,7 @@ impl<'a> Ctx<'a> {
                     .iter()
                     .map(|value| self.value_term(&public_value(value)?))
                     .collect::<Result<Vec<_>, _>>()?;
-                in_list(left, options)
+                self.in_list(left, options)?
             }
             PolicyExpr::SessionContains { .. } => {
                 return Err(unsupported("session-side CONTAINS policies on SQLite"));
@@ -1165,6 +1342,21 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// [`Self::resolve`] as an operand.
+    fn resolve_term(&self, rel: &Rel, column: &RelationColumnRef) -> Result<Term, Error> {
+        let sql = self.resolve(rel, column)?;
+        let src = rel.from.iter().find(|src| {
+            src.table.as_ref().is_some_and(|table| {
+                sql.starts_with(&format!("{}.", src.alias))
+                    && self.schema.tables[table].has_column(&column.column)
+            })
+        });
+        Ok(match src.and_then(|src| src.table.as_ref()) {
+            Some(table) => self.large_term(&self.schema.tables[table], sql, &column.column),
+            None => Term::Sql(sql),
+        })
+    }
+
     fn row_id(
         &self,
         rel: &Rel,
@@ -1212,7 +1404,7 @@ impl<'a> Ctx<'a> {
                 let (table, alias) = scope
                     .outer
                     .ok_or_else(|| query_error("outer column outside a policy"))?;
-                Ok(Term::Sql(column_sql(table, alias, &column.column)?))
+                self.column_term(table, alias, &column.column)
             }
             RelationValueRef::FrontierColumn(_) => Err(unsupported("frontier columns on SQLite")),
             RelationValueRef::RowId(row) => Ok(Term::Sql(self.row_id(rel, *row, scope)?)),
@@ -1247,7 +1439,7 @@ impl<'a> Ctx<'a> {
                 self.rel_predicate(part, rel, scope)?
             ),
             RelationPredicate::Cmp { left, op, right } => {
-                let left = Term::Sql(self.resolve(rel, left)?);
+                let left = self.resolve_term(rel, left)?;
                 let right = self.rel_value(right, rel, scope)?;
                 let op = match op {
                     RelationCmpOp::Eq => CmpOp::Eq,
@@ -1257,7 +1449,7 @@ impl<'a> Ctx<'a> {
                     RelationCmpOp::Gt => CmpOp::Gt,
                     RelationCmpOp::Ge => CmpOp::Ge,
                 };
-                cmp(op, left, right)
+                self.cmp(op, left, right)?
             }
             RelationPredicate::IsNull { column } => {
                 format!("({} IS NULL)", self.resolve(rel, column)?)
@@ -1266,17 +1458,17 @@ impl<'a> Ctx<'a> {
                 format!("({} IS NOT NULL)", self.resolve(rel, column)?)
             }
             RelationPredicate::In { left, values } => {
-                let left = Term::Sql(self.resolve(rel, left)?);
+                let left = self.resolve_term(rel, left)?;
                 let options = values
                     .iter()
                     .map(|value| self.rel_value(value, rel, scope))
                     .collect::<Result<Vec<_>, _>>()?;
-                in_list(left, options)
+                self.in_list(left, options)?
             }
             RelationPredicate::Contains { left, right } => {
-                let left = Term::Sql(self.resolve(rel, left)?);
+                let left = self.resolve_term(rel, left)?;
                 let right = self.rel_value(right, rel, scope)?;
-                contains(left, right)
+                self.contains(left, right)
             }
             RelationPredicate::EnumMatch { .. } => {
                 return Err(unsupported("enum payload relation predicates on SQLite"));
@@ -1353,22 +1545,6 @@ fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<(String, V
     }
 }
 
-fn order_sql(table: &Table, alias: &str, order: &[crate::query::OrderBy]) -> Result<String, Error> {
-    let mut keys = Vec::new();
-    for key in order {
-        let direction = match key.direction {
-            OrderDirection::Asc => "ASC",
-            OrderDirection::Desc => "DESC",
-        };
-        keys.push(format!(
-            "{} {direction}",
-            column_sql(table, alias, &key.column)?
-        ));
-    }
-    keys.push(format!("{alias}.id ASC"));
-    Ok(keys.join(", "))
-}
-
 pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<String, Error> {
     if column == "id" {
         return Ok(format!("{alias}.id"));
@@ -1413,7 +1589,7 @@ fn and(parts: &[String]) -> String {
     if parts.is_empty() {
         "1".to_owned()
     } else {
-        format!("({})", parts.join(" AND "))
+        chain(parts, " AND ")
     }
 }
 
@@ -1421,8 +1597,70 @@ fn or(parts: &[String]) -> String {
     if parts.is_empty() {
         "0".to_owned()
     } else {
-        format!("({})", parts.join(" OR "))
+        chain(parts, " OR ")
     }
+}
+
+/// Terms flatter than this join as one chain. SQLite parses a chain of n
+/// terms n deep, and Durable Object SQLite caps expression depth at 100.
+const CHAIN_MAX: usize = 32;
+
+/// `parts` joined by `op`, nested in halves past [`CHAIN_MAX`] so the depth
+/// grows with the log of the count. SQLite splits nested AND and OR terms
+/// the same as a flat chain.
+fn chain(parts: &[String], op: &str) -> String {
+    if parts.len() <= CHAIN_MAX {
+        return format!("({})", parts.join(op));
+    }
+    let (left, right) = parts.split_at(parts.len() / 2);
+    format!("({}{op}{})", chain(left, op), chain(right, op))
+}
+
+/// Lists longer than this bind as one JSON array read by `json_each`, not
+/// a parameter per value: Durable Object SQLite caps a statement at 100
+/// bound parameters.
+pub(crate) const BOUND_LIST_MAX: usize = 16;
+
+/// A `SELECT` of `values` from the JSON array bound at `mark`, and that
+/// array; `None` when the values have no exact shared JSON form (reals, or
+/// blobs mixed with other types).
+pub(crate) fn json_list(values: &[&Sql], mark: &str) -> Option<(String, Sql)> {
+    let blobs = values.iter().any(|value| matches!(value, Sql::Blob(_)));
+    let mut items = Vec::with_capacity(values.len());
+    for value in values {
+        items.push(match value {
+            Sql::Null => serde_json::Value::Null,
+            Sql::Blob(bytes) => serde_json::Value::String(hex(bytes)),
+            _ if blobs => return None,
+            Sql::Integer(n) => serde_json::Value::from(*n),
+            Sql::Text(text) => serde_json::Value::String(String::from_utf8(text.clone()).ok()?),
+            Sql::Real(_) => return None,
+        });
+    }
+    let column = if blobs { "unhex(value)" } else { "value" };
+    Some((
+        format!("SELECT {column} FROM json_each({mark})"),
+        Sql::Text(serde_json::Value::Array(items).to_string().into_bytes()),
+    ))
+}
+
+/// Ids as a JSON array for [`json_list`]'s blob form.
+pub(crate) fn json_ids<'a>(ids: impl IntoIterator<Item = &'a [u8]>) -> Sql {
+    let items: Vec<serde_json::Value> = ids
+        .into_iter()
+        .map(|id| serde_json::Value::String(hex(id)))
+        .collect();
+    Sql::Text(serde_json::Value::Array(items).to_string().into_bytes())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    out
 }
 
 fn bool_sql(value: bool) -> String {
@@ -1434,10 +1672,7 @@ fn bool_sql(value: bool) -> String {
 /// Orderings and `IN` stay bare so SQLite can use an index for them: their
 /// SQL null means false, which AND, OR and WHERE already treat as false;
 /// only NOT (and a condition read as a value) coalesces it.
-fn cmp(op: CmpOp, left: Term, right: Term) -> String {
-    let (Term::Sql(l), Term::Sql(r)) = (left, right) else {
-        return "0".to_owned();
-    };
+fn cmp_plain(op: &CmpOp, l: &str, r: &str) -> String {
     match op {
         CmpOp::Eq => format!("({l} IS {r})"),
         CmpOp::Ne => format!("({l} IS NOT {r})"),
@@ -1448,30 +1683,331 @@ fn cmp(op: CmpOp, left: Term, right: Term) -> String {
     }
 }
 
-fn in_list(left: Term, options: Vec<Term>) -> String {
-    let Term::Sql(left) = left else {
-        return "0".to_owned();
-    };
-    let options: Vec<String> = options
-        .into_iter()
-        .filter_map(|option| match option {
-            Term::Sql(sql) => Some(sql),
-            _ => None,
-        })
-        .collect();
-    if options.is_empty() {
-        return "0".to_owned();
+/// `a op b` as `b flip(op) a`.
+fn flip(op: &CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Lt => CmpOp::Gt,
+        CmpOp::Le => CmpOp::Ge,
+        CmpOp::Gt => CmpOp::Lt,
+        CmpOp::Ge => CmpOp::Le,
+        op => op.clone(),
     }
-    format!("({left} IN ({}))", options.join(", "))
 }
 
-fn contains(left: Term, right: Term) -> String {
-    let (Term::Sql(l), Term::Sql(r)) = (left, right) else {
-        return "0".to_owned();
-    };
-    // Never SQLite's `instr`: a large-capable cell may be tagged bytes or a
-    // chunked descriptor, which only `jz_contains` reads as its value.
-    format!("(jz_contains({l}, {r}) > 0)")
+/// The logical bytes of an inline-form cell.
+fn logical_of(cell: &[u8]) -> &[u8] {
+    match cell.first() {
+        Some(&crate::large::BYTES) => &cell[1..],
+        _ => cell,
+    }
+}
+
+impl Ctx<'_> {
+    /// A column as an operand: a large-capable column compares by its key.
+    fn column_term(&self, table: &Table, alias: &str, column: &str) -> Result<Term, Error> {
+        let sql = column_sql(table, alias, column)?;
+        Ok(self.large_term(table, sql, column))
+    }
+
+    fn large_term(&self, table: &Table, sql: String, column: &str) -> Term {
+        match table.column(column) {
+            Some(col)
+                if column != "id"
+                    && crate::values::elided_as(column).is_none()
+                    && crate::values::author_part(column).is_none()
+                    && crate::large::large_capable(col) =>
+            {
+                Term::Large(LargeColumn {
+                    cell: sql,
+                    table: table.name.clone(),
+                    column: column.to_owned(),
+                    kind: crate::large::kind(col),
+                })
+            }
+            _ => Term::Sql(sql),
+        }
+    }
+
+    fn prep(&mut self, make: impl FnOnce(i64) -> Prep, question: String) -> i64 {
+        let prep = Prep::new(make, &question);
+        let slot = prep.slot();
+        if !self.preps.iter().any(|p| p.slot() == slot) {
+            self.preps.push(prep);
+        }
+        slot
+    }
+
+    fn cmp(&mut self, op: CmpOp, left: Term, right: Term) -> Result<String, Error> {
+        Ok(match (left, right) {
+            (Term::Missing | Term::NaN, _) | (_, Term::Missing | Term::NaN) => "0".to_owned(),
+            (Term::Large(column), Term::Bound(sql, value)) => {
+                self.cmp_large(&op, &column, &sql, &value)
+            }
+            (Term::Bound(sql, value), Term::Large(column)) => {
+                self.cmp_large(&flip(&op), &column, &sql, &value)
+            }
+            (Term::Large(a), Term::Large(b)) => self.cmp_large_pair(&op, &a, &b)?,
+            (left, right) => cmp_plain(
+                &op,
+                left.sql().expect("present"),
+                right.sql().expect("present"),
+            ),
+        })
+    }
+
+    /// A large-capable cell against a bound value.
+    fn cmp_large(&mut self, op: &CmpOp, column: &LargeColumn, p: &str, value: &Sql) -> String {
+        let c = &column.cell;
+        let Sql::Text(literal) = value else {
+            return cmp_plain(op, c, p);
+        };
+        let key = crate::large::key_sql(c);
+        let logical = logical_of(literal);
+        let chunked = format!("COALESCE({}, 0)", crate::large::chunked_sql(c));
+        match op {
+            // Every value up to the inline threshold has one inline cell, so
+            // a chunked cell never equals such a literal. The key term lets
+            // SQLite use an index on it.
+            CmpOp::Eq | CmpOp::Ne
+                if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
+            {
+                let eq = format!("({key} IS {p} AND {c} IS {p})");
+                if *op == CmpOp::Eq {
+                    eq
+                } else {
+                    format!("(NOT {eq})")
+                }
+            }
+            CmpOp::Eq | CmpOp::Ne => {
+                let slot = self.prep_match(column, MatchTest::Cmp(CmpOp::Eq, literal.clone()));
+                let prefix = crate::large::sort_prefix(column.kind, logical);
+                let k = self.bind(Sql::Text(prefix));
+                let eq = format!("({key} IS {k} AND {chunked} AND {})", scratch_has(slot, c));
+                if *op == CmpOp::Eq {
+                    eq
+                } else {
+                    format!("(NOT {eq})")
+                }
+            }
+            // A chunked value's key is a prefix of it at least as long as
+            // the literal: it orders against the literal as the value does,
+            // except that a key equal to the literal is the longer value.
+            _ if logical.len() <= crate::large::EXACT_RANGE_BYTES => match op {
+                CmpOp::Lt => format!("({key} < {p})"),
+                CmpOp::Ge => format!("({key} >= {p})"),
+                CmpOp::Le => format!("({key} < {p} OR {c} = {p})"),
+                CmpOp::Gt => format!("({key} >= {p} AND {c} IS NOT {p})"),
+                CmpOp::Eq | CmpOp::Ne => unreachable!("handled above"),
+            },
+            _ => {
+                let slot = self.prep_match(column, MatchTest::Cmp(op.clone(), literal.clone()));
+                format!(
+                    "(CASE WHEN {chunked} THEN {} ELSE {} END)",
+                    scratch_has(slot, c),
+                    cmp_plain(op, c, p)
+                )
+            }
+        }
+    }
+
+    fn prep_match(&mut self, column: &LargeColumn, test: MatchTest) -> i64 {
+        let question = format!(
+            "match {} {} {}",
+            column.table,
+            column.column,
+            test.question()
+        );
+        let (table, name) = (column.table.clone(), column.column.clone());
+        self.prep(
+            |slot| Prep::Match {
+                slot,
+                table,
+                column: name,
+                test,
+            },
+            question,
+        )
+    }
+
+    /// Two large-capable cells: equal when both inline and equal, or both
+    /// chunked with one content id.
+    fn cmp_large_pair(
+        &mut self,
+        op: &CmpOp,
+        a: &LargeColumn,
+        b: &LargeColumn,
+    ) -> Result<String, Error> {
+        if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
+            return Err(unsupported(format!(
+                "ordering comparisons between two string or bytes columns (`{}.{}`, `{}.{}`)",
+                a.table, a.column, b.table, b.column
+            )));
+        }
+        let mut columns = vec![
+            (a.table.clone(), a.column.clone()),
+            (b.table.clone(), b.column.clone()),
+        ];
+        columns.sort();
+        columns.dedup();
+        let question = format!("class {columns:?}");
+        let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
+        let eq = format!(
+            "(CASE WHEN COALESCE({} OR {}, 0) THEN {} IS {} ELSE {} IS {} END)",
+            crate::large::chunked_sql(&a.cell),
+            crate::large::chunked_sql(&b.cell),
+            scratch_value(slot, &a.cell),
+            scratch_value(slot, &b.cell),
+            a.cell,
+            b.cell
+        );
+        Ok(if *op == CmpOp::Eq {
+            eq
+        } else {
+            format!("(NOT {eq})")
+        })
+    }
+
+    fn in_list(&mut self, left: Term, options: Vec<Term>) -> Result<String, Error> {
+        let options: Vec<Term> = options
+            .into_iter()
+            .filter(|option| !matches!(option, Term::Missing | Term::NaN))
+            .collect();
+        if options.is_empty() || matches!(left, Term::Missing | Term::NaN) {
+            return Ok("0".to_owned());
+        }
+        let list = self.bound_list(&options);
+        if let Term::Large(column) = &left {
+            let small = |option: &Term| match option {
+                Term::Bound(_, Sql::Text(cell)) => {
+                    logical_of(cell).len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+                }
+                Term::Bound(_, _) => true,
+                _ => false,
+            };
+            if !options.iter().all(small) {
+                let parts = options
+                    .into_iter()
+                    .map(|option| self.cmp(CmpOp::Eq, Term::Large(column.clone()), option))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(or(&parts));
+            }
+            let list = list.unwrap_or_else(|| {
+                let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
+                list.join(", ")
+            });
+            return Ok(format!(
+                "({} IN ({list}) AND {} IN ({list}))",
+                crate::large::key_sql(&column.cell),
+                column.cell
+            ));
+        }
+        let list = list.unwrap_or_else(|| {
+            let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
+            list.join(", ")
+        });
+        Ok(format!("({} IN ({list}))", left.sql().expect("present")))
+    }
+
+    /// A long list of values bound last, rebound as one JSON array
+    /// ([`json_list`]): its `SELECT`, or `None` to keep one placeholder per
+    /// value.
+    fn bound_list(&mut self, options: &[Term]) -> Option<String> {
+        if options.len() <= BOUND_LIST_MAX || options.len() > self.params.len() {
+            return None;
+        }
+        let first = self.params.len() - options.len();
+        let mut values = Vec::with_capacity(options.len());
+        for (i, option) in options.iter().enumerate() {
+            match option {
+                Term::Bound(mark, value) if *mark == format!("?{}", first + i + 1) => {
+                    values.push(value)
+                }
+                _ => return None,
+            }
+        }
+        let (select, array) = json_list(&values, &format!("?{}", first + 1))?;
+        self.params.truncate(first);
+        self.params.push(array);
+        Some(select)
+    }
+
+    fn contains(&mut self, left: Term, right: Term) -> String {
+        let (Some(l), Some(r)) = (left.sql(), right.sql()) else {
+            return "0".to_owned();
+        };
+        // Bytewise: TEXT `instr` steps by code point, and cells may hold
+        // tagged bytes.
+        let instr = |l: &str, r: &str| {
+            format!("COALESCE(instr(CAST({l} AS BLOB), CAST({r} AS BLOB)) > 0, 0)")
+        };
+        let (Term::Large(column), Term::Bound(_, Sql::Text(needle))) = (&left, &right) else {
+            return instr(l, r);
+        };
+        let inline = match column.kind {
+            jazz_types::large_values::LargeValueKind::Bytes => instr(
+                &format!("substr(CAST({l} AS BLOB), 2)"),
+                &format!("substr(CAST({r} AS BLOB), 2)"),
+            ),
+            _ => instr(l, r),
+        };
+        let slot = self.prep_match(column, MatchTest::Contains(needle.clone()));
+        format!(
+            "(CASE WHEN COALESCE({}, 0) THEN {} ELSE {inline} END)",
+            crate::large::chunked_sql(l),
+            scratch_has(slot, l)
+        )
+    }
+
+    /// `ORDER BY` keys, and the same keys with prefix-tie ranks (`None`
+    /// when no key is large-capable). Ties break by row id in the last
+    /// key's direction, so a declared index (which ends in `id`) supplies
+    /// the whole order in one scan, in either direction, with no sort step.
+    fn order_sql(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        order: &[crate::query::OrderBy],
+    ) -> Result<(String, Option<String>), Error> {
+        let mut keys = Vec::new();
+        let mut ranked = Vec::new();
+        let mut any_large = false;
+        for key in order {
+            let direction = match key.direction {
+                OrderDirection::Asc => "ASC",
+                OrderDirection::Desc => "DESC",
+            };
+            match self.column_term(table, alias, &key.column)? {
+                Term::Large(column) => {
+                    any_large = true;
+                    let sql = crate::large::key_sql(&column.cell);
+                    keys.push(format!("{sql} {direction}"));
+                    ranked.push(format!("{sql} {direction}"));
+                    let question = format!("rank {} {}", column.table, column.column);
+                    let slot = self.prep(
+                        |slot| Prep::Rank {
+                            slot,
+                            table: column.table.clone(),
+                            column: column.column.clone(),
+                        },
+                        question,
+                    );
+                    ranked.push(format!("{} {direction}", scratch_value(slot, &column.cell)));
+                }
+                term => {
+                    let sql = format!("{} {direction}", term.sql().expect("column"));
+                    keys.push(sql.clone());
+                    ranked.push(sql);
+                }
+            }
+        }
+        let tie = match order.last().map(|key| key.direction) {
+            Some(OrderDirection::Desc) => "DESC",
+            _ => "ASC",
+        };
+        keys.push(format!("{alias}.id {tie}"));
+        ranked.push(format!("{alias}.id {tie}"));
+        Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
+    }
 }
 
 /// A public schema value (policy literals, defaults) as a storage value.

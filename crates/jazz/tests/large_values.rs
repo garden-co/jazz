@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, JsonSetEdit, LargeValueUpdate,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, Journal, JsonSetEdit, LargeValueUpdate,
     LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -198,6 +198,26 @@ fn ordering_and_indexes_follow_logical_bytes() {
             .map(|(_, id)| *id)
             .collect();
         assert_eq!(found, greater, "indexed: {indexed}");
+        // A bounded page cuts inside values that share their whole sort
+        // prefix, in both directions.
+        for (direction, mut want) in [
+            (OrderDirection::Asc, expected.clone()),
+            (
+                OrderDirection::Desc,
+                expected.iter().rev().cloned().collect(),
+            ),
+        ] {
+            want.truncate(3);
+            let found = ids(
+                &db,
+                Query::from("docs").order_by("body", direction).limit(3),
+            );
+            assert_eq!(
+                found,
+                want.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+                "indexed: {indexed}, {direction:?}"
+            );
+        }
     }
 }
 
@@ -277,53 +297,109 @@ fn scratch(name: &str) -> PathBuf {
     dir.join("store.sqlite")
 }
 
+/// Every journal mode, including the ones browser VFSes need (no WAL):
+/// the large-value reader connection sees exactly the committed chunks.
 #[test]
 fn a_file_store_reads_chunks_back_after_reopening() {
-    let path = scratch("reopen");
-    let values: Vec<String> = (0..4).map(|n| text(20 + n, LARGE)).collect();
-    {
-        let db = block_on(Db::open_at(config(true), &path, FileOptions::default())).unwrap();
-        for (n, value) in values.iter().enumerate() {
-            insert(&db, n as u8 + 1, value, b"");
+    for journal in [Journal::Wal, Journal::Rollback, Journal::Memory] {
+        let path = scratch(&format!("reopen-{journal:?}"));
+        let options = FileOptions {
+            journal,
+            ..FileOptions::default()
+        };
+        let values: Vec<String> = (0..4).map(|n| text(20 + n, LARGE)).collect();
+        {
+            let db = block_on(Db::open_at(config(true), &path, options)).unwrap();
+            for (n, value) in values.iter().enumerate() {
+                insert(&db, n as u8 + 1, value, b"");
+            }
+            // Read back within the same session, through the reader.
+            assert_eq!(ordered(&db).len(), values.len(), "{journal:?}");
         }
+        let db = block_on(Db::open_at(config(true), &path, options)).unwrap();
+        let mut expected: Vec<(String, RowUuid)> = values
+            .iter()
+            .enumerate()
+            .map(|(n, value)| (value.clone(), row(n as u8 + 1)))
+            .collect();
+        expected.sort();
+        assert_eq!(
+            ordered(&db),
+            expected.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            "{journal:?}"
+        );
+        let found = ids(
+            &db,
+            Query::from("docs").filter(eq(col("body"), lit(Value::String(values[2].clone())))),
+        );
+        assert_eq!(found, vec![row(3)], "{journal:?}");
     }
-    let db = block_on(Db::open_at(config(true), &path, FileOptions::default())).unwrap();
-    let mut expected: Vec<(String, RowUuid)> = values
-        .iter()
-        .enumerate()
-        .map(|(n, value)| (value.clone(), row(n as u8 + 1)))
-        .collect();
-    expected.sort();
-    assert_eq!(
-        ordered(&db),
-        expected.iter().map(|(_, id)| *id).collect::<Vec<_>>()
-    );
-    let found = ids(
-        &db,
-        Query::from("docs").filter(eq(col("body"), lit(Value::String(values[2].clone())))),
-    );
-    assert_eq!(found, vec![row(3)]);
 }
 
+/// The file needs nothing but SQLite: a plain connection, with no Jazz
+/// collation or functions registered, opens the schema, checks every index
+/// (expression indexes over sort keys included), prepares the statements
+/// large-value operators compile to, and fires the refcount triggers.
 #[test]
-fn large_columns_never_reach_sqlite_text_functions() {
-    let db = db();
-    for query in [
-        Query::from("docs").filter(contains(col("body"), lit(Value::String("x".into())))),
-        Query::from("docs").filter(contains(col("blob"), lit(Value::Bytes(vec![1])))),
-        Query::from("docs").filter(eq(col("body"), lit(Value::String("x".into())))),
-        Query::from("docs").order_by("body", OrderDirection::Desc),
-    ] {
-        let prepared = db.prepare_query(&query).unwrap();
-        let (sql, _) = db.explain_query_plan(&prepared, None).unwrap();
-        let lower = sql.to_lowercase();
-        for builtin in [
-            "instr(", "length(", "substr(", "like ", "glob ", "lower(", "upper(", "json_", "hex(",
-            "trim(", "replace(",
+fn a_plain_sqlite_connection_runs_the_schema_queries_and_triggers() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vanilla.sqlite");
+    let statements = {
+        let db = block_on(Db::open_at(config(true), &path, FileOptions::default())).unwrap();
+        insert(&db, 1, &text(40, LARGE), &vec![7; LARGE]);
+        insert(&db, 2, "short", b"tiny");
+        let mut statements = Vec::new();
+        for query in [
+            Query::from("docs").filter(contains(col("body"), lit(Value::String("x".into())))),
+            Query::from("docs").filter(contains(col("blob"), lit(Value::Bytes(vec![1])))),
+            Query::from("docs").filter(eq(col("body"), lit(Value::String("x".into())))),
+            Query::from("docs").filter(eq(col("body"), lit(Value::String(text(41, LARGE))))),
+            Query::from("docs").order_by("body", OrderDirection::Desc),
         ] {
-            assert!(!lower.contains(builtin), "{builtin} in {sql}");
+            let prepared = db.prepare_query(&query).unwrap();
+            statements.push(db.explain_query_plan(&prepared, None).unwrap().0);
         }
+        block_on(db.close()).unwrap();
+        statements
+    };
+    let plain = rusqlite::Connection::open(&path).unwrap();
+    let schema: Vec<String> = plain
+        .prepare("SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for sql in &schema {
+        let lower = sql.to_lowercase();
+        assert!(
+            !lower.contains("collate") && !lower.contains("jz_"),
+            "{sql}"
+        );
     }
+    let check: String = plain
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(check, "ok");
+    for sql in &statements {
+        plain.prepare(sql).unwrap_or_else(|e| panic!("{e}: {sql}"));
+    }
+    let durable = |plain: &rusqlite::Connection| -> i64 {
+        plain
+            .query_row(
+                "SELECT COALESCE(SUM(durable), 0) FROM _jazz_lv_root",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let before = durable(&plain);
+    assert!(before > 0);
+    plain.execute("DELETE FROM docs", []).unwrap();
+    assert!(
+        durable(&plain) < before,
+        "the delete triggers released the roots"
+    );
 }
 
 fn body(db: &Db, n: u8) -> String {
