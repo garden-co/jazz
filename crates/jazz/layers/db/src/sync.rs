@@ -3006,7 +3006,7 @@ impl Db {
         }
         if let Some(tx) = open_tx {
             return Ok(SerializedReadResult::Rows(
-                self.exclusive_tx_ref(tx).all_prepared(&prepared).await?,
+                self.serializable_tx_ref(tx).all_prepared(&prepared).await?,
             ));
         }
         if self.is_client() && opts.tier != ReadTier::LocalOnly {
