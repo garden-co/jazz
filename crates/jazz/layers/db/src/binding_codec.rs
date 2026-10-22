@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::db::RelationSnapshot;
 use crate::db::{CurrentRow, RemovedRow, SubscriptionOutputRow};
 use crate::ids::{PhysicalColumnId, RowUuid};
-use crate::object::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::object::ResultKey;
 use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 
 /// Encode only the descriptor portion of the named-cell input role. This is
@@ -195,13 +195,12 @@ pub fn encode_relation_snapshot(snapshot: &RelationSnapshot) -> Result<Vec<u8>, 
 /// A row's occurrence: the row itself, or a flat join's root followed by
 /// its joined source rows. Relations arrive as nested rows, not joined
 /// outputs.
-fn occurrence(row: RowUuid, joined: &[RowUuid]) -> ResultKey {
-    let id = |row: &RowUuid| ObjectId::from_uuid(row.0);
-    ResultKey::from_occurrence(if joined.is_empty() {
-        OutputOccurrenceId::single_source(id(&row))
-    } else {
-        OutputOccurrenceId::new(id(&row), joined.iter().map(id))
-    })
+fn occurrence(
+    row: RowUuid,
+    version: Option<crate::values::SourceVersion>,
+    joined: &[crate::values::JoinedRow],
+) -> ResultKey {
+    crate::values::occurrence_key(row, version, joined)
 }
 
 /// Encode an incremental subscription delta with aligned occurrence sidecars.
@@ -227,15 +226,15 @@ pub fn encode_subscription_delta(
             .collect(),
         added_occurrence_keys: added
             .iter()
-            .map(|row| occurrence(row.row_uuid(), row.joined_rows()))
+            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
             .collect(),
         updated_occurrence_keys: updated
             .iter()
-            .map(|row| occurrence(row.row_uuid(), row.joined_rows()))
+            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
             .collect(),
         removed_occurrence_keys: removed
             .iter()
-            .map(|row| occurrence(row.row_uuid, &row.joined))
+            .map(|row| occurrence(row.row_uuid, row.version, &row.joined))
             .collect(),
         added_indices: added.iter().map(|row| row.index as u64).collect(),
         updated_previous_indices: updated
@@ -496,6 +495,7 @@ mod tests {
             ]),
             types: Arc::from([ValueType::String, ValueType::Bool]),
             joined: Arc::from([]),
+            version: None,
         }
     }
 
@@ -576,6 +576,7 @@ mod tests {
                 table: "todos".to_owned(),
                 row_uuid: RowUuid::from_bytes([8; 16]),
                 joined: Vec::new(),
+                version: None,
                 index: 1,
             }],
         )

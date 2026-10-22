@@ -62,6 +62,58 @@ impl Ctx<'_> {
         {
             return Err(unsupported("ordering history by $transactionId"));
         }
+        let (source, versions) =
+            self.history_source(source, HistoryBound::Filter(bound), include_deleted)?;
+        let versions = &versions;
+        let projection = projection(versions, query.select.as_deref())?;
+
+        let alias = "t";
+        let mut wheres = Vec::new();
+        for filter in &query.filters {
+            wheres.push(self.predicate(filter, versions, alias)?);
+        }
+        let (order, ranked_order) = self.order_sql(versions, alias, &query.order_by)?;
+        // Versions of one row share its id: their seq orders them.
+        let tie = match query.order_by.last().map(|key| key.direction) {
+            Some(OrderDirection::Desc) => "DESC",
+            _ => "ASC",
+        };
+        let order = format!("{order}, {alias}._seq {tie}");
+        let ranked_order = ranked_order.map(|ranked| format!("{ranked}, {alias}._seq {tie}"));
+        let columns = projection
+            .iter()
+            .map(|(name, _)| Ok(format!(", {}", column_sql(versions, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
+        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(query.offset as i64));
+        let statement = |order: &str| {
+            format!(
+                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                and(&wheres),
+            )
+        };
+        Ok(Compiled {
+            sql: statement(&order),
+            ranked_sql: ranked_order.as_deref().map(statement),
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: 0,
+            preps: self.preps,
+        })
+    }
+    /// The versions of the rows of `source` that `bound` names, as a SQL
+    /// source with the table's columns plus the history metadata, and the
+    /// table they read as. Every version is gated by its current row's
+    /// read policy in its branch (and liveness, unless `include_deleted`).
+    pub(super) fn history_source(
+        &mut self,
+        source: &str,
+        bound: HistoryBound<'_>,
+        include_deleted: bool,
+    ) -> Result<(String, Table), Error> {
         if self.cut.is_some() {
             return Err(unsupported("history reads at a snapshot"));
         }
@@ -71,42 +123,18 @@ impl Ctx<'_> {
             ));
         }
         let table = self.table(source)?;
-        // The source's columns plus the metadata, under the source's name:
-        // large-value preps answer from the table and its history alike.
-        let mut versions = table.clone();
-        for metadata in HistoryMetadataColumn::ALL {
-            let ty = match metadata {
-                HistoryMetadataColumn::TransactionId => crate::tx::TxId::value_type(),
-                HistoryMetadataColumn::AcceptedAt => ValueType::U64,
-            };
-            versions.columns.push(crate::values::Column {
-                name: metadata.name().to_owned(),
-                stored: metadata.name().to_owned(),
-                ty,
-                default: None,
-                json: false,
-            });
-        }
-        // Every version reads its current row's deletion (see
-        // `deletion_sql`), carried as columns of the version.
-        for column in ["$deletedAt", "$deletedBy"] {
-            versions.stored_provenance.push(crate::values::Column {
-                name: column.to_owned(),
-                stored: column.to_owned(),
-                ty: ValueType::Nullable(Box::new(ValueType::U64)),
-                default: None,
-                json: false,
-            });
-        }
-        let versions = &versions;
-        let projection = projection(versions, query.select.as_deref())?;
-
+        let versions = versions_table(table);
         let mut stored = String::new();
         for column in table.stored() {
             stored.push_str(&format!(", {}", quote(&column.stored)));
         }
-        let current_bound = self.predicate(bound, versions, "c")?;
-        let history_bound = self.predicate(bound, versions, "h")?;
+        let (current_bound, history_bound) = match bound {
+            HistoryBound::Filter(bound) => (
+                self.predicate(bound, &versions, "c")?,
+                self.predicate(bound, &versions, "h")?,
+            ),
+            HistoryBound::Ids(ids) => (format!("c.id IN ({ids})"), format!("h.id IN ({ids})")),
+        };
         let name = quote(&table.stored);
         let history = quote(&format!("{}__h", table.stored));
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
@@ -163,48 +191,56 @@ impl Ctx<'_> {
             v_stored = stored.replace(", ", ", v."),
         );
 
-        let alias = "t";
-        let mut wheres = Vec::new();
-        for filter in &query.filters {
-            wheres.push(self.predicate(filter, versions, alias)?);
-        }
-        let (order, ranked_order) = self.order_sql(versions, alias, &query.order_by)?;
-        // Versions of one row share its id: their seq orders them.
-        let tie = match query.order_by.last().map(|key| key.direction) {
-            Some(OrderDirection::Desc) => "DESC",
-            _ => "ASC",
-        };
-        let order = format!("{order}, {alias}._seq {tie}");
-        let ranked_order = ranked_order.map(|ranked| format!("{ranked}, {alias}._seq {tie}"));
-        let columns = projection
-            .iter()
-            .map(|(name, _)| Ok(format!(", {}", column_sql(versions, alias, name)?)))
-            .collect::<Result<String, Error>>()?;
-        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
-        let offset = self.bind(Sql::Integer(query.offset as i64));
-        let statement = |order: &str| {
-            format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
-                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
-                and(&wheres),
-            )
-        };
-        Ok(Compiled {
-            sql: statement(&order),
-            ranked_sql: ranked_order.as_deref().map(statement),
-            params: self.params,
-            projection,
-            tables: self.tables,
-            aggregate: false,
-            joined: 0,
-            preps: self.preps,
-        })
+        Ok((source, versions))
     }
+}
+
+/// The table a history source of `table` reads as: its columns plus the
+/// history metadata, under the source's name (large-value preps answer
+/// from the table and its history alike), each version carrying its
+/// current row's deletion.
+pub(super) fn versions_table(table: &Table) -> Table {
+    // The source's columns plus the metadata, under the source's name:
+    // large-value preps answer from the table and its history alike.
+    let mut versions = table.clone();
+    for metadata in HistoryMetadataColumn::ALL {
+        let ty = match metadata {
+            HistoryMetadataColumn::TransactionId => crate::tx::TxId::value_type(),
+            HistoryMetadataColumn::AcceptedAt => ValueType::U64,
+        };
+        versions.columns.push(crate::values::Column {
+            name: metadata.name().to_owned(),
+            stored: metadata.name().to_owned(),
+            ty,
+            default: None,
+            json: false,
+        });
+    }
+    // Every version reads its current row's deletion (see
+    // `deletion_sql`), carried as columns of the version.
+    for column in ["$deletedAt", "$deletedBy"] {
+        versions.stored_provenance.push(crate::values::Column {
+            name: column.to_owned(),
+            stored: column.to_owned(),
+            ty: ValueType::Nullable(Box::new(ValueType::U64)),
+            default: None,
+            json: false,
+        });
+    }
+    versions
+}
+
+/// What bounds a history source to named rows.
+pub(super) enum HistoryBound<'p> {
+    /// A filter `id = v` or `id IN (...)` on the source ([`bounding_id`]).
+    Filter(&'p Predicate),
+    /// A SQL query of the row ids.
+    Ids(String),
 }
 
 /// The filter that bounds a history read to supplied row ids: `id = v` or
 /// `id IN (...)`, at the top level or inside a conjunction.
-fn bounding_id(predicate: &Predicate) -> Option<&Predicate> {
+pub(super) fn bounding_id(predicate: &Predicate) -> Option<&Predicate> {
     let supplied = |value: &Operand| matches!(value, Operand::Literal(_) | Operand::Param(_));
     match predicate {
         Predicate::All(predicates) => predicates.iter().find_map(bounding_id),

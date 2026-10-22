@@ -948,28 +948,28 @@ impl Inner {
         Ok(support)
     }
 
-    /// The images a history read ships for its result `rows` (versions of
-    /// `source`): each version, then the current image of its row in its
-    /// branch, so a replica never takes an old version for its current
-    /// one. The versions' seqs go to `seqs`, for their origins.
+    /// The images a history read ships for its result `versions` (row and
+    /// seq, of `source`): each version, then the current image of its row
+    /// in its branch, so a replica never takes an old version for its
+    /// current one. The versions' seqs go to `seqs`, for their origins.
     fn history_versions(
         &self,
         source: &str,
-        rows: &[CurrentRow],
+        versions: impl IntoIterator<Item = (RowUuid, u64)>,
         images: &mut Vec<Image>,
         seqs: &mut BTreeSet<u64>,
     ) -> Result<(), Error> {
         let mut current = BTreeSet::new();
-        for row in rows {
-            let rid = row.id.0.as_bytes().to_vec();
-            let seq = row.seq as i64;
+        for (row, seq) in versions {
+            let rid = row.0.as_bytes().to_vec();
+            let seq = seq as i64;
             let mut found = self.images_where(source, false, ID_AT_SEQ, &[&rid, &seq])?;
             if found.is_empty() {
                 found = self.images_where(source, true, ID_AT_SEQ, &[&rid, &seq])?;
             }
             for image in &found {
                 seqs.insert(image.seq);
-                current.insert((row.id, image.key.clone()));
+                current.insert((row, image.key.clone()));
             }
             images.extend(found);
         }
@@ -977,6 +977,43 @@ impl Inner {
             images.extend(self.current_image(source, row, &key)?);
         }
         Ok(())
+    }
+
+    /// The images a flat-join occurrence ships for one joined row of stored
+    /// table `table`: its current images, or for a history source the
+    /// version it names and the row's current image.
+    fn joined_images(
+        &self,
+        table: &str,
+        joined: &crate::values::JoinedRow,
+        seqs: &mut BTreeSet<u64>,
+    ) -> Result<Vec<Image>, Error> {
+        let id = joined.row.0.as_bytes().to_vec();
+        let Some((tx, node)) = joined.version else {
+            return self.images_where(table, false, "id = ?1", &[&id]);
+        };
+        // A version's seq: as `_jazz_settled` recorded its upload, else
+        // this authority's own commit (whose tx is its seq).
+        let recorded = self
+            .conn
+            .prepare_cached("SELECT seq FROM _jazz_settled WHERE tx = ?1 AND node = ?2")
+            .and_then(|mut statement| {
+                statement
+                    .query_row(
+                        rusqlite::params![tx as i64, node.as_bytes().to_vec()],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .optional()
+            })
+            .map_err(storage)?;
+        let seq = match recorded {
+            Some(seq) => seq as u64,
+            None if node == self.identity.node => tx,
+            None => return Ok(Vec::new()),
+        };
+        let mut images = Vec::new();
+        self.history_versions(table, [(joined.row, seq)], &mut images, seqs)?;
+        Ok(images)
     }
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_settled`
@@ -1410,7 +1447,13 @@ impl Inner {
                 self.drop_row(&image.table, row, &image.key, LOCAL_BASE)?;
                 self.put_image(image, false)?;
             }
-            Some(_) => self.put_image(image, true)?,
+            // An older version: history reads of the row change.
+            Some(_) => {
+                self.put_image(image, true)?;
+                self.changed
+                    .borrow_mut()
+                    .push((image.table.clone(), row, image.key.clone()));
+            }
         }
         Ok(())
     }
@@ -3059,7 +3102,12 @@ impl Db {
                         .flat_join
                         .iter()
                         .flat_map(|flat| &flat.sources)
-                        .map(|source| names.stored_table(&source.table).map(str::to_owned))
+                        .map(|source| {
+                            let table = &source.table;
+                            names
+                                .stored_table(history_source_table(table).unwrap_or(table))
+                                .map(str::to_owned)
+                        })
                         .collect::<Result<Vec<_>, Error>>()?,
                     None => Vec::new(),
                 };
@@ -3078,8 +3126,7 @@ impl Db {
                     };
                     for row in added.iter().chain(updated.iter()) {
                         for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                            let id = joined.0.as_bytes().to_vec();
-                            images.extend(inner.images_where(table, false, "id = ?1", &[&id])?);
+                            images.extend(inner.joined_images(table, joined, &mut history_seqs)?);
                         }
                         // A history row is a version of its source table.
                         let history = history_source_table(&row.table);
@@ -3106,7 +3153,7 @@ impl Db {
                                 let mut found = Vec::new();
                                 inner.history_versions(
                                     &table,
-                                    std::slice::from_ref(&**row),
+                                    [(row.id, row.seq)],
                                     &mut found,
                                     &mut history_seqs,
                                 )?;
@@ -3137,9 +3184,13 @@ impl Db {
                         }
                         // A joined row may have left for its permissions.
                         for (table, joined) in joined_tables.iter().zip(&gone.joined) {
-                            let id = joined.0.as_bytes().to_vec();
+                            let id = joined.row.0.as_bytes().to_vec();
                             for image in inner.images_where(table, false, "id = ?1", &[&id])? {
-                                touched.insert((image.table.clone(), *joined, image.key.clone()));
+                                touched.insert((
+                                    image.table.clone(),
+                                    joined.row,
+                                    image.key.clone(),
+                                ));
                             }
                         }
                     }
@@ -3412,11 +3463,29 @@ impl Db {
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
                 let mut images = Vec::new();
-                let mut origins = Vec::new();
+                // Seqs of shipped history versions, for their origins.
+                let mut seqs = BTreeSet::new();
+                // A flat join ships each occurrence's joined rows.
+                let joined_tables = query
+                    .flat_join
+                    .iter()
+                    .flat_map(|flat| &flat.sources)
+                    .map(|source| {
+                        let table = &source.table;
+                        inner
+                            .schema
+                            .stored_table(history_source_table(table).unwrap_or(table))
+                            .map(str::to_owned)
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                for row in &rows {
+                    for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
+                        images.extend(inner.joined_images(table, joined, &mut seqs)?);
+                    }
+                }
                 if history.is_some() {
-                    let mut seqs = BTreeSet::new();
-                    inner.history_versions(&table, &rows, &mut images, &mut seqs)?;
-                    origins = inner.origins(&seqs)?;
+                    let versions = rows.iter().map(|row| (row.id, row.seq));
+                    inner.history_versions(&table, versions, &mut images, &mut seqs)?;
                 } else {
                     for row in &rows {
                         let rid = row.id.0.as_bytes().to_vec();
@@ -3446,6 +3515,7 @@ impl Db {
                         watch_key(&Sql::Blob(image.id.to_vec())),
                     )));
                 }
+                let origins = inner.origins(&seqs)?;
                 let through = at.unwrap_or(inner.seq);
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
