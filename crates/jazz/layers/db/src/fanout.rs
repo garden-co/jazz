@@ -286,7 +286,10 @@ impl Inner {
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self.execute(&compiled, &prepared.query.table) {
+        let (rows, awaiting) = match self
+            .execute(&compiled, &prepared.query.table)
+            .and_then(|rows| self.nest_relations(prepared, identity, rows))
+        {
             Ok(rows) => (rows, false),
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
             Err(error) => return Err(error),
@@ -1014,8 +1017,14 @@ impl Inner {
         }
     }
 
+    /// A group's rows, with array relations nested in their cells.
+    fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
+        let rows = self.run(&group.prepared, group.identity, &group.read)?;
+        self.nest_relations(&group.prepared, group.identity, rows)
+    }
+
     fn reset_group(&self, group: &mut Group) {
-        match self.run(&group.prepared, group.identity, &group.read) {
+        match self.group_rows(group) {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
             Ok(rows) => {
                 group.awaiting = false;
@@ -1046,7 +1055,7 @@ impl Inner {
                 None => {}
             }
         }
-        let rows = match self.run(&group.prepared, group.identity, &group.read) {
+        let rows = match self.group_rows(group) {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
