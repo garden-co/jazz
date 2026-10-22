@@ -1,62 +1,32 @@
-import { assertRelationshipDeclaration } from "./relationships.js";
-import type { Relationships, ForwardRelationship } from "./relationships.js";
-import type {
-  AnyTypedColumnBuilder,
-  ColumnBuilderInitValue,
-  ColumnBuilderOptional,
-  ColumnBuilderSqlType,
+import { equalityIndexColumn, type EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
+import {
+  assertRelationshipDeclaration,
+  type Relationships,
+  type ForwardRelationship,
+  type Relationship,
+} from "./relationships.js";
+import {
+  isComputedColumn,
+  type AnyColumnDefinition,
+  type ComputedColumn,
+  type ColumnBuilderInitValue,
+  type ColumnBuilderOptional,
+  type ColumnBuilderSqlType,
+  type ColumnBuilderValue,
 } from "./dsl.js";
 import { assertUserTableColumnNameAllowed, type NoExplicitIdColumn } from "./magic-columns.js";
 import { validateTransformDependencies } from "./runtime/column-transforms.js";
 import type { TSTypeFromSqlType } from "./schema.js";
-import { equalityIndexColumn, type EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
-export type TableDefinition = Record<string, AnyTypedColumnBuilder> & NoExplicitIdColumn;
 
-type StoredDependencyValue<C extends AnyTypedColumnBuilder> =
-  ColumnBuilderOptional<C> extends true
-    ? TSTypeFromSqlType<ColumnBuilderSqlType<C>> | null
-    : TSTypeFromSqlType<ColumnBuilderSqlType<C>>;
-type DependencyValues<C extends TableDefinition, D extends string, Stored extends boolean> = {
-  readonly [K in D]: K extends "id"
-    ? string
-    : K extends keyof C
-      ? Stored extends true
-        ? StoredDependencyValue<C[K]>
-        : ColumnBuilderOptional<C[K]> extends true
-          ? ColumnBuilderInitValue<C[K]> | null
-          : ColumnBuilderInitValue<C[K]>
-      : never;
-};
-type ValidDependencyContext<
-  C extends TableDefinition,
-  D extends string,
-  Context,
-  Stored extends boolean,
-> =
-  Exclude<keyof Context, D> extends never
-    ? DependencyValues<C, D, Stored> extends Context
-      ? true
-      : false
-    : false;
-export type ValidateTransformContexts<C extends TableDefinition> = {
-  [K in keyof C]: C[K] extends {
-    readonly __jazzDependencies: readonly (infer D extends string)[];
-    readonly __jazzStoredDependencies: infer S;
-    readonly __jazzInputDependencies: infer I;
-  }
-    ? string extends D
-      ? C[K]
-      : Exclude<D, keyof C | "id"> extends never
-        ? K extends D
-          ? never
-          : ValidDependencyContext<C, D, S, true> extends true
-            ? ValidDependencyContext<C, D, I, false> extends true
-              ? C[K]
-              : never
-            : never
-        : never
-    : C[K];
-};
+export type ReturnedColumnValue<TBuilder extends AnyColumnDefinition> =
+  ColumnBuilderOptional<TBuilder> extends true
+    ? ColumnBuilderValue<TBuilder> | null
+    : ColumnBuilderValue<TBuilder>;
+
+export type TableDefinition = Record<string, AnyColumnDefinition> & NoExplicitIdColumn;
+type StoredColumnKeys<C extends TableDefinition> = {
+  [K in keyof C & string]: C[K] extends ComputedColumn ? never : K;
+}[keyof C & string];
 
 // Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
 // without changing the column-level schema representation the runtime uses today.
@@ -68,22 +38,28 @@ export class DefinedTable<
   public readonly __jazzTableDefinition = true as const;
 
   encrypted(options: {
-    space: Extract<keyof TColumns, string>;
-    columns?: readonly Extract<keyof TColumns, string>[];
-    indexes?: Partial<Record<Extract<keyof TColumns, string>, "equality">>;
+    space: StoredColumnKeys<TColumns>;
+    columns?: readonly StoredColumnKeys<TColumns>[];
+    indexes?: Partial<Record<StoredColumnKeys<TColumns>, "equality">>;
   }): DefinedTable<TColumns, TRelations, EncryptionDeclaration> {
     const referenceColumns = new Set<string>();
     for (const relation of Object.values(this.relations)) {
       if (relation.kind === "forward") referenceColumns.add(relation.column);
     }
-    const selected =
-      options.columns ?? Object.keys(this.columns).filter((name) => !referenceColumns.has(name));
+    const selected: readonly string[] =
+      options.columns ??
+      Object.keys(this.columns).filter(
+        (name) => !referenceColumns.has(name) && !isComputedColumn(this.columns[name]!),
+      );
     for (const name of selected) {
       if (!(name in this.columns)) throw new Error(`Unknown encrypted column "${name}"`);
       if (referenceColumns.has(name)) {
         throw new Error(`Encrypted column "${name}" must not be a reference`);
       }
-      const column = this.columns[name]!._build(name);
+      const builder = this.columns[name]!;
+      if (isComputedColumn(builder))
+        throw new Error(`Computed field "${name}" cannot be encrypted`);
+      const column = builder._build(name);
       if (column.default !== undefined || column.mergeStrategy !== undefined)
         throw new Error(
           `Encrypted column "${name}" cannot have a server default or merge strategy`,
@@ -95,7 +71,11 @@ export class DefinedTable<
       )
         throw new Error(`Encrypted column "${name}" cannot be an ordinary index or branch key`);
     }
-    const space = this.columns[options.space]?._build(options.space);
+    const spaceBuilder = this.columns[options.space];
+    const space =
+      spaceBuilder && !isComputedColumn(spaceBuilder)
+        ? spaceBuilder._build(options.space)
+        : undefined;
     if (
       options.indexes !== undefined &&
       (options.indexes === null ||
@@ -136,9 +116,9 @@ export class DefinedTable<
   constructor(
     public readonly columns: TColumns,
     public readonly relations: TRelations,
-    public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
-    public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
-    public readonly compositeIndexes?: readonly (readonly Extract<keyof TColumns, string>[])[],
+    public readonly indexedColumns?: readonly StoredColumnKeys<TColumns>[],
+    public readonly branchColumns?: readonly StoredColumnKeys<TColumns>[],
+    public readonly compositeIndexes?: readonly (readonly StoredColumnKeys<TColumns>[])[],
     public readonly encryption?: TEncryption,
   ) {
     validateTransformDependencies(columns);
@@ -147,13 +127,13 @@ export class DefinedTable<
 
   indexOnly<
     const TColumnsForIndex extends readonly [
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
+      StoredColumnKeys<TColumns>,
+      ...StoredColumnKeys<TColumns>[],
     ],
   >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations, TEncryption> {
-    const normalizedColumns = [...columns] as Extract<keyof TColumns, string>[];
+    const normalizedColumns = [...columns] as StoredColumnKeys<TColumns>[];
     for (const column of normalizedColumns) {
-      if (!(column in this.columns)) {
+      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
         throw new Error(`table.indexOnly(...) references unknown column "${column}".`);
       }
     }
@@ -172,14 +152,14 @@ export class DefinedTable<
 
   compositeIndex<
     const TColumnsForIndex extends readonly [
-      Extract<keyof TColumns, string>,
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
+      StoredColumnKeys<TColumns>,
+      StoredColumnKeys<TColumns>,
+      ...StoredColumnKeys<TColumns>[],
     ],
   >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations, TEncryption> {
     if (
       new Set(columns).size !== columns.length ||
-      columns.some((column) => !(column in this.columns))
+      columns.some((column) => !(column in this.columns) || isComputedColumn(this.columns[column]!))
     ) {
       throw new Error("table.compositeIndex(...) requires distinct declared columns.");
     }
@@ -199,26 +179,25 @@ export class DefinedTable<
     );
   }
 
-  branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
+  branchBy<const TBranchColumn extends StoredColumnKeys<TColumns>>(
     column: TBranchColumn,
   ): DefinedTable<TColumns, TRelations, TEncryption>;
   branchBy<
     const TBranchColumns extends readonly [
-      Extract<keyof TColumns, string>,
-      ...Extract<keyof TColumns, string>[],
+      StoredColumnKeys<TColumns>,
+      ...StoredColumnKeys<TColumns>[],
     ],
   >(columns: TBranchColumns): DefinedTable<TColumns, TRelations, TEncryption>;
   branchBy(
     columns:
-      | Extract<keyof TColumns, string>
-      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
+      | StoredColumnKeys<TColumns>
+      | readonly [StoredColumnKeys<TColumns>, ...StoredColumnKeys<TColumns>[]],
   ): DefinedTable<TColumns, TRelations, TEncryption> {
-    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
-      keyof TColumns,
-      string
-    >[];
+    const normalizedColumns = (
+      Array.isArray(columns) ? [...columns] : [columns]
+    ) as StoredColumnKeys<TColumns>[];
     for (const column of normalizedColumns) {
-      if (!(column in this.columns)) {
+      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
         throw new Error(`table.branchBy(...) references unknown column "${column}".`);
       }
     }
@@ -236,13 +215,28 @@ export class DefinedTable<
   }
 }
 
+/**
+ * Define a table with the given columns.
+ *
+ * @example
+ * ```typescript
+ * const schema = {
+ *   todos: s.table({
+ *     title: s.string(),
+ *     done: s.boolean(),
+ *   }),
+ * });
+ * type AppSchema = s.Schema<typeof schema>;
+ * export const app: s.App<AppSchema> = s.defineApp(schema);
+ * ```
+ */
 type RelationColumns<T extends TableDefinition> = {
-  [K in keyof T & string]: ColumnBuilderSqlType<T[K]> extends
+  [K in StoredColumnKeys<T>]: ColumnBuilderSqlType<T[K]> extends
     | "UUID"
     | { kind: "ARRAY"; element: "UUID" }
     ? K
     : never;
-}[keyof T & string];
+}[StoredColumnKeys<T>];
 type ConflictingTargets<R extends Relationships, C extends string, T extends string> = {
   [N in keyof R]: R[N] extends ForwardRelationship<infer OtherTarget, C>
     ? OtherTarget extends T
@@ -268,34 +262,32 @@ type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> 
         : never
       : R[K];
 };
-/**
- * Define a table with explicit columns and named relationships.
- *
- * @example
- * ```typescript
- * const schema = {
- *   todos: s.table({
- *     title: s.string(),
- *     done: s.boolean(),
- *   }, {}),
- * };
- * type AppSchema = s.Schema<typeof schema>;
- * export const app: s.App<AppSchema> = s.defineApp(schema);
- * ```
- */
 export function defineTable<
   const TColumns extends TableDefinition,
-  const TRelations extends Relationships,
+  const TFields extends Record<
+    string,
+    Relationship | ComputedField<ComputedRow<TColumns>, unknown>
+  >,
 >(
   columns: TColumns & ValidateTransformContexts<TColumns>,
-  relations: TRelations & ValidateLocalRelations<TColumns, TRelations>,
-): DefinedTable<TColumns, TRelations, undefined> {
-  if (!relations || typeof relations !== "object" || Array.isArray(relations))
+  fields: TFields,
+  ..._validation: [TFields] extends [
+    ValidateLocalRelations<TColumns, TableRelations<TFields>> & {
+      [K in keyof TFields]: K extends keyof TColumns | "id" ? never : TFields[K];
+    },
+  ]
+    ? []
+    : [invalidFields: never]
+): DefinedTable<TColumns & ComputedColumns<TFields>, TableRelations<TFields>, undefined> {
+  if (!fields || typeof fields !== "object" || Array.isArray(fields))
     throw new Error(
-      "s.table(columns, relations) requires a relationship map; use {} for no relationships.",
+      "s.table(columns, fields) requires a relationship map, optionally containing computed fields; use {} for no fields.",
     );
+  let completeColumns: Record<string, AnyColumnDefinition> = columns;
+  const relations: Relationships = {};
   const targets = new Map<string, string>();
-  for (const [name, relation] of Object.entries(relations)) {
+  for (const [name, relation] of Object.entries(fields)) {
+    const computed = relation && typeof relation === "object" && "_computed" in relation;
     if (
       !name ||
       ["__proto__", "constructor", "prototype"].includes(name) ||
@@ -303,16 +295,32 @@ export function defineTable<
       name === "id" ||
       Object.hasOwn(columns, name)
     )
-      throw new Error(`Relationship "${name}" collides with a column.`);
+      throw new Error(
+        `${computed ? "Computed field" : "Relationship"} "${name}" collides with a column.`,
+      );
+    if (computed) {
+      assertUserTableColumnNameAllowed(name);
+      if (completeColumns === columns) completeColumns = { ...columns };
+      completeColumns[name] = {
+        _computed: {
+          ...relation._computed,
+          rowColumns: Object.freeze(["id", ...Object.keys(columns)]),
+        },
+      } as ComputedColumn;
+      continue;
+    }
     assertRelationshipDeclaration(relation, name);
+    relations[name] = relation;
     if (relation.kind === "forward") {
       const previous = targets.get(relation.column);
       if (previous && previous !== relation.table)
         throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
       targets.set(relation.column, relation.table);
-      const column = Object.hasOwn(columns, relation.column)
-        ? columns[relation.column]?._build(relation.column)
-        : undefined;
+      const builder = columns[relation.column];
+      const column =
+        Object.hasOwn(columns, relation.column) && builder && !isComputedColumn(builder)
+          ? builder._build(relation.column)
+          : undefined;
       if (!column)
         throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
       if (
@@ -337,5 +345,82 @@ export function defineTable<
         );
     }
   }
-  return new DefinedTable<TColumns, TRelations, undefined>(columns, relations);
+  return new DefinedTable(
+    completeColumns as TColumns & ComputedColumns<TFields>,
+    relations as TableRelations<TFields>,
+  );
 }
+
+type ComputedRow<C extends TableDefinition> = { readonly id: string } & {
+  readonly [K in keyof C & string]: ReturnedColumnValue<C[K]>;
+};
+export type ComputedField<R, V> = {
+  readonly _computed: {
+    readonly compute: (row: Readonly<R>) => V;
+  };
+};
+type ComputedColumns<F> = [F] extends [never]
+  ? {}
+  : {
+      [K in keyof F as F[K] extends ComputedField<never, unknown>
+        ? K
+        : never]: F[K] extends ComputedField<never, infer V> ? ComputedColumn<V> : never;
+    };
+type TableRelations<F> = [F] extends [never]
+  ? never
+  : {
+      [K in keyof F as F[K] extends Relationship ? K : never]: Extract<F[K], Relationship>;
+    };
+
+/** Declare a virtual, read-only field in s.table's second argument. */
+export function defineComputed<R, V>(compute: (row: Readonly<R>) => V): ComputedField<R, V> {
+  if (typeof compute !== "function")
+    throw new TypeError("s.computed(...) requires a synchronous callback.");
+  return Object.freeze({ _computed: Object.freeze({ compute }) });
+}
+
+type StoredDependencyValue<C extends AnyColumnDefinition> =
+  ColumnBuilderOptional<C> extends true
+    ? TSTypeFromSqlType<ColumnBuilderSqlType<C>> | null
+    : TSTypeFromSqlType<ColumnBuilderSqlType<C>>;
+type DependencyValues<C extends TableDefinition, D extends string, Stored extends boolean> = {
+  readonly [K in D]: K extends "id"
+    ? string
+    : K extends keyof C
+      ? Stored extends true
+        ? StoredDependencyValue<C[K]>
+        : ColumnBuilderOptional<C[K]> extends true
+          ? ColumnBuilderInitValue<C[K]> | null
+          : ColumnBuilderInitValue<C[K]>
+      : never;
+};
+type ValidDependencyContext<
+  C extends TableDefinition,
+  D extends string,
+  Context,
+  Stored extends boolean,
+> =
+  Exclude<keyof Context, D> extends never
+    ? DependencyValues<C, D, Stored> extends Context
+      ? true
+      : false
+    : false;
+export type ValidateTransformContexts<C extends TableDefinition> = {
+  [K in keyof C]: C[K] extends {
+    readonly __jazzDependencies: readonly (infer D extends string)[];
+    readonly __jazzStoredDependencies: infer S;
+    readonly __jazzInputDependencies: infer I;
+  }
+    ? string extends D
+      ? C[K]
+      : Exclude<D, StoredColumnKeys<C> | "id"> extends never
+        ? K extends D
+          ? never
+          : ValidDependencyContext<C, D, S, true> extends true
+            ? ValidDependencyContext<C, D, I, false> extends true
+              ? C[K]
+              : never
+            : never
+        : never
+    : C[K];
+};

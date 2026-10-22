@@ -7,6 +7,7 @@ import type {
   TablePolicies,
 } from "../schema.js";
 import type { TableMetaOf } from "../typed-app.js";
+import type { ColumnTransformMap, ColumnTransformRegistry } from "../runtime/column-transforms.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import type {
@@ -47,7 +48,11 @@ type QueryBuilderFor<TApp extends AppLike, K extends TableKey<TApp>> = Extract<
   TApp[K],
   QueryBuilderLike
 >;
-type RowFor<QB> = QB extends { _rowType: infer R } ? R : never;
+type RowFor<QB> = QB extends { _rowType: infer R }
+  ? [TableMetaOf<QB>] extends [never]
+    ? R
+    : Pick<R, Extract<keyof WhereFor<QB>, keyof R>>
+  : never;
 type WhereFor<QB> = QB extends { where(input: infer W): unknown } ? W : never;
 
 type RelationNamesFor<QB> = [TableMetaOf<QB>] extends [never]
@@ -919,6 +924,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
     private readonly table: string,
     private readonly hasTypeColumn: boolean,
     private readonly registerRule?: (ruleLike: RuleLike) => void,
+    private readonly columnTransforms?: ColumnTransformMap,
   ) {}
 
   where(
@@ -926,7 +932,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): Rule;
   where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
   where(input: unknown, ..._guard: unknown[]): Rule {
-    const condition = resolveWhereInput(input, this.hasTypeColumn);
+    const condition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
     const rule: Rule = {
       table: this.table,
       action: "update",
@@ -950,7 +956,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereOld<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereOld(input: unknown, ..._guard: unknown[]): this {
-    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn);
+    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
     this.registerBuilder();
     return this;
   }
@@ -960,7 +966,7 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereNew<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereNew(input: unknown, ..._guard: unknown[]): this {
-    this.newCondition = resolveWhereInput(input, this.hasTypeColumn);
+    this.newCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
     this.registerBuilder();
     return this;
   }
@@ -1020,6 +1026,12 @@ export function definePermissions<TApp extends AppLike>(
   const fkReferencesByTable = collectFkReferencesByTable(app);
   const tablesWithTypeColumn = collectTablesWithTypeColumn(app);
   const relationsByTable = collectRelationsByTable(app);
+  const columnTransformsByTable: ColumnTransformRegistry = Object.create(null);
+  for (const table of tableNames) {
+    const transforms = (app as Record<string, { _columnTransforms?: ColumnTransformMap }>)[table]
+      ?._columnTransforms;
+    if (transforms) columnTransformsByTable[table] = transforms;
+  }
   const rules: RuleLike[] = [];
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
@@ -1030,7 +1042,13 @@ export function definePermissions<TApp extends AppLike>(
     rules.push(ruleLike);
   };
   const ctx = {
-    policy: buildPolicyContext(tableNames, relationsByTable, tablesWithTypeColumn, collectRule),
+    policy: buildPolicyContext(
+      tableNames,
+      relationsByTable,
+      tablesWithTypeColumn,
+      collectRule,
+      columnTransformsByTable,
+    ),
     anyOf,
     allOf,
     raw: rawPermissionExpression,
@@ -1050,6 +1068,12 @@ export function definePermissions<TApp extends AppLike>(
   }
   factory(ctx);
   const application = compileRules(rules, fkReferencesByTable, relationsByTable);
+  for (const [table, policies] of Object.entries(application)) {
+    for (const operation of [policies.select, policies.insert, policies.update, policies.delete]) {
+      validateComputedPermissionReferences(operation?.using, table, columnTransformsByTable);
+      validateComputedPermissionReferences(operation?.with_check, table, columnTransformsByTable);
+    }
+  }
   const defaults: CompiledPermissions = {};
   for (const table of Object.keys(application)) {
     if (Object.hasOwn(managed, table)) {
@@ -1082,6 +1106,7 @@ export function definePermissions<TApp extends AppLike>(
         relationsByTable,
         tablesWithTypeColumn,
         (rule) => topologyRules.push(rule),
+        columnTransformsByTable,
       ),
     } as unknown as Parameters<typeof applyGroupTopologyPermissions>[0]);
     const topology = compileRules(topologyRules, fkReferencesByTable, relationsByTable);
@@ -1156,6 +1181,7 @@ function buildPolicyContext(
   relationsByTable: Map<string, Relation[]>,
   tablesWithTypeColumn: ReadonlySet<string>,
   collectRule: (ruleLike: RuleLike) => void,
+  columnTransformsByTable: ColumnTransformRegistry,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
@@ -1164,6 +1190,7 @@ function buildPolicyContext(
       relationsByTable,
       tablesWithTypeColumn.has(table),
       collectRule,
+      columnTransformsByTable,
     );
   }
   context.exists = (relation: PermissionRelation): ExistsRelationCondition =>
@@ -1181,7 +1208,9 @@ function buildTablePolicyBuilder(
   relationsByTable: Map<string, Relation[]>,
   hasTypeColumn: boolean,
   collectRule: (ruleLike: RuleLike) => void,
+  columnTransformsByTable: ColumnTransformRegistry,
 ): Record<string, unknown> {
+  const columnTransforms = columnTransformsByTable[table];
   const registerRule = (rule: Rule): Rule => {
     collectRule(rule);
     return rule;
@@ -1192,7 +1221,7 @@ function buildTablePolicyBuilder(
   ): ActionBuilder<unknown, unknown> => {
     const builder: ActionBuilder<unknown, unknown> = {
       where: ((input: unknown) => {
-        const condition = resolveWhereInput(input, hasTypeColumn);
+        const condition = resolveWhereInput(input, hasTypeColumn, columnTransforms);
         return registerRule(
           clause === "using"
             ? { table, action, using: condition }
@@ -1209,7 +1238,7 @@ function buildTablePolicyBuilder(
   const del = actionBuilder("delete", "using");
   const relation = () => createTableRelation(table, relationsByTable);
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
-    new UpdateRuleBuilder(table, hasTypeColumn, collectRule);
+    new UpdateRuleBuilder(table, hasTypeColumn, collectRule, columnTransforms);
   const managedByCreator = (): void => {
     read.where(CREATOR_CONDITION);
     insert.where(CREATOR_CONDITION);
@@ -1536,6 +1565,7 @@ function isRecursiveCurrentFilter(raw: unknown, token: RecursiveCurrentValue): b
 
 function resolveRelationWhereInput(input: unknown): Record<string, unknown> {
   if (typeof input === "function") {
+    // Relation callbacks reference the enclosing policy row, whose table is not known yet.
     return resolveRelationWhereInput(input(createRowContext()));
   }
   return normalizeWhereObject(input);
@@ -2038,10 +2068,79 @@ function normalizeSessionPath(path: string | string[]): string[] {
   return parts.map((part) => part.trim()).filter((part) => part.length > 0);
 }
 
-function createRowContext(): RowContext<Record<string, unknown>> {
+function assertStoredPermissionReference(column: string, transforms?: ColumnTransformMap): void {
+  if (transforms?.[column]?.computed)
+    throw new TypeError(`Computed field "${column}" cannot be referenced in permission policies.`);
+}
+
+/** Check outer references only once a relation is attached to its owning policy. */
+function validateComputedPermissionReferences(
+  expression: PolicyExpr | undefined,
+  table: string,
+  transforms: ColumnTransformRegistry,
+): void {
+  if (!expression) return;
+  if (expression.type === "And" || expression.type === "Or") {
+    for (const child of expression.exprs)
+      validateComputedPermissionReferences(child, table, transforms);
+  } else if (expression.type === "Not") {
+    validateComputedPermissionReferences(expression.expr, table, transforms);
+  } else if (expression.type === "Exists") {
+    validateComputedPermissionReferences(expression.condition, expression.table, transforms);
+  } else if (expression.type === "ExistsRel" && transforms[table]) {
+    const value = (ref: RelValueRef) => {
+      if ("OuterColumn" in ref)
+        assertStoredPermissionReference(ref.OuterColumn.column, transforms[table]);
+    };
+    const predicate = (expr: RelPredicateExpr): void => {
+      if (typeof expr === "string") return;
+      if ("Cmp" in expr) value(expr.Cmp.right);
+      else if ("Contains" in expr) value(expr.Contains.right);
+      else if ("In" in expr) expr.In.values.forEach(value);
+      else if ("And" in expr) expr.And.forEach(predicate);
+      else if ("Or" in expr) expr.Or.forEach(predicate);
+      else if ("Not" in expr) predicate(expr.Not);
+      else if ("EnumMatch" in expr) predicate(expr.EnumMatch.payload);
+    };
+    const relation = (expr: RelExpr): void => {
+      if ("Filter" in expr) {
+        relation(expr.Filter.input);
+        predicate(expr.Filter.predicate);
+      } else if ("Union" in expr) {
+        for (const arm of expr.Union.inputs) relation(arm.input);
+      } else if ("Join" in expr) {
+        relation(expr.Join.left);
+        relation(expr.Join.right);
+      } else if ("Gather" in expr) {
+        relation(expr.Gather.seed);
+        relation(expr.Gather.step);
+      } else {
+        const unary =
+          "Project" in expr
+            ? expr.Project
+            : "Distinct" in expr
+              ? expr.Distinct
+              : "OrderBy" in expr
+                ? expr.OrderBy
+                : "Offset" in expr
+                  ? expr.Offset
+                  : "Limit" in expr
+                    ? expr.Limit
+                    : undefined;
+        if (unary) relation(unary.input);
+      }
+    };
+    relation(expression.rel);
+  }
+}
+
+function createRowContext(
+  columnTransforms?: ColumnTransformMap,
+): RowContext<Record<string, unknown>> {
   return new Proxy({} as RowContext<Record<string, unknown>>, {
     get(_target, prop) {
       if (typeof prop === "string") {
+        assertStoredPermissionReference(prop, columnTransforms);
         return {
           __jazzPermissionKind: "row-ref",
           column: prop,
@@ -2064,10 +2163,14 @@ function normalizeWhereObject(input: unknown, hasTypeColumn?: boolean): Record<s
   return input;
 }
 
-function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
+function resolveWhereInput(
+  input: unknown,
+  hasTypeColumn: boolean,
+  columnTransforms?: ColumnTransformMap,
+): Condition {
   if (typeof input === "function") {
-    const result = input(createRowContext());
-    return resolveWhereInput(result, hasTypeColumn);
+    const result = input(createRowContext(columnTransforms));
+    return resolveWhereInput(result, hasTypeColumn, columnTransforms);
   }
   if (isPolicyExpr(input) || isAllowedRelationCondition(input)) {
     return input;
@@ -2085,7 +2188,9 @@ function resolveWhereInput(input: unknown, hasTypeColumn: boolean): Condition {
     return brandPermissionExpression({
       __jazzPermissionKind: "compound",
       op: input.op,
-      conditions: input.conditions.map((condition) => resolveWhereInput(condition, hasTypeColumn)),
+      conditions: input.conditions.map((condition) =>
+        resolveWhereInput(condition, hasTypeColumn, columnTransforms),
+      ),
     });
   }
   if (isPlainObject(input)) {
