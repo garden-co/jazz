@@ -712,6 +712,22 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
         && query.filters.is_empty()
 }
 
+/// What a remote read of `query` subscribes to: the query itself, or for
+/// an aggregate its input rows (its filters and traversals, every column,
+/// no window), which the client aggregates as it would local rows.
+pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
+    if query.aggregate.is_none() {
+        return std::borrow::Cow::Borrowed(query);
+    }
+    let mut input = query.clone();
+    input.aggregate = None;
+    input.select = None;
+    input.order_by.clear();
+    input.limit = None;
+    input.offset = 0;
+    std::borrow::Cow::Owned(input)
+}
+
 /// Whether a junction traversal's witnesses can ship as [`Support::Array`]
 /// children of the row it starts from: it correlates with a column of that
 /// row (not a referenced row's), at every level.
@@ -2313,23 +2329,24 @@ impl Db {
     }
 
     /// Remote reads ship the query's rows plus its supporting rows (single
-    /// hop includes, array subqueries, junction traversals, gathers); the
-    /// client evaluates locally. Other shapes that read further tables
+    /// hop includes, array subqueries, junction traversals, gathers), and
+    /// an aggregate's input rows ([`remote_query`]); the client evaluates
+    /// locally. Other shapes that read further tables
     /// (uncorrelated traversals or ones through a referenced row, gathers
-    /// filtered after the gather, multi-hop includes, aggregates) would see
-    /// a partial replica, so they are refused explicitly.
+    /// filtered after the gather, multi-hop includes) would see a partial
+    /// replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
+        let query = &*remote_query(query);
         let other_tables = !query.joins.iter().all(join_followable)
             || !query.reachable.iter().all(|via| gather_shaped(query, via))
             || !query.inherits.is_empty()
             || query
                 .includes
                 .iter()
-                .any(|include| include.path.contains('.'))
-            || query.aggregate.is_some();
+                .any(|include| include.path.contains('.'));
         if other_tables {
             return Err(crate::values::unsupported(format!(
-                "a synced read of `{}` that reads further tables (joins, multi-hop includes or aggregates)",
+                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers or multi-hop includes)",
                 query.table
             )));
         }
@@ -2342,9 +2359,10 @@ impl Db {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Option<Rc<StdCell<bool>>> {
+        let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
-        let key = remote_key(&prepared.query, &prepared.binding, include_deleted);
+        let key = remote_key(&query, &prepared.binding, include_deleted);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some(remote.answered.clone());
@@ -2354,7 +2372,7 @@ impl Db {
         let answered = Rc::new(StdCell::new(false));
         client.outbox.push(SyncMessage::Subscribe {
             id,
-            query: prepared.query.clone(),
+            query: query.clone().into_owned(),
             binding: prepared.binding.clone(),
             since: None,
             include_deleted,
@@ -2364,7 +2382,7 @@ impl Db {
             Remote {
                 id,
                 refs: 1,
-                query: prepared.query.clone(),
+                query: query.into_owned(),
                 binding: prepared.binding.clone(),
                 include_deleted,
                 answered: answered.clone(),
@@ -2386,7 +2404,7 @@ impl Db {
         let Some(client) = inner.client.as_mut() else {
             return;
         };
-        let key = remote_key(query, binding, include_deleted);
+        let key = remote_key(&remote_query(query), binding, include_deleted);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -2424,7 +2442,7 @@ impl Db {
             client.answers.insert(id, None);
             client.outbox.push(SyncMessage::Fetch {
                 id,
-                query: prepared.query.clone(),
+                query: remote_query(&prepared.query).into_owned(),
                 binding: prepared.binding.clone(),
                 at,
                 include_deleted,

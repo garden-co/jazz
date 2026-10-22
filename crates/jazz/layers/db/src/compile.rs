@@ -466,6 +466,7 @@ impl<'a> Ctx<'a> {
         query: &Query,
         aggregate: &crate::query::AggregateQuery,
         table: &Table,
+        from: &str,
         alias: &str,
         wheres: &[String],
     ) -> Result<Compiled, Error> {
@@ -524,10 +525,23 @@ impl<'a> Ctx<'a> {
                         ValueType::U64,
                     ),
                 },
-                F::Avg => (
-                    format!("AVG({})", input(&output.column)?.0),
-                    ValueType::Nullable(Box::new(ValueType::F64)),
-                ),
+                F::Avg => {
+                    // SQLite's AVG divides a sum, which overflows to
+                    // infinity for large finite inputs; then the inputs,
+                    // scaled exactly by a power of two, average instead.
+                    let column = input(&output.column)?.0;
+                    (
+                        format!(
+                            "(CASE WHEN COUNT({column}) = 0 THEN NULL \
+                             WHEN abs(AVG({column})) <= {max:e} THEN AVG({column}) \
+                             ELSE AVG({column} * {down:e}) * {up:e} END)",
+                            max = f64::MAX,
+                            down = 2f64.powi(-128),
+                            up = 2f64.powi(128),
+                        ),
+                        ValueType::Nullable(Box::new(ValueType::F64)),
+                    )
+                }
                 F::Sum | F::Min | F::Max => {
                     let (column, ty) = input(&output.column)?;
                     let name = match output.function {
@@ -577,10 +591,9 @@ impl<'a> Ctx<'a> {
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let sql = format!(
-            "SELECT {key}, 0, 0, {} FROM {} AS {alias} WHERE {}{group_by}{order} \
+            "SELECT {key}, 0, 0, {} FROM {from} AS {alias} WHERE {}{group_by}{order} \
              LIMIT {limit} OFFSET {offset}",
             outputs.join(", "),
-            self.source(table)?,
             and(wheres),
         );
         Ok(Compiled {
@@ -726,7 +739,8 @@ impl<'a> Ctx<'a> {
                     "aggregates with selections or array subqueries on SQLite",
                 ));
             }
-            return self.compile_aggregate(query, aggregate, table, alias, &wheres);
+            let from = self.source(table)?;
+            return self.compile_aggregate(query, aggregate, table, &from, alias, &wheres);
         }
         let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
         let columns = projection
