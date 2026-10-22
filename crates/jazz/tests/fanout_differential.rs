@@ -184,6 +184,11 @@ fn run(seed: u64) {
                 .order_by("sent_at", OrderDirection::Desc)
                 .limit(3),
             Query::from("messages").order_by("sent_at", OrderDirection::Asc),
+            // A first page ordered by a column it does not select.
+            Query::from("messages")
+                .select(["body"])
+                .order_by("sent_at", OrderDirection::Asc)
+                .limit(4),
             Query::from("memberships"),
             Query::from("rooms")
                 .order_by("name", OrderDirection::Asc)
@@ -208,7 +213,7 @@ fn run(seed: u64) {
     let mut rng = Rng(seed);
     let (mut messages, mut memberships) = (0usize, 0usize);
     for step in 0..400 {
-        let pick = rng.next(7);
+        let pick = rng.next(8);
         let mut renamed = None;
         let result = match pick {
             0 | 1 => {
@@ -280,6 +285,13 @@ fn run(seed: u64) {
                 ))
                 .map(drop)
             }
+            // Delete a message: a full page that loses a row must refill.
+            7 if messages > 0 => block_on(db.delete(
+                "messages",
+                row(3, 1 + rng.next(messages)),
+                Default::default(),
+            ))
+            .map(drop),
             _ => Ok(()),
         };
         let _ = result;

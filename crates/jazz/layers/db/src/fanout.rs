@@ -50,11 +50,16 @@ pub(super) struct Group {
     pub(super) rows: Vec<CurrentRow>,
     members: Vec<Member>,
     watches: Vec<Watch>,
-    /// An unbounded single-table result whose rows' membership depends only
-    /// on the rows themselves: a commit that changes only root rows is
-    /// applied by re-checking those ids, not by re-running the query.
+    /// A single-table result (unbounded or a first page) whose rows'
+    /// membership depends only on the rows themselves: a commit that
+    /// changes only root rows is applied by re-checking those ids, not by
+    /// re-running the query.
     recheck: bool,
-    /// Sort keys parallel to `rows`, built on the first re-check.
+    /// Every order column is projected, so sort keys come from the rows.
+    projected: bool,
+    /// Sort keys parallel to `rows`. Built from the rows on the first
+    /// re-check when `projected`; otherwise read with the rows, before
+    /// any later write can move them.
     keys: Vec<SortKey>,
     /// Optional includes whose target table nothing else in the query
     /// reads: (target, root column). A change to a target row cannot move
@@ -262,6 +267,7 @@ impl Inner {
         let rows = self.execute(&compiled, &prepared.query.table)?;
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let recheck = recheckable(&prepared.query, &read, &compiled);
+        let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
         let queue: Queue = Rc::new(RefCell::new(VecDeque::from([open(&rows)])));
         let gid = self.fan.next;
@@ -277,9 +283,11 @@ impl Inner {
             members: vec![member(&queue)],
             watches,
             recheck,
+            projected,
             keys: Vec::new(),
             includes,
         }));
+        self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
         self.fan.groups.insert(gid, handle);
         Ok((queue, weak))
@@ -635,62 +643,29 @@ impl Inner {
             .collect()
     }
 
-    /// Apply a commit that changed only the root rows `ids` to an
-    /// unbounded result in place: re-check those ids and splice them in by
-    /// the query's order (sort keys are kept per row), emitting a delta for
-    /// just those rows. O(changed · log n) comparisons plus memmoves, not a
-    /// re-run and full diff. `None` when the order cannot be compared from
-    /// the rows (then the caller re-runs).
+    /// Apply a commit that changed only the root rows `ids` to a result in
+    /// place: re-check those ids and splice them in by the query's order
+    /// (sort keys are kept per row), emitting a delta for just those rows.
+    /// O(changed · log n) comparisons plus memmoves, not a re-run and full
+    /// diff. A first page (`limit`, no offset) keeps its first `limit`
+    /// rows; one that was full and shrank re-runs, since it never held the
+    /// rows after it. `None` when the order cannot be compared from the
+    /// rows (then the caller re-runs).
     fn recheck_rows(
         &self,
         group: &mut Group,
         ids: &BTreeSet<RowUuid>,
     ) -> Option<Result<Option<SubscriptionEvent>, Error>> {
         let order = group.prepared.query.order_by.clone();
-        let compiled = match self.compile(&group.prepared, group.identity, &group.read) {
-            Ok(compiled) => compiled,
-            Err(error) => return Some(Err(error)),
-        };
-        if order.iter().any(|key| {
-            key.column != "id"
-                && !compiled
-                    .projection
-                    .iter()
-                    .any(|(name, _)| *name == key.column)
-        }) {
-            return None;
-        }
-        let sort_key = |row: &CurrentRow| -> Option<SortKey> {
-            let mut key = Vec::with_capacity(order.len() + 1);
-            for by in &order {
-                let value = if by.column == "id" {
-                    Sql::Blob(row.id.0.as_bytes().to_vec())
-                } else {
-                    match row
-                        .cells
-                        .iter()
-                        .find(|(name, _)| *name == by.column)?
-                        .1
-                        .as_ref()
-                    {
-                        None => Sql::Null,
-                        Some(value) => to_sql(value).ok()??,
-                    }
-                };
-                key.push((
-                    value,
-                    matches!(by.direction, crate::query::OrderDirection::Desc),
-                ));
-            }
-            key.push((Sql::Blob(row.id.0.as_bytes().to_vec()), false));
-            Some(key)
-        };
+        let projected = group.projected;
         if group.keys.len() != group.rows.len() {
-            group.keys = group
-                .rows
-                .iter()
-                .map(sort_key)
-                .collect::<Option<Vec<_>>>()?;
+            if !projected {
+                return None;
+            }
+            group.keys = match self.sort_keys(group, &order, projected, &group.rows)? {
+                Ok(keys) => keys,
+                Err(error) => return Some(Err(error)),
+            };
         }
         // The same query narrowed to the changed ids, as a root filter, so
         // SQLite seeks them by primary key instead of sorting the view.
@@ -702,6 +677,7 @@ impl Inner {
                 .collect(),
         ));
         prepared.query.order_by.clear();
+        prepared.query.limit = None;
         let narrowed = match self.compile(&prepared, group.identity, &group.read) {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
@@ -710,19 +686,47 @@ impl Inner {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
-        let fresh: Vec<(SortKey, CurrentRow)> = fresh
-            .into_iter()
-            .map(|row| Some((sort_key(&row)?, row)))
-            .collect::<Option<_>>()?;
+        let fresh_keys = match self.sort_keys(group, &order, projected, &fresh)? {
+            Ok(keys) => keys,
+            Err(error) => return Some(Err(error)),
+        };
+        let fresh: Vec<(SortKey, CurrentRow)> = fresh_keys.into_iter().zip(fresh).collect();
         // Before: where each changed id sat, and what it showed.
-        let before: HashMap<RowUuid, (usize, CurrentRow)> = group
+        let before: HashMap<RowUuid, (usize, CurrentRow, SortKey)> = group
             .rows
             .iter()
             .enumerate()
             .filter(|(_, row)| ids.contains(&row.id))
-            .map(|(i, row)| (row.id, (i, row.clone())))
+            .map(|(i, row)| (row.id, (i, row.clone(), group.keys[i].clone())))
             .collect();
-        let mut positions: Vec<usize> = before.values().map(|(i, _)| *i).collect();
+        let limit = group.prepared.query.limit;
+        let page_ids_before: Vec<RowUuid> = if limit.is_some() {
+            group.rows.iter().map(|row| row.id).collect()
+        } else {
+            Vec::new()
+        };
+        let full_before = limit.is_some_and(|limit| group.rows.len() >= limit);
+        // A full page only knows the rows up to its last one: a changed
+        // row that now sorts after it may have unseen rows before it.
+        let boundary = full_before.then(|| group.keys.last().cloned()).flatten();
+        let fresh: Vec<(SortKey, CurrentRow)> = fresh
+            .into_iter()
+            .filter(|(key, _)| {
+                boundary
+                    .as_ref()
+                    .is_none_or(|last| sql_order(key, last) != std::cmp::Ordering::Greater)
+            })
+            .collect();
+        // A full page that would shrink lost rows whose successors it
+        // never held: only a re-run can refill it. Decided before any
+        // splice, so the caller re-runs against the result as it was.
+        if let Some(limit) = limit
+            && full_before
+            && group.rows.len() - before.len() + fresh.len() < limit
+        {
+            return None;
+        }
+        let mut positions: Vec<usize> = before.values().map(|(i, _, _)| *i).collect();
         positions.sort_unstable_by(|a, b| b.cmp(a));
         for at in positions {
             group.rows.remove(at);
@@ -736,13 +740,27 @@ impl Inner {
             group.keys.insert(at, key);
             group.rows.insert(at, row);
         }
+        // A first page keeps its first `limit` rows; unchanged rows pushed
+        // past the end leave it.
+        let mut pushed_off = Vec::new();
+        if let Some(limit) = limit
+            && group.rows.len() > limit
+        {
+            group.keys.truncate(limit);
+            pushed_off = group.rows.split_off(limit);
+        }
+        let fresh_ids: BTreeSet<RowUuid> = fresh_ids
+            .into_iter()
+            .filter(|id| !pushed_off.iter().any(|row| row.id == *id))
+            .collect();
         let mut added = Vec::new();
         let mut updated = Vec::new();
-        for (index, row) in group
+        for (index, (row, key)) in group
             .rows
             .iter()
+            .zip(&group.keys)
             .enumerate()
-            .filter(|(_, row)| fresh_ids.contains(&row.id))
+            .filter(|(_, (row, _))| fresh_ids.contains(&row.id))
         {
             match before.get(&row.id) {
                 None => added.push(SubscriptionOutputRow {
@@ -750,8 +768,12 @@ impl Inner {
                     previous_index: None,
                     index,
                 }),
-                Some((previous, prior))
-                    if prior.cells != row.cells || prior.deleted != row.deleted =>
+                // A row whose order key moved is reported even when its
+                // shown cells did not change: it changed place.
+                Some((previous, prior, prior_key))
+                    if prior.cells != row.cells
+                        || prior.deleted != row.deleted
+                        || prior_key != key =>
                 {
                     updated.push(SubscriptionOutputRow {
                         row: row.clone(),
@@ -762,20 +784,138 @@ impl Inner {
                 Some(_) => {}
             }
         }
+        // Changed rows that left, and unchanged rows a page pushed off.
         let mut removed: Vec<RemovedRow> = before
             .iter()
             .filter(|(id, _)| !fresh_ids.contains(id))
-            .map(|(id, (index, row))| RemovedRow {
+            .map(|(id, (index, row, _))| RemovedRow {
                 table: row.table.to_string(),
                 row_uuid: *id,
                 index: *index,
             })
             .collect();
+        if !pushed_off.is_empty() {
+            let index_before: HashMap<RowUuid, usize> = page_ids_before
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, i))
+                .collect();
+            removed.extend(pushed_off.iter().filter_map(|row| {
+                let index = *index_before.get(&row.id)?;
+                (!before.contains_key(&row.id)).then(|| RemovedRow {
+                    table: row.table.to_string(),
+                    row_uuid: row.id,
+                    index,
+                })
+            }));
+        }
         removed.sort_by_key(|row| row.index);
         if added.is_empty() && updated.is_empty() && removed.is_empty() {
             return Some(Ok(None));
         }
         Some(Ok(Some(delta(false, added, updated, removed))))
+    }
+
+    /// The sort keys of `rows` in the query's order (ties broken by id):
+    /// from their cells when every order column is projected, else read
+    /// back by id. `None` when a value cannot be compared from SQL.
+    fn sort_keys(
+        &self,
+        group: &Group,
+        order: &[crate::query::OrderBy],
+        projected: bool,
+        rows: &[CurrentRow],
+    ) -> Option<Result<Vec<SortKey>, Error>> {
+        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), false);
+        if projected {
+            let keys = rows
+                .iter()
+                .map(|row| {
+                    let mut key = Vec::with_capacity(order.len() + 1);
+                    for by in order {
+                        let value = if by.column == "id" {
+                            Sql::Blob(row.id.0.as_bytes().to_vec())
+                        } else {
+                            match row
+                                .cells
+                                .iter()
+                                .find(|(name, _)| *name == by.column)?
+                                .1
+                                .as_ref()
+                            {
+                                None => Sql::Null,
+                                Some(value) => to_sql(value).ok()??,
+                            }
+                        };
+                        key.push((
+                            value,
+                            matches!(by.direction, crate::query::OrderDirection::Desc),
+                        ));
+                    }
+                    key.push(id_key(row));
+                    Some(key)
+                })
+                .collect::<Option<Vec<_>>>()?;
+            return Some(Ok(keys));
+        }
+        if rows.is_empty() {
+            return Some(Ok(Vec::new()));
+        }
+        let table = &self.schema.tables[&group.prepared.query.table];
+        // By id alone a branched table's row is ambiguous.
+        if !table.branch_by.is_empty() {
+            return None;
+        }
+        let mut columns = String::new();
+        for by in order {
+            match crate::compile::column_sql(table, "t", &by.column) {
+                Ok(sql) => columns.push_str(&format!(", {sql}")),
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        let marks = vec!["?"; rows.len()].join(", ");
+        let sql = format!(
+            "SELECT t.id{columns} FROM {} AS t WHERE t.id IN ({marks})",
+            quote(&table.name)
+        );
+        let ids: Vec<Vec<u8>> = rows
+            .iter()
+            .map(|row| row.id.0.as_bytes().to_vec())
+            .collect();
+        let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
+            let mut statement = self.conn.prepare_cached(&sql)?;
+            let found = statement.query_map(params_from_iter(ids.iter()), |r| {
+                let id: Vec<u8> = r.get(0)?;
+                let values = (1..=order.len())
+                    .map(|i| r.get::<_, Sql>(i))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((id, values))
+            })?;
+            found.collect()
+        };
+        let mut found = match read() {
+            Ok(found) => found,
+            Err(error) => return Some(Err(storage(error))),
+        };
+        let keys = rows
+            .iter()
+            .map(|row| {
+                let values = found.remove(row.id.0.as_bytes().as_slice())?;
+                let mut key: SortKey = values
+                    .into_iter()
+                    .zip(order)
+                    .map(|(value, by)| {
+                        (
+                            value,
+                            matches!(by.direction, crate::query::OrderDirection::Desc),
+                        )
+                    })
+                    .collect();
+                key.push(id_key(row));
+                Some(key)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Ok(keys))
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -784,6 +924,7 @@ impl Inner {
                 group.push(opening(&rows));
                 group.rows = rows;
                 group.keys.clear();
+                self.read_keys(group);
             }
             Err(error) => group.push(SubscriptionEvent::Rejected {
                 reason: error.to_string(),
@@ -816,8 +957,23 @@ impl Inner {
         };
         if let Some(event) = diff(&group.rows, &rows) {
             group.push(event);
-            group.rows = rows;
-            group.keys.clear();
+        }
+        // Order keys that are not shown may have moved even when no row
+        // did: read them again with the rows.
+        group.rows = rows;
+        group.keys.clear();
+        self.read_keys(group);
+    }
+
+    /// Reads the sort keys of a re-checkable group whose order is not
+    /// shown, so they describe its rows as read (not after a later write).
+    fn read_keys(&self, group: &mut Group) {
+        if !group.recheck || group.projected {
+            return;
+        }
+        let order = group.prepared.query.order_by.clone();
+        if let Some(Ok(keys)) = self.sort_keys(group, &order, false, &group.rows) {
+            group.keys = keys;
         }
     }
 }
@@ -863,14 +1019,13 @@ impl Group {
     }
 }
 
-/// Whether a group may apply root-only commits by re-checking ids: an
-/// unbounded, single-table query (no joins, arrays, required includes,
+/// Whether a group may apply root-only commits by re-checking ids: a
+/// single-table query, unbounded or a first page, (no joins, arrays, required includes,
 /// aggregates, windows), outside branch views and cuts, whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
-    query.limit.is_none()
-        && query.offset == 0
+    query.offset == 0
         && query.aggregate.is_none()
         && query.joins.is_empty()
         && query.flat_join.is_none()
@@ -882,6 +1037,17 @@ fn recheckable(query: &Query, read: &ReadSpec, compiled: &Compiled) -> bool {
         && read.cut.is_none()
         && !compiled.aggregate
         && compiled.sql.matches(&quote(&query.table)).count() == 1
+}
+
+/// Whether every order column of a query is among its shown columns.
+fn order_projected(query: &Query, compiled: &Compiled) -> bool {
+    query.order_by.iter().all(|key| {
+        key.column == "id"
+            || compiled
+                .projection
+                .iter()
+                .any(|(name, _)| *name == key.column)
+    })
 }
 
 /// SQLite's ORDER BY comparison of two sort keys (NULL < numbers < text <
@@ -939,6 +1105,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
         .map(|(i, row)| (row.id, (i, row)))
         .collect();
     let new: BTreeSet<RowUuid> = after.iter().map(|row| row.id).collect();
+    let moved = moved_rows(before, after, &new);
     let mut added = Vec::new();
     let mut updated = Vec::new();
     for (index, row) in after.iter().enumerate() {
@@ -948,7 +1115,11 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
                 previous_index: None,
                 index,
             }),
-            Some((previous, prior)) if prior.cells != row.cells || prior.deleted != row.deleted => {
+            Some((previous, prior))
+                if prior.cells != row.cells
+                    || prior.deleted != row.deleted
+                    || moved.contains(&row.id) =>
+            {
                 updated.push(SubscriptionOutputRow {
                     row: row.clone(),
                     previous_index: Some(*previous),
@@ -972,6 +1143,50 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
         return None;
     }
     Some(delta(false, added, updated, removed))
+}
+
+/// Rows kept by both results that changed place relative to each other
+/// (an order key that is not shown moved them): every kept row outside a
+/// longest run that kept its relative order.
+fn moved_rows(
+    before: &[CurrentRow],
+    after: &[CurrentRow],
+    kept_after: &BTreeSet<RowUuid>,
+) -> BTreeSet<RowUuid> {
+    let rank: HashMap<RowUuid, usize> = before
+        .iter()
+        .filter(|row| kept_after.contains(&row.id))
+        .enumerate()
+        .map(|(rank, row)| (row.id, rank))
+        .collect();
+    let kept: Vec<(RowUuid, usize)> = after
+        .iter()
+        .filter_map(|row| Some((row.id, *rank.get(&row.id)?)))
+        .collect();
+    // Patience sorting: `tails[k]` ends the best increasing run of length
+    // k + 1; `back` links each element to its predecessor in its run.
+    let mut tails: Vec<usize> = Vec::new();
+    let mut back: Vec<Option<usize>> = vec![None; kept.len()];
+    for (i, (_, rank)) in kept.iter().enumerate() {
+        let at = tails.partition_point(|&t| kept[t].1 < *rank);
+        back[i] = at.checked_sub(1).map(|k| tails[k]);
+        if at == tails.len() {
+            tails.push(i);
+        } else {
+            tails[at] = i;
+        }
+    }
+    let mut in_order = vec![false; kept.len()];
+    let mut cursor = tails.last().copied();
+    while let Some(i) = cursor {
+        in_order[i] = true;
+        cursor = back[i];
+    }
+    kept.iter()
+        .zip(in_order)
+        .filter(|(_, in_order)| !in_order)
+        .map(|((id, _), _)| *id)
+        .collect()
 }
 
 /// A top-level `column = literal/param` filter on the root table.
