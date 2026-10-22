@@ -18,6 +18,8 @@ use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
 
+mod history;
+
 /// Inherits chains with no explicit bound unroll this deep.
 const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
@@ -220,6 +222,10 @@ pub struct Ctx<'a> {
     pub cut: Option<Cut>,
     /// Questions the statement needs answered first.
     pub preps: Vec<Prep>,
+    /// The authority's node, whose own commits history reads name by their
+    /// seq; `None` on a replica, which lists only versions whose
+    /// transaction it knows.
+    pub history_origin: Option<[u8; 16]>,
     next_alias: usize,
 }
 
@@ -290,8 +296,14 @@ impl<'a> Ctx<'a> {
             view: None,
             cut: None,
             preps: Vec::new(),
+            history_origin: None,
             next_alias: 0,
         }
+    }
+
+    pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
+        self.history_origin = origin;
+        self
     }
 
     pub fn with_view(mut self, view: Option<View>) -> Self {
@@ -584,6 +596,16 @@ impl<'a> Ctx<'a> {
         query: &Query,
         include_deleted: bool,
     ) -> Result<Compiled, Error> {
+        if let Some(source) = crate::schema::history::history_source_table(&query.table) {
+            if query.flat_join.is_some()
+                || !query.policy_branches.is_empty()
+                || !query.inherits.is_empty()
+                || query.relation.is_some()
+            {
+                return Err(unsupported("joins or relationships in history queries"));
+            }
+            return self.compile_history(query, source, include_deleted);
+        }
         if query.flat_join.is_some()
             || !query.policy_branches.is_empty()
             || !query.inherits.is_empty()

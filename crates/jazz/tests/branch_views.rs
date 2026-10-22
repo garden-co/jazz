@@ -2402,7 +2402,6 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
 /// must find the project in that same branch, as his current read does; an
 /// outsider without the project sees neither.
 #[test]
-#[ignore = "history relations on SQLite are being ported from #4166"]
 fn branch_history_checks_inherited_policy_evidence_in_the_branch() {
     let owner_policy = PolicyExpr::Cmp {
         column: "owner".to_owned(),
@@ -2536,7 +2535,7 @@ fn branch_history_checks_inherited_policy_evidence_in_the_branch() {
             })
             .collect::<Vec<_>>(),
         ["first", "second"]
-            .map(|title| Some(Value::Nullable(Some(Box::new(Value::String(title.into()))))))
+            .map(|title| Some(Value::String(title.into())))
             .to_vec(),
         "the history gate must find the project in the same branch"
     );
