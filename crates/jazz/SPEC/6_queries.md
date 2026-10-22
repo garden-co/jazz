@@ -1004,7 +1004,17 @@ Inside an open exclusive transaction, `tx_query` records a binding-sensitive
 `base_snapshot.global_base` against now.
 
 Allowed "magic" select columns are the provenance columns `$createdAt`,
-`$createdBy`, `$updatedAt`, `$updatedBy`. Alpha-compatible permission
+`$createdBy`, `$updatedAt`, `$updatedBy`, and the deletion columns `$deletedAt`
+and `$deletedBy`, with the author paths `$createdBy.*`, `$updatedBy.*` and
+`$deletedBy.*`. The deletion columns require `includeDeleted` and are rejected
+without it; they are nullable (`Nullable(U64)` physical milliseconds and
+`Nullable(RowAuthor)`) and are `NULL` for live and restored rows. A deleted
+row's values are the current deletion winner's authored `$updatedAt` and
+`$updatedBy`, not its acceptance time. Every history version of a row carries
+the same current deletion values, so a restoration clears them on all
+versions. They may be selected, filtered, and ordered, but only on the root of
+a plain query: flat joins reject them, because joined sources read only live
+rows. Alpha-compatible permission
 introspection fields such as `$canRead` are not
 ordinary stored columns and are not executable query columns. Permission
 introspection is exposed through standalone dry-run APIs (ch. 7, ch. 13), so
