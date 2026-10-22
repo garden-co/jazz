@@ -324,6 +324,18 @@ pub fn decode_rows(bytes: &[u8]) -> Result<Vec<DecodedRowBatch>, String> {
     Ok(batches)
 }
 
+/// Decode an [`encode_relation_snapshot`] payload: the root-row count and
+/// the row batches.
+pub fn decode_relation_snapshot(bytes: &[u8]) -> Result<(usize, Vec<DecodedRowBatch>), String> {
+    let mut input = bytes;
+    let root_count: u64 = publication_type::take(&mut input)?;
+    let batches = read_row_batches(&mut input)?;
+    if !input.is_empty() {
+        return Err("trailing bytes after relation snapshot".to_owned());
+    }
+    Ok((root_count as usize, batches))
+}
+
 /// Decode the added and updated rows of an [`encode_subscription_delta`]
 /// payload.
 pub fn decode_subscription_delta_rows(

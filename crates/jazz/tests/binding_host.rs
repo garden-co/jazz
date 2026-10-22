@@ -11,7 +11,7 @@ use std::task::{Context, Poll, Waker};
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{ArraySubquery, Query};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
@@ -25,6 +25,12 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("notes")
                     .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("comments")
+                    .column("note", ColumnType::Uuid)
+                    .column("body", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .build(),
@@ -327,4 +333,91 @@ fn empty_cells() -> Vec<u8> {
         descriptor,
     ))
     .unwrap()
+}
+
+fn comment(note: RowUuid, body: &str) -> Vec<u8> {
+    let descriptor =
+        RecordDescriptor::new([("note", ValueType::Uuid), ("body", ValueType::String)]);
+    let record = OwnedRecord::new(
+        descriptor
+            .create(&[Value::Uuid(note.0), Value::String(body.to_owned())])
+            .unwrap(),
+        descriptor,
+    );
+    jazz::binding_codec::encode_named_cells(&record).unwrap()
+}
+
+#[test]
+fn a_relation_read_nests_each_relation_in_its_parents_cells() {
+    let db = open(0xa1);
+    let note = db
+        .insert("notes", &title("with comments"), &none())
+        .unwrap();
+    db.insert("notes", &title("without"), &none()).unwrap();
+    for body in ["first", "second"] {
+        db.insert("comments", &comment(note.row_id, body), &none())
+            .unwrap();
+    }
+
+    let query = Query::from("notes")
+        .array_subquery(ArraySubquery::new("comments", "comments", "note", "id"));
+    let read = db
+        .all(
+            postcard::to_allocvec(&query).unwrap(),
+            &json!({ "tier": "local-only" }),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let (root_count, batches) =
+        jazz::binding_codec::decode_relation_snapshot(&block_on(read).unwrap()).unwrap();
+    let roots = batches
+        .iter()
+        .flat_map(|batch| &batch.rows)
+        .collect::<Vec<_>>();
+    assert_eq!((root_count, roots.len()), (2, 2));
+
+    let mut bodies = Vec::new();
+    for root in roots {
+        let Value::Array(children) = &root.cells["comments"] else {
+            panic!(
+                "expected a comments array, got {:?}",
+                root.cells["comments"]
+            );
+        };
+        let mut row_bodies = Vec::new();
+        for child in children {
+            let Value::Record(record) = child else {
+                panic!("expected a nested record, got {child:?}");
+            };
+            let names = record
+                .descriptor()
+                .fields()
+                .iter()
+                .map(|field| field.name.clone().unwrap())
+                .collect::<Vec<_>>();
+            let values = record.to_values().unwrap();
+            assert_eq!(names[0], "row_uuid");
+            let cell = |name: &str| values[names.iter().position(|n| n == name).unwrap()].clone();
+            assert_eq!(cell("note"), Value::Uuid(note.row_id.0));
+            row_bodies.push(cell("body"));
+        }
+        row_bodies.sort_by_key(|body| format!("{body:?}"));
+        bodies.push((root.cells["title"].clone(), row_bodies));
+    }
+    bodies.sort_by_key(|(title, _)| format!("{title:?}"));
+    assert_eq!(
+        bodies,
+        [
+            (
+                Value::String("with comments".to_owned()),
+                vec![
+                    Value::String("first".to_owned()),
+                    Value::String("second".to_owned())
+                ]
+            ),
+            (Value::String("without".to_owned()), vec![]),
+        ]
+    );
 }

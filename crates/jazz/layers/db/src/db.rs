@@ -845,6 +845,32 @@ impl Db {
         inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
     }
 
+    /// Root rows with each array relation nested in a cell under its
+    /// column name ([`ResultNode::into_nested_row`]).
+    pub fn nest_relations(
+        &self,
+        prepared: &PreparedQuery,
+        roots: Vec<CurrentRow>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if prepared.query.array_subqueries.is_empty() {
+            return Ok(roots);
+        }
+        let inner = self.inner();
+        roots
+            .into_iter()
+            .map(|row| {
+                inner
+                    .node(
+                        prepared,
+                        &prepared.query.table,
+                        &prepared.query.array_subqueries,
+                        row,
+                    )?
+                    .into_nested_row()
+            })
+            .collect()
+    }
+
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.inner().run(prepared, None, &ReadSpec::default())
     }

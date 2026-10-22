@@ -3600,10 +3600,22 @@ impl Db {
         if let Some((author, claims)) = request_scope {
             prepared = prepared.with_identity_claims(author, claims);
         }
+        // Relations arrive as nested rows in their parent's cells, so a
+        // relation read's snapshot is its root rows alone.
+        let relation = !prepared.query.array_subqueries.is_empty();
+        let result = |rows: Vec<CurrentRow>| {
+            if relation {
+                SerializedReadResult::Relation(RelationSnapshot {
+                    root_count: rows.len(),
+                    rows,
+                })
+            } else {
+                SerializedReadResult::Rows(rows)
+            }
+        };
         if let Some(tx) = open_tx {
-            return Ok(SerializedReadResult::Rows(
-                self.serializable_tx_ref(tx).all_prepared(&prepared).await?,
-            ));
+            let roots = self.serializable_tx_ref(tx).all_prepared(&prepared).await?;
+            return Ok(result(self.nest_relations(&prepared, roots)?));
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
         if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
@@ -3619,16 +3631,16 @@ impl Db {
                 self.fetch(&prepared, None, deadline).await;
             }
         }
-        Ok(SerializedReadResult::Rows(
-            self.all(
+        let roots = self
+            .all(
                 &prepared,
                 ReadOpts {
                     first_load: FirstLoad::Deliver,
                     ..opts
                 },
             )
-            .await?,
-        ))
+            .await?;
+        Ok(result(self.nest_relations(&prepared, roots)?))
     }
 }
 

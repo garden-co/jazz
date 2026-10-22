@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
-use crate::records::{Value, ValueType};
+use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+use crate::result_tree::{ResultNode, ResultRelation};
 use crate::schema::JazzSchema;
 use crate::tools::{PolicyExpr, TablePolicies};
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
@@ -795,4 +796,82 @@ impl CurrentRow {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_ref()))
     }
+}
+
+impl ResultNode {
+    /// The node's row with each relation appended as a cell under its
+    /// column name: an array of records, each the child's `row_uuid`
+    /// followed by its own cells (relations nested the same way). This is
+    /// the shape the bindings publish for relation reads.
+    pub fn into_nested_row(self) -> Result<CurrentRow, Error> {
+        let ResultNode { row, relations } = self;
+        if relations.is_empty() {
+            return Ok(row);
+        }
+        let mut cells = (*row.cells).clone();
+        let mut types = row.types.to_vec();
+        for (name, relation) in relations {
+            let children = match relation {
+                ResultRelation::Array(children) => children,
+                ResultRelation::Null | ResultRelation::Hole => Vec::new(),
+            };
+            let children = children
+                .into_iter()
+                .map(ResultNode::into_nested_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            let (element, values) = child_records(&children)?;
+            cells.push((name, Some(Value::Array(values))));
+            types.push(ValueType::Array(Box::new(element)));
+        }
+        Ok(CurrentRow {
+            cells: Arc::new(cells),
+            types: types.into(),
+            ..row
+        })
+    }
+}
+
+/// One relation's children as records under a shared descriptor. A field
+/// is nullable when its declared type is, or when any child left it
+/// unwritten.
+fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Error> {
+    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+    if let Some(first) = children.first() {
+        for (index, ((name, _), ty)) in first.cells().zip(first.cell_types()).enumerate() {
+            let unwritten = children
+                .iter()
+                .any(|child| child.cells.get(index).is_some_and(|(_, v)| v.is_none()));
+            let ty = match ty {
+                ValueType::Nullable(_) => ty.clone(),
+                _ if unwritten => ValueType::Nullable(Box::new(ty.clone())),
+                _ => ty.clone(),
+            };
+            fields.push((name.to_owned(), ty));
+        }
+    }
+    let descriptor = RecordDescriptor::new(fields.clone());
+    let mut values = Vec::with_capacity(children.len());
+    for child in children {
+        if child.cells.len() + 1 != fields.len() {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation children with different projections",
+            ));
+        }
+        let mut record = vec![Value::Uuid(child.id.0)];
+        for ((_, value), (_, ty)) in child.cells.iter().zip(&fields[1..]) {
+            record.push(match (value, ty) {
+                (None, _) => Value::Nullable(None),
+                (Some(value), ValueType::Nullable(_)) if !matches!(value, Value::Nullable(_)) => {
+                    Value::Nullable(Some(Box::new(value.clone())))
+                }
+                (Some(value), _) => value.clone(),
+            });
+        }
+        let raw = descriptor
+            .create(&record)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("relation record: {error}")))?;
+        values.push(Value::Record(OwnedRecord::new(raw, descriptor)));
+    }
+    Ok((ValueType::Record(Box::new(descriptor)), values))
 }
