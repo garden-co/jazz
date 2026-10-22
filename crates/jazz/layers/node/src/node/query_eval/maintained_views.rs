@@ -435,6 +435,16 @@ where
                 settled_binding_view,
                 settled_authority_result_key.clone(),
                 PreparedClaimBindingMode::Strict,
+                // A local serving aggregate consumes its own result. Peer
+                // publishers instead request witnesses for receiver-side
+                // aggregation; authorization mode alone cannot distinguish them.
+                if shape.query().aggregate.is_some()
+                    && authorization_mode == QueryAuthorizationMode::TrustedServing
+                {
+                    CurrentQueryProgramOutput::AppRows
+                } else {
+                    CurrentQueryProgramOutput::MaintainedView
+                },
                 pending_overlay,
                 progress_waker,
             ),
@@ -1121,6 +1131,7 @@ where
             &row,
             schema_alias,
             &version.branch_key(),
+            input.is_current,
         )?;
         #[cfg(feature = "cold-settle-attribution")]
         version.record_conversion("covered_input_record", record.len());

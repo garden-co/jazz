@@ -128,7 +128,7 @@ impl IvmRuntime {
         )?;
         let mut demanded = Vec::new();
         for expression in expressions.iter() {
-            if let Some(field) = projection_source_ref(&expression.expression) {
+            for field in projection_source_refs(&expression.expression) {
                 demanded.push(input_mapping[resolve_field_ref(&original, field)?]);
             }
         }
@@ -222,7 +222,7 @@ impl IvmRuntime {
                 .map(|(position, source)| (source, position))
                 .collect::<HashMap<_, _>>();
         for expression in expressions {
-            if let Some(field) = projection_source_ref_mut(&mut expression.expression) {
+            for field in projection_source_refs_mut(&mut expression.expression) {
                 let (side, old) = input_mapping[resolve_field_ref(&original, field)?];
                 let retained = if side == 0 {
                     &left_fields
@@ -2096,33 +2096,39 @@ fn arg_by_comparison_field_indices(
         .collect()
 }
 
-fn projection_source_ref(expression: &ProjectExpr) -> Option<&FieldRef> {
+fn projection_source_refs(expression: &ProjectExpr) -> &[FieldRef] {
     match expression {
         ProjectExpr::Field(field)
+        | ProjectExpr::U64ShiftRight { source: field, .. }
+        | ProjectExpr::Required(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)
         | ProjectExpr::RecordField { source: field, .. }
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
-        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
+        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => std::slice::from_ref(field),
+        ProjectExpr::Tuple(fields) => fields,
         ProjectExpr::Literal(_)
         | ProjectExpr::TypedLiteral { .. }
         | ProjectExpr::Null(_)
-        | ProjectExpr::TemplateArgument { .. } => None,
+        | ProjectExpr::TemplateArgument { .. } => &[],
     }
 }
-fn projection_source_ref_mut(expression: &mut ProjectExpr) -> Option<&mut FieldRef> {
+fn projection_source_refs_mut(expression: &mut ProjectExpr) -> &mut [FieldRef] {
     match expression {
         ProjectExpr::Field(field)
+        | ProjectExpr::U64ShiftRight { source: field, .. }
+        | ProjectExpr::Required(field)
         | ProjectExpr::Nullable(field)
         | ProjectExpr::NullableFlat(field)
         | ProjectExpr::RecordField { source: field, .. }
         | ProjectExpr::EnumTagRemap { source: field, .. }
         | ProjectExpr::EnumRemap { source: field, .. }
-        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => Some(field),
+        | ProjectExpr::RecursiveEnumRemap { source: field, .. } => std::slice::from_mut(field),
+        ProjectExpr::Tuple(fields) => fields,
         ProjectExpr::Literal(_)
         | ProjectExpr::TypedLiteral { .. }
         | ProjectExpr::Null(_)
-        | ProjectExpr::TemplateArgument { .. } => None,
+        | ProjectExpr::TemplateArgument { .. } => &mut [],
     }
 }

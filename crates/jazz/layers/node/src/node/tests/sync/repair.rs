@@ -108,6 +108,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         })],
         peer_payload_inventory: Default::default(),
         supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(vec![crate::protocol::SupportingRow {
+                is_current: true,
                 physical_table: receiver.local_availability_table_id(reintroduced.version_id(), "tasks").unwrap(),
                 version_table: "tasks".to_owned().into(),
                 row: task_row,

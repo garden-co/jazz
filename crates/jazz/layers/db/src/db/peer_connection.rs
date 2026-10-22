@@ -4817,7 +4817,12 @@ where
                             )
                             .await?;
                             stats.subscription_events += changed;
-                            needs_subscription_refresh |= published;
+                            // Eager ingress may already have applied a write
+                            // without returning a deferred publication receipt.
+                            // Its local streams still need to drain the graph.
+                            needs_subscription_refresh |= published
+                                || local_upload.is_some()
+                                || write_state_tx_id.is_some();
                             if let Some(tx_id) = write_state_tx_id {
                                 handle_write_state_update(
                                     &self.node,

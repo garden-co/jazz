@@ -1515,3 +1515,144 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
     assert_eq!(rows, BTreeSet::from([resource1]));
     node.abandon_tx(tx).unwrap();
 }
+
+/// Alice queries three retained versions with equal projected values. Every
+/// version keeps its transaction identity through collection and pagination.
+/// This lower-layer test pins collector keys and hidden payload layouts before
+/// public materialization; end-to-end behavior is covered by jazz-testkit.
+#[test]
+fn history_query_collector_preserves_version_keys_and_windows() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf3; 16]), schema.clone());
+    let target = row(7);
+    let cells = || BTreeMap::from([("title".to_owned(), Value::String("same".to_owned()))]);
+    let transactions = (1..=3)
+        .map(|index| commit_global_cells(&mut node, "tasks", target, cells(), 1000 + index, index))
+        .collect::<Vec<_>>();
+    let base = Query::from("history.tasks")
+        .filter(eq(col("id"), lit(Value::Uuid(target.0))))
+        .select(["title"]);
+    let expected = |index: usize| {
+        let tx = transactions[index];
+        OutputOccurrenceId::history(ObjectId::from_uuid(target.0), tx.time, tx.node)
+    };
+    for (query, indexes) in [
+        (
+            base.clone()
+                .order_by("$acceptedAt", OrderDirection::Asc)
+                .offset(1)
+                .limit(1),
+            vec![1],
+        ),
+        (
+            base.clone()
+                .order_by("$acceptedAt", OrderDirection::Desc)
+                .limit(2),
+            vec![2, 1],
+        ),
+        (base.clone().offset(1).limit(1), vec![1]),
+        (base.clone(), vec![0, 1, 2]),
+    ] {
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let program = node
+            .compile_current_query_program(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorSubject::SYSTEM,
+                CurrentQueryProgramOutput::AppRows,
+            )
+            .unwrap();
+        let schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
+        let tables = program.lowered.maintained_terminal_tables.clone();
+        let binding_source = program
+            .request
+            .input
+            .binding
+            .source_shape
+            .clone()
+            .unwrap_or_else(|| {
+                query_binding_source_shape_for_parts(&BTreeMap::new(), &BTreeMap::new())
+            });
+        let mut subscription = node
+            .subscribe_lowered_program(
+                program,
+                &binding,
+                binding_source,
+                PreparedClaimBindingMode::Strict,
+                None,
+            )
+            .unwrap();
+        node.drive_ready_query_runtime_with_waker(None).unwrap();
+        let mut maintained = MaintainedSubscriptionView::default();
+        while let Ok(delta) = subscription.try_recv() {
+            maintained
+                .apply_multisink_deltas(delta, &schemas, &tables, &node.node_aliases, &node.authors)
+                .unwrap();
+        }
+        let rows = maintained.structured_app_rows_by_terminal_key().unwrap();
+        let identities = rows
+            .iter()
+            .map(|(key, _)| {
+                crate::node::terminal_root::terminal_root_occurrence_id_with_root_union(key, false)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            indexes.into_iter().map(expected).collect::<Vec<_>>()
+        );
+        for (_, record) in &rows {
+            let names = record
+                .descriptor()
+                .fields()
+                .iter()
+                .filter_map(|field| field.name.as_deref())
+                .collect::<Vec<_>>();
+            assert!(!names.iter().any(|name| name.contains("transactionId")));
+            if query.order_by.is_empty() {
+                assert!(!names.iter().any(|name| name.contains("seq")));
+            }
+        }
+        if rows.len() == 3 {
+            assert_eq!(rows[0].1, rows[1].1);
+            assert_eq!(rows[1].1, rows[2].1);
+            let added = commit_global_cells(&mut node, "tasks", target, cells(), 1004, 4);
+            node.drive_ready_query_runtime_with_waker(None).unwrap();
+            while let Ok(delta) = subscription.try_recv() {
+                maintained
+                    .apply_multisink_deltas(
+                        delta,
+                        &schemas,
+                        &tables,
+                        &node.node_aliases,
+                        &node.authors,
+                    )
+                    .unwrap();
+            }
+            let updated = maintained.structured_app_rows_by_terminal_key().unwrap();
+            assert_eq!(updated.len(), 4);
+            assert_eq!(
+                &updated[..3],
+                rows.as_slice(),
+                "new version must not replace old keys or payloads"
+            );
+            assert_eq!(
+                crate::node::terminal_root::terminal_root_occurrence_id_with_root_union(
+                    &updated[3].0,
+                    false
+                )
+                .unwrap(),
+                OutputOccurrenceId::history(ObjectId::from_uuid(target.0), added.time, added.node),
+            );
+        }
+        assert!(node.unsubscribe_groove_subscription(subscription.id()));
+    }
+}

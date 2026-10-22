@@ -2144,6 +2144,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             .supporting_rows
             .added_rows_mut()
             .push(crate::protocol::SupportingRow {
+                is_current: true,
                 physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
                 version_table: "todos".to_owned().into(),
                 row: row(1),

@@ -1,6 +1,17 @@
 use super::*;
 use std::{future::Future, pin::Pin};
 
+/// A lookup whose keys come from a constant or maintained relation.
+/// Fields name the matching columns in both the source graph and key relation.
+/// The source owner selects a compatible physical access path or rejects it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceLookup {
+    /// Matching source fields, in key order.
+    pub fields: Vec<String>,
+    /// Constant or maintained rows with those named fields.
+    pub keys: GraphBuilder,
+}
+
 /// Logical source request made by query, policy, or fact lowering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRequest {
@@ -119,11 +130,33 @@ pub enum FieldRequirement {
 /// This is not the Groove runtime source resolver. New code must keep this
 /// trait on the preparation side of `lower_resolved_query_program`.
 pub trait SourceGraphPreparer {
+    /// Preparation failures, including operational errors from the source owner.
+    type Error;
+
+    /// Whether this source needs keys supplied by a join input.
+    fn requires_key_lookup(&self, _request: &SourceRequest) -> bool {
+        false
+    }
+
+    /// Whether a join key can bound this source using an available access path.
+    fn supports_lookup(&self, _request: &SourceRequest, _field: &str) -> bool {
+        false
+    }
+
+    /// Prepare a source bounded by the supplied lookup.
+    fn prepare_source_graph_with_lookup<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        _lookup: SourceLookup,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>> {
+        self.prepare_source_graph(request)
+    }
+
     /// Prepare one source request into a concrete Groove graph and row shape.
     fn prepare_source_graph<'a>(
         &'a mut self,
         request: &'a SourceRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>>;
 }
 
 /// Concrete source selected for one logical source request.
@@ -193,11 +226,157 @@ pub struct SourceRowShape {
     pub source: SourceId,
     /// Descriptor of the record emitted by this source.
     pub descriptor: RecordDescriptor,
-    /// Field containing row identity.
-    pub row_uuid_field: String,
+    /// Complete identity of one occurrence emitted by this source.
+    pub occurrence_key: SourceOccurrenceKey,
     /// Internal metadata fields emitted by this source, keyed by the matching
     /// requirement.
     pub metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+}
+
+/// Field mapping for one source occurrence. The row UUID remains available for
+/// application IDs, policy checks and storage lookups, but is not by itself the
+/// identity of a historical occurrence. This definition travels with the source
+/// and result schema; scalar fields are expanded only for graph operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceOccurrenceKey {
+    /// A projected historical occurrence, carried as one `(row, time, node)` tuple.
+    Packed {
+        /// Field containing the complete source occurrence.
+        field: String,
+    },
+    /// A current row has one occurrence regardless of its content version.
+    Current {
+        /// Field containing the logical row UUID.
+        row: String,
+    },
+    /// Each retained content transaction is a separate occurrence.
+    History {
+        /// Field containing the logical row UUID.
+        row: String,
+        /// Field containing the transaction's packed HLC timestamp.
+        time: String,
+        /// Field containing the originating node's portable UUID.
+        node: String,
+    },
+}
+
+impl SourceOccurrenceKey {
+    /// Name the hidden identity field for one source in a flat join.
+    pub fn joined_field(position: usize) -> String {
+        format!("__flat_join_row_{position}")
+    }
+
+    /// Describe this identity after projection into one hidden field.
+    pub fn projected(&self, field: impl Into<String>) -> Self {
+        match self {
+            Self::Current { .. } => Self::current(field),
+            Self::History { .. } | Self::Packed { .. } => Self::Packed {
+                field: field.into(),
+            },
+        }
+    }
+
+    /// Whether a field can carry a complete projected source identity.
+    pub fn is_value_type(ty: &groove::records::ValueType) -> bool {
+        *ty == groove::records::ValueType::Uuid || *ty == Self::packed_type()
+    }
+
+    fn packed_type() -> groove::records::ValueType {
+        use groove::records::ValueType;
+        ValueType::Tuple(vec![ValueType::Uuid, ValueType::U64, ValueType::Uuid])
+    }
+
+    /// Decode a hidden source identity; current sources use a UUID scalar.
+    pub fn decode_value(
+        value: groove::records::Value,
+    ) -> Option<jazz_types::object::SourceOccurrenceId> {
+        use groove::records::Value;
+        use jazz_types::object::{ObjectId, SourceOccurrenceId};
+        match value {
+            Value::Uuid(row) => Some(SourceOccurrenceId::current(ObjectId::from_uuid(row))),
+            Value::Tuple(values) => match values.as_slice() {
+                [Value::Uuid(row), Value::U64(time), Value::Uuid(node)] => {
+                    Some(SourceOccurrenceId::history(
+                        ObjectId::from_uuid(*row),
+                        crate::time::TxTime(*time),
+                        crate::ids::NodeUuid(*node),
+                    ))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Decode this key through its declared physical fields.
+    pub fn decode(
+        &self,
+        read: impl Fn(&str) -> Option<groove::records::Value>,
+    ) -> Option<jazz_types::object::SourceOccurrenceId> {
+        use groove::records::Value;
+        Self::decode_value(match self {
+            Self::Current { row } => match read(row)? {
+                value @ Value::Uuid(_) => value,
+                _ => return None,
+            },
+            Self::Packed { field } => match read(field)? {
+                value @ Value::Tuple(_) => value,
+                _ => return None,
+            },
+            Self::History { row, time, node } => {
+                Value::Tuple(vec![read(row)?, read(time)?, read(node)?])
+            }
+        })
+    }
+
+    /// Project the whole identity, resolving source fields through the join layout.
+    pub fn project(
+        &self,
+        output: String,
+        resolve: impl Fn(&str) -> String,
+    ) -> groove::ivm::ProjectField {
+        use groove::ivm::{FieldRef, ProjectExpr, ProjectField};
+        let mut field = ProjectField::named(output);
+        field.expression = match self {
+            Self::Current { row } => ProjectExpr::Field(FieldRef::name(resolve(row))),
+            Self::Packed { field } => ProjectExpr::Field(FieldRef::name(resolve(field))),
+            Self::History { row, time, node } => ProjectExpr::Tuple(
+                [row, time, node]
+                    .into_iter()
+                    .map(|name| FieldRef::name(resolve(name)))
+                    .collect(),
+            ),
+        };
+        field
+    }
+
+    /// Declare the occurrence key of an ordinary current-row source.
+    pub fn current(row: impl Into<String>) -> Self {
+        Self::Current { row: row.into() }
+    }
+
+    /// Leading identity field: the row UUID for source keys, or the whole
+    /// tuple carrier for a packed projected key.
+    pub fn row_field(&self) -> &String {
+        match self {
+            Self::Current { row } | Self::History { row, .. } => row,
+            Self::Packed { field } => field,
+        }
+    }
+
+    /// Ordered physical fields for graph grouping, ordering and projection.
+    pub fn fields(&self) -> Vec<(&String, groove::records::ValueType)> {
+        use groove::records::ValueType;
+        match self {
+            Self::Packed { field } => vec![(field, Self::packed_type())],
+            Self::Current { row } => vec![(row, ValueType::Uuid)],
+            Self::History { row, time, node } => vec![
+                (row, ValueType::Uuid),
+                (time, ValueType::U64),
+                (node, ValueType::Uuid),
+            ],
+        }
+    }
 }
 
 /// Concrete source metadata fields emitted for one requirement.

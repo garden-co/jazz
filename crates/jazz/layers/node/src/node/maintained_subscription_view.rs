@@ -27,7 +27,7 @@ use crate::node::terminal_root::{
     TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
 };
 use crate::node::{CurrentRowPublicationField, CurrentRowResultVisibility};
-use crate::object::{ObjectId, OutputOccurrenceId};
+use crate::object::OutputOccurrenceId;
 #[cfg(test)]
 use crate::protocol::CoveredInputEntry;
 use crate::protocol::{
@@ -711,6 +711,7 @@ impl MaintainedSubscriptionView {
             .to_owned()
             .into();
         Ok(SupportingRow {
+            is_current: !crate::schema::history::is_history_table(&source.table),
             physical_table,
             version_table,
             row: row.row_uuid(),
@@ -1153,6 +1154,23 @@ impl MaintainedSubscriptionView {
             }
         }
         versions
+    }
+
+    /// Translate logical query sources to authored table names at publication.
+    /// Internal witness indexes retain their logical source identities.
+    pub(super) fn publication_versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
+        self.versions_by_tx(tx_id)
+            .into_iter()
+            .map(|mut version| {
+                if let Some(name) = self
+                    .witness_table_names
+                    .get(&(version.table().to_owned(), version.schema_version_alias()))
+                {
+                    version.table = name.clone().into();
+                }
+                version
+            })
+            .collect()
     }
 
     #[doc(hidden)]
@@ -2683,12 +2701,16 @@ fn decode_typed_terminal_record(
                     "maintained result membership table_name must exist",
                 ))?;
             let row_uuid = RowUuid(record.get_uuid(field_idx(record, &schema.row_field)?)?);
-            let mut occurrence_ids = Vec::with_capacity(schema.occurrence_id_fields.len());
-            for field in &schema.occurrence_id_fields {
-                occurrence_ids.push(ObjectId::from_uuid(
-                    record.get_uuid(field_idx(record, field)?)?,
-                ));
-            }
+            let occurrence_ids = schema
+                .occurrence_keys
+                .iter()
+                .map(|key| {
+                    key.decode(|name| record.get_idx(field_idx(record, name).ok()?).ok())
+                        .ok_or(super::Error::InvalidStoredValue(
+                            "invalid source occurrence",
+                        ))
+                })
+                .collect::<Result<Vec<_>, super::Error>>()?;
             let Some((root, joined)) = occurrence_ids.split_first() else {
                 return Err(super::Error::InvalidStoredValue(
                     "maintained result membership occurrence must include its root row",
@@ -2709,11 +2731,14 @@ fn decode_typed_terminal_record(
                     Ok((*position, label))
                 })
                 .collect::<Result<Vec<_>, super::Error>>()?;
-            let occurrence_id =
-                OutputOccurrenceId::with_union_arms(*root, joined.iter().copied(), union_arms)
-                    .ok_or(super::Error::InvalidStoredValue(
-                        "maintained result union occurrence carrier is malformed",
-                    ))?;
+            let occurrence_id = OutputOccurrenceId::from_source_occurrences(
+                *root,
+                joined.iter().copied(),
+                union_arms,
+            )
+            .ok_or(super::Error::InvalidStoredValue(
+                "maintained result occurrence carrier is malformed or unsupported",
+            ))?;
             let (tx_time_field, tx_node_field) = match &schema.version {
                 super::query_engine::ResultMembershipVersionSchema::Content(content) => {
                     (&content.tx_time_field, &content.tx_node_field)
@@ -3220,6 +3245,15 @@ fn decode_typed_version_witness(
     } else {
         None
     };
+    // History sources retain packed provenance timestamps; current sources
+    // expose Unix milliseconds. Both witnesses reconstruct the authored image.
+    let provenance_time = |value, message| {
+        if crate::schema::history::is_history_table(&table.name) {
+            Ok(TxTime(value))
+        } else {
+            TxTime::from_physical_ms(value).map_err(|_| super::Error::InvalidStoredValue(message))
+        }
+    };
     let parts = VersionRowParts {
         table: table.name.clone(),
         branch_key,
@@ -3231,22 +3265,15 @@ fn decode_typed_version_witness(
         )?),
         tx_time,
         created_by: AuthorCode(record.get_dictionary_code(plan.created_by_idx)?),
-        // Current-row provenance is public Unix milliseconds. Witness state
-        // needs the corresponding history form only to identify/materialize
-        // the authored version, whose provenance HLC always has counter zero.
-        created_at: TxTime::from_physical_ms(record_u64_idx(record, plan.created_at_idx)?)
-            .map_err(|_| {
-                super::Error::InvalidStoredValue(
-                    "maintained witness created_at_ms exceeds packed HLC range",
-                )
-            })?,
+        created_at: provenance_time(
+            record_u64_idx(record, plan.created_at_idx)?,
+            "maintained witness created_at_ms exceeds packed HLC range",
+        )?,
         updated_by: AuthorCode(record.get_dictionary_code(plan.updated_by_idx)?),
-        updated_at: TxTime::from_physical_ms(record_u64_idx(record, plan.updated_at_idx)?)
-            .map_err(|_| {
-                super::Error::InvalidStoredValue(
-                    "maintained witness updated_at_ms exceeds packed HLC range",
-                )
-            })?,
+        updated_at: provenance_time(
+            record_u64_idx(record, plan.updated_at_idx)?,
+            "maintained witness updated_at_ms exceeds packed HLC range",
+        )?,
         cells: BTreeMap::new(),
         authored_columns,
         deletion,
@@ -3675,7 +3702,7 @@ fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
 fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
     mem::size_of_val(member)
         + match member {
-            ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
+            ResultMemberEntry::Row(row) => {
                 intern_string_bytes(&row.table)
                     + option_vec_bytes(&row.branch_or_prefix)
                     + option_vec_bytes(&row.row_digest)
@@ -3814,6 +3841,7 @@ mod tests {
 
     fn physical_input(input: CoveredInputEntry) -> SupportingRow {
         SupportingRow {
+            is_current: true,
             physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(1)),
             version_table: input.version_table,
             row: input.source_row,
@@ -3873,12 +3901,12 @@ mod tests {
 
         struct Source;
         impl q::SourceGraphPreparer for Source {
+            type Error = Box<q::CapabilityReport>;
             fn prepare_source_graph<'a>(
                 &'a mut self,
                 request: &'a q::SourceRequest,
-            ) -> std::pin::Pin<
-                Box<dyn Future<Output = Result<q::ResolvedSource, q::SourceResolutionError>> + 'a>,
-            > {
+            ) -> std::pin::Pin<Box<dyn Future<Output = Result<q::ResolvedSource, Self::Error>> + 'a>>
+            {
                 Box::pin(async move {
                     Ok(q::ResolvedSource {
                         stored_column_ids: BTreeMap::from([(
@@ -3903,7 +3931,9 @@ mod tests {
                                     )))),
                                 ),
                             ]),
-                            row_uuid_field: "row_uuid".to_owned(),
+                            occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                                "row_uuid".to_owned(),
+                            ),
                             metadata: BTreeMap::new(),
                         },
                         routing_fields: BTreeSet::new(),
@@ -6125,7 +6155,10 @@ mod tests {
         let schema = ResultMembershipSchema {
             table_field: "table".to_owned(),
             row_field: "row_uuid".to_owned(),
-            occurrence_id_fields: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()],
+            occurrence_keys: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()]
+                .into_iter()
+                .map(crate::node::query_engine::SourceOccurrenceKey::current)
+                .collect(),
             occurrence_union_arm_fields: BTreeMap::from([(0, "union_arm".to_owned())]),
             payload_fields: Vec::new(),
             payload_publication_fields: BTreeMap::new(),

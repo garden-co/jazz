@@ -699,6 +699,35 @@ pub(super) fn project_descriptor(
         .iter()
         .map(|project_field| {
             let value_type = match &project_field.expression {
+                ProjectExpr::Tuple(fields) => ValueType::Tuple(
+                    fields
+                        .iter()
+                        .map(|field| {
+                            let index = resolve_field_ref(input, field)?;
+                            let ty = input.fields()[index].value_type.clone();
+                            if ty.fixed_size().is_none() {
+                                return Err(IvmRuntimeError::RecordEncoding(
+                                    records::Error::InvalidTupleMember { member_type: ty },
+                                ));
+                            }
+                            Ok(ty)
+                        })
+                        .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                ),
+                ProjectExpr::U64ShiftRight { source, bits } => {
+                    let index = resolve_field_ref(input, source)?;
+                    if input.fields()[index].value_type != ValueType::U64 || *bits >= 64 {
+                        return Err(IvmRuntimeError::UnsupportedOperator);
+                    }
+                    ValueType::U64
+                }
+                ProjectExpr::Required(source) => {
+                    let index = resolve_field_ref(input, source)?;
+                    let ValueType::Nullable(inner) = &input.fields()[index].value_type else {
+                        return Err(IvmRuntimeError::UnsupportedOperator);
+                    };
+                    *inner.clone()
+                }
                 ProjectExpr::RecordField { source, path } => {
                     let index = resolve_field_ref(input, source)?;
                     // A sub-field of an interned value is typed by the
@@ -1291,7 +1320,14 @@ pub(super) fn project_field_expr(
 ) -> Result<ProjectExpr, IvmRuntimeError> {
     let mut expression = field.expression.clone();
     match &mut expression {
+        ProjectExpr::Tuple(fields) => {
+            for field in fields {
+                *field = FieldRef::Resolved(resolve_field_ref(input, field)?);
+            }
+        }
         ProjectExpr::Field(source)
+        | ProjectExpr::U64ShiftRight { source, .. }
+        | ProjectExpr::Required(source)
         | ProjectExpr::RecordField { source, .. }
         | ProjectExpr::Nullable(source)
         | ProjectExpr::NullableFlat(source)
@@ -1362,6 +1398,21 @@ pub(super) fn project_field_value(
     };
     Ok(match &expr.expression {
         ProjectExpr::TemplateArgument { .. } => return Err(IvmRuntimeError::UnsupportedOperator),
+        ProjectExpr::Tuple(fields) => {
+            Value::Tuple(fields.iter().map(resolved).collect::<Result<_, _>>()?)
+        }
+        ProjectExpr::U64ShiftRight { source, bits } => match resolved(source)? {
+            Value::U64(value) => Value::U64(
+                value
+                    .checked_shr(*bits)
+                    .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+            ),
+            _ => return Err(IvmRuntimeError::UnsupportedOperator),
+        },
+        ProjectExpr::Required(field) => match resolved(field)? {
+            Value::Nullable(Some(value)) => *value,
+            _ => return Err(IvmRuntimeError::RequiredProjectionValueMissing),
+        },
         ProjectExpr::Field(field) => resolved(field)?,
         ProjectExpr::RecordField { source, path } => {
             let source_idx = resolve_field_ref(input_desc, source)?;
@@ -1761,7 +1812,10 @@ pub(super) fn raw_projection_fields(
                 ProjectExpr::Literal(value) | ProjectExpr::TypedLiteral { value, .. } => {
                     prepared_constant_field(output_desc, output_idx, value.to_value())
                 }
-                ProjectExpr::EnumTagRemap { .. }
+                ProjectExpr::Tuple(_)
+                | ProjectExpr::U64ShiftRight { .. }
+                | ProjectExpr::Required(_)
+                | ProjectExpr::EnumTagRemap { .. }
                 | ProjectExpr::EnumRemap { .. }
                 | ProjectExpr::RecursiveEnumRemap { .. } => RawProjectionField::Evaluate,
             })

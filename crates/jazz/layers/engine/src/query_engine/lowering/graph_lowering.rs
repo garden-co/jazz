@@ -313,11 +313,11 @@ fn lower_cardinality_complete_parent_graph(
         required,
         covered,
         [
-            root_source.row_shape.row_uuid_field.clone(),
+            root_source.row_shape.occurrence_key.row_field().clone(),
             required_element_field.to_owned(),
         ],
         [
-            root_source.row_shape.row_uuid_field.clone(),
+            root_source.row_shape.occurrence_key.row_field().clone(),
             required_element_field.to_owned(),
         ],
     )
@@ -325,8 +325,8 @@ fn lower_cardinality_complete_parent_graph(
     Ok(GraphBuilder::anti_join(
         parent,
         missing,
-        [root_source.row_shape.row_uuid_field.clone()],
-        [root_source.row_shape.row_uuid_field.clone()],
+        [root_source.row_shape.occurrence_key.row_field().clone()],
+        [root_source.row_shape.occurrence_key.row_field().clone()],
     ))
 }
 
@@ -718,7 +718,7 @@ fn lower_union_relation_input_with_prefix_cached(
             false,
         )?;
         if !output.fields.contains("__union_occurrence_row") {
-            let row_field = &source.row_shape.row_uuid_field;
+            let row_field = source.row_shape.occurrence_key.row_field();
             if !output.fields.contains(row_field) {
                 return Err(UnsupportedReason::Operator(
                     "UNION ALL arm projection discarded its stable source row identity".to_owned(),
@@ -845,7 +845,7 @@ fn lower_union_plan(
         let source = resolved_sources.get(source_id).ok_or_else(|| {
             UnsupportedReason::Runtime(format!("union source {source_id:?} was not resolved"))
         })?;
-        let row_field = &source.row_shape.row_uuid_field;
+        let row_field = source.row_shape.occurrence_key.row_field();
         if !input.fields.contains(row_field) {
             return Err(UnsupportedReason::Operator(
                 "UNION ALL root arm projection discarded its stable source row identity".to_owned(),
@@ -1710,9 +1710,9 @@ fn lower_linear_plan_steps_cached(
                         // left input: terminals still use them to distinguish
                         // public root occurrences.
                         for ((source_id, field), (output, _)) in &accumulated_join_fields {
-                            let is_row_id = resolved_sources
-                                .get(source_id)
-                                .is_some_and(|source| source.row_shape.row_uuid_field == *field);
+                            let is_row_id = resolved_sources.get(source_id).is_some_and(|source| {
+                                source.row_shape.occurrence_key.row_field() == field
+                            });
                             if is_row_id {
                                 projection.push(ProjectField::renamed(
                                     retained_left_field(output),
@@ -1755,7 +1755,7 @@ fn lower_linear_plan_steps_cached(
                                 right_source_id.path.components.last(),
                                 Some(SourceRole::Alias(_))
                             );
-                            let right_row = &right_source.row_shape.row_uuid_field;
+                            let right_row = right_source.row_shape.occurrence_key.row_field();
                             if app_join_source
                                 && last_join_right
                                     .as_ref()
@@ -1880,7 +1880,7 @@ fn lower_linear_plan_steps_cached(
                             .or_insert(*depth);
                     }
                 }
-                let project_fields = field_plans
+                let mut project_fields = field_plans
                     .into_iter()
                     .map(|mut field| {
                         let output_depth = field
@@ -1908,12 +1908,70 @@ fn lower_linear_plan_steps_cached(
                         field.project
                     })
                     .collect::<Vec<_>>();
+                // Occurrence carriers come from the source identity descriptor,
+                // never from application-column name resolution.
+                for column in columns {
+                    let position = if column.output.name == "row_uuid" {
+                        Some(0)
+                    } else {
+                        column
+                            .output
+                            .name
+                            .strip_prefix("__flat_join_row_")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    };
+                    let Some(position) = position else { continue };
+                    let NormalizedValueRef::RowId(RowIdRef::Source(id)) = &column.value else {
+                        continue;
+                    };
+                    let Some(source) = resolved_sources.get(id) else {
+                        continue;
+                    };
+                    if matches!(
+                        source.row_shape.occurrence_key,
+                        SourceOccurrenceKey::Current { .. }
+                    ) {
+                        continue;
+                    }
+                    let key = &source.row_shape.occurrence_key;
+                    let mut inputs = BTreeMap::new();
+                    for (name, _) in key.fields() {
+                        let input = if id == &root_source.row_shape.source {
+                            if last_join_right.is_some() {
+                                left_field(name)
+                            } else {
+                                name.clone()
+                            }
+                        } else if last_join_right
+                            .as_ref()
+                            .is_some_and(|(right, ..)| right.root_source() == Some(id))
+                        {
+                            right_field(name)
+                        } else {
+                            let (field, _) = accumulated_join_fields
+                                .get(&(id.clone(), name.clone()))
+                                .ok_or_else(|| {
+                                    UnsupportedReason::Runtime(
+                                        "joined occurrence field is missing".into(),
+                                    )
+                                })?;
+                            if last_join_right.is_some() {
+                                left_field(field)
+                            } else {
+                                field.clone()
+                            }
+                        };
+                        inputs.insert(name.clone(), input);
+                    }
+                    let output = SourceOccurrenceKey::joined_field(position);
+                    project_fields.retain(|field| field.output_name != output);
+                    project_fields.push(key.project(output, |name| inputs[name].clone()));
+                }
                 for (field, depth) in &unwrap_fields {
                     for _ in 0..*depth {
                         graph = graph.unwrap_nullable(field.clone());
                     }
                 }
-                let mut project_fields = project_fields;
                 let mut retained_route_fields = BTreeSet::new();
                 let mut projected_outputs = project_fields
                     .iter()
@@ -1989,10 +2047,8 @@ fn lower_linear_plan_steps_cached(
                 graph = graph
                     .project_fields(project_fields)
                     .narrow_projected_join_chain();
-                fields = columns
-                    .iter()
-                    .map(|column| column.output.name.clone())
-                    .collect();
+                fields = projected_outputs;
+
                 fields.extend(retained_route_fields.iter().cloned());
                 if let Some(retained_fields) = retained_contributor_fields {
                     fields.extend(retained_fields);
@@ -3142,7 +3198,7 @@ fn source_join_field(
             resolved?
         }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source_id => {
-            require_source_field(source, &source.row_shape.row_uuid_field)?
+            require_source_field(source, source.row_shape.occurrence_key.row_field())?
         }
         _ => return Ok(None),
     };
@@ -3281,7 +3337,7 @@ fn lower_window(
         .map(|key| lower_order_key(key, plan, source, request))
         .collect::<Result<Vec<_>, _>>()?;
     let tie_cols = if tie_breaker.is_empty() {
-        vec![source.row_shape.row_uuid_field.clone()]
+        vec![source.row_shape.occurrence_key.row_field().clone()]
     } else {
         tie_breaker
             .iter()
@@ -4039,7 +4095,7 @@ fn lower_value_ref(
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) if value_source == source_id => {
             Ok(LoweredValueRef::Field(require_source_field(
                 source,
-                &source.row_shape.row_uuid_field,
+                source.row_shape.occurrence_key.row_field(),
             )?))
         }
         NormalizedValueRef::RowId(RowIdRef::Source(value_source)) => {

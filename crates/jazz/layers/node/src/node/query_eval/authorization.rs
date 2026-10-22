@@ -388,7 +388,7 @@ where
         };
         let access_paths = BTreeMap::from([(
             root_source_id(policy_shape.query().table.as_str()),
-            CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
+            SourceAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
         )]);
         let program = self
             .compile_query_program_request_with_access_paths(request, access_paths)
@@ -413,7 +413,7 @@ where
     pub(super) async fn point_policy_authorization_row_id_graph(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<PolicyAuthorizationGraph, Error> {
         self.query_engine_read_metrics.policy_authorization_graphs += 1;
@@ -429,7 +429,7 @@ where
     async fn policy_authorization_row_id_graph_inner(
         &mut self,
         request: QueryProgramRequest,
-        forced_access_paths: Option<BTreeMap<SourceId, CurrentAccessPath>>,
+        forced_access_paths: Option<BTreeMap<SourceId, SourceAccessPath>>,
         cache: bool,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<PolicyAuthorizationGraph, Error> {
@@ -651,7 +651,7 @@ where
         // overloading public `id`, which may be a declared user column.
         let access_paths = BTreeMap::from([(
             root_source_id(policy_shape.query().table.as_str()),
-            CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
+            SourceAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
         )]);
         let program = self
             .compile_query_program_request_with_access_paths(request, access_paths)

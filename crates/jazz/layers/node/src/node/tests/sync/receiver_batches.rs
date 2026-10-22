@@ -20,6 +20,7 @@ fn todos_physical_table() -> crate::ids::GlobalPhysicalTableId {
 
 fn todos_covered_input(tx: TxId, version: &VersionRecord) -> crate::protocol::SupportingRow {
     crate::protocol::SupportingRow {
+        is_current: true,
         physical_table: todos_physical_table(),
         version_table: "todos".to_owned().into(),
         row: version.row_uuid(),

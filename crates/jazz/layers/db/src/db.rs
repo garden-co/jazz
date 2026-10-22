@@ -6326,7 +6326,9 @@ fn apply_maintained_update_to_snapshot(
                 let candidates = snapshot_index
                     .roots
                     .keys_unordered()
-                    .filter(|candidate| candidate.canonical_bytes().get(..16) == root_bytes)
+                    .filter(|candidate| {
+                        Some(candidate.root_source().uuid().as_bytes().as_slice()) == root_bytes
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 match candidates.as_slice() {
@@ -6918,7 +6920,7 @@ fn terminal_subscription_output_row(
             format!("invalid terminal root key: {error}"),
         )
     })?;
-    if occurrence_id.canonical_bytes().get(..16) != Some(row_uuid.as_bytes()) {
+    if occurrence_id.root_source().uuid() != &row_uuid {
         return Err(Error::new(
             ErrorCode::Protocol,
             "terminal root payload key does not match its addressed result",
@@ -6999,7 +7001,7 @@ where
     else {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     };
-    if shape.query().flat_join.is_none() {
+    if shape.query().flat_join.is_none() && !shape.query().uses_history() {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     }
     let materialized = crate::local_executor::block_on(
@@ -7071,16 +7073,22 @@ where
 
 #[doc(hidden)]
 pub fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    let root = ObjectId::from_uuid(row.row_uuid().0);
+    use crate::node::query_engine::SourceOccurrenceKey;
+    let root = row
+        .raw_field(&SourceOccurrenceKey::joined_field(0))
+        .map(|value| SourceOccurrenceKey::decode_value(value).expect("valid root occurrence"))
+        .unwrap_or_else(|| {
+            crate::object::SourceOccurrenceId::current(ObjectId::from_uuid(row.row_uuid().0))
+        });
     let mut joined = Vec::new();
     for position in 1.. {
-        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
-        else {
+        let Some(value) = row.raw_field(&SourceOccurrenceKey::joined_field(position)) else {
             break;
         };
-        joined.push(ObjectId::from_uuid(row_id));
+        joined.push(SourceOccurrenceKey::decode_value(value).expect("valid joined occurrence"));
     }
-    OutputOccurrenceId::new(root, joined)
+    OutputOccurrenceId::from_source_occurrences(root, joined, [])
+        .expect("source occurrences without union arms")
 }
 
 fn subscription_outputs_with_occurrence_sidecar(
@@ -7101,8 +7109,7 @@ fn subscription_outputs_with_occurrence_sidecar(
         .zip(occurrence_ids)
         .enumerate()
         .map(|(index, (row, occurrence_id))| {
-            let bytes = occurrence_id.canonical_bytes();
-            if bytes.get(..16) != Some(row.row_uuid().0.as_bytes()) {
+            if occurrence_id.root_source().uuid() != &row.row_uuid().0 {
                 return Err(Error::new(
                     ErrorCode::Protocol,
                     "maintained root occurrence sidecar root does not match row",

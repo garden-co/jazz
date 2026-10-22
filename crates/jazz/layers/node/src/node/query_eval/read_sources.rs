@@ -33,7 +33,7 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// authored descriptor after the physical catalogue has selected a
     /// canonical enum/schema boundary.
     pub(super) covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
-    pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    pub(super) access_paths: BTreeMap<SourceId, SourceAccessPath>,
     /// A one-shot ordered page can restrict deletion checks to its bounded
     /// content candidates. Other sources retain the complete register.
     pub(super) bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
@@ -46,6 +46,8 @@ pub(super) struct JazzSourceGraphPreparer<'a, S> {
     /// a variant target invalidates table inputs, so reuse it across the main
     /// source, access path, and metadata sidecars of one compiled program.
     pub(super) current_projection_targets: BTreeMap<SourceId, String>,
+    /// Refresh dependencies of programs embedded inside resolved sources.
+    pub(super) nested_program_dependencies: lowering::PolicyDependencyFootprint,
     /// Whether these sources feed a policy-authorization subplan, which an
     /// exclusive transaction records no read for (garden-co/jazz#3694).
     pub(super) policy_subplan: bool,
@@ -292,8 +294,10 @@ pub(super) struct CurrentIndexCandidateFilter {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum CurrentAccessPath {
+pub(super) enum SourceAccessPath {
     PrimaryKey(Vec<Value>),
+    /// Probe matching fields using constant or maintained key rows.
+    Lookup(SourceLookup),
     /// First-result Global listing in physical row-UUID order. The caller
     /// re-proves the page after policy and deletion filtering before returning.
     PrimaryKeyPage {
@@ -391,7 +395,7 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::LocalAvailabilityInput))
     }
 
-    fn stored_column_ids_for_read_table(
+    pub(super) fn stored_column_ids_for_read_table(
         &self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -509,7 +513,9 @@ where
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor,
-                    row_uuid_field: "row_uuid".to_owned(),
+                    occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                        "row_uuid".to_owned(),
+                    ),
                     metadata,
                 },
                 routing_fields: BTreeSet::new(),
@@ -646,7 +652,9 @@ where
                 row_shape: SourceRowShape {
                     source: request.source.clone(),
                     descriptor,
-                    row_uuid_field: "row_uuid".to_owned(),
+                    occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                        "row_uuid".to_owned(),
+                    ),
                     metadata,
                 },
                 routing_fields: BTreeSet::new(),
@@ -741,7 +749,9 @@ where
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
                         descriptor,
-                        row_uuid_field: "row_uuid".to_owned(),
+                        occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                            "row_uuid".to_owned(),
+                        ),
                         metadata,
                     },
                     routing_fields: BTreeSet::new(),
@@ -837,7 +847,9 @@ where
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
                         descriptor,
-                        row_uuid_field: "row_uuid".to_owned(),
+                        occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                            "row_uuid".to_owned(),
+                        ),
                         metadata,
                     },
                     routing_fields,
@@ -1083,7 +1095,9 @@ where
                     row_shape: SourceRowShape {
                         source: request.source.clone(),
                         descriptor,
-                        row_uuid_field: "row_uuid".to_owned(),
+                        occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                            "row_uuid".to_owned(),
+                        ),
                         metadata,
                     },
                     routing_fields,
@@ -1924,7 +1938,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields,
@@ -2024,7 +2040,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields,
@@ -2187,7 +2205,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields,
@@ -2268,7 +2288,9 @@ where
             row_shape: SourceRowShape {
                 source: request.source.clone(),
                 descriptor,
-                row_uuid_field: "row_uuid".to_owned(),
+                occurrence_key: crate::node::query_engine::SourceOccurrenceKey::current(
+                    "row_uuid".to_owned(),
+                ),
                 metadata,
             },
             routing_fields: BTreeSet::new(),
@@ -2284,17 +2306,43 @@ impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    type Error = Error;
+
+    fn requires_key_lookup(&self, request: &SourceRequest) -> bool {
+        crate::schema::history::is_history_table(&request.source.table)
+            && !self.access_paths.contains_key(&request.source)
+    }
+
+    fn supports_lookup(&self, request: &SourceRequest, field: &str) -> bool {
+        // History currently has only a branch/row primary-key access path.
+        // Future history indexes extend this source-local eligibility check.
+        crate::schema::history::is_history_table(&request.source.table) && field == "id"
+    }
+
+    fn prepare_source_graph_with_lookup<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        lookup: SourceLookup,
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>> {
+        self.access_paths
+            .insert(request.source.clone(), SourceAccessPath::Lookup(lookup));
+        self.prepare_source_graph(request)
+    }
+
     fn prepare_source_graph<'a>(
         &'a mut self,
         request: &'a SourceRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, SourceResolutionError>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ResolvedSource, Self::Error>> + 'a>> {
+        if crate::schema::history::is_history_table(&request.source.table) {
+            return Box::pin(self.prepare_history_source_graph(request));
+        }
         Box::pin(async move {
             let exclusion_scope = self.local_exclusion_scope(request);
             // A physical limit is valid only when no later source filter can
             // remove candidates. Unavailability is a mutable anti-join, so
             // retain the logical query limit after it instead.
             if exclusion_scope.is_some()
-                && let Some(CurrentAccessPath::Index { source_limit, .. }) =
+                && let Some(SourceAccessPath::Index { source_limit, .. }) =
                     self.access_paths.get_mut(&request.source)
             {
                 *source_limit = None;
@@ -2426,7 +2474,7 @@ impl<S: OrderedKvStorage> JazzSourceGraphPreparer<'_, S> {
                 .collect()
         })
         .map_err(|_| overlay_error())?;
-        let row_field = resolved.row_shape.row_uuid_field.clone();
+        let row_field = resolved.row_shape.occurrence_key.row_field().clone();
         let written_descriptor = RecordDescriptor::new([(row_field.clone(), ValueType::Uuid)]);
         let written_records =
             TransactionOverlayTable::cached(&rows.written_records, written_descriptor, || {
@@ -2519,6 +2567,12 @@ where
         &mut self,
         request: &SourceRequest,
     ) -> Result<Option<QueryProgramRequest>, Error> {
+        // History compiles its underlying current-table authorization program
+        // as a graph dependency. Prepare those policies in that program, never
+        // against the historical values or the virtual table name.
+        if crate::schema::history::is_history_table(&request.source.table) {
+            return Ok(None);
+        }
         let SourceAuthorizationRequest::PolicyFiltered {
             permission_subject,
             plan,
@@ -2753,7 +2807,7 @@ where
     fn cached_policy_authorization_access_path(
         &mut self,
         request: &SourceRequest,
-    ) -> Result<Option<CurrentAccessPath>, SourceResolutionError> {
+    ) -> Result<Option<SourceAccessPath>, SourceResolutionError> {
         let Some(policy_request) = self
             .policy_dependency_request(request)
             .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
@@ -2772,18 +2826,21 @@ where
         request: &SourceRequest,
         table: &TableSchema,
         tier: DurabilityTier,
-        access_path: CurrentAccessPath,
+        access_path: SourceAccessPath,
     ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
         match access_path {
-            CurrentAccessPath::PrimaryKey(prefix) => {
-                if self.count_access_path_metrics {
-                    self.node.query_engine_read_metrics.source_primary_key_scans += 1;
-                }
-                Ok(Some(selected_visible_current_primary_key_graph(
-                    table, tier, prefix,
-                )))
-            }
-            CurrentAccessPath::PrimaryKeyPage { cap } => {
+            path @ (SourceAccessPath::PrimaryKey(_) | SourceAccessPath::Lookup(_)) => self
+                .projected_content_current_source_graph_with_access_path(
+                    request,
+                    table,
+                    tier,
+                    true,
+                    true,
+                    Some(path),
+                )
+                .await
+                .map(Some),
+            SourceAccessPath::PrimaryKeyPage { cap } => {
                 if tier != DurabilityTier::Global {
                     return Ok(None);
                 }
@@ -2800,7 +2857,7 @@ where
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
                 Ok(Some(rows))
             }
-            CurrentAccessPath::Index {
+            SourceAccessPath::Index {
                 column,
                 order_column,
                 reverse,
@@ -3031,10 +3088,11 @@ where
     /// access path, when one bounds a branch layer (SPEC 11 §11.2).
     fn branch_layer_access(&self, request: &SourceRequest) -> BranchLayerAccess {
         match self.access_paths.get(&request.source) {
-            Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+            Some(SourceAccessPath::Lookup(lookup)) => BranchLayerAccess::Lookup(lookup.clone()),
+            Some(SourceAccessPath::PrimaryKey(prefix)) => {
                 BranchLayerAccess::PrimaryKey(prefix.clone())
             }
-            Some(CurrentAccessPath::Index {
+            Some(SourceAccessPath::Index {
                 column,
                 order_column,
                 prefix,
@@ -3053,7 +3111,7 @@ where
                 intersections: intersections.clone(),
                 maintained: *maintained,
             },
-            Some(CurrentAccessPath::PrimaryKeyPage { .. }) | None => BranchLayerAccess::Full,
+            Some(SourceAccessPath::PrimaryKeyPage { .. }) | None => BranchLayerAccess::Full,
         }
     }
 
@@ -3387,6 +3445,9 @@ where
         self.record_branch_layer_read(|metrics| match access {
             BranchLayerAccess::Full => metrics.source_full_scans += 1,
             BranchLayerAccess::PrimaryKey(_) => metrics.source_primary_key_scans += 1,
+            BranchLayerAccess::Lookup(lookup) => {
+                metrics.source_primary_key_scans += refs * keys * lookup_probe_count(lookup);
+            }
             BranchLayerAccess::Index { intersections, .. } => {
                 // Each ref under the prefix; the local delta's mask over
                 // origin is its presence (read whole or looked up by
@@ -3409,6 +3470,17 @@ where
                             branch_key,
                             None,
                         ),
+                    BranchLayerAccess::Lookup(lookup) => this
+                        .node
+                        .physical_current_branch_source_graph_with_projection_target(
+                            this.read_view.read_schema,
+                            &request.source.table,
+                            class,
+                            projection_target.clone(),
+                            branch_key,
+                            None,
+                        )
+                        .and_then(|rows| apply_source_lookup(rows, lookup)),
                     BranchLayerAccess::PrimaryKey(prefix) => this
                         .node
                         .physical_current_branch_source_graph_with_projection_target(
@@ -3515,7 +3587,15 @@ where
         let fields = std::iter::once("branch_key".to_owned())
             .chain(register_storage_field_names())
             .collect::<Vec<_>>();
+        let selected_ids = match access {
+            BranchLayerAccess::Lookup(lookup) if lookup.fields == ["row_uuid"] => {
+                Some(lookup.keys.clone())
+            }
+            _ => None,
+        };
+        let row_ids = row_ids.or(selected_ids.as_ref());
         let scan = match access {
+            BranchLayerAccess::Lookup(_) => None,
             BranchLayerAccess::PrimaryKey(prefix) => Some(row_prefix_scan(prefix)),
             BranchLayerAccess::Full | BranchLayerAccess::Index { .. } => {
                 if row_ids.is_none() {
@@ -3569,6 +3649,26 @@ where
         include_global_time: bool,
         exclude_deleted: bool,
     ) -> Pin<Box<dyn Future<Output = Result<GraphBuilder, SourceResolutionError>> + 'a>> {
+        let access_path = self.access_paths.get(&request.source).cloned();
+        self.projected_content_current_source_graph_with_access_path(
+            request,
+            read_table,
+            tier,
+            include_global_time,
+            exclude_deleted,
+            access_path,
+        )
+    }
+
+    fn projected_content_current_source_graph_with_access_path<'a>(
+        &'a mut self,
+        request: &'a SourceRequest,
+        read_table: &'a TableSchema,
+        tier: DurabilityTier,
+        include_global_time: bool,
+        exclude_deleted: bool,
+        access_path: Option<SourceAccessPath>,
+    ) -> Pin<Box<dyn Future<Output = Result<GraphBuilder, SourceResolutionError>> + 'a>> {
         Box::pin(async move {
             let mut fields = global_current_storage_fields(read_table, true, include_global_time);
             // Unfiltered callers receive the image's deletion cell.
@@ -3582,8 +3682,25 @@ where
             // Global and Ahead candidates before their compatibility boundary.
             if tier == DurabilityTier::Global {
                 let projection_target = self.current_projection_target(request, read_table)?;
-                let content = match self.access_paths.get(&request.source).cloned() {
-                    Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                let content = match access_path {
+                    Some(SourceAccessPath::Lookup(lookup)) => {
+                        if self.count_access_path_metrics {
+                            self.node.query_engine_read_metrics.source_primary_key_scans +=
+                                lookup_probe_count(&lookup);
+                        }
+                        self.node
+                            .physical_current_source_graph_with_projection_target(
+                                self.read_view.read_schema,
+                                &request.source.table,
+                                PhysicalCurrentClass::Global,
+                                projection_target,
+                            )
+                            .and_then(|rows| apply_source_lookup(rows, &lookup))
+                            .map_err(|_| {
+                                source_resolution_error(request, SourceGap::SchemaProjection)
+                            })?
+                    }
+                    Some(SourceAccessPath::PrimaryKey(prefix)) => {
                         if self.count_access_path_metrics {
                             self.node.query_engine_read_metrics.source_primary_key_scans += 1;
                         }
@@ -3599,7 +3716,7 @@ where
                                 source_resolution_error(request, SourceGap::SchemaProjection)
                             })?
                     }
-                    Some(CurrentAccessPath::PrimaryKeyPage { cap }) => self
+                    Some(SourceAccessPath::PrimaryKeyPage { cap }) => self
                         .node
                         .physical_current_source_scan_graph_with_projection_target(
                             self.read_view.read_schema,
@@ -3611,7 +3728,7 @@ where
                         .map_err(|_| {
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?,
-                    Some(CurrentAccessPath::Index {
+                    Some(SourceAccessPath::Index {
                         column,
                         order_column,
                         reverse,
@@ -3692,9 +3809,25 @@ where
                         .map_err(Error::Groove)
                 })
                 .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let access_path = self.access_paths.get(&request.source).cloned();
             let global = match &access_path {
-                Some(CurrentAccessPath::PrimaryKey(prefix)) => {
+                Some(SourceAccessPath::Lookup(lookup)) => {
+                    if self.count_access_path_metrics {
+                        self.node.query_engine_read_metrics.source_primary_key_scans +=
+                            lookup_probe_count(lookup);
+                    }
+                    self.node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Global,
+                            projection_target.clone(),
+                        )
+                        .and_then(|rows| apply_source_lookup(rows, lookup))
+                        .map_err(|_| {
+                            source_resolution_error(request, SourceGap::SchemaProjection)
+                        })?
+                }
+                Some(SourceAccessPath::PrimaryKey(prefix)) => {
                     if self.count_access_path_metrics {
                         self.node.query_engine_read_metrics.source_primary_key_scans += 1;
                     }
@@ -3710,7 +3843,7 @@ where
                             source_resolution_error(request, SourceGap::SchemaProjection)
                         })?
                 }
-                Some(CurrentAccessPath::PrimaryKeyPage { cap }) => self
+                Some(SourceAccessPath::PrimaryKeyPage { cap }) => self
                     .node
                     .physical_current_source_scan_graph_with_projection_target(
                         self.read_view.read_schema,
@@ -3720,7 +3853,7 @@ where
                         primary_key_page_scan(*cap),
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?,
-                Some(CurrentAccessPath::Index {
+                Some(SourceAccessPath::Index {
                     column,
                     order_column,
                     reverse,
@@ -3783,7 +3916,7 @@ where
                 // row ids, whatever their indexed values. It is read whole or
                 // by the settled candidates, whichever costs less
                 // (`local_mask_read`).
-                if let Some(CurrentAccessPath::Index {
+                if let Some(SourceAccessPath::Index {
                     column,
                     order_column,
                     reverse,
@@ -3847,7 +3980,16 @@ where
                     return Ok(content.filter(not_deleted_predicate()));
                 }
                 let ahead = match &access_path {
-                    Some(CurrentAccessPath::PrimaryKey(prefix)) => self
+                    Some(SourceAccessPath::Lookup(lookup)) => self
+                        .node
+                        .physical_current_source_graph_with_projection_target(
+                            self.read_view.read_schema,
+                            &request.source.table,
+                            PhysicalCurrentClass::Ahead,
+                            projection_target.clone(),
+                        )
+                        .and_then(|rows| apply_source_lookup(rows, lookup)),
+                    Some(SourceAccessPath::PrimaryKey(prefix)) => self
                         .node
                         .physical_current_source_scan_graph_with_projection_target(
                             self.read_view.read_schema,
@@ -3856,7 +3998,7 @@ where
                             projection_target.clone(),
                             static_scan_for_prefix(prefix.clone(), 3),
                         ),
-                    Some(CurrentAccessPath::Index { .. }) => {
+                    Some(SourceAccessPath::Index { .. }) => {
                         // A Local-ahead winner can change the indexed column and
                         // therefore no longer be present under the settled
                         // candidate's prefix.  Scan the ahead current table in
@@ -4032,57 +4174,6 @@ fn content_version_current_source_graph(
     .project(fields)
 }
 
-fn selected_visible_current_primary_key_graph(
-    table: &TableSchema,
-    tier: DurabilityTier,
-    prefix: Vec<Value>,
-) -> GraphBuilder {
-    let user_fields = table
-        .columns
-        .iter()
-        .map(|column| user_column_field(&column.name))
-        .collect::<Vec<_>>();
-    let mut content_fields = vec![
-        "row_uuid".to_owned(),
-        "schema_version".to_owned(),
-        "authored_columns".to_owned(),
-    ];
-    content_fields.extend(user_fields.iter().cloned());
-    content_fields.extend([
-        "created_by".to_owned(),
-        "created_at".to_owned(),
-        "updated_by".to_owned(),
-        "updated_at".to_owned(),
-        "tx_time".to_owned(),
-        "tx_node_id".to_owned(),
-    ]);
-    let content_scan = static_scan_for_prefix(prefix, 1);
-    let mut image_fields = content_fields.clone();
-    image_fields.push("_deletion".to_owned());
-    let current = if tier == DurabilityTier::Global {
-        GraphBuilder::table_scan(global_current_table_name(&table.name), content_scan)
-            .project(image_fields)
-    } else {
-        GraphBuilder::arg_max_by(
-            GraphBuilder::union([
-                GraphBuilder::table_scan(
-                    global_current_table_name(&table.name),
-                    content_scan.clone(),
-                )
-                .project(image_fields.clone()),
-                GraphBuilder::table_scan(ahead_current_table_name(&table.name), content_scan)
-                    .project(image_fields.clone()),
-            ]),
-            ["row_uuid"],
-            ["tx_time", "tx_node_id"],
-        )
-        .project(image_fields)
-    };
-    current
-        .filter(not_deleted_predicate())
-        .project(content_fields)
-}
-
 /// How a branch-view source reads each of its branch layers.
 #[derive(Clone, Debug)]
 pub(super) enum BranchLayerAccess {
@@ -4091,6 +4182,8 @@ pub(super) enum BranchLayerAccess {
     /// The rows under one row-id prefix, in every layer and in both the
     /// content and deletion registers.
     PrimaryKey(Vec<Value>),
+    /// Probe matching fields using constant or maintained key rows.
+    Lookup(SourceLookup),
     /// Content rows under one index prefix; see
     /// `live_branch_view_registers` for what stays whole.
     Index {
@@ -4110,6 +4203,47 @@ enum PresenceRead {
     Lookup(GraphBuilder),
     /// Every row id the layer holds.
     Whole,
+}
+
+fn lookup_probe_count(lookup: &SourceLookup) -> u64 {
+    match &lookup.keys {
+        GraphBuilder::InlineRecords { records, .. } => records.len() as u64,
+        _ => 1,
+    }
+}
+
+fn row_id_lookup(values: &[Value]) -> Result<Option<SourceLookup>, Error> {
+    // Access-path selection is optional: nullable or claim-bound values must
+    // remain predicates, rather than fail while constructing UUID probes.
+    if values.iter().any(|value| !matches!(value, Value::Uuid(_))) {
+        return Ok(None);
+    }
+    Ok(Some(SourceLookup {
+        fields: vec!["row_uuid".into()],
+        keys: primary_key_rows(values)?,
+    }))
+}
+
+fn apply_source_lookup(rows: GraphBuilder, lookup: &SourceLookup) -> Result<GraphBuilder, Error> {
+    GraphBuilder::lookup(rows, lookup.keys.clone(), lookup.fields.clone()).ok_or(
+        Error::InvalidStoredValue("a keyed lookup needs a physical table source"),
+    )
+}
+
+pub(super) fn primary_key_rows(values: &[Value]) -> Result<GraphBuilder, Error> {
+    let ids = values
+        .iter()
+        .map(|value| match value {
+            Value::Uuid(id) => Ok(*id),
+            _ => Err(Error::InvalidStoredValue(
+                "primary-key probe must be a UUID",
+            )),
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    Ok(GraphBuilder::values(
+        RecordDescriptor::new([("row_uuid", ValueType::Uuid)]),
+        ids.into_iter().map(|id| [Value::Uuid(id)]),
+    )?)
 }
 
 /// The rows of a physical current table source, keyed `(branch_key,
@@ -4322,9 +4456,8 @@ pub(super) fn trace_capability_compile(
     );
 }
 
-/// Expose requested nested-author fields on policy preimages that retain
-/// complete author records, including head-over-current branch preimages.
-fn with_requested_author_paths(
+/// Expose requested nested-author fields on sources retaining complete author records.
+pub(super) fn with_requested_author_paths(
     graph: GraphBuilder,
     descriptor: RecordDescriptor,
     mut metadata: BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
@@ -4938,7 +5071,7 @@ where
         &self,
         request: &QueryProgramRequest,
         allow_secondary_indexes: bool,
-    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+    ) -> Result<BTreeMap<SourceId, SourceAccessPath>, Error> {
         // A policy proof may contain both an owner arm and a correlated
         // membership arm for the same protected source. Walking its nested
         // nodes independently would see the owner's claim equality and apply
@@ -4972,7 +5105,17 @@ where
         policy: &PolicyContext,
         allow_local: bool,
         allow_secondary_indexes: bool,
-    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+    ) -> Result<BTreeMap<SourceId, SourceAccessPath>, Error> {
+        // An arm's predicates do not constrain the other arms sharing its
+        // source. This applies to one-shot reads as well as maintained proofs.
+        if input
+            .shape
+            .nodes
+            .values()
+            .any(|node| matches!(node, RowSetExpr::Union { .. }))
+        {
+            return Ok(BTreeMap::new());
+        }
         let mut equalities_by_source = BTreeMap::new();
         // This deliberately small access-path selector only recognizes a
         // source's own Filter -> Source pipeline.  Inspecting every normalized
@@ -5007,6 +5150,30 @@ where
                 paths.insert(source, path);
             }
         }
+        // A conjunctive IN predicate can bound primary-key probes just as an
+        // equality does; retain the predicate itself
+        // in the graph so additional/intersecting constraints still apply.
+        for node in input.shape.nodes.values() {
+            if let RowSetExpr::Filter {
+                input: source_node,
+                predicate,
+            } = node
+                && let Some(mut sources) = normalized_program_equalities(
+                    &input.shape,
+                    source_node,
+                    &input.binding,
+                    policy,
+                )?
+            {
+                sources.retain(|source, _| {
+                    matches!(
+                        read_view.source_current_tier(source),
+                        Some(DurabilityTier::Local | DurabilityTier::Global)
+                    )
+                });
+                collect_primary_key_sets(predicate, &input.binding, policy, &sources, &mut paths)?;
+            }
+        }
         Ok(paths)
     }
 
@@ -5027,7 +5194,7 @@ where
         allow_secondary_indexes: bool,
         selector: AccessPathSelector,
         covered_column: Option<&str>,
-    ) -> Result<Option<CurrentAccessPath>, Error> {
+    ) -> Result<Option<SourceAccessPath>, Error> {
         let Some(tier) = read_view.source_current_tier(source) else {
             return Ok(None);
         };
@@ -5038,17 +5205,17 @@ where
         if !matches!(tier, DurabilityTier::Global | DurabilityTier::Local) {
             return Ok(None);
         }
-        let table = self.table_in_schema_ref(&source.table, read_view.read_schema)?;
+        let table = self.table_in_schema(&source.table, read_view.read_schema)?;
         let selected = match selector {
             AccessPathSelector::Ordinary => {
-                select_current_access_path(table, equalities).or_else(|| {
+                select_current_access_path(&table, equalities).or_else(|| {
                     covered_column.and_then(|covered| {
-                        select_composite_leading_equality_access_path(table, equalities, covered)
+                        select_composite_leading_equality_access_path(&table, equalities, covered)
                     })
                 })
             }
             AccessPathSelector::CompositeEquality => {
-                select_composite_equality_access_path(table, equalities)
+                select_composite_equality_access_path(&table, equalities)
             }
         };
         let Some(mut path) = selected else {
@@ -5060,10 +5227,10 @@ where
         // reuse another identity's candidate set. Keep those reusable
         // graphs identity-neutral; maintained root views are compiled for
         // this concrete request and may safely select their own index.
-        if !allow_secondary_indexes && matches!(path, CurrentAccessPath::Index { .. }) {
+        if !allow_secondary_indexes && matches!(path, SourceAccessPath::Index { .. }) {
             return Ok(None);
         }
-        if !allow_local && let CurrentAccessPath::Index { maintained, .. } = &mut path {
+        if !allow_local && let SourceAccessPath::Index { maintained, .. } = &mut path {
             *maintained = true;
         }
         Ok(Some(path))
@@ -5074,7 +5241,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
-    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+    ) -> Result<BTreeMap<SourceId, SourceAccessPath>, Error> {
         if !matches!(tier, DurabilityTier::Local | DurabilityTier::Global) {
             return Ok(BTreeMap::new());
         }
@@ -5131,7 +5298,7 @@ where
             return Ok(paths);
         }
         let root = root_source_id(&query.table);
-        let table = self.table_in_schema_ref(&query.table, shape.schema_version())?;
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
         if table.has_any_policy() {
             return Ok(paths);
         }
@@ -5140,7 +5307,7 @@ where
         // the public limit after arg-max. Only the Global physical winner is
         // stable enough for this source bound.
         if tier == DurabilityTier::Global
-            && let Some(CurrentAccessPath::Index { source_limit, .. }) = paths.get_mut(&root)
+            && let Some(SourceAccessPath::Index { source_limit, .. }) = paths.get_mut(&root)
         {
             *source_limit = Some(limit);
         }
@@ -5156,7 +5323,7 @@ where
         shape: &ValidatedQuery,
         binding: &Binding,
         lifetime: HydrationLifetime,
-    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+    ) -> Result<BTreeMap<SourceId, SourceAccessPath>, Error> {
         let mut paths = match lifetime {
             HydrationLifetime::Retained => {
                 self.current_query_primary_key_access_paths(shape, binding)?
@@ -5172,14 +5339,19 @@ where
                     .unwrap_or(DurabilityTier::None);
                 self.one_shot_access_paths(shape, binding, tier)?
                     .into_iter()
-                    .filter(|(_, path)| matches!(path, CurrentAccessPath::PrimaryKey(_)))
+                    .filter(|(_, path)| {
+                        matches!(
+                            path,
+                            SourceAccessPath::PrimaryKey(_) | SourceAccessPath::Lookup(_)
+                        )
+                    })
                     .collect()
             }
         };
         paths.extend(
             self.query_program_access_paths(request, true)?
                 .into_iter()
-                .filter(|(_, path)| matches!(path, CurrentAccessPath::Index { .. })),
+                .filter(|(_, path)| matches!(path, SourceAccessPath::Index { .. })),
         );
         if matches!(lifetime, HydrationLifetime::FirstResult) {
             let query = shape.query();
@@ -5202,7 +5374,7 @@ where
                     let equalities = root_literal_equalities(query, binding)?;
                     // Same admission guard as the ordinary selector and the
                     // junction narrowing below.
-                    if let Some(path @ CurrentAccessPath::Index { .. }) = self
+                    if let Some(path @ SourceAccessPath::Index { .. }) = self
                         .guarded_current_access_path(
                             &request.reads.primary,
                             &root,
@@ -5226,7 +5398,7 @@ where
                 // stale Local index read (#3340) is unchanged by this.
                 let replaceable = match paths.get(&root) {
                     None => true,
-                    Some(CurrentAccessPath::Index {
+                    Some(SourceAccessPath::Index {
                         order_column,
                         source_limit,
                         ..
@@ -5235,7 +5407,7 @@ where
                 };
                 if replaceable && query.limit.is_none() && query.order_by.is_empty() {
                     let equalities = root_literal_equalities(query, binding)?;
-                    if let Some(CurrentAccessPath::Index {
+                    if let Some(SourceAccessPath::Index {
                         column,
                         order_column,
                         reverse,
@@ -5254,14 +5426,14 @@ where
                         None,
                     )? {
                         let maintained = match paths.get(&root) {
-                            Some(CurrentAccessPath::Index {
+                            Some(SourceAccessPath::Index {
                                 maintained: kept, ..
                             }) => *kept || maintained,
                             _ => maintained,
                         };
                         paths.insert(
                             root.clone(),
-                            CurrentAccessPath::Index {
+                            SourceAccessPath::Index {
                                 column,
                                 order_column,
                                 reverse,
@@ -5278,7 +5450,7 @@ where
             if matches!(
                 request.reads.primary.source_current_tier(&root),
                 Some(DurabilityTier::Global | DurabilityTier::Local)
-            ) && let Some(CurrentAccessPath::Index {
+            ) && let Some(SourceAccessPath::Index {
                 maintained,
                 intersections,
                 ..
@@ -5351,7 +5523,7 @@ where
                             && query.order_by.is_empty()
                             && query.aggregate.is_none())
                         .then_some(join.on_column.as_str());
-                        if let Some(mut path @ CurrentAccessPath::Index { .. }) = self
+                        if let Some(mut path @ SourceAccessPath::Index { .. }) = self
                             .guarded_current_access_path(
                                 &request.reads.primary,
                                 join_source,
@@ -5388,11 +5560,17 @@ where
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
-    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+    ) -> Result<BTreeMap<SourceId, SourceAccessPath>, Error> {
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
+        // Top-level filters describe only the first authorization arm when
+        // policy branches are present. Even a false first arm cannot bound
+        // the shared source to an empty ID set.
+        if !query.policy_branches.is_empty() {
+            return Ok(access_paths);
+        }
         let equalities = root_literal_equalities(query, binding)?;
-        self.table_in_schema_ref(&query.table, shape.schema_version())?;
+        self.table_in_schema(&query.table, shape.schema_version())?;
         // Policy-bearing roots take the point path too (#3511). The point
         // narrows only the content source: the deletion register stays a full
         // maintained source anti-joined after it, and policy proofs keep their
@@ -5400,8 +5578,70 @@ where
         if let Some(value) = equalities.get("id").cloned() {
             access_paths.insert(
                 root_source_id(&query.table),
-                CurrentAccessPath::PrimaryKey(vec![value]),
+                SourceAccessPath::PrimaryKey(vec![value]),
             );
+        }
+        if !access_paths.contains_key(&root_source_id(&query.table))
+            && let Some(operands) = query.primary_key_operands()
+        {
+            let values = operands
+                .into_iter()
+                .map(|operand| match operand {
+                    Operand::Literal(value) => Ok(value.clone()),
+                    Operand::Param(name) => binding
+                        .values()
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| Error::from(QueryError::MissingParam(name.clone()))),
+                    _ => unreachable!("validated primary-key bound"),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(lookup) = row_id_lookup(&values)? {
+                access_paths.insert(
+                    root_source_id(&query.table),
+                    SourceAccessPath::Lookup(lookup),
+                );
+            }
+        }
+        if let Some(join) = &query.flat_join {
+            let sources = std::iter::once((
+                root_source_id(&query.table),
+                join.root_alias.as_deref().unwrap_or(&query.table),
+            ))
+            .chain(join.sources.iter().enumerate().map(|(index, source)| {
+                let alias = source.alias.as_deref().unwrap_or(&source.table);
+                (
+                    normalization::flat_join_source_id(&source.table, index, alias),
+                    alias,
+                )
+            }));
+            for (source, scope) in sources {
+                let mut scoped = crate::query::Query::from(source.table.as_str());
+                scoped.filters = query
+                    .filters
+                    .iter()
+                    .filter_map(|predicate| {
+                        crate::query::unqualify_flat_join_predicate(predicate, scope).ok()
+                    })
+                    .collect();
+                if let Some(operands) = scoped.primary_key_operands() {
+                    let values = operands
+                        .into_iter()
+                        .map(|operand| match operand {
+                            Operand::Literal(value) => Ok(value.clone()),
+                            Operand::Param(name) => {
+                                binding.values().get(name).cloned().ok_or_else(|| {
+                                    Error::from(QueryError::MissingParam(name.clone()))
+                                })
+                            }
+                            _ => unreachable!("finite primary-key operand"),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(lookup) = row_id_lookup(&values)? {
+                        access_paths.insert(source.clone(), SourceAccessPath::Lookup(lookup));
+                    }
+                }
+            }
         }
         self.add_reachable_access_paths(query, shape.schema_version(), binding, &mut access_paths)?;
         Ok(access_paths)
@@ -5412,7 +5652,7 @@ where
         query: &JazzQuery,
         schema_version: SchemaVersionId,
         binding: &Binding,
-        access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: &mut BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<(), Error> {
         for (index, reachable) in query.reachable.iter().enumerate() {
             let reachable_id = format!("reachable:{index}");
@@ -5456,12 +5696,12 @@ where
         schema_version: SchemaVersionId,
         filters: &[Predicate],
         binding: &Binding,
-        access_paths: &mut BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: &mut BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<(), Error> {
-        let table = self.table_in_schema_ref(table_name, schema_version)?;
+        let table = self.table_in_schema(table_name, schema_version)?;
         let equalities = literal_equalities_for_filters(filters, binding)?;
         if let Some(access_path) = select_current_access_path(&table, &equalities)
-            && matches!(access_path, CurrentAccessPath::PrimaryKey(_))
+            && matches!(access_path, SourceAccessPath::PrimaryKey(_))
         {
             access_paths.insert(source.clone(), access_path);
         }
@@ -5779,6 +6019,64 @@ where
 /// may retain equality restrictions from an enclosing conjunction. A full
 /// normalized program still runs after the scan, so this is a physical
 /// candidate-selection optimization, never a second evaluator.
+fn collect_primary_key_sets(
+    predicate: &NormalizedPredicateExpr,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+    sources: &BTreeMap<SourceId, BTreeMap<String, Value>>,
+    paths: &mut BTreeMap<SourceId, SourceAccessPath>,
+) -> Result<(), Error> {
+    match predicate {
+        NormalizedPredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                collect_primary_key_sets(predicate, binding, policy, sources, paths)?;
+            }
+        }
+        NormalizedPredicateExpr::In { value, options } => {
+            if let Some((source, field)) = normalized_program_source_field(value)
+                && field == "id"
+                && sources.contains_key(&source)
+                && !matches!(
+                    paths.get(&source),
+                    Some(SourceAccessPath::PrimaryKey(_) | SourceAccessPath::Lookup(_))
+                )
+            {
+                let values = options
+                    .iter()
+                    .map(|option| normalized_bound_value(option, binding, policy))
+                    .collect::<Result<Option<Vec<_>>, _>>()?;
+                if let Some(values) = values
+                    && let Some(lookup) = row_id_lookup(&values)?
+                {
+                    paths.insert(source, SourceAccessPath::Lookup(lookup));
+                }
+            }
+        }
+        NormalizedPredicateExpr::False => {
+            for source in sources.keys() {
+                paths.insert(
+                    source.clone(),
+                    SourceAccessPath::Lookup(SourceLookup {
+                        fields: vec!["row_uuid".into()],
+                        keys: primary_key_rows(&[])?,
+                    }),
+                );
+            }
+        }
+        NormalizedPredicateExpr::Or(predicates) if predicates.is_empty() => {
+            collect_primary_key_sets(
+                &NormalizedPredicateExpr::False,
+                binding,
+                policy,
+                sources,
+                paths,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn normalized_program_equalities(
     shape: &NormalizedRowSetShape,
     node_id: &RowSetNodeId,
@@ -6009,7 +6307,7 @@ fn inline_current_graph(
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
-fn inline_current_graph_with_source_metadata(
+pub(super) fn inline_current_graph_with_source_metadata(
     authors: &AuthorCodes,
     table: &TableSchema,
     rows: Vec<CurrentRow>,
@@ -6217,8 +6515,9 @@ pub(super) fn covered_input_record(
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
     source_branch: &BranchKey,
+    is_current: bool,
 ) -> Result<Vec<u8>, Error> {
-    inline_current_record_with_source_metadata(
+    let mut values = inline_current_values_with_source_metadata_and_deletion(
         authors,
         table,
         descriptor,
@@ -6228,7 +6527,10 @@ pub(super) fn covered_input_record(
         descriptor
             .field_index("supplying_branch_key")
             .map(|_| ("supplying_branch_key", source_branch)),
-    )
+        None,
+    )?;
+    values.push(Value::Bool(is_current));
+    Ok(descriptor.create(&values)?)
 }
 
 fn inline_current_record_with_source_metadata_and_deletion(
@@ -6625,7 +6927,7 @@ pub(super) fn maintained_view_history_storage_field_names(table: &TableSchema) -
 fn select_composite_equality_access_path(
     table: &TableSchema,
     equalities: &BTreeMap<String, Value>,
-) -> Option<CurrentAccessPath> {
+) -> Option<SourceAccessPath> {
     if equalities.contains_key("id") {
         return None;
     }
@@ -6646,7 +6948,7 @@ fn select_composite_equality_access_path(
                 })
             })
             .collect();
-        Some(CurrentAccessPath::Index {
+        Some(SourceAccessPath::Index {
             column: first.clone(),
             order_column: Some(second.clone()),
             reverse: false,
@@ -6675,7 +6977,7 @@ mod tests {
 
         assert!(matches!(
             select_current_access_path(&table, &equalities),
-            Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
+            Some(SourceAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
         ));
     }
 
@@ -6705,7 +7007,7 @@ mod tests {
             ("state".to_owned(), text("open")),
             ("assignee".to_owned(), text("ann")),
         ]);
-        let Some(CurrentAccessPath::Index {
+        let Some(SourceAccessPath::Index {
             column,
             order_column,
             prefix,
@@ -6819,10 +7121,10 @@ fn attach_covered_join_key_filter(
     join_table: &TableSchema,
     on_column: &str,
     root_table: &str,
-    root_path: Option<&CurrentAccessPath>,
-    join_path: &mut CurrentAccessPath,
+    root_path: Option<&SourceAccessPath>,
+    join_path: &mut SourceAccessPath,
 ) {
-    let Some(CurrentAccessPath::Index {
+    let Some(SourceAccessPath::Index {
         column: root_column,
         order_column: root_order_column,
         prefix: root_prefix,
@@ -6833,7 +7135,7 @@ fn attach_covered_join_key_filter(
     else {
         return;
     };
-    let CurrentAccessPath::Index {
+    let SourceAccessPath::Index {
         column,
         order_column,
         reverse: false,
@@ -6881,4 +7183,16 @@ fn single_root_join_source<'a>(
     let contribution = root_joins.next()?;
     (root_joins.next().is_none() && contribution.source.table == join_table)
         .then_some(&contribution.source)
+}
+
+impl From<SourceResolutionError> for Error {
+    fn from(error: SourceResolutionError) -> Self {
+        query_capability_error(&CapabilityReport {
+            gaps: vec![query_engine::UnsupportedReason::Source(error.gap)],
+            explain: query_engine::ExplainPlan {
+                read: vec![format!("failed source request: {:#?}", error.request)],
+                ..query_engine::ExplainPlan::default()
+            },
+        })
+    }
 }

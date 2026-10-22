@@ -931,7 +931,11 @@ fn assert_current_join_via_union_relation_input(
         })
         .expect("result-membership schema");
     assert_eq!(
-        schema.occurrence_id_fields,
+        schema
+            .occurrence_keys
+            .iter()
+            .map(|key| key.row_field().as_str())
+            .collect::<Vec<_>>(),
         ["row_uuid", "__root_join_row_0"]
     );
     assert_eq!(
@@ -2073,7 +2077,14 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
     else {
         panic!("result-membership terminal must retain its schema");
     };
-    assert_eq!(schema.occurrence_id_fields, vec!["row_uuid"]);
+    assert_eq!(
+        schema
+            .occurrence_keys
+            .iter()
+            .map(|key| key.row_field().as_str())
+            .collect::<Vec<_>>(),
+        vec!["row_uuid"]
+    );
 
     // The source-read terminal uses an ordinary identity context, not the
     // authorization-subplan context above. Its trailing inherited-policy

@@ -1303,8 +1303,8 @@ impl RetainedRootWindowSource {
     }
 }
 
-/// Receiver-local replacement key. Content and deletion registers, and
-/// different branches, are independent inputs even when they share a row UUID.
+/// Receiver-local exact version key. History scopes can retain multiple versions
+/// of one row; current scopes separately enforce one version per row/layer.
 /// This index is rebuilt from existing facts; it has no storage or wire codec.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CoveredInputCoordinate {
@@ -1312,6 +1312,7 @@ struct CoveredInputCoordinate {
     row: RowUuid,
     layer: crate::protocol::ResultRowLayer,
     branch: Vec<u8>,
+    transaction: Option<TxId>,
 }
 
 impl From<&crate::protocol::SupportingRow> for CoveredInputCoordinate {
@@ -1321,6 +1322,16 @@ impl From<&crate::protocol::SupportingRow> for CoveredInputCoordinate {
             row: input.row,
             layer: input.version.layer,
             branch: input.version.branch_or_prefix.clone().unwrap_or_default(),
+            transaction: Some(input.version.tx),
+        }
+    }
+}
+
+impl CoveredInputCoordinate {
+    fn row_coordinate(&self) -> Self {
+        Self {
+            transaction: None,
+            ..self.clone()
         }
     }
 }
@@ -2135,9 +2146,25 @@ impl CurrentRow {
         })
     }
 
-    #[cfg(feature = "runtime")]
     #[doc(hidden)]
     pub fn provenance_value(&self, column: &str) -> Result<Option<Value>, Error> {
+        if let Some((root, path)) = AuthorSubject::metadata_path(column) {
+            if let Some(value) = self.raw_field(column) {
+                return Ok(Some(value));
+            }
+            let Some(mut value) = self.provenance_value(root)? else {
+                return Ok(None);
+            };
+            for member in path {
+                let Value::Record(record) = value else {
+                    return Err(Error::InvalidStoredValue(
+                        "provenance author must be a record",
+                    ));
+                };
+                value = record.get(member)?;
+            }
+            return Ok(Some(value));
+        }
         let Some(index) = self.provenance_field_index(column) else {
             return Ok(None);
         };
@@ -2193,6 +2220,10 @@ impl CurrentRow {
         columns: &[String],
         column_binding: impl Fn(&str) -> Option<usize>,
     ) -> Result<Self, Error> {
+        let history_metadata = |name: &str| {
+            crate::schema::history::is_history_table(&table.name)
+                && crate::schema::history::HistoryMetadataColumn::contains(name)
+        };
         let projected_public_name = |column_name: &str| -> String {
             column_binding(column_name)
                 .and_then(|index| self.publication_fields[index].application_name())
@@ -2213,7 +2244,11 @@ impl CurrentRow {
             let public_name = projected_public_name(&column.name);
             records::DescriptorField::new(
                 user_column_field(&column.name),
-                records::ValueType::Nullable(Box::new(column.column_type.clone())),
+                if history_metadata(&column.name) {
+                    column.column_type.clone()
+                } else {
+                    records::ValueType::Nullable(Box::new(column.column_type.clone()))
+                },
             )
             .with_identity(records::FieldIdentity::Name(public_name))
         }));
@@ -2239,7 +2274,11 @@ impl CurrentRow {
                     Value::Nullable(Some(value)) => Some(*value),
                     value => Some(value),
                 });
-            let projected = if matches!(column.column_type, records::ValueType::Nullable(_)) {
+            let projected = if history_metadata(&column.name) {
+                cell.ok_or(Error::InvalidStoredValue(
+                    "history version metadata is missing",
+                ))?
+            } else if matches!(column.column_type, records::ValueType::Nullable(_)) {
                 match cell {
                     Some(value @ Value::Nullable(_)) => Value::Nullable(Some(Box::new(value))),
                     Some(value) => {
@@ -2297,7 +2336,25 @@ impl CurrentRow {
             );
             binding_field_names.extend(std::iter::repeat_n(None, 4));
         }
-        if let Some((time, node)) = self.projected_tx_alias() {
+        for column in columns {
+            if AuthorSubject::metadata_path(column).is_none() {
+                continue;
+            }
+            if let Some(value) = self.provenance_value(column)? {
+                descriptor_fields.push(records::DescriptorField::new(
+                    column.clone(),
+                    AuthorSubject::metadata_type(column)
+                        .expect("validated author path")
+                        .clone(),
+                ));
+                values.push(value);
+                binding_fields.push(CurrentRowBindingRole::LogicalField);
+                binding_field_names.push(None);
+            }
+        }
+        if !crate::schema::history::is_history_table(&table.name)
+            && let Some((time, node)) = self.projected_tx_alias()
+        {
             descriptor_fields.extend([
                 records::DescriptorField::new("tx_time", records::ValueType::U64),
                 records::DescriptorField::new("tx_node_id", records::ValueType::U64),
@@ -3448,6 +3505,7 @@ mod authority_source_incremental_tests {
     fn fact(table: &str) -> crate::protocol::SupportingRow {
         let tx = TxId::new(crate::time::TxTime::from(1), NodeUuid::from_bytes([1; 16]));
         crate::protocol::SupportingRow {
+            is_current: true,
             physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_u128(
                 if table == "a" { 1 } else { 2 },
             )),
