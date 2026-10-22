@@ -2976,7 +2976,7 @@ function preparedTransactionScope(
     kind: "exclusive",
     upsert(table, id, data, options) {
       binding.resolveClient(table._schema);
-      writeRecord("Upsert", table, data);
+      const values = writeRecord("Upsert", table, data);
       io.upsertInternal(
         table._table,
         id,
