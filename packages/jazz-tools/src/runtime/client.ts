@@ -915,9 +915,12 @@ export class WriteHandle<T = void, WaitResult = void> {
   readonly #client: JazzClient;
   readonly value: T;
   readonly txId: Promise<TxId>;
+  // Keep known IDs immediate; pending IDs must register waits before they settle.
+  protected readonly originalTxId: TxId | Promise<TxId>;
 
   constructor(txId: TxId | Promise<TxId>, client: JazzClient, value = undefined as T) {
     this.value = value;
+    this.originalTxId = txId;
     this.txId = Promise.resolve(txId);
     // Fire-and-forget callers may wait later, or never. Observe rejection now
     // without replacing txId: a later wait must still receive the original error.
@@ -991,7 +994,7 @@ export class SerializableWriteHandle extends WriteHandle<void> {
   override wait(options?: { tier: DurabilityTier }): Promise<void>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<void> {
     await this.client().waitForSerializableTransaction(
-      this.txId,
+      this.originalTxId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
   }
@@ -1016,7 +1019,7 @@ export class SerializableWriteResult<T> extends WriteResult<T> {
   override wait(options?: { tier: DurabilityTier }): Promise<T>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<T> {
     await this.client().waitForSerializableTransaction(
-      this.txId,
+      this.originalTxId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
     return this.value;
