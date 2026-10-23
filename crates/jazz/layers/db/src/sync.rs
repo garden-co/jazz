@@ -4127,8 +4127,19 @@ impl Db {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = query.limit.is_some() || query.offset > 0;
                 // A relay serves what its upstream lists, settled once the
-                // upstream answers: its own store may be cold.
-                let relayed = db.attach_remote(&prepared, include_deleted);
+                // upstream answers: its own store may be cold. A relay
+                // whose upstream cannot answer (none, or its link failed)
+                // serves its own store instead, settled at once.
+                let upstream = db
+                    .inner()
+                    .client
+                    .as_ref()
+                    .is_some_and(|client| may_wait(client.hint.get()));
+                let relayed = if upstream {
+                    db.attach_remote(&prepared, include_deleted)
+                } else {
+                    None
+                };
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
