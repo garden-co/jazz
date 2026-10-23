@@ -1842,7 +1842,7 @@ fn byte_wire_uploads_client_writes_for_authority_fate() {
 }
 
 #[test]
-fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
+fn db_sync_surface_uploads_client_serializable_commit_for_global_fate() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -1853,18 +1853,18 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let row = row(0xe1);
-    let exclusive = client.exclusive_tx().unwrap();
-    exclusive
+    let serializable = client.serializable_tx().unwrap();
+    serializable
         .insert(
             "todos",
-            cells("exclusive", false, author),
+            cells("serializable", false, author),
             crate::db::InsertOptions {
                 row_id: Some(row),
                 ..Default::default()
             },
         )
         .unwrap();
-    let tx_id = exclusive.commit().unwrap();
+    let tx_id = serializable.commit().unwrap();
 
     assert_eq!(
         client.write_state(tx_id).unwrap(),
@@ -1892,15 +1892,16 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
 }
 
 #[test]
-fn anonymous_authority_exclusive_write_is_rejected_before_policy_evaluation() {
+fn anonymous_authority_serializable_write_is_rejected_before_policy_evaluation() {
     let schema = schema();
     let anonymous =
-        AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","exclusive-anonymous"]"#).unwrap();
+        AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","serializable-anonymous"]"#)
+            .unwrap();
     let core = open_core_with_claims(0x5e, anonymous, &schema, BTreeMap::new());
     // This authority-local path cannot use a remote session transport. Its
     // accountless subject must fail at provisional durable authorship, before
     // policy evaluation can stage a row or transaction.
-    let Err(error) = core.exclusive_tx() else {
+    let Err(error) = core.serializable_tx() else {
         panic!("accountless author unexpectedly opened a durable transaction")
     };
 
@@ -1910,7 +1911,7 @@ fn anonymous_authority_exclusive_write_is_rejected_before_policy_evaluation() {
 }
 
 #[test]
-fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
+fn db_sync_surface_returns_serialization_conflict_fate_to_client() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -1921,8 +1922,8 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let row = row(0xe2);
-    let first = client.exclusive_tx().unwrap();
-    let second = client.exclusive_tx().unwrap();
+    let first = client.serializable_tx().unwrap();
+    let second = client.serializable_tx().unwrap();
     first
         .insert(
             "todos",
@@ -2136,7 +2137,9 @@ fn enqueue_incomplete_upsert(db: &Db, kind: Option<TransactionKind>) -> WriteHan
             let id = OpenTransactionId::new();
             match kind {
                 TransactionKind::Mergeable => db.enqueue_begin_mergeable(id, None, None).unwrap(),
-                TransactionKind::Exclusive => db.enqueue_begin_exclusive(id, None, None).unwrap(),
+                TransactionKind::Serializable => {
+                    db.enqueue_begin_serializable(id, None, None).unwrap()
+                }
             }
             db.enqueue_transaction_upsert(
                 id,
@@ -2148,7 +2151,7 @@ fn enqueue_incomplete_upsert(db: &Db, kind: Option<TransactionKind>) -> WriteHan
             .unwrap();
             match kind {
                 TransactionKind::Mergeable => db.enqueue_commit_mergeable_handle(id).unwrap(),
-                TransactionKind::Exclusive => db.enqueue_commit_exclusive_handle(id).unwrap(),
+                TransactionKind::Serializable => db.enqueue_commit_serializable_handle(id).unwrap(),
             }
         }
     }
@@ -2161,7 +2164,7 @@ fn unobserved_queued_upsert_failures_are_reported_once() {
     for kind in [
         None,
         Some(TransactionKind::Mergeable),
-        Some(TransactionKind::Exclusive),
+        Some(TransactionKind::Serializable),
     ] {
         let db = open_db(0xb1, AuthorSubject::for_test_bytes([0xb1; 16]), &schema());
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -2214,7 +2217,7 @@ fn application_waits_claim_queued_errors_but_internal_observers_do_not() {
     for kind in [
         None,
         Some(TransactionKind::Mergeable),
-        Some(TransactionKind::Exclusive),
+        Some(TransactionKind::Serializable),
     ] {
         for application_wait in [false, true] {
             for already_failed in [false, true] {
@@ -3987,30 +3990,30 @@ fn backend_attribution_survives_transactions_and_streaming_publication() {
     assert_eq!(tx.made_by, alice);
     assert_eq!(tx.permission_subject, Some(backend_author));
 
-    let exclusive = OpenTransactionId::new();
-    block_on(
-        backend
-            .begin_exclusive_with_identity(exclusive, crate::db::WriteIdentity::Attribution(alice)),
-    )
+    let serializable = OpenTransactionId::new();
+    block_on(backend.begin_serializable_with_identity(
+        serializable,
+        crate::db::WriteIdentity::Attribution(alice),
+    ))
     .unwrap();
-    block_on(backend.exclusive_tx_ref(exclusive).insert(
+    block_on(backend.serializable_tx_ref(serializable).insert(
         "todos",
-        cells("exclusive provenance", false, backend_author),
+        cells("serializable provenance", false, backend_author),
         crate::db::InsertOptions {
             row_id: Some(row(0xba)),
             ..Default::default()
         },
     ))
     .unwrap();
-    let exclusive_tx = block_on(backend.commit_exclusive_handle(exclusive)).unwrap();
+    let serializable_tx = block_on(backend.commit_serializable_handle(serializable)).unwrap();
     let SyncMessage::CommitUnit { tx, .. } = backend
         .node
         .node
         .borrow_mut()
-        .commit_unit_for(exclusive_tx)
+        .commit_unit_for(serializable_tx)
         .unwrap()
     else {
-        panic!("exclusive transaction must publish a commit unit");
+        panic!("serializable transaction must publish a commit unit");
     };
     assert_eq!(tx.made_by, alice);
     assert_eq!(tx.permission_subject, Some(backend_author));
@@ -4636,25 +4639,26 @@ fn deferred_mergeable_handle_refresh_cancellation_keeps_persistence_owned() {
     settle_cancelled_local_publication(&db, published);
 }
 
-/// Causal flow: an exclusive transaction transfers its upload-bearing
+/// Causal flow: a serializable transaction transfers its upload-bearing
 /// publication to the deferred queue, refresh stalls, then its caller is
 /// cancelled. The node tick must retain and persist that exact publication.
 #[test]
-fn deferred_exclusive_refresh_cancellation_keeps_persistence_owned() {
+fn deferred_serializable_refresh_cancellation_keeps_persistence_owned() {
     let schema = owner_write_schema();
     let owner = AuthorSubject::for_test_bytes([0xa4; 16]);
     let db = open_db(0xa4, owner, &schema);
     db.set_deferred_local_persistence(true);
     let open = OpenTransactionId::new();
-    block_on(db.begin_exclusive(open)).unwrap();
-    block_on(db.exclusive_tx_ref(open).insert(
+    block_on(db.begin_serializable(open)).unwrap();
+    block_on(db.serializable_tx_ref(open).insert(
         "todos",
-        cells("exclusive handle", false, owner),
+        cells("serializable handle", false, owner),
         Default::default(),
     ))
     .unwrap();
 
-    let published = cancel_during_subscription_refresh(&db, db.commit_exclusive_handle(open), true);
+    let published =
+        cancel_during_subscription_refresh(&db, db.commit_serializable_handle(open), true);
     settle_cancelled_local_publication(&db, published);
 }
 
@@ -4872,18 +4876,18 @@ fn nullable_json_accepts_present_values_wrapped_as_nullable() {
         Default::default(),
     ))
     .unwrap();
-    let exclusive = db.exclusive_tx().unwrap();
-    let exclusive_row = exclusive
+    let serializable = db.serializable_tx().unwrap();
+    let serializable_row = serializable
         .insert(
             "docs",
             BTreeMap::from([
-                ("name".to_owned(), Value::String("exclusive".to_owned())),
+                ("name".to_owned(), Value::String("serializable".to_owned())),
                 ("meta".to_owned(), present("{\"b\":2}")),
             ]),
             Default::default(),
         )
         .unwrap();
-    exclusive.commit().unwrap();
+    serializable.commit().unwrap();
 
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
     let mut rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
@@ -4902,7 +4906,7 @@ fn nullable_json_accepts_present_values_wrapped_as_nullable() {
     let read = |json: &str| Value::Nullable(Some(Box::new(present(json))));
     assert_eq!(meta(wrapped), read("[1,2]"));
     assert_eq!(meta(bare), read("{\"a\":1}"));
-    assert_eq!(meta(exclusive_row), read("{\"b\":2}"));
+    assert_eq!(meta(serializable_row), read("{\"b\":2}"));
 }
 
 /// A client that has never loaded a row cannot stage a partial UPDATE for it:

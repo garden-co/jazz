@@ -277,8 +277,11 @@ fn collector_orders_and_slices_by_hidden_provenance_keys() {
     for (direction, expected_title) in
         [(SortDirection::Asc, "near"), (SortDirection::Desc, "later")]
     {
-        let request =
-            provenance_window_collector_request(ProvenanceField::CreatedAt, direction, false);
+        let request = provenance_window_collector_request(
+            MagicColumn::parse("$createdAt").unwrap(),
+            direction,
+            false,
+        );
         let mut resolver = InlineCollectorResolver::with_root_rows([
             (0xd1, "early", 10),
             (0xd2, "near", 20),
@@ -291,10 +294,8 @@ fn collector_orders_and_slices_by_hidden_provenance_keys() {
             request.source.table == "todos"
                 && request
                     .requirements
-                    .metadata
-                    .contains(&SourceMetadataRequirement::Provenance(
-                        ProvenanceField::CreatedAt,
-                    ))
+                    .magic_fields
+                    .contains(&MagicColumn::parse("$createdAt").unwrap())
         }));
         let terminal = program
             .lowered
@@ -324,9 +325,21 @@ fn collector_executes_every_hidden_provenance_order_key() {
         (0xd3, "third", 20, 0xa2, 90, 0xa2),
     ];
     for (field, direction, expected_title) in [
-        (ProvenanceField::CreatedBy, SortDirection::Asc, "third"),
-        (ProvenanceField::UpdatedAt, SortDirection::Desc, "second"),
-        (ProvenanceField::UpdatedBy, SortDirection::Desc, "third"),
+        (
+            MagicColumn::parse("$createdBy").unwrap(),
+            SortDirection::Asc,
+            "third",
+        ),
+        (
+            MagicColumn::parse("$updatedAt").unwrap(),
+            SortDirection::Desc,
+            "second",
+        ),
+        (
+            MagicColumn::parse("$updatedBy").unwrap(),
+            SortDirection::Desc,
+            "third",
+        ),
     ] {
         let request = provenance_window_collector_request(field, direction, false);
         let mut resolver = InlineCollectorResolver::with_provenance_root_rows(rows);
@@ -336,8 +349,8 @@ fn collector_executes_every_hidden_provenance_order_key() {
             request.source.table == "todos"
                 && request
                     .requirements
-                    .metadata
-                    .contains(&SourceMetadataRequirement::Provenance(field))
+                    .magic_fields
+                    .contains(&MagicColumn::from(field))
         }));
         let terminal = program
             .lowered
@@ -349,10 +362,7 @@ fn collector_executes_every_hidden_provenance_order_key() {
             panic!("collector must expose app rows");
         };
         assert!(
-            schema
-                .descriptor
-                .field_index(provenance_field_name(field))
-                .is_none(),
+            schema.descriptor.field_index(field.name()).is_none(),
             "order keys must stay internal unless explicitly selected"
         );
         let output = run_collector_graph(terminal.graph.clone());
@@ -363,8 +373,11 @@ fn collector_executes_every_hidden_provenance_order_key() {
 
 #[test]
 fn collector_uses_row_id_tie_breakers_for_hidden_provenance_windows() {
-    let request =
-        provenance_window_collector_request(ProvenanceField::CreatedAt, SortDirection::Asc, false);
+    let request = provenance_window_collector_request(
+        MagicColumn::parse("$createdAt").unwrap(),
+        SortDirection::Asc,
+        false,
+    );
     let mut resolver = InlineCollectorResolver::with_root_rows([
         (0xd1, "first", 10),
         (0xd2, "second", 10),
@@ -395,7 +408,7 @@ fn shape_default_collector_retains_current_row_provenance_window_keys() {
     );
     add_root_provenance_window(
         &mut request,
-        ProvenanceField::UpdatedAt,
+        MagicColumn::parse("$updatedAt").unwrap(),
         SortDirection::Desc,
     );
     request.authorization_mode = QueryAuthorizationMode::ClientLocal;
@@ -433,8 +446,11 @@ fn shape_default_collector_retains_current_row_provenance_window_keys() {
 
 #[test]
 fn collector_exposes_provenance_only_when_selected() {
-    let request =
-        provenance_window_collector_request(ProvenanceField::CreatedAt, SortDirection::Asc, true);
+    let request = provenance_window_collector_request(
+        MagicColumn::parse("$createdAt").unwrap(),
+        SortDirection::Asc,
+        true,
+    );
     let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
         .expect("selected provenance window key should lower");
     let terminal = program
@@ -450,7 +466,7 @@ fn collector_exposes_provenance_only_when_selected() {
 }
 
 fn provenance_window_collector_request(
-    field: ProvenanceField,
+    field: MagicColumn,
     direction: SortDirection,
     select_created_at: bool,
 ) -> QueryProgramRequest {
@@ -476,7 +492,7 @@ fn provenance_window_collector_request(
 
 fn add_root_provenance_window(
     request: &mut QueryProgramRequest,
-    field: ProvenanceField,
+    field: MagicColumn,
     direction: SortDirection,
 ) {
     let input = request.input.shape.root.clone();
@@ -488,9 +504,9 @@ fn add_root_provenance_window(
         RowSetExpr::OrderBy {
             input,
             keys: vec![OrderKey {
-                value: NormalizedValueRef::Provenance {
+                value: NormalizedValueRef::Magic {
                     source: root_source.clone(),
-                    field,
+                    column: field,
                 },
                 direction,
             }],
@@ -508,15 +524,6 @@ fn add_root_provenance_window(
         },
     );
     request.input.shape.root = slice;
-}
-
-fn provenance_field_name(field: ProvenanceField) -> &'static str {
-    match field {
-        ProvenanceField::CreatedAt => "$createdAt",
-        ProvenanceField::CreatedBy => "$createdBy",
-        ProvenanceField::UpdatedAt => "$updatedAt",
-        ProvenanceField::UpdatedBy => "$updatedBy",
-    }
 }
 
 #[test]
@@ -769,9 +776,9 @@ fn collector_orders_nested_slots_by_hidden_provenance_keys() {
         RowSetExpr::OrderBy {
             input: RowSetNodeId("child".to_owned()),
             keys: vec![OrderKey {
-                value: NormalizedValueRef::Provenance {
+                value: NormalizedValueRef::Magic {
                     source: tags.clone(),
-                    field: ProvenanceField::CreatedAt,
+                    column: MagicColumn::parse("$createdAt").unwrap(),
                 },
                 direction: SortDirection::Asc,
             }],
@@ -806,10 +813,8 @@ fn collector_orders_nested_slots_by_hidden_provenance_keys() {
         request.source == tags
             && request
                 .requirements
-                .metadata
-                .contains(&SourceMetadataRequirement::Provenance(
-                    ProvenanceField::CreatedAt,
-                ))
+                .magic_fields
+                .contains(&MagicColumn::parse("$createdAt").unwrap())
     }));
     let terminal = program
         .lowered
@@ -1448,7 +1453,7 @@ fn payload_coverage_is_split_into_small_terminal_facts() {
             fate_field: "fate".to_owned(),
         }),
     };
-    let view_complete = ProgramFactKey::ViewCompleteExclusiveCoverage {
+    let view_complete = ProgramFactKey::ViewCompleteSerializableCoverage {
         view: program_scope(),
         result: None,
         tier: DurabilityTier::Global,

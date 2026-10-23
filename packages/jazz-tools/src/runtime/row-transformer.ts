@@ -1,3 +1,4 @@
+import { resolveQueryTable } from "./history-relation.js";
 /**
  * Transform WASM row results to typed TypeScript objects.
  */
@@ -69,7 +70,7 @@ function resolveBaseColumns(
   schema: WasmSchema,
   projection?: readonly string[],
 ): BaseColumn[] {
-  const table = schema[tableName];
+  const table = resolveQueryTable(schema, tableName);
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
@@ -221,7 +222,7 @@ function transformRowValues(
   includedRelationNames: readonly string[] = [],
   applyRootTransforms = true,
 ): Record<string, unknown> {
-  const table = schema[tableName];
+  const table = resolveQueryTable(schema, tableName);
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
@@ -303,7 +304,13 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
       }
       return v.value.map((entry) => unwrapValue(entry));
     case "Row":
-      if (columnType?.type === "Row" && columnName && isProvenanceMagicColumn(columnName)) {
+      if (
+        columnType?.type === "Row" &&
+        columnName &&
+        (isProvenanceMagicColumn(columnName) ||
+          columnName === "$deletedBy" ||
+          columnName.startsWith("$deletedBy."))
+      ) {
         return Object.fromEntries(
           columnType.columns.map((column, index) => [
             column.name,
@@ -332,7 +339,7 @@ function prepareRowTransform(
   includes: IncludeSpec,
   relations?: Map<string, Relation[]>,
 ): PreparedRowTransform {
-  if (!schema[tableName]) {
+  if (!resolveQueryTable(schema, tableName)) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
   const includePlans =

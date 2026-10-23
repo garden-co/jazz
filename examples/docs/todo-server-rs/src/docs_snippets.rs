@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
-use jazz::db::{Db, ExclusiveTxOps, InsertOptions, MergeableTxOps, UpdateOptions};
+use jazz::db::{Db, SerializableTxOps, InsertOptions, MergeableTxOps, UpdateOptions};
 use jazz::groove::records::Value as DbValue;
 use jazz::ids::RowUuid;
 use jazz::query::{
@@ -298,9 +298,9 @@ pub async fn group_todo_writes(
 }
 // #endregion writing-transaction-rust
 
-// #region writing-exclusive-transaction-rust
-pub async fn finish_todo_exclusively(db: &Db, todo_id: RowUuid) -> Result<(), jazz::db::Error> {
-    let tx = db.exclusive_tx().await?;
+// #region writing-serializable-transaction-rust
+pub async fn finish_todo_serializably(db: &Db, todo_id: RowUuid) -> Result<(), jazz::db::Error> {
+    let tx = db.serializable_tx().await?;
     let _todo = tx.read("todos", todo_id).await?;
 
     tx.update(
@@ -313,7 +313,7 @@ pub async fn finish_todo_exclusively(db: &Db, todo_id: RowUuid) -> Result<(), ja
     let _transaction_id = tx.commit().await?;
     Ok(())
 }
-// #endregion writing-exclusive-transaction-rust
+// #endregion writing-serializable-transaction-rust
 
 pub async fn where_operator_examples(client: &JazzClient) -> jazz::tools::Result<()> {
     let search_term = "milk";

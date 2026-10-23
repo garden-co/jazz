@@ -239,14 +239,14 @@ fn parent_inserted_and_deleted_in_same_transaction_does_not_satisfy_child_exists
     assert_eq!(fate, Fate::Accepted);
 }
 
-/// An exclusive transaction's writes are evidence for its own later writes,
+/// A serializable transaction's writes are evidence for its own later writes,
 /// exactly as in a mergeable transaction.
 ///
 /// ```text
-/// alice ──exclusive{ show, task(show) }──► core ──► Accepted
+/// alice ──serializable{ show, task(show) }──► core ──► Accepted
 /// ```
 #[test]
-fn exclusive_transaction_parent_satisfies_child_exists_policy() {
+fn serializable_transaction_parent_satisfies_child_exists_policy() {
     let alice = user(0xa1);
     let schema = show_task_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
@@ -256,7 +256,7 @@ fn exclusive_transaction_parent_satisfies_child_exists_policy() {
     let task = row(0x41);
 
     let open = OpenTransactionId::new();
-    writer.open_exclusive_for_identity(open, alice).unwrap();
+    writer.open_serializable_for_identity(open, alice).unwrap();
     writer
         .tx_write(
             open,
@@ -278,7 +278,7 @@ fn exclusive_transaction_parent_satisfies_child_exists_policy() {
             None,
         )
         .unwrap();
-    let (tx_id, unit) = writer.commit_exclusive_settled(open, alice, 10).unwrap();
+    let (tx_id, unit) = writer.commit_serializable_settled(open, alice, 10).unwrap();
 
     let updates = core.apply_sync_message_settled(unit).unwrap();
     assert_eq!(reported_fate(&updates, tx_id), Fate::Accepted);
@@ -879,30 +879,30 @@ fn inherited_policy_parent_inserted_in_same_transaction_is_accepted() {
     assert_eq!(fate, Fate::Accepted);
 }
 
-/// One staged write of an exclusive transaction: table, row, cells and an
+/// One staged write of a serializable transaction: table, row, cells and an
 /// optional deletion event.
-type ExclusiveWrite = (&'static str, RowUuid, BTreeMap<String, Value>, Option<DeletionEvent>);
+type SerializableWrite = (&'static str, RowUuid, BTreeMap<String, Value>, Option<DeletionEvent>);
 
-/// Commit an exclusive transaction on `core` and let `core`, its own
+/// Commit a serializable transaction on `core` and let `core`, its own
 /// authority, finalize it: the transaction is stored Pending and Local
 /// before its write policies are decided.
-fn self_finalize_exclusive(
+fn self_finalize_serializable(
     core: &mut NodeState,
     author: AuthorSubject,
-    writes: Vec<ExclusiveWrite>,
+    writes: Vec<SerializableWrite>,
     now_ms: u64,
 ) -> Fate {
     let open = OpenTransactionId::new();
-    core.open_exclusive_for_identity(open, author).unwrap();
+    core.open_serializable_for_identity(open, author).unwrap();
     for (table, row_uuid, cells, deletion) in writes {
         core.tx_write(open, table, row_uuid, cells, deletion).unwrap();
     }
-    let (_, unit) = core.commit_exclusive_settled(open, author, now_ms).unwrap();
+    let (_, unit) = core.commit_serializable_settled(open, author, now_ms).unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("an exclusive commit yields a commit unit");
+        panic!("a serializable commit yields a commit unit");
     };
     let outcome =
-        crate::local_executor::block_on(core.finalize_local_exclusive_commit(tx, versions))
+        crate::local_executor::block_on(core.finalize_local_serializable_commit(tx, versions))
             .unwrap();
     crate::local_executor::block_on(core.persist_and_settle_outcome(outcome)).unwrap()
 }
@@ -928,21 +928,21 @@ fn task_cells(show: RowUuid) -> BTreeMap<String, Value> {
 /// - another still-pending local transaction's parent is not.
 ///
 /// ```text
-/// core(self) ──exclusive{ show, task(show) }─────────► Accepted
-/// core(self) ──exclusive{ a(parent: b), b(parent: a) }► Rejected
-/// core(self) ──exclusive{ delete show, task(show) }──► Accepted
+/// core(self) ──serializable{ show, task(show) }─────────► Accepted
+/// core(self) ──serializable{ a(parent: b), b(parent: a) }► Rejected
+/// core(self) ──serializable{ delete show, task(show) }──► Accepted
 /// core(self) ──mergeable{ show2 } (pending)
-/// core(self) ──exclusive{ task(show2) }──────────────► Rejected
+/// core(self) ──serializable{ task(show2) }──────────────► Rejected
 /// ```
 #[test]
-fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
+fn self_finalized_serializable_units_read_accepted_state_as_policy_evidence() {
     let alice = user(0xa1);
     let mallory = user(0x3d);
 
     let (_core_dir, mut core) = open_node_with_schema(node(9), show_task_schema());
     install_test_uuid_sub_claim(&mut core, alice);
     let show = row(0xd0);
-    let fate = self_finalize_exclusive(
+    let fate = self_finalize_serializable(
         &mut core,
         alice,
         vec![
@@ -953,7 +953,7 @@ fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
     );
     assert_eq!(fate, Fate::Accepted, "a same-unit parent is evidence");
 
-    let fate = self_finalize_exclusive(
+    let fate = self_finalize_serializable(
         &mut core,
         alice,
         vec![
@@ -976,7 +976,7 @@ fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
                 .cells(show_cells(alice)),
         )
         .unwrap();
-    let fate = self_finalize_exclusive(
+    let fate = self_finalize_serializable(
         &mut core,
         alice,
         vec![("tasks", row(0xd4), task_cells(pending_show), None)],
@@ -990,7 +990,7 @@ fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
     // Planted positive: once that transaction is accepted, it is evidence.
     core.finalize_local_mergeable_commit_settled(pending_tx)
         .unwrap();
-    let fate = self_finalize_exclusive(
+    let fate = self_finalize_serializable(
         &mut core,
         alice,
         vec![("tasks", row(0xd5), task_cells(pending_show), None)],
@@ -1007,7 +1007,7 @@ fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
             ("parent".to_owned(), Value::Uuid(parent.0)),
         ])
     };
-    let fate = self_finalize_exclusive(
+    let fate = self_finalize_serializable(
         &mut folders,
         mallory,
         vec![
@@ -1031,7 +1031,7 @@ fn self_finalized_exclusive_units_read_accepted_state_as_policy_evidence() {
 /// ```text
 /// core(self) ──mergeable{ show } (pending)
 /// dry run: task(show) ─────────────────────► allowed (Local sees show)
-/// core(self) ──exclusive{ task(show) }─────► Rejected (Global does not)
+/// core(self) ──serializable{ task(show) }─────► Rejected (Global does not)
 /// dry run: task(show) ─────────────────────► still allowed
 /// ```
 #[test]
@@ -1054,7 +1054,7 @@ fn unit_decisions_leave_ordinary_policy_checks_reading_local_state() {
         "an ordinary check sees the pending local show"
     );
 
-    let fate = self_finalize_exclusive(
+    let fate = self_finalize_serializable(
         &mut core,
         alice,
         vec![("tasks", row(0xe2), task_cells(pending_show), None)],

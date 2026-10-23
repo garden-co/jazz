@@ -618,7 +618,7 @@ fn local_writes_store_versions_under_current_write_schema_storage() {
 }
 
 #[test]
-fn exclusive_writes_store_versions_under_current_write_schema_storage() {
+fn serializable_writes_store_versions_under_current_write_schema_storage() {
     let base = schema();
     let evolved = catalogue_evolved_schema();
     let evolved_payload = SchemaVersion::new(evolved.clone());
@@ -653,19 +653,19 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
     .unwrap();
 
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(
         tx,
         "todos",
         row(0x4b),
         BTreeMap::from([
-            ("title".to_owned(), v("exclusive")),
+            ("title".to_owned(), v("serializable")),
             ("body".to_owned(), v("partition")),
         ]),
         None,
     )
     .unwrap();
-    let (exclusive_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 11).unwrap();
+    let (serializable_tx, _unit) = core.commit_serializable_settled(tx, AuthorSubject::SYSTEM, 11).unwrap();
 
     let base_history_table = physical_history_table_name(
         core.catalogue.physical_mappings[&base.version_id()].tables["todos"].table_id,
@@ -690,7 +690,7 @@ fn exclusive_writes_store_versions_under_current_write_schema_storage() {
         .iter()
         .map(|version| core.version_tx_id(version).unwrap())
         .collect::<BTreeSet<_>>();
-    assert_eq!(stored_txs, BTreeSet::from([base_tx, exclusive_tx]));
+    assert_eq!(stored_txs, BTreeSet::from([base_tx, serializable_tx]));
 }
 
 #[test]

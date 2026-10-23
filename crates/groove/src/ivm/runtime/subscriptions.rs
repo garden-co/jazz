@@ -2080,6 +2080,40 @@ fn lift_literal_filter_node(
                     .iter()
                     .map(|field| match &field.expression {
                         ProjectExpr::TemplateArgument { .. } => Ok(field.clone()),
+                        ProjectExpr::Tuple(sources) => {
+                            let mut projected = field.clone();
+                            projected.expression = ProjectExpr::Tuple(
+                                sources
+                                    .iter()
+                                    .map(|source| {
+                                        project_source_from_joined_filter_input(
+                                            &input_output,
+                                            source,
+                                        )
+                                        .map(FieldRef::name)
+                                    })
+                                    .collect::<Result<_, _>>()?,
+                            );
+                            Ok(projected)
+                        }
+                        ProjectExpr::U64ShiftRight { source, bits } => {
+                            let mut projected = field.clone();
+                            projected.expression = ProjectExpr::U64ShiftRight {
+                                source: FieldRef::name(project_source_from_joined_filter_input(
+                                    &input_output,
+                                    source,
+                                )?),
+                                bits: *bits,
+                            };
+                            Ok(projected)
+                        }
+                        ProjectExpr::Required(source) => {
+                            let mut projected = field.clone();
+                            projected.expression = ProjectExpr::Required(FieldRef::name(
+                                project_source_from_joined_filter_input(&input_output, source)?,
+                            ));
+                            Ok(projected)
+                        }
                         ProjectExpr::RecordField { source, path } => {
                             let source =
                                 project_source_from_joined_filter_input(&input_output, source)?;
@@ -2560,6 +2594,42 @@ fn project_fields_against_rewritten_input(
         .iter()
         .map(|field| {
             let (field_ref, nullable_projection) = match &field.expression {
+                ProjectExpr::Tuple(sources) => {
+                    let mut projected = field.clone();
+                    projected.expression = ProjectExpr::Tuple(
+                        sources
+                            .iter()
+                            .map(|source| {
+                                rewritten_projection_source(
+                                    &original_output,
+                                    &rewritten_output,
+                                    source,
+                                )
+                                .map(FieldRef::name)
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                    return Ok(projected);
+                }
+                ProjectExpr::U64ShiftRight { source, bits } => {
+                    let mut projected = field.clone();
+                    projected.expression = ProjectExpr::U64ShiftRight {
+                        source: FieldRef::name(rewritten_projection_source(
+                            &original_output,
+                            &rewritten_output,
+                            source,
+                        )?),
+                        bits: *bits,
+                    };
+                    return Ok(projected);
+                }
+                ProjectExpr::Required(source) => {
+                    let mut projected = field.clone();
+                    projected.expression = ProjectExpr::Required(FieldRef::name(
+                        rewritten_projection_source(&original_output, &rewritten_output, source)?,
+                    ));
+                    return Ok(projected);
+                }
                 ProjectExpr::RecordField { source, path } => {
                     let source =
                         rewritten_projection_source(&original_output, &rewritten_output, source)?;

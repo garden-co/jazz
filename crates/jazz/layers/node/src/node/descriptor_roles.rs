@@ -63,8 +63,14 @@ fn validate_role_fields(
             ResultDescriptorRole::Current
                 if tag == "occurrence" && last_union_position.is_none() =>
             {
-                if field.value_type != records::ValueType::Uuid {
+                if !super::query_engine::SourceOccurrenceKey::is_value_type(&field.value_type) {
                     return Err(invalid());
+                }
+                // A historical root has a separate complete occurrence carrier;
+                // metadata/row_uuid remains the application-facing row identity.
+                if !values_started && ordinal == "0" && field.value_type != records::ValueType::Uuid
+                {
+                    occurrence_ordinal = 0;
                 }
                 values_started = true;
                 let index = occurrence_ordinal;
@@ -293,17 +299,20 @@ fn current_role_schema(
         CurrentRowPublicationField as Publication, CurrentRowResultVisibility as Visibility,
     };
     let unique_sources = schema
-        .occurrence_id_fields
+        .occurrence_keys
         .iter()
+        .map(|key| key.row_field())
         .collect::<std::collections::BTreeSet<_>>();
-    if schema.occurrence_id_fields.first() != Some(&schema.row_field)
-        || unique_sources.len() != schema.occurrence_id_fields.len()
+    if schema.occurrence_keys.first().is_none_or(|key| {
+        !matches!(key, super::query_engine::SourceOccurrenceKey::Packed { .. })
+            && key.row_field() != &schema.row_field
+    }) || unique_sources.len() != schema.occurrence_keys.len()
         || schema
             .occurrence_union_arm_fields
             .keys()
             // Source positions are the actual contributor positions: root is
             // position 0 and joined sources occupy positions 1..N.
-            .any(|position| *position >= schema.occurrence_id_fields.len())
+            .any(|position| *position >= schema.occurrence_keys.len())
     {
         return Err(Error::InvalidStoredValue(
             "result occurrence source declarations are invalid",
@@ -347,10 +356,18 @@ fn current_role_schema(
             field.ty.clone(),
         ));
     }
-    for (ordinal, name) in schema.occurrence_id_fields.iter().enumerate().skip(1) {
+    for (ordinal, key) in schema
+        .occurrence_keys
+        .iter()
+        .enumerate()
+        .filter(|(position, key)| {
+            *position > 0 || matches!(key, super::query_engine::SourceOccurrenceKey::Packed { .. })
+        })
+    {
+        let name = key.row_field();
         fields.push(DescriptorField::new(
             format!("occurrence/{ordinal}/{name}"),
-            records::ValueType::Uuid,
+            key.fields()[0].1.clone(),
         ));
     }
     for (position, name) in &schema.occurrence_union_arm_fields {
@@ -390,10 +407,17 @@ impl CurrentPayloadEncodePlan {
             )
             .chain(
                 schema
-                    .occurrence_id_fields
+                    .occurrence_keys
                     .iter()
-                    .skip(1)
-                    .map(String::as_str),
+                    .enumerate()
+                    .filter(|(position, key)| {
+                        *position > 0
+                            || matches!(
+                                key,
+                                super::query_engine::SourceOccurrenceKey::Packed { .. }
+                            )
+                    })
+                    .map(|(_, key)| key.row_field().as_str()),
             )
             .chain(
                 schema
@@ -526,7 +550,7 @@ pub(super) fn decode_current_payload_record(
         .as_ref()
         .map_or(0, |id| id.joined_sources().len())
         + 1
-        != schema.occurrence_id_fields.len()
+        != schema.occurrence_keys.len()
         || member_occurrence.as_ref().is_some_and(|id| {
             values[0] != records::Value::Uuid(*id.root_source().uuid())
                 || id.union_arms().len() != schema.occurrence_union_arm_fields.len()
@@ -536,32 +560,45 @@ pub(super) fn decode_current_payload_record(
             "result occurrence differs from compiled sources",
         ));
     }
-    if schema.occurrence_id_fields.len() > 1 {
+    if schema.occurrence_keys.len() > 1
+        || matches!(
+            schema.occurrence_keys.first(),
+            Some(super::query_engine::SourceOccurrenceKey::Packed { .. })
+        )
+    {
         let occurrence = payload
             .member
             .output_occurrence_id()
             .ok_or(Error::InvalidStoredValue(
                 "joined result payload has no occurrence identity",
             ))?;
-        if occurrence.joined_sources().len() + 1 != schema.occurrence_id_fields.len()
+        if occurrence.joined_sources().len() + 1 != schema.occurrence_keys.len()
             || occurrence.union_arms().len() != schema.occurrence_union_arm_fields.len()
         {
             return Err(Error::InvalidStoredValue(
                 "result occurrence differs from compiled sources",
             ));
         }
-        for (name, source) in schema
-            .occurrence_id_fields
+        for (position, (key, source)) in schema
+            .occurrence_keys
             .iter()
-            .skip(1)
-            .zip(occurrence.joined_sources())
+            .zip(occurrence.source_occurrences())
+            .enumerate()
         {
-            if values[fields.len()] != records::Value::Uuid(*source.uuid()) {
+            if position == 0
+                && !matches!(key, super::query_engine::SourceOccurrenceKey::Packed { .. })
+            {
+                continue;
+            }
+            let name = key.row_field();
+            if super::query_engine::SourceOccurrenceKey::decode_value(values[fields.len()].clone())
+                != Some(source)
+            {
                 return Err(Error::InvalidStoredValue(
                     "result payload differs from its joined source identity",
                 ));
             }
-            fields.push(DescriptorField::new(name, records::ValueType::Uuid));
+            fields.push(DescriptorField::new(name, key.fields()[0].1.clone()));
             publications.push(CurrentRowPublicationField::ResultField {
                 name: name.clone(),
                 visibility: CurrentRowResultVisibility::HiddenMetadata,
@@ -778,7 +815,10 @@ mod tests {
         ResultMembershipSchema {
             table_field: "table".to_owned(),
             row_field: "row_uuid".to_owned(),
-            occurrence_id_fields: vec!["row_uuid".to_owned()],
+            occurrence_keys: vec!["row_uuid".to_owned()]
+                .into_iter()
+                .map(crate::node::query_engine::SourceOccurrenceKey::current)
+                .collect(),
             occurrence_union_arm_fields: std::collections::BTreeMap::new(),
             payload_fields: vec![TypedOutputField {
                 name: carrier.to_owned(),
@@ -896,10 +936,13 @@ mod tests {
         use crate::object::{ObjectId, OutputOccurrenceId};
         use crate::protocol::RealRowMemberEntry;
         let mut schema = current_schema(1, "_app_1");
-        schema.occurrence_id_fields.extend([
-            "__flat_join_row_1".to_owned(),
-            "__flat_join_row_2".to_owned(),
-        ]);
+        schema.occurrence_keys.extend(
+            [
+                "__flat_join_row_1".to_owned(),
+                "__flat_join_row_2".to_owned(),
+            ]
+            .map(crate::node::query_engine::SourceOccurrenceKey::current),
+        );
         schema
             .occurrence_union_arm_fields
             .insert(0, "__root_join_arm_0".to_owned());
@@ -989,7 +1032,7 @@ mod tests {
         wrong_root.member = ResultMemberEntry::Row(row);
         assert!(decode_current_payload_record("items", &wrong_root, &schema).is_err());
         let mut reordered = schema.clone();
-        reordered.occurrence_id_fields.swap(1, 2);
+        reordered.occurrence_keys.swap(1, 2);
         assert!(decode_current_payload_record("items", &payload, &reordered).is_err());
         let mut changed_arm_role = schema.clone();
         let arm = changed_arm_role

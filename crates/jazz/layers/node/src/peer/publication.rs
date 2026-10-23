@@ -327,7 +327,7 @@ impl PeerState {
                 peer_complete_tx_payloads: self.acknowledged_complete_tx_payloads(),
                 known_state: plan.known_state,
                 leave_scan_after: plan.leave_scan_after,
-                complete_exclusive_payloads: self.ship_complete_exclusive_payloads
+                complete_serializable_payloads: self.ship_complete_serializable_payloads
                     && self.role == PeerRole::Relay,
                 previous_result_set: BTreeSet::new(),
                 result_member_adds: plan.adds,
@@ -2889,7 +2889,11 @@ pub(crate) fn row_local_membership(query: &crate::query::Query) -> bool {
             select: None,
             ..query.clone()
         });
-    scalar_filters
+    // History membership also depends on the current row's visibility and
+    // policy. The current-row watermark shortcut cannot reconstruct its set
+    // of immutable versions; use the ordinary supporting-set snapshot instead.
+    !query.uses_history()
+        && scalar_filters
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.policy_branches.is_empty()

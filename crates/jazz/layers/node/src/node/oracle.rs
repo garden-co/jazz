@@ -548,15 +548,19 @@ impl Oracle {
         current_content_version(self.global_row_versions_at(row_uuid, global_base))
     }
 
-    /// Return whether an exclusive row read matches at a serialization base.
-    pub fn exclusive_row_read_matches_at(&self, read: &RowRead, global_base: GlobalTime) -> bool {
+    /// Return whether a serializable row read matches at a serialization base.
+    pub fn serializable_row_read_matches_at(
+        &self,
+        read: &RowRead,
+        global_base: GlobalTime,
+    ) -> bool {
         self.visible_global_current_version_at(read.row_uuid, global_base)
             .map(|version| version.tx_id)
             == Some(read.version)
     }
 
-    /// Return whether an exclusive absent-row read matches at a serialization base.
-    pub fn exclusive_absent_read_matches_at(
+    /// Return whether a serializable absent-row read matches at a serialization base.
+    pub fn serializable_absent_read_matches_at(
         &self,
         absent: &AbsentRead,
         global_base: GlobalTime,

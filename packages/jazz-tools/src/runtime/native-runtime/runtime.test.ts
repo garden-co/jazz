@@ -137,8 +137,8 @@ function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
 
 function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
   if (
-    occurrenceKey.length === 25 &&
-    occurrenceKey[0] === 1 &&
+    occurrenceKey.length === 26 &&
+    occurrenceKey[0] === 2 &&
     occurrenceKey.subarray(17).every((byte) => byte === 0)
   )
     return sourceId;
@@ -3843,14 +3843,6 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).toThrow("unsupported read tier");
   });
 
-  it("rejects include_deleted subscription query intent", () => {
-    const runtime = emptyNativeRuntime();
-
-    expect(() =>
-      runtime.createSubscription(JSON.stringify({ table: "todos", include_deleted: true })),
-    ).toThrow("include_deleted subscriptions");
-  });
-
   it("rejects permission introspection selected columns before preparing flat queries", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -4925,8 +4917,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("materializes typed-occurrence resets instead of collapsing them in the packed path", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
     const key = (suffix: number) => {
-      const bytes = new Uint8Array(50);
-      bytes[0] = 1;
+      const bytes = new Uint8Array(52);
+      bytes[0] = 2;
       bytes.set(rowId, 1);
       new DataView(bytes.buffer).setUint32(17, 1);
       bytes.fill(2, 21, 37);
@@ -4957,8 +4949,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
-      expect.stringContaining("result:01"),
-      expect.stringContaining("result:01"),
+      expect.stringContaining("result:02"),
+      expect.stringContaining("result:02"),
     ]);
     runtime.close();
   });
@@ -5859,10 +5851,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(transactionCall?.[2]).toBeUndefined();
     expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
 
-    runtime.beginTransaction("exclusive", "attributed-exclusive" as never, context);
-    const exclusiveCall = beginTransaction.mock.calls[1];
-    expect(exclusiveCall?.[1]).toBe("exclusive");
-    expect(new TextDecoder().decode(exclusiveCall?.[3])).toBe(attribution);
+    runtime.beginTransaction("serializable", "attributed-serializable" as never, context);
+    const serializableCall = beginTransaction.mock.calls[1];
+    expect(serializableCall?.[1]).toBe("serializable");
+    expect(new TextDecoder().decode(serializableCall?.[3])).toBe(attribution);
 
     await runtime.streamingMutation(
       "insert",
@@ -7064,7 +7056,7 @@ function encodeTerminalSubscriptionDelta(schema: WasmSchema): Uint8Array {
   suffix.vec(() => {}, 0); // updated rows
   suffix.vec(() => {}, 0); // removed rows
   const rowId = uuidBytes("00000000-0000-0000-0000-000000000001");
-  const resultKey = Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const resultKey = Uint8Array.from([2, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   suffix.vec((key) => key.bytes(resultKey), 1); // added occurrence keys
   suffix.vec(() => {}, 0); // updated occurrence keys
   suffix.vec(() => {}, 0); // removed occurrence keys
@@ -7157,7 +7149,7 @@ function encodeSubscriptionDelta(delta: {
     removed.string(source.table);
     removed.bytes(source.rowId);
   }, delta.removed.length);
-  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([2, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   for (const keys of [
     delta.addedOccurrenceKeys ?? delta.added.map((row) => rowKey(row.rowId)),
     delta.updatedOccurrenceKeys ?? delta.updated.map((row) => rowKey(row.rowId)),
@@ -7180,8 +7172,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const rowId = new Uint8Array(16).fill(7);
   const typedKey = (label: string) => {
     const labelBytes = inlineScalar(label);
-    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-    key[0] = 1;
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
+    key[0] = 2;
     key.fill(7, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
     key.fill(8, 21, 37);
@@ -7208,8 +7200,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const first = decodeSubscriptionDelta(initial, testSchema);
   const firstDelta = runtimeDeltaChanges(first);
   expect(firstDelta.map((change) => change.id)).toEqual([
-    expect.stringContaining("result:01"),
-    expect.stringContaining("result:01"),
+    expect.stringContaining("result:02"),
+    expect.stringContaining("result:02"),
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
@@ -7445,7 +7437,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   }, 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
-  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])), 1);
+  delta.vec((key) => key.bytes(Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec((index) => index.u64(0), 1);
@@ -7479,9 +7471,9 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writer.vec(() => undefined, 0);
   for (const keys of [
     delta.addedOccurrenceKeys ??
-      added.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
+      added.map((row) => Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
     delta.updatedOccurrenceKeys ??
-      updated.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
+      updated.map((row) => Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
     [],
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
@@ -7535,8 +7527,8 @@ function writeTeamGatherBatches(
 
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
-  const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-  key[0] = 1;
+  const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
+  key[0] = 2;
   key.fill(1, 1, 17);
   new DataView(key.buffer).setUint32(17, 1);
   key.fill(2, 21, 37);
@@ -7586,7 +7578,7 @@ function encodeArrayRows(): Uint8Array {
 
 function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
-    kind: "mergeable" | "exclusive";
+    kind: "mergeable" | "serializable";
     author?: Uint8Array;
   };
   const implementation = db as T & {

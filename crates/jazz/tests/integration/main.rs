@@ -18,6 +18,8 @@
 mod account_author;
 #[path = "../aggregate_nullable_keys.rs"]
 mod aggregate_nullable_keys;
+#[path = "../aggregate_ordering.rs"]
+mod aggregate_ordering;
 #[cfg(feature = "testing")]
 #[path = "../async_open.rs"]
 mod async_open;
@@ -53,9 +55,6 @@ mod deployment_preparation;
 mod dynamic_schema_views;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
-#[cfg(feature = "runtime")]
-#[path = "../exclusive_snapshot_coverage.rs"]
-mod exclusive_snapshot_coverage;
 #[path = "../fate_regressions.rs"]
 mod fate_regressions;
 #[cfg(feature = "testing")]
@@ -101,6 +100,9 @@ mod public_transaction_id_api;
 mod route_subscription_benchmark_contract;
 #[path = "../row_provenance.rs"]
 mod row_provenance;
+#[cfg(feature = "runtime")]
+#[path = "../serializable_snapshot_coverage.rs"]
+mod serializable_snapshot_coverage;
 #[path = "../shared_coverage_differential.rs"]
 mod shared_coverage_differential;
 #[cfg(feature = "testing")]

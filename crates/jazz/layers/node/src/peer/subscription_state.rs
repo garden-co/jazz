@@ -69,9 +69,7 @@ pub(super) fn member_settle_position(
     member: &ResultMemberEntry,
 ) -> Option<super::super::time::GlobalTime> {
     match member {
-        ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
-            row.settle_position
-        }
+        ResultMemberEntry::Row(row) => row.settle_position,
         ResultMemberEntry::Synthetic { .. } | ResultMemberEntry::PathTuple { .. } => None,
     }
 }

@@ -46,7 +46,7 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     });
     db = await createDb(account);
     await db.all(newApp.projects, { tier: "remote" });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(newApp.projects, { title: "New project" });
     const note = tx.insert(newApp.notes, { projectId: project.id, title: "New note" });
     await tx.commit().wait();
@@ -80,7 +80,7 @@ it.each(["local", "global"] as const)(
       db = await createDb(await localAccountConfig(server.appId, server.url));
       await db.all(app.notes, { tier: "remote" });
       if (tier === "local") await db.disconnect();
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       expect(
         await tx.all(app.notes.where({ bucket: "destination" }), { tier: "local-first" }),
       ).toEqual([]);
@@ -126,7 +126,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
     });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     await db.all(app.notes, { tier: "remote" });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     expect(await tx.all(app.notes.where({ bucket: "destination" }))).toEqual([]);
     await db
       .insert(app.notes, { bucket: "unrelated", title: "Other data" })
@@ -143,7 +143,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
 }, 60_000);
 
 it.each(["offline", "synced"] as const)(
-  "rejects the losing exclusive write on the same row without failing the core tick (%s)",
+  "rejects the losing serializable write on the same row without failing the core tick (%s)",
   async (mode) => {
     const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
     const permissions = definePermissions(app, ({ policy }) => {
@@ -186,7 +186,7 @@ it.each(["offline", "synced"] as const)(
       });
       let reads = 0;
       const race = (title: string) =>
-        db!.exclusiveTransaction(async (tx) => {
+        db!.serializableTransaction(async (tx) => {
           await tx.one(app.notes.where({ id: row.id }), { tier: "local-first" });
           if (++reads === 2) releaseWrites();
           await bothRead;

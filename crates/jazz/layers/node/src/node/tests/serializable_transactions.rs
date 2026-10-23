@@ -1,10 +1,10 @@
 #[test]
-fn exclusive_base_snapshot_preserves_sparse_local_and_foreign_dots() {
+fn serializable_base_snapshot_preserves_sparse_local_and_foreign_dots() {
     let owner = node(1);
     let own_dot = TxId::new(TxTime::from(10), owner);
     let foreign_dot = TxId::new(TxTime::from(11), node(2));
 
-    let snapshot = crate::tx::Snapshot::exclusive_base(
+    let snapshot = crate::tx::Snapshot::serializable_base(
         owner,
         GlobalTime(3),
         TxTime::from(12),
@@ -15,7 +15,7 @@ fn exclusive_base_snapshot_preserves_sparse_local_and_foreign_dots() {
 }
 
 #[test]
-fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_reopen() {
+fn serializable_begin_resolves_sparse_global_dots_without_scanning_history_after_reopen() {
     let (dir, mut core) = open_node();
     for ordinal in 1..=128 {
         core.commit_mergeable_settled(
@@ -39,7 +39,7 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
     let mut reopened = reopen_node_at(&dir, node(9), schema());
     reopened.reset_storage_read_metrics();
     let batch = OpenTransactionId::new();
-    reopened.open_exclusive(batch).unwrap();
+    reopened.open_serializable(batch).unwrap();
     assert_eq!(
         reopened.open_tx(batch).unwrap().base_snapshot.dots,
         vec![sparse]
@@ -56,26 +56,26 @@ fn exclusive_begin_resolves_sparse_global_dots_without_scanning_history_after_re
 fn open_batch_identity_is_unique_and_terminal() {
     let (_temp_dir, mut node) = open_node();
     let rolled_back = OpenTransactionId::new();
-    node.open_exclusive(rolled_back).unwrap();
+    node.open_serializable(rolled_back).unwrap();
     assert!(matches!(
-        node.open_exclusive(rolled_back).resolve(),
+        node.open_serializable(rolled_back).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == rolled_back
     ));
     node.abandon_tx(rolled_back).unwrap();
     assert!(matches!(
-        node.open_exclusive(rolled_back).resolve(),
+        node.open_serializable(rolled_back).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == rolled_back
     ));
 
     let committed = OpenTransactionId::new();
     let author = user(1);
-    node.open_exclusive_for_identity(committed, author).unwrap();
+    node.open_serializable_for_identity(committed, author).unwrap();
     node.tx_write(committed, "todos", row(91), title_cells("committed"), None)
         .unwrap();
-    node.commit_exclusive_settled(committed, author, 10)
+    node.commit_serializable_settled(committed, author, 10)
         .unwrap();
     assert!(matches!(
-        node.open_exclusive(committed).resolve(),
+        node.open_serializable(committed).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == committed
     ));
 }
@@ -83,43 +83,43 @@ fn open_batch_identity_is_unique_and_terminal() {
 /// Bare node transactions are system-owned; application transactions bind the
 /// authenticated author when opened and reject a different commit author.
 #[test]
-fn exclusive_identity_binding_requires_an_explicit_author_at_open() {
+fn serializable_identity_binding_requires_an_explicit_author_at_open() {
     let (_temp_dir, mut node) = open_node();
     let alice = user(0xa1);
     let bob = user(0xb2);
 
     let system_owned = OpenTransactionId::new();
-    node.open_exclusive(system_owned).unwrap();
+    node.open_serializable(system_owned).unwrap();
     node.tx_write(system_owned, "todos", row(1), title_cells("system"), None)
         .unwrap();
     assert!(matches!(
-        node.commit_exclusive_settled(system_owned, alice, 10),
+        node.commit_serializable_settled(system_owned, alice, 10),
         Err(Error::OpenTransactionIdentityMismatch)
     ));
-    node.commit_exclusive_settled(system_owned, AuthorSubject::SYSTEM, 10)
+    node.commit_serializable_settled(system_owned, AuthorSubject::SYSTEM, 10)
         .unwrap();
 
     let bound = OpenTransactionId::new();
-    node.open_exclusive_for_identity(bound, alice).unwrap();
+    node.open_serializable_for_identity(bound, alice).unwrap();
     node.tx_write(bound, "todos", row(2), title_cells("bound"), None)
         .unwrap();
     assert!(matches!(
-        node.commit_exclusive_settled(bound, bob, 11),
+        node.commit_serializable_settled(bound, bob, 11),
         Err(Error::OpenTransactionIdentityMismatch)
     ));
     // Planted positive: rejecting Bob does not consume Alice's capability.
-    node.commit_exclusive_settled(bound, alice, 11).unwrap();
+    node.commit_serializable_settled(bound, alice, 11).unwrap();
 }
 
 #[test]
-fn exclusive_tx_snapshot_read_ignores_newer_commits_after_open() {
+fn serializable_tx_snapshot_read_ignores_newer_commits_after_open() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
     let base = node
         .commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
         .unwrap();
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive(tx_id).unwrap();
+    node.open_serializable(tx_id).unwrap();
 
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row, 11).cells(title_cells("newer")),
@@ -140,7 +140,7 @@ fn exclusive_tx_snapshot_read_ignores_newer_commits_after_open() {
     );
 }
 #[test]
-fn exclusive_tx_reads_own_pending_writes() {
+fn serializable_tx_reads_own_pending_writes() {
     let (_temp_dir, mut node) = open_node();
     let existing = row(7);
     let created = row(8);
@@ -149,7 +149,7 @@ fn exclusive_tx_reads_own_pending_writes() {
     )
     .unwrap();
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive(tx_id).unwrap();
+    node.open_serializable(tx_id).unwrap();
 
     node.tx_write(tx_id, "todos", existing, title_cells("pending"), None)
         .unwrap();
@@ -187,7 +187,7 @@ fn exclusive_tx_reads_own_pending_writes() {
 }
 
 #[test]
-fn exclusive_tx_pending_writes_overlay_snapshot_for_point_and_table_reads() {
+fn serializable_tx_pending_writes_overlay_snapshot_for_point_and_table_reads() {
     let (_temp_dir, mut node) = open_node();
     let existing = row(7);
     let created = row(8);
@@ -196,7 +196,7 @@ fn exclusive_tx_pending_writes_overlay_snapshot_for_point_and_table_reads() {
     )
     .unwrap();
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive(tx_id).unwrap();
+    node.open_serializable(tx_id).unwrap();
 
     node.tx_write(tx_id, "todos", existing, title_cells("pending"), None)
         .unwrap();
@@ -227,7 +227,7 @@ fn tx_read_records_present_and_absent_snapshot_reads() {
         )
         .unwrap();
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive(tx_id).unwrap();
+    node.open_serializable(tx_id).unwrap();
 
     assert_eq!(
         node.tx_read(tx_id, "todos", present).unwrap(),
@@ -261,7 +261,7 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
         .commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
         .unwrap();
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive(tx_id).unwrap();
+    node.open_serializable(tx_id).unwrap();
 
     assert_eq!(
         node.tx_read(tx_id, "todos", row).unwrap(),
@@ -288,11 +288,11 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
                 .contains_key(&node.current_write_schema().unwrap().schema))
     );
 
-    let (_exclusive, unit) = node
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+    let (_serializable, unit) = node
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("expected exclusive commit unit");
+        panic!("expected serializable commit unit");
     };
     assert_eq!(
         tx.row_read_set.as_deref(),
@@ -309,7 +309,7 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
 }
 
 #[test]
-fn exclusive_tx_snapshot_applies_deletion_register() {
+fn serializable_tx_snapshot_applies_deletion_register() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
     node.commit_mergeable_settled(
@@ -322,7 +322,7 @@ fn exclusive_tx_snapshot_applies_deletion_register() {
         )
         .unwrap();
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive(tx_id).unwrap();
+    node.open_serializable(tx_id).unwrap();
 
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Restored),
@@ -353,11 +353,11 @@ fn exclusive_tx_snapshot_applies_deletion_register() {
     );
 }
 #[test]
-fn exclusive_tx_open_state_is_invisible_outside_transaction() {
+fn serializable_tx_open_state_is_invisible_outside_transaction() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive(tx_id).unwrap();
+    node.open_serializable(tx_id).unwrap();
     node.tx_write(tx_id, "todos", row, title_cells("buffered"), None)
         .unwrap();
 
@@ -408,7 +408,7 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
     }
 
     let first_snapshot = OpenTransactionId::new();
-    reader.open_exclusive(first_snapshot).unwrap();
+    reader.open_serializable(first_snapshot).unwrap();
     let first_base = &reader.open_tx(first_snapshot).unwrap().base_snapshot;
     assert_eq!(first_base.global_base, GlobalTime::default());
     assert_eq!(first_base.dots.len(), 2);
@@ -442,7 +442,7 @@ fn partial_node_snapshot_does_not_promote_received_global_times() {
         .unwrap();
 
     let second_snapshot = OpenTransactionId::new();
-    reader.open_exclusive(second_snapshot).unwrap();
+    reader.open_serializable(second_snapshot).unwrap();
     let second_base = &reader.open_tx(second_snapshot).unwrap().base_snapshot;
     assert_eq!(second_base.global_base, GlobalTime::default());
     assert_eq!(second_base.dots.len(), 3);
@@ -485,12 +485,12 @@ fn partial_node_snapshot_advances_from_authoritative_settled_through() {
     reader.record_authoritative_settled_through(GlobalTime(2));
 
     let open_id = OpenTransactionId::new();
-    reader.open_exclusive(open_id).unwrap();
+    reader.open_serializable(open_id).unwrap();
     let base = reader.open_tx(open_id).unwrap().base_snapshot.clone();
     assert_eq!(base.global_base, GlobalTime(2));
     assert_eq!(base.dots, vec![TxId::new(TxTime::new(13, 0), node(9))]);
     let rows = reader
-        .projected_snapshot_current_rows("todos", schema().version_id(), &base)
+        .projected_snapshot_current_rows("todos", schema().version_id(), &base, false)
         .resolve()
         .unwrap();
     assert_eq!(rows.len(), 2);
@@ -508,7 +508,7 @@ fn core_snapshot_uses_atomically_committed_global_time() {
     core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 
     let open_id = OpenTransactionId::new();
-    core.open_exclusive(open_id).unwrap();
+    core.open_serializable(open_id).unwrap();
     let base = &core.open_tx(open_id).unwrap().base_snapshot;
     assert_eq!(base.global_base, GlobalTime::new(25, 0).unwrap());
     assert!(base.dots.is_empty());
@@ -525,13 +525,13 @@ fn partial_snapshot_whole_table_validation_accepts_its_sparse_global_dots() {
     );
 
     let open_id = OpenTransactionId::new();
-    client.open_exclusive(open_id).unwrap();
+    client.open_serializable(open_id).unwrap();
     assert_eq!(client.tx_current_rows(open_id, "todos").unwrap().len(), 1);
     client
         .tx_write(open_id, "todos", row(2), title_cells("next"), None)
         .unwrap();
     let (_, unit) = client
-        .commit_exclusive(open_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable(open_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
 
     let updates = core.apply_sync_message_settled(unit).unwrap();
@@ -557,13 +557,13 @@ fn partial_snapshot_filtered_validation_accepts_its_sparse_global_dots() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let open_id = OpenTransactionId::new();
-    client.open_exclusive(open_id).unwrap();
+    client.open_serializable(open_id).unwrap();
     assert_eq!(client.tx_query(open_id, &shape, &binding).unwrap().len(), 1);
     client
         .tx_write(open_id, "todos", row(2), title_cells("next"), None)
         .unwrap();
     let (_, unit) = client
-        .commit_exclusive(open_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable(open_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
 
     let updates = core.apply_sync_message_settled(unit).unwrap();
@@ -574,7 +574,7 @@ fn partial_snapshot_filtered_validation_accepts_its_sparse_global_dots() {
 }
 
 #[test]
-fn exclusive_commit_accepts_clean_end_to_end() {
+fn serializable_commit_accepts_clean_end_to_end() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
@@ -584,12 +584,12 @@ fn exclusive_commit_accepts_clean_end_to_end() {
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
     );
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     client
-        .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
+        .tx_write(tx_id, "todos", row, title_cells("serializable"), None)
         .unwrap();
     let (tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     assert_eq!(
         client
@@ -598,7 +598,7 @@ fn exclusive_commit_accepts_clean_end_to_end() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row, title_cells("exclusive"))])
+        BTreeMap::from([(row, title_cells("serializable"))])
     );
 
     let [fate] = core
@@ -631,11 +631,11 @@ fn exclusive_commit_accepts_clean_end_to_end() {
             .into_iter()
             .map(current_row_pair)
             .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row, title_cells("exclusive"))])
+        BTreeMap::from([(row, title_cells("serializable"))])
     );
 }
 #[test]
-fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
+fn serializable_row_read_conflict_rejects_and_client_restores_old_value() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -646,7 +646,7 @@ fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
     );
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert_eq!(
         client.tx_read(tx_id, "todos", row).unwrap(),
         Some(title_cells("base"))
@@ -660,7 +660,7 @@ fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
         .tx_write(tx_id, "todos", row, title_cells("loser"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 13)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 13)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -672,7 +672,7 @@ fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
     };
     assert_eq!(
         rejected,
-        &Fate::Rejected(RejectionReason::ExclusiveConflict)
+        &Fate::Rejected(RejectionReason::SerializationConflict)
     );
     client.apply_sync_message_settled(fate).unwrap();
     assert_eq!(
@@ -688,9 +688,9 @@ fn exclusive_row_read_conflict_rejects_and_client_restores_old_value() {
 
 /// A row read records visible content. A later deletion changes that visible
 /// state even though the content register retains the version the reader saw,
-/// so the exclusive write must conflict rather than be admitted by content CAS.
+/// so the serializable write must conflict rather than be admitted by content CAS.
 #[test]
-fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
+fn serializable_row_read_conflicts_when_a_later_delete_hides_the_content() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -701,7 +701,7 @@ fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
         MergeableCommit::new("todos", row, 10).cells(title_cells("base")),
     );
     let open = OpenTransactionId::new();
-    client.open_exclusive(open).unwrap();
+    client.open_serializable(open).unwrap();
     assert_eq!(
         client.tx_read(open, "todos", row).unwrap(),
         Some(title_cells("base"))
@@ -718,7 +718,7 @@ fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
         .tx_write(open, "todos", row, title_cells("loser"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 13)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -728,7 +728,7 @@ fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
     assert!(matches!(
         fate,
         SyncMessage::FateUpdate {
-            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            fate: Fate::Rejected(RejectionReason::SerializationConflict),
             ..
         }
     ));
@@ -739,7 +739,7 @@ fn exclusive_row_read_conflicts_when_a_later_delete_hides_the_content() {
 /// globally current; authority first-committer-wins must compare that same
 /// deletion register rather than treating content as a general dependency.
 #[test]
-fn exclusive_delete_compares_the_deletion_register_not_content() {
+fn serializable_delete_compares_the_deletion_register_not_content() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(0x6d);
@@ -750,7 +750,7 @@ fn exclusive_delete_compares_the_deletion_register_not_content() {
     );
 
     let open = OpenTransactionId::new();
-    client.open_exclusive(open).unwrap();
+    client.open_serializable(open).unwrap();
     assert_eq!(
         client.tx_read(open, "todos", row).unwrap(),
         Some(title_cells("base"))
@@ -765,10 +765,10 @@ fn exclusive_delete_compares_the_deletion_register_not_content() {
         )
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let SyncMessage::CommitUnit { versions, .. } = &unit else {
-        panic!("expected exclusive commit unit");
+        panic!("expected serializable commit unit");
     };
     assert_eq!(versions.len(), 1);
 
@@ -788,9 +788,9 @@ fn exclusive_delete_compares_the_deletion_register_not_content() {
 
 /// Deletion visibility does not erase content ancestry. Replacing a deleted
 /// row and restoring it atomically must advance both independent registers from
-/// the winners captured by the exclusive snapshot.
+/// the winners captured by the serializable snapshot.
 #[test]
-fn exclusive_replacement_and_restore_parent_their_own_registers() {
+fn serializable_replacement_and_restore_parent_their_own_registers() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(0x6f);
@@ -806,7 +806,7 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
     );
 
     let open = OpenTransactionId::new();
-    client.open_exclusive(open).unwrap();
+    client.open_serializable(open).unwrap();
     assert_eq!(client.tx_read(open, "todos", row).unwrap(), None);
     client
         .tx_write(open, "todos", row, title_cells("replacement"), None)
@@ -821,10 +821,10 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
         )
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 12)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 12)
         .unwrap();
     let SyncMessage::CommitUnit { versions, .. } = &unit else {
-        panic!("expected exclusive commit unit");
+        panic!("expected serializable commit unit");
     };
     // The replacement and the restore are one row image of the row.
     assert_eq!(versions.len(), 1);
@@ -857,12 +857,12 @@ fn exclusive_replacement_and_restore_parent_their_own_registers() {
 }
 
 #[test]
-fn exclusive_predicate_phantom_conflict_rejects() {
+fn serializable_predicate_phantom_conflict_rejects() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_current_rows(tx_id, "todos").unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -873,7 +873,7 @@ fn exclusive_predicate_phantom_conflict_rejects() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -883,11 +883,11 @@ fn exclusive_predicate_phantom_conflict_rejects() {
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 #[test]
-fn exclusive_whole_table_predicate_ignores_other_table_changes() {
+fn serializable_whole_table_predicate_ignores_other_table_changes() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(PublicTableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
@@ -898,7 +898,7 @@ fn exclusive_whole_table_predicate_ignores_other_table_changes() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_current_rows(tx_id, "todos").unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -909,7 +909,7 @@ fn exclusive_whole_table_predicate_ignores_other_table_changes() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -923,7 +923,7 @@ fn exclusive_whole_table_predicate_ignores_other_table_changes() {
 }
 
 #[test]
-fn exclusive_filtered_shape_phantom_conflict_rejects() {
+fn serializable_filtered_shape_phantom_conflict_rejects() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -938,7 +938,7 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
     register_shape_binding(&mut core, &shape, &binding);
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -949,7 +949,7 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -959,16 +959,16 @@ fn exclusive_filtered_shape_phantom_conflict_rejects() {
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 #[test]
-fn local_exclusive_predicate_rejects_remote_phantom_ingested_after_begin() {
+fn local_serializable_predicate_rejects_remote_phantom_ingested_after_begin() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_current_rows(tx_id, "todos").unwrap().is_empty());
 
     let (_remote, unit) = other
@@ -988,12 +988,12 @@ fn local_exclusive_predicate_rejects_remote_phantom_ingested_after_begin() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     assert!(matches!(
-        client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11),
+        client.commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11),
         Err(Error::TransactionConflict)
     ));
 }
 #[test]
-fn exclusive_filtered_shape_ignores_irrelevant_changes() {
+fn serializable_filtered_shape_ignores_irrelevant_changes() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1008,7 +1008,7 @@ fn exclusive_filtered_shape_ignores_irrelevant_changes() {
     register_shape_binding(&mut core, &shape, &binding);
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -1019,7 +1019,7 @@ fn exclusive_filtered_shape_ignores_irrelevant_changes() {
         .tx_write(tx_id, "todos", row(2), title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1032,7 +1032,7 @@ fn exclusive_filtered_shape_ignores_irrelevant_changes() {
     assert_eq!(fate, Fate::Accepted);
 }
 
-// The local pre-publication check runs inside `commit_exclusive` before any
+// The local pre-publication check runs inside `commit_serializable` before any
 // authority sees the unit, and it depends on which versions this node ingested
 // between begin and commit. `JazzClient` cannot pin that interleaving, so
 // these tests drive the node directly and assert the local commit outcome.
@@ -1049,14 +1049,14 @@ fn watched_title_shape() -> (ValidatedQuery, Binding) {
 }
 
 #[test]
-fn local_exclusive_filtered_predicate_rejects_remote_matching_phantom() {
+fn local_serializable_filtered_predicate_rejects_remote_matching_phantom() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (shape, binding) = watched_title_shape();
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
 
     let (_remote, unit) = other
@@ -1076,18 +1076,18 @@ fn local_exclusive_filtered_predicate_rejects_remote_matching_phantom() {
         .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
         .unwrap();
     assert!(matches!(
-        client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11),
+        client.commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11),
         Err(Error::TransactionConflict)
     ));
 }
 
 #[test]
-fn local_exclusive_filtered_predicate_rejects_pending_local_matching_insert() {
+fn local_serializable_filtered_predicate_rejects_pending_local_matching_insert() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (shape, binding) = watched_title_shape();
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
 
     // No authority exists: the matching insert stays a pending local write.
@@ -1101,13 +1101,13 @@ fn local_exclusive_filtered_predicate_rejects_pending_local_matching_insert() {
         .tx_write(tx_id, "todos", row(9), title_cells("mine"), None)
         .unwrap();
     assert!(matches!(
-        client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11),
+        client.commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11),
         Err(Error::TransactionConflict)
     ));
 }
 
 #[test]
-fn local_exclusive_filtered_predicate_ignores_non_matching_inserts() {
+fn local_serializable_filtered_predicate_ignores_non_matching_inserts() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1115,7 +1115,7 @@ fn local_exclusive_filtered_predicate_ignores_non_matching_inserts() {
     register_shape_binding(&mut core, &shape, &binding);
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
 
     let (_remote, unit) = other
@@ -1141,7 +1141,7 @@ fn local_exclusive_filtered_predicate_ignores_non_matching_inserts() {
         .unwrap();
     // Passing the local check publishes the unit; the authority agrees.
     let (_committed, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 12)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 12)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1155,7 +1155,7 @@ fn local_exclusive_filtered_predicate_ignores_non_matching_inserts() {
 }
 
 #[test]
-fn local_exclusive_filtered_predicate_rejects_pending_local_removal() {
+fn local_serializable_filtered_predicate_rejects_pending_local_removal() {
     for (name, removal) in [
         (
             "moved out of the filter",
@@ -1176,7 +1176,7 @@ fn local_exclusive_filtered_predicate_rejects_pending_local_removal() {
         );
 
         let tx_id = OpenTransactionId::new();
-        client.open_exclusive(tx_id).unwrap();
+        client.open_serializable(tx_id).unwrap();
         assert_eq!(
             client.tx_query(tx_id, &shape, &binding).unwrap().len(),
             1,
@@ -1191,7 +1191,7 @@ fn local_exclusive_filtered_predicate_rejects_pending_local_removal() {
             .unwrap();
         assert!(
             matches!(
-                client.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 21),
+                client.commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 21),
                 Err(Error::TransactionConflict)
             ),
             "{name}"
@@ -1199,7 +1199,7 @@ fn local_exclusive_filtered_predicate_rejects_pending_local_removal() {
     }
 }
 #[test]
-fn exclusive_shape_predicate_is_binding_sensitive() {
+fn serializable_shape_predicate_is_binding_sensitive() {
     let author_a = user(0xa1);
     let author_b = user(0xb2);
     for (node_base, changed_owner, expected) in [
@@ -1207,7 +1207,7 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
         (
             5,
             author_a,
-            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            Fate::Rejected(RejectionReason::SerializationConflict),
         ),
     ] {
         let schema = owner_policy_schema();
@@ -1232,7 +1232,7 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
         register_shape_binding(&mut core, &shape, &binding_a);
 
         let tx_id = OpenTransactionId::new();
-        client.open_exclusive_for_identity(tx_id, author_a).unwrap();
+        client.open_serializable_for_identity(tx_id, author_a).unwrap();
         assert!(
             client
                 .tx_query(tx_id, &shape, &binding_a)
@@ -1256,7 +1256,7 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
             )
             .unwrap();
         let (_tx_id, unit) = client
-            .commit_exclusive_settled(tx_id, author_a, 11)
+            .commit_serializable_settled(tx_id, author_a, 11)
             .unwrap();
         let [fate] = core
             .apply_sync_message_settled(unit)
@@ -1270,7 +1270,7 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
     }
 }
 #[test]
-fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration() {
+fn serializable_shape_predicate_validation_uses_inline_shape_without_registration() {
     let author_a = user(0xa1);
     let schema = owner_policy_schema();
     let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
@@ -1293,7 +1293,7 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
         .unwrap();
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive_for_identity(tx_id, author_a).unwrap();
+    client.open_serializable_for_identity(tx_id, author_a).unwrap();
     assert!(
         client
             .tx_query(tx_id, &shape, &binding_a)
@@ -1311,7 +1311,7 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
         .tx_write(tx_id, "todos", row(2), owner_cells(author_a, "mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, author_a, 11)
+        .commit_serializable_settled(tx_id, author_a, 11)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1321,7 +1321,7 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 #[test]
 fn district_scoped_predicate_rejects_same_district_phantom_only() {
@@ -1352,7 +1352,7 @@ fn district_scoped_predicate_rejects_same_district_phantom_only() {
         (
             1,
             row(0xd1),
-            Fate::Rejected(RejectionReason::ExclusiveConflict),
+            Fate::Rejected(RejectionReason::SerializationConflict),
         ),
         (5, row(0xd2), Fate::Accepted),
     ] {
@@ -1374,7 +1374,7 @@ fn district_scoped_predicate_rejects_same_district_phantom_only() {
             .unwrap();
 
         let tx_id = OpenTransactionId::new();
-        client.open_exclusive(tx_id).unwrap();
+        client.open_serializable(tx_id).unwrap();
         assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
         commit_mergeable_global(
             &mut other,
@@ -1395,7 +1395,7 @@ fn district_scoped_predicate_rejects_same_district_phantom_only() {
             )
             .unwrap();
         let (_tx_id, unit) = client
-            .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+            .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
             .unwrap();
         let [fate] = core
             .apply_sync_message_settled(unit)
@@ -1409,7 +1409,7 @@ fn district_scoped_predicate_rejects_same_district_phantom_only() {
     }
 }
 #[test]
-fn exclusive_write_write_first_committer_wins() {
+fn serializable_write_write_first_committer_wins() {
     let (_client_a_dir, mut client_a) = open_node_with_uuid(node(1));
     let (_client_b_dir, mut client_b) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1421,9 +1421,9 @@ fn exclusive_write_write_first_committer_wins() {
     );
     sync_current_rows_to(&mut core, &mut client_b, 42);
     let tx_a = OpenTransactionId::new();
-    client_a.open_exclusive(tx_a).unwrap();
+    client_a.open_serializable(tx_a).unwrap();
     let tx_b = OpenTransactionId::new();
-    client_b.open_exclusive(tx_b).unwrap();
+    client_b.open_serializable(tx_b).unwrap();
     client_a
         .tx_write(tx_a, "todos", row, title_cells("a"), None)
         .unwrap();
@@ -1431,10 +1431,10 @@ fn exclusive_write_write_first_committer_wins() {
         .tx_write(tx_b, "todos", row, title_cells("b"), None)
         .unwrap();
     let (_a_ref, unit_a) = client_a
-        .commit_exclusive_settled(tx_a, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_a, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let (_b_ref, unit_b) = client_b
-        .commit_exclusive_settled(tx_b, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_b, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let [fate_a] = core
         .apply_sync_message_settled(unit_a)
@@ -1453,16 +1453,16 @@ fn exclusive_write_write_first_committer_wins() {
         panic!("expected fate update");
     };
     assert_eq!(accepted, Fate::Accepted);
-    assert_eq!(rejected, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(rejected, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 #[test]
-fn exclusive_absent_read_conflict_rejects() {
+fn serializable_absent_read_conflict_rejects() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_serializable(tx_id).unwrap();
     assert_eq!(client.tx_read(tx_id, "todos", row).unwrap(), None);
     commit_mergeable_global(
         &mut other,
@@ -1476,7 +1476,7 @@ fn exclusive_absent_read_conflict_rejects() {
         .tx_write(tx_id, "todos", row, title_cells("mine"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1486,7 +1486,7 @@ fn exclusive_absent_read_conflict_rejects() {
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 #[test]
 fn commit_unit_forward_skew_rejects_and_client_cleans_up() {
@@ -1573,7 +1573,7 @@ fn register_shape_binding_for_receiver(
 }
 
 #[test]
-fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
+fn receiver_tracks_partial_serializable_payload_coverage_per_view() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -1584,7 +1584,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let tx = OpenTransactionId::new();
-    writer.open_exclusive(tx).unwrap();
+    writer.open_serializable(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), title_cells("one"), None)
         .unwrap();
@@ -1592,7 +1592,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
         .tx_write(tx, "todos", row(2), title_cells("two"), None)
         .unwrap();
     let (_tx_id, unit) = writer
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1626,7 +1626,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
     };
     assert_eq!(version_bundles.len(), 1);
     let bundle = version_bundles.pop().unwrap();
-    assert_eq!(bundle.tx.kind, TxKind::Exclusive);
+    assert_eq!(bundle.tx.kind, TxKind::Serializable);
     assert_eq!(bundle.tx.n_total_writes, 1);
     assert_eq!(
         bundle.scope,
@@ -1695,7 +1695,7 @@ fn receiver_tracks_partial_exclusive_payload_coverage_per_view() {
 }
 
 #[test]
-fn malformed_exclusive_partial_covered_input_is_rejected() {
+fn malformed_serializable_partial_covered_input_is_rejected() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
@@ -1706,7 +1706,7 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let tx = OpenTransactionId::new();
-    writer.open_exclusive(tx).unwrap();
+    writer.open_serializable(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), title_cells("one"), None)
         .unwrap();
@@ -1714,7 +1714,7 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
         .tx_write(tx, "todos", row(2), title_cells("two"), None)
         .unwrap();
     let (_tx_id, unit) = writer
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1794,7 +1794,7 @@ fn malformed_exclusive_partial_covered_input_is_rejected() {
 }
 
 #[test]
-fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
+fn partial_serializable_payload_does_not_establish_tx_level_complete_tx_ref() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let first_shape = Query::from("todos")
@@ -1809,7 +1809,7 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     let second_binding = second_shape.bind(BTreeMap::new()).unwrap();
 
     let tx = OpenTransactionId::new();
-    writer.open_exclusive(tx).unwrap();
+    writer.open_serializable(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), title_cells("one"), None)
         .unwrap();
@@ -1817,7 +1817,7 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
         .tx_write(tx, "todos", row(2), title_cells("two"), None)
         .unwrap();
     let (tx_id, unit) = writer
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1876,7 +1876,7 @@ fn partial_exclusive_payload_does_not_establish_tx_level_complete_tx_ref() {
     assert!(peer.shipped_complete_tx_payloads().is_empty());
 }
 #[test]
-fn exclusive_view_shipping_is_view_atomic_per_recipient() {
+fn serializable_view_shipping_is_view_atomic_per_recipient() {
     let schema = owner_policy_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
@@ -1890,7 +1890,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     install_test_uuid_sub_claim(&mut core, author_b);
 
     let tx = OpenTransactionId::new();
-    writer.open_exclusive(tx).unwrap();
+    writer.open_serializable(tx).unwrap();
     writer
         .tx_write(tx, "todos", row(1), owner_cells(author_a, "a row"), None)
         .unwrap();
@@ -1898,7 +1898,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
         .tx_write(tx, "todos", row(2), owner_cells(author_b, "b row"), None)
         .unwrap();
     let (_tx_id, unit) = writer
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1924,7 +1924,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
         panic!("expected view update");
     };
     assert_eq!(version_bundles.len(), 1);
-    assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+    assert_eq!(version_bundles[0].tx.kind, TxKind::Serializable);
     assert_eq!(version_bundles[0].tx.n_total_writes, 1);
     assert_eq!(
         version_bundles[0].scope,
@@ -1968,7 +1968,7 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     );
 }
 #[test]
-fn originating_rejected_exclusive_moves_payload_to_retry_store() {
+fn originating_rejected_serializable_moves_payload_to_retry_store() {
     let (_writer_a_dir, mut writer_a) = open_node_with_uuid(node(1));
     let (writer_b_dir, mut writer_b) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -1981,7 +1981,7 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
     );
     sync_current_rows_to(&mut core, &mut writer_b, 77);
     let tx_id = OpenTransactionId::new();
-    writer_b.open_exclusive(tx_id).unwrap();
+    writer_b.open_serializable(tx_id).unwrap();
     writer_b.tx_read(tx_id, "todos", row).unwrap();
     commit_mergeable_global(
         &mut writer_a,
@@ -1995,7 +1995,7 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         .tx_write(tx_id, "todos", row, title_cells("retry me"), None)
         .unwrap();
     let (rejected, unit) = writer_b
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 12)
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 12)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -2006,7 +2006,7 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
         fate,
         SyncMessage::FateUpdate {
             tx_id: rejected,
-            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            fate: Fate::Rejected(RejectionReason::SerializationConflict),
             global_time: None,
             durability: None,
         }
@@ -2016,9 +2016,9 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
 
     assert_eq!(writer_b.rejected_transactions(), vec![rejected]);
     let stored = writer_b.rejected_transaction(rejected).unwrap();
-    assert_eq!(stored.reason(), RejectionReason::ExclusiveConflict);
+    assert_eq!(stored.reason(), RejectionReason::SerializationConflict);
     assert_eq!(stored.cascade_root(), None);
-    assert_eq!(stored.kind(), TxKind::Exclusive);
+    assert_eq!(stored.kind(), TxKind::Serializable);
     assert_eq!(stored.versions().len(), 1);
     assert_eq!(stored.versions()[0].table(), "todos");
     assert_eq!(stored.versions()[0].row_uuid(), row);
@@ -2058,7 +2058,7 @@ fn originating_rejected_exclusive_moves_payload_to_retry_store() {
 // history scans a transaction table read performs; results alone cannot tell
 // one table-wide scan from a re-scan per row (#3473).
 #[test]
-fn exclusive_table_read_decodes_each_history_version_once() {
+fn serializable_table_read_decodes_each_history_version_once() {
     let (_temp_dir, mut core) = open_node();
     for ordinal in 1..=16 {
         core.commit_mergeable_settled(
@@ -2079,7 +2079,7 @@ fn exclusive_table_read_decodes_each_history_version_once() {
     )
     .unwrap();
     let tx_id = OpenTransactionId::new();
-    core.open_exclusive(tx_id).unwrap();
+    core.open_serializable(tx_id).unwrap();
     // Arrives after the snapshot, so the transaction must not see it.
     let late = TxId::new(TxTime::from(300), node(2));
     ingest_relay_version(&mut core, late, 300, Vec::new(), row(5), "late");
@@ -2112,12 +2112,12 @@ fn exclusive_table_read_decodes_each_history_version_once() {
     assert!(rows.contains(&(row(7), title_cells("pending"))));
 }
 
-// Differential: a whole-table read inside an exclusive transaction must equal
+// Differential: a whole-table read inside a serializable transaction must equal
 // per-row point reads under concurrent content heads, delete/restore,
 // accepted and pending foreign versions, versions that arrive after the
 // snapshot, and staged writes and deletes.
 #[test]
-fn exclusive_table_read_matches_point_reads_across_seeds() {
+fn serializable_table_read_matches_point_reads_across_seeds() {
     for seed in 0..60u64 {
         let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let mut rand = move |n: u64| {
@@ -2169,7 +2169,7 @@ fn exclusive_table_read_matches_point_reads_across_seeds() {
         };
         ops(&mut core, &mut rand, false);
         let tx_id = OpenTransactionId::new();
-        core.open_exclusive(tx_id).unwrap();
+        core.open_serializable(tx_id).unwrap();
         ops(&mut core, &mut rand, true);
         for r in 1..=rows + 2 {
             match rand(4) {
@@ -2208,7 +2208,7 @@ fn exclusive_table_read_matches_point_reads_across_seeds() {
 // how snapshot coverage is decided; results alone cannot tell a full stored
 // transaction decode from a global-time projection.
 #[test]
-fn exclusive_point_read_and_commit_decode_no_payload_per_row_version() {
+fn serializable_point_read_and_commit_decode_no_payload_per_row_version() {
     fn decodes(edits: u64) -> usize {
         let (_temp_dir, mut core) = open_node();
         for edit in 1..=edits {
@@ -2218,7 +2218,7 @@ fn exclusive_point_read_and_commit_decode_no_payload_per_row_version() {
             .unwrap();
         }
         let tx_id = OpenTransactionId::new();
-        core.open_exclusive(tx_id).unwrap();
+        core.open_serializable(tx_id).unwrap();
         super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.set(0));
         assert_eq!(
             core.tx_read(tx_id, "todos", row(1)).unwrap(),
@@ -2226,7 +2226,7 @@ fn exclusive_point_read_and_commit_decode_no_payload_per_row_version() {
         );
         core.tx_write(tx_id, "todos", row(1), title_cells("mine"), None)
             .unwrap();
-        core.commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 10_000)
+        core.commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 10_000)
             .unwrap();
         super::super::currency::TRANSACTION_PAYLOAD_DECODES.with(|count| count.get())
     }
@@ -2251,12 +2251,12 @@ fn watched_shape_for(title: &str) -> (ValidatedQuery, Binding) {
 
 /// garden-co/jazz#3694. A partial node's snapshot cut advances with any
 /// authority receipt, not only with receipts that delivered the rows an
-/// exclusive query later reads. A row the reader still holds may therefore be
+/// serializable query later reads. A row the reader still holds may therefore be
 /// deleted at the authority before the claimed cut: rebuilding the predicate at
 /// that cut shows it absent both then and now, so only a proof of the row the
 /// reader actually saw can reject the commit.
 #[test]
-fn exclusive_query_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
+fn serializable_query_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -2287,13 +2287,13 @@ fn exclusive_query_conflicts_when_a_returned_row_was_deleted_before_the_claimed_
     client.record_authoritative_settled_through(core.clock.committed_global_time);
 
     let open = OpenTransactionId::new();
-    client.open_exclusive(open).unwrap();
+    client.open_serializable(open).unwrap();
     assert_eq!(client.tx_query(open, &shape, &binding).unwrap().len(), 1);
     client
         .tx_write(open, "todos", row(2), title_cells("member"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 13)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -2303,13 +2303,13 @@ fn exclusive_query_conflicts_when_a_returned_row_was_deleted_before_the_claimed_
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 /// Whole-table reads validate by table currency after the claimed cut, so they
 /// need the same per-row proof as filtered queries (garden-co/jazz#3694).
 #[test]
-fn exclusive_table_read_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
+fn serializable_table_read_conflicts_when_a_returned_row_was_deleted_before_the_claimed_cut() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_other_dir, mut other) = open_node_with_uuid(node(2));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
@@ -2336,13 +2336,13 @@ fn exclusive_table_read_conflicts_when_a_returned_row_was_deleted_before_the_cla
     client.record_authoritative_settled_through(core.clock.committed_global_time);
 
     let open = OpenTransactionId::new();
-    client.open_exclusive(open).unwrap();
+    client.open_serializable(open).unwrap();
     assert_eq!(client.tx_current_rows(open, "todos").unwrap().len(), 1);
     client
         .tx_write(open, "todos", row(2), title_cells("member"), None)
         .unwrap();
     let (_tx_id, unit) = client
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 13)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 13)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -2352,10 +2352,10 @@ fn exclusive_table_read_conflicts_when_a_returned_row_was_deleted_before_the_cla
     let SyncMessage::FateUpdate { fate, .. } = fate else {
         panic!("expected fate update");
     };
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
-/// Todos readable only while they have a member, plus a table any exclusive
+/// Todos readable only while they have a member, plus a table any serializable
 /// transaction can write.
 fn member_visible_todos_schema() -> JazzSchema {
     build_public_test_schema(
@@ -2390,15 +2390,15 @@ fn todo_member_cells(owner: RowUuid) -> BTreeMap<String, Value> {
     ])
 }
 
-/// garden-co/jazz#3694: an exclusive read behind a membership read policy
+/// garden-co/jazz#3694: a serializable read behind a membership read policy
 /// records the rows it returned, not the membership table. The authority
 /// re-runs the read under the same policy, so a membership change conflicts
 /// exactly when it changes what the reader sees.
-fn exclusive_policy_read_fate(
+fn serializable_policy_read_fate(
     read_all_open: bool,
     change: impl FnOnce(&mut NodeState, &mut NodeState),
 ) -> Fate {
-    exclusive_policy_read_fate_with(
+    serializable_policy_read_fate_with(
         if read_all_open { PolicyRead::AllOpen } else { PolicyRead::Point },
         change,
     )
@@ -2411,7 +2411,7 @@ enum PolicyRead {
     JoinedFromAudit,
 }
 
-fn exclusive_policy_read_fate_with(
+fn serializable_policy_read_fate_with(
     read: PolicyRead,
     change: impl FnOnce(&mut NodeState, &mut NodeState),
 ) -> Fate {
@@ -2456,7 +2456,7 @@ fn exclusive_policy_read_fate_with(
     .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let open = OpenTransactionId::new();
-    client.open_exclusive_for_identity(open, reader).unwrap();
+    client.open_serializable_for_identity(open, reader).unwrap();
     let rows = client
         .tx_query_for_identity(open, &shape, &binding, reader)
         .unwrap();
@@ -2476,7 +2476,7 @@ fn exclusive_policy_read_fate_with(
     client
         .tx_write(open, "audit", row(0x71), title_cells("redeemed"), None)
         .unwrap();
-    let (_tx_id, unit) = client.commit_exclusive_settled(open, reader, 20).unwrap();
+    let (_tx_id, unit) = client.commit_serializable_settled(open, reader, 20).unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
         .unwrap()
@@ -2489,33 +2489,33 @@ fn exclusive_policy_read_fate_with(
 }
 
 #[test]
-fn exclusive_policy_read_conflicts_when_the_membership_is_revoked() {
-    let fate = exclusive_policy_read_fate(false, |other, core| {
+fn serializable_policy_read_conflicts_when_the_membership_is_revoked() {
+    let fate = serializable_policy_read_fate(false, |other, core| {
         commit_mergeable_global(
             other,
             core,
             MergeableCommit::new("members", row(0x61), 15).deletion(DeletionEvent::Deleted),
         );
     });
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 #[test]
-fn exclusive_policy_read_conflicts_when_a_grant_reveals_a_matching_row() {
-    let fate = exclusive_policy_read_fate(true, |other, core| {
+fn serializable_policy_read_conflicts_when_a_grant_reveals_a_matching_row() {
+    let fate = serializable_policy_read_fate(true, |other, core| {
         commit_mergeable_global(
             other,
             core,
             MergeableCommit::new("members", row(0x62), 15).cells(todo_member_cells(row(2))),
         );
     });
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 #[test]
-fn exclusive_policy_read_ignores_membership_changes_it_cannot_see() {
+fn serializable_policy_read_ignores_membership_changes_it_cannot_see() {
     for read_all_open in [false, true] {
-        let fate = exclusive_policy_read_fate(read_all_open, |other, core| {
+        let fate = serializable_policy_read_fate(read_all_open, |other, core| {
             // Another member of the visible todo, and a revoked membership of
             // a todo neither read returns.
             commit_mergeable_global(
@@ -2537,29 +2537,29 @@ fn exclusive_policy_read_ignores_membership_changes_it_cannot_see() {
 /// the read set, so an unchanged join commits, and the rows it can see are
 /// validated like any other read.
 #[test]
-fn exclusive_join_into_a_policy_protected_table_commits_while_unchanged() {
+fn serializable_join_into_a_policy_protected_table_commits_while_unchanged() {
     for read in [PolicyRead::Point, PolicyRead::AllOpen, PolicyRead::JoinedFromAudit] {
-        let fate = exclusive_policy_read_fate_with(read, |_, _| {});
+        let fate = serializable_policy_read_fate_with(read, |_, _| {});
         assert_eq!(fate, Fate::Accepted, "{read:?}");
     }
 }
 
 #[test]
-fn exclusive_join_into_a_policy_protected_table_conflicts_when_access_is_revoked() {
-    let fate = exclusive_policy_read_fate_with(PolicyRead::JoinedFromAudit, |other, core| {
+fn serializable_join_into_a_policy_protected_table_conflicts_when_access_is_revoked() {
+    let fate = serializable_policy_read_fate_with(PolicyRead::JoinedFromAudit, |other, core| {
         commit_mergeable_global(
             other,
             core,
             MergeableCommit::new("members", row(0x61), 15).deletion(DeletionEvent::Deleted),
         );
     });
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 /// The read set of a point read behind a membership policy stays one row,
 /// however many memberships exist.
 #[test]
-fn exclusive_policy_read_set_does_not_grow_with_the_policy_table() {
+fn serializable_policy_read_set_does_not_grow_with_the_policy_table() {
     let schema = member_visible_todos_schema();
     let (_dir, mut node) = open_node_with_schema(node(1), schema.clone());
     let reader = user(0x51);
@@ -2582,7 +2582,7 @@ fn exclusive_policy_read_set_does_not_grow_with_the_policy_table() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let open = OpenTransactionId::new();
-    node.open_exclusive_for_identity(open, reader).unwrap();
+    node.open_serializable_for_identity(open, reader).unwrap();
     assert_eq!(
         node.tx_query_for_identity(open, &shape, &binding, reader)
             .unwrap()
@@ -2594,20 +2594,20 @@ fn exclusive_policy_read_set_does_not_grow_with_the_policy_table() {
     assert_eq!(open_tx.predicate_reads.len(), 1);
 }
 
-/// The authority validates exclusive reads as the transaction's permission
+/// The authority validates serializable reads as the transaction's permission
 /// subject, so that must be the identity the reads ran as: the identity bound
 /// at open. A commit under any other author is refused.
 #[test]
-fn exclusive_reads_and_their_validation_share_one_identity() {
+fn serializable_reads_and_their_validation_share_one_identity() {
     let schema = member_visible_todos_schema();
     let (_dir, mut node) = open_node_with_schema(node(1), schema);
     let reader = user(0x51);
     let open = OpenTransactionId::new();
-    node.open_exclusive_for_identity(open, reader).unwrap();
+    node.open_serializable_for_identity(open, reader).unwrap();
     node.tx_write(open, "audit", row(0x71), title_cells("redeemed"), None)
         .unwrap();
     assert!(matches!(
-        node.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 20),
+        node.commit_serializable_settled(open, AuthorSubject::SYSTEM, 20),
         Err(Error::OpenTransactionIdentityMismatch)
     ));
 }
@@ -2651,7 +2651,7 @@ enum Sender {
     PreAlpha58,
 }
 
-/// The authority's fate for an exclusive transaction over two notes, after
+/// The authority's fate for a serializable transaction over two notes, after
 /// `change` commits elsewhere between the transaction's open and its commit.
 fn notes_tx_fate(
     sender: Sender,
@@ -2671,7 +2671,7 @@ fn notes_tx_fate(
         );
     }
     let open = OpenTransactionId::new();
-    client.open_exclusive_for_identity(open, reader).unwrap();
+    client.open_serializable_for_identity(open, reader).unwrap();
     let query = |query: Query| {
         let shape = query.validate(&schema).unwrap();
         let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -2711,7 +2711,7 @@ fn notes_tx_fate(
         }
     }
     change(&mut other, &mut core);
-    let (_tx_id, unit) = client.commit_exclusive_settled(open, reader, 20).unwrap();
+    let (_tx_id, unit) = client.commit_serializable_settled(open, reader, 20).unwrap();
     let SyncMessage::CommitUnit { mut tx, versions } = unit else {
         panic!("expected commit unit");
     };
@@ -2766,14 +2766,14 @@ fn a_read_by_id_commits_only_with_a_row_proof() {
     let other_row = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, edit_note(row(2), "x"));
     assert_eq!(other_row, Fate::Accepted);
     let read_row = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, edit_note(row(1), "x"));
-    assert_eq!(read_row, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(read_row, Fate::Rejected(RejectionReason::SerializationConflict));
     let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, |_, _| {});
-    assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(legacy, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 /// An unproved read is checked only against rows that exist at validation,
 /// so a read by a client before alpha.58 of a row deleted since commits.
-/// Documented limitation: exclusive conflicts rely on writers reporting their
+/// Documented limitation: serializable conflicts rely on writers reporting their
 /// reads and are not a security boundary.
 #[test]
 fn a_pre_alpha58_read_of_a_row_deleted_since_commits() {
@@ -2787,7 +2787,7 @@ fn a_pre_alpha58_read_of_a_row_deleted_since_commits() {
     let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::ReadByIdThenLog, delete_note);
     assert_eq!(legacy, Fate::Accepted);
     let current = notes_tx_fate(Sender::Current, NotesTx::ReadByIdThenLog, delete_note);
-    assert_eq!(current, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(current, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 /// A client before alpha.58 records an update's read-policy check of its
@@ -2798,7 +2798,7 @@ fn a_pre_alpha58_update_conflicts_beside_other_rows() {
     let current = notes_tx_fate(Sender::Current, NotesTx::UpdateNote, |_, _| {});
     assert_eq!(current, Fate::Accepted);
     let legacy = notes_tx_fate(Sender::PreAlpha58, NotesTx::UpdateNote, |_, _| {});
-    assert_eq!(legacy, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(legacy, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 /// A proved whole-table read beside an update commits while the table is
@@ -2812,7 +2812,7 @@ fn a_proved_whole_table_read_beside_an_update_sees_new_rows() {
         NotesTx::ReadAllThenUpdateNote,
         edit_note(row(3), "new"),
     );
-    assert_eq!(fate, Fate::Rejected(RejectionReason::ExclusiveConflict));
+    assert_eq!(fate, Fate::Rejected(RejectionReason::SerializationConflict));
 }
 
 /// Orgs own projects, projects own todos, todos own comments and comments own
@@ -2913,7 +2913,7 @@ fn assert_narrowed_reads(
     };
     let binding = shape.bind(values).unwrap();
     let sources = node
-        .exclusive_source_reads(&shape, &binding, false)
+        .serializable_source_reads(&shape, &binding, false)
         .unwrap();
     // Implicit root references are sync payload and record no read.
     assert!(sources.payload.iter().all(|source| matches!(
@@ -2964,7 +2964,7 @@ fn narrowing_todos_titled() -> crate::query::Query {
 /// is narrowed the same way.
 ///
 /// White-box: soundness rests on the exact shape of each narrowed read, which
-/// no public API exposes. The `exclusive_snapshot_coverage` integration tests
+/// no public API exposes. The `serializable_snapshot_coverage` integration tests
 /// cover what a client observes (unrelated writes commit, related ones
 /// conflict).
 #[test]
@@ -3117,9 +3117,9 @@ fn narrowed_reads_follow_a_reference_array_by_membership() {
     );
 }
 
-/// Assert an exclusive read of `query` fails before reading anything, naming
+/// Assert a serializable read of `query` fails before reading anything, naming
 /// its read pattern.
-fn assert_exclusive_read_unsupported(
+fn assert_serializable_read_unsupported(
     query: crate::query::Query,
     values: BTreeMap<String, Value>,
     pattern: &str,
@@ -3128,20 +3128,20 @@ fn assert_exclusive_read_unsupported(
     let (_dir, node) = open_node_with_schema(node(1), schema.clone());
     let shape = query.validate(&schema).unwrap();
     let binding = shape.bind(values).unwrap();
-    let Err(error) = node.exclusive_source_reads(&shape, &binding, false) else {
+    let Err(error) = node.serializable_source_reads(&shape, &binding, false) else {
         panic!("{pattern} has no narrowed reads");
     };
     assert_eq!(
         error.to_string(),
-        format!("Reading {pattern} is not supported in exclusive transactions yet")
+        format!("Reading {pattern} is not supported in serializable transactions yet")
     );
 }
 
 /// A flat join routes its filters per source, so its root rows are not
 /// constrained by the root's own filters alone: it narrows nothing.
 #[test]
-fn exclusive_reads_reject_a_flat_join() {
-    assert_exclusive_read_unsupported(
+fn serializable_reads_reject_a_flat_join() {
+    assert_serializable_read_unsupported(
         crate::query::Query::from("todos").flat_join("comments", "todos._id", "comments.todo"),
         BTreeMap::new(),
         "a flat join of `todos` with `comments`",
@@ -3151,7 +3151,7 @@ fn exclusive_reads_reject_a_flat_join() {
 /// A lookup join correlates through a third table (projects sharing the
 /// org of a todo's project), which a reverse join cannot express.
 #[test]
-fn exclusive_reads_reject_a_lookup_join() {
+fn serializable_reads_reject_a_lookup_join() {
     let mut query = narrowing_todos_titled();
     query.joins.push(crate::query::JoinVia {
         table: "projects".to_owned(),
@@ -3167,7 +3167,7 @@ fn exclusive_reads_reject_a_lookup_join() {
         filters: Vec::new(),
         nested_joins: Vec::new(),
     });
-    assert_exclusive_read_unsupported(
+    assert_serializable_read_unsupported(
         query,
         BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))]),
         "`projects` through a lookup join from `todos`",
@@ -3176,7 +3176,7 @@ fn exclusive_reads_reject_a_lookup_join() {
 
 /// A membership hop has no equality to carry extra correlated keys on.
 #[test]
-fn exclusive_reads_reject_a_reference_array_join_with_extra_keys() {
+fn serializable_reads_reject_a_reference_array_join_with_extra_keys() {
     let mut query = crate::query::Query::from("people");
     query.joins.push(crate::query::JoinVia {
         table: "todos".to_owned(),
@@ -3191,7 +3191,7 @@ fn exclusive_reads_reject_a_reference_array_join_with_extra_keys() {
         filters: Vec::new(),
         nested_joins: Vec::new(),
     });
-    assert_exclusive_read_unsupported(
+    assert_serializable_read_unsupported(
         query,
         BTreeMap::new(),
         "`todos` through a reference array together with additional join keys",
@@ -3201,14 +3201,14 @@ fn exclusive_reads_reject_a_reference_array_join_with_extra_keys() {
 /// Inheriting access evaluates the parent's policy, which is not a
 /// correlation the narrowed read can carry.
 #[test]
-fn exclusive_reads_reject_inherited_access() {
+fn serializable_reads_reject_inherited_access() {
     let mut query = crate::query::Query::from("todos");
     query.inherits.push(crate::query::InheritsVia {
         parent_column: "project".to_owned(),
         operation: crate::query::InheritsOperation::Select,
         max_depth: None,
     });
-    assert_exclusive_read_unsupported(
+    assert_serializable_read_unsupported(
         query,
         BTreeMap::new(),
         "`todos` inheriting read access from `projects`",
@@ -3218,7 +3218,7 @@ fn exclusive_reads_reject_inherited_access() {
 /// Policy branches are disjunctive, so the root rows are not constrained by
 /// the root's own filters alone.
 #[test]
-fn exclusive_reads_reject_policy_branches() {
+fn serializable_reads_reject_policy_branches() {
     let mut query = crate::query::Query::from("todos");
     query.policy_branches.push(crate::query::PolicyBranch {
         filters: vec![narrowing_title_is_a()],
@@ -3232,7 +3232,7 @@ fn exclusive_reads_reject_policy_branches() {
         reachable: Vec::new(),
         inherits: Vec::new(),
     });
-    assert_exclusive_read_unsupported(
+    assert_serializable_read_unsupported(
         query,
         BTreeMap::new(),
         "`todos` through policy branches",
@@ -3242,7 +3242,7 @@ fn exclusive_reads_reject_policy_branches() {
 /// A union's rows come from several arms, so they are not constrained by
 /// the root's own filters alone.
 #[test]
-fn exclusive_reads_reject_a_union_of_relations() {
+fn serializable_reads_reject_a_union_of_relations() {
     use crate::query::{
         RelationColumnRef, RelationExpr, RelationJoinCondition, RelationJoinKind,
         RelationProjectColumn, RelationProjectExpr, RelationQuery, RelationUnionArm,
@@ -3287,7 +3287,7 @@ fn exclusive_reads_reject_a_union_of_relations() {
         },
     })
     .unwrap();
-    assert_exclusive_read_unsupported(
+    assert_serializable_read_unsupported(
         query,
         BTreeMap::new(),
         "a union of relations over `todos`",

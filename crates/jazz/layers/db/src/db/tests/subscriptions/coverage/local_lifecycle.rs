@@ -24,7 +24,6 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
         &prepared_query,
         ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     ))
@@ -62,7 +61,6 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
         &prepared_query,
         ReadOpts {
             tier: crate::db::ReadTier::Remote,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     ))
@@ -175,7 +173,6 @@ fn db_facade_schedules_immediate_tick_for_attached_query_coverage() {
         &prepared_query,
         ReadOpts {
             tier: crate::db::ReadTier::Remote,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     )
@@ -198,7 +195,6 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
         &prepared_query,
         ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     ))
@@ -215,7 +211,6 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     let prepared_query = prepared(&db, &query);
     let opts = ReadOpts {
         tier: crate::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     };
 
@@ -266,7 +261,6 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
         &prepared_query,
         ReadOpts {
             tier: crate::db::ReadTier::LocalOnly,
-            include_deleted: false,
             ..ReadOpts::default()
         },
     ))

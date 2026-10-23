@@ -1,4 +1,4 @@
-//! Mergeable and exclusive transaction staging, coalescing, provenance, and conflicts.
+//! Mergeable and serializable transaction staging, coalescing, provenance, and conflicts.
 
 use super::*;
 
@@ -101,21 +101,23 @@ fn renamed_point_absence_accepts_stable_read_and_rejects_concurrent_insert() {
     let (old, _new, pump, authority) = renamed_point_read_views(false);
     let missing = row(0x97);
     let stable = OpenTransactionId::new();
-    old.begin_exclusive(stable).unwrap();
+    old.begin_serializable(stable).unwrap();
     assert_eq!(
-        old.exclusive_tx_ref(stable).read("todos", missing).unwrap(),
+        old.serializable_tx_ref(stable)
+            .read("todos", missing)
+            .unwrap(),
         None
     );
     let accepted = old
-        .commit_exclusive_handle(stable)
+        .commit_serializable_handle(stable)
         .expect("unambiguous stable absence is valid");
     pump();
     assert_eq!(old.write_state(accepted).unwrap().fate, Fate::Accepted);
 
     let changed = OpenTransactionId::new();
-    old.begin_exclusive(changed).unwrap();
+    old.begin_serializable(changed).unwrap();
     assert_eq!(
-        old.exclusive_tx_ref(changed)
+        old.serializable_tx_ref(changed)
             .read("todos", missing)
             .unwrap(),
         None
@@ -131,11 +133,11 @@ fn renamed_point_absence_accepts_stable_read_and_rejects_concurrent_insert() {
         .collect();
     authority.insert_with_id("tasks", missing, cells).unwrap();
     // Read-only commit: no write precondition can mask absent-read validation.
-    let committed = old.commit_exclusive_handle(changed).unwrap();
+    let committed = old.commit_serializable_handle(changed).unwrap();
     pump();
     assert_eq!(
         old.write_state(committed).unwrap().fate,
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
+        Fate::Rejected(RejectionReason::SerializationConflict)
     );
 }
 
@@ -169,29 +171,29 @@ fn reused_table_name_rejects_point_read_and_absence() {
     );
     for target in [present, row(0x99)] {
         let open = OpenTransactionId::new();
-        old.begin_exclusive(open).unwrap();
-        let observed = old.exclusive_tx_ref(open).read("todos", target).unwrap();
+        old.begin_serializable(open).unwrap();
+        let observed = old.serializable_tx_ref(open).read("todos", target).unwrap();
         assert_eq!(observed.is_some(), target == present);
-        let committed = old.commit_exclusive_handle(open).unwrap();
+        let committed = old.commit_serializable_handle(open).unwrap();
         pump();
         assert_eq!(
             old.write_state(committed).unwrap().fate,
-            Fate::Rejected(RejectionReason::ExclusiveConflict)
+            Fate::Rejected(RejectionReason::SerializationConflict)
         );
     }
     let current = OpenTransactionId::new();
-    new.begin_exclusive(current).unwrap();
+    new.begin_serializable(current).unwrap();
     assert_eq!(
-        new.exclusive_tx_ref(current)
+        new.serializable_tx_ref(current)
             .read("todos", row(0x99))
             .unwrap(),
         None
     );
-    let committed = new.commit_exclusive_handle(current).unwrap();
+    let committed = new.commit_serializable_handle(current).unwrap();
     pump();
     assert_eq!(
         new.write_state(committed).unwrap().fate,
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
+        Fate::Rejected(RejectionReason::SerializationConflict)
     );
 }
 
@@ -402,11 +404,11 @@ fn reopened_seeded_row_ids_do_not_claim_freshness() {
 }
 
 #[test]
-fn exclusive_transactions_lower_oversized_scalars_before_publication() {
+fn serializable_transactions_lower_oversized_scalars_before_publication() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 91);
     let row = row(0x4e);
-    let tx = db.exclusive_tx().unwrap();
+    let tx = db.serializable_tx().unwrap();
     tx.insert(
         "todos",
         doctest_support::todo_cells(&title, false),
@@ -437,7 +439,7 @@ fn exclusive_transactions_lower_oversized_scalars_before_publication() {
         Some(Value::String(title.clone()))
     );
 
-    let update = db.exclusive_tx().unwrap();
+    let update = db.serializable_tx().unwrap();
     assert_eq!(
         update.read("todos", row).unwrap().unwrap().get("title"),
         Some(&Value::String(title.clone())),
@@ -468,7 +470,7 @@ fn exclusive_transactions_lower_oversized_scalars_before_publication() {
     });
     assert_eq!(physical, after_update, "unchanged locators must be stable");
 
-    let upsert = db.exclusive_tx().unwrap();
+    let upsert = db.serializable_tx().unwrap();
     upsert
         .upsert(
             "todos",
@@ -505,7 +507,7 @@ fn exclusive_transactions_lower_oversized_scalars_before_publication() {
         Some(Value::String(title.clone()))
     );
 
-    let forged = db.exclusive_tx().unwrap();
+    let forged = db.serializable_tx().unwrap();
     forged
         .insert(
             "todos",
@@ -575,7 +577,7 @@ fn committed_title(db: &Db) -> Option<Value> {
 /// the commit publishes the spliced value without leaking any staged root.
 #[test]
 fn transaction_splices_compose_against_the_transaction_view() {
-    for exclusive in [false, true] {
+    for serializable in [false, true] {
         let db = block_on(doctest_support::open_todos_db()).unwrap();
         let base = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
         let row = db
@@ -592,8 +594,8 @@ fn transaction_splices_compose_against_the_transaction_view() {
         let (tx_id, commit): (
             OpenTransactionId,
             Box<dyn FnOnce() -> Result<TxId, Error> + '_>,
-        ) = if exclusive {
-            let tx = db.exclusive_tx().unwrap();
+        ) = if serializable {
+            let tx = db.serializable_tx().unwrap();
             (tx.tx_id(), Box::new(move || block_on(tx.commit())))
         } else {
             let tx = db.mergeable_tx().unwrap();
@@ -651,7 +653,7 @@ fn transaction_splices_compose_against_the_transaction_view() {
 /// the splice, and the orphaned root is evicted at commit.
 #[test]
 fn transaction_replacement_supersedes_an_earlier_splice() {
-    for exclusive in [false, true] {
+    for serializable in [false, true] {
         let db = block_on(doctest_support::open_todos_db()).unwrap();
         let base = "b".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
         let row = db
@@ -663,8 +665,8 @@ fn transaction_replacement_supersedes_an_earlier_splice() {
             .unwrap()
             .row_uuid();
         let replacement = BTreeMap::from([("title".to_owned(), Value::String("short".to_owned()))]);
-        let committed = if exclusive {
-            let tx = db.exclusive_tx().unwrap();
+        let committed = if serializable {
+            let tx = db.serializable_tx().unwrap();
             block_on(db.stage_transaction_large_value_update(
                 tx.tx_id(),
                 "todos",
@@ -799,7 +801,7 @@ fn transaction_splice_rejects_invalid_targets_without_staging() {
 /// leaving them to the staging TTL.
 #[test]
 fn abandoned_transaction_releases_its_staged_splices() {
-    for exclusive in [false, true] {
+    for serializable in [false, true] {
         let db = block_on(doctest_support::open_todos_db()).unwrap();
         let base = "d".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
         let row = db
@@ -823,8 +825,8 @@ fn abandoned_transaction_releases_its_staged_splices() {
                 .unwrap();
             }
         };
-        if exclusive {
-            let tx = db.exclusive_tx().unwrap();
+        if serializable {
+            let tx = db.serializable_tx().unwrap();
             stage(tx.tx_id());
             assert_ne!(staged_large_value_count(&db), 0);
             drop(tx);
@@ -856,7 +858,7 @@ fn binding_rollback_paths_release_staged_splices() {
             .unwrap()
             .row_uuid();
         let open = OpenTransactionId::new();
-        block_on(db.begin_exclusive(open)).unwrap();
+        block_on(db.begin_serializable(open)).unwrap();
         block_on(db.stage_transaction_large_value_update(
             open,
             "todos",
@@ -884,7 +886,7 @@ fn binding_rollback_paths_release_staged_splices() {
 /// root behind once the transaction commits.
 #[test]
 fn transaction_delete_after_splice_leaves_no_staged_root() {
-    for exclusive in [false, true] {
+    for serializable in [false, true] {
         let db = block_on(doctest_support::open_todos_db()).unwrap();
         let base = "e".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 32);
         let row = db
@@ -906,8 +908,8 @@ fn transaction_delete_after_splice_leaves_no_staged_root() {
             ))
             .unwrap();
         };
-        if exclusive {
-            let tx = db.exclusive_tx().unwrap();
+        if serializable {
+            let tx = db.serializable_tx().unwrap();
             splice(tx.tx_id());
             tx.delete("todos", row, Default::default()).unwrap();
             block_on(tx.commit()).unwrap();
@@ -1332,14 +1334,14 @@ fn dropping_owned_transactions_abandons_both_kinds_immediately_when_uncontended(
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let mergeable = db.mergeable_tx().unwrap();
     let mergeable_id = mergeable.tx_id;
-    let exclusive = db.exclusive_tx().unwrap();
-    let exclusive_id = exclusive.tx_id;
+    let serializable = db.serializable_tx().unwrap();
+    let serializable_id = serializable.tx_id;
 
     drop(mergeable);
-    drop(exclusive);
+    drop(serializable);
 
     assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
-    for tx_id in [mergeable_id, exclusive_id] {
+    for tx_id in [mergeable_id, serializable_id] {
         let error = db.abandon_transaction_handle(tx_id).unwrap_err();
         assert!(error.message.contains("missing open transaction"));
     }
@@ -1352,13 +1354,13 @@ fn dropping_owned_transactions_while_node_is_locked_queues_both_abandonments() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let mergeable = db.mergeable_tx().unwrap();
     let mergeable_id = mergeable.tx_id;
-    let exclusive = db.exclusive_tx().unwrap();
-    let exclusive_id = exclusive.tx_id;
+    let serializable = db.serializable_tx().unwrap();
+    let serializable_id = serializable.tx_id;
 
     block_on(async {
         let guard = db.node.node.lock().await;
         drop(mergeable);
-        drop(exclusive);
+        drop(serializable);
         assert_eq!(db.node.pending_transaction_abandonments.borrow().len(), 2);
         drop(guard);
 
@@ -1366,7 +1368,7 @@ fn dropping_owned_transactions_while_node_is_locked_queues_both_abandonments() {
     });
 
     assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
-    for tx_id in [mergeable_id, exclusive_id] {
+    for tx_id in [mergeable_id, serializable_id] {
         let error = db.abandon_transaction_handle(tx_id).unwrap_err();
         assert!(error.message.contains("missing open transaction"));
     }
@@ -1410,12 +1412,12 @@ fn dropped_handles_beat_commit_waiters_already_ahead_of_tick() {
         assert!(mergeable_error.message.contains("was abandoned"));
         assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
 
-        let exclusive = db.exclusive_tx().await.unwrap();
-        let exclusive_id = exclusive.tx_id;
-        exclusive
+        let serializable = db.serializable_tx().await.unwrap();
+        let serializable_id = serializable.tx_id;
+        serializable
             .insert(
                 "todos",
-                doctest_support::todo_cells("exclusive abandoned", false),
+                doctest_support::todo_cells("serializable abandoned", false),
                 InsertOptions {
                     row_id: Some(row(0xd2)),
                     ..Default::default()
@@ -1425,19 +1427,19 @@ fn dropped_handles_beat_commit_waiters_already_ahead_of_tick() {
             .unwrap();
 
         let guard = db.node.node.lock().await;
-        let mut exclusive_commit = Box::pin(db.commit_exclusive_handle(exclusive_id));
+        let mut serializable_commit = Box::pin(db.commit_serializable_handle(serializable_id));
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
         assert!(matches!(
-            exclusive_commit.as_mut().poll(&mut context),
+            serializable_commit.as_mut().poll(&mut context),
             Poll::Pending
         ));
-        drop(exclusive);
+        drop(serializable);
         drop(guard);
 
-        let exclusive_error = exclusive_commit.await.unwrap_err();
-        assert_eq!(exclusive_error.code, ErrorCode::Protocol);
-        assert!(exclusive_error.message.contains("was abandoned"));
+        let serializable_error = serializable_commit.await.unwrap_err();
+        assert_eq!(serializable_error.code, ErrorCode::Protocol);
+        assert!(serializable_error.message.contains("was abandoned"));
         assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
     });
 }
@@ -1475,15 +1477,15 @@ fn queued_commits_reject_handles_abandoned_while_the_node_is_locked() {
         assert_eq!(mergeable_error.code, ErrorCode::Protocol);
         assert!(mergeable_error.message.contains("was abandoned"));
         // Settle the failed mergeable commit's idempotent cleanup before
-        // placing the independent exclusive receipt on the FIFO owner.
+        // placing the independent serializable receipt on the FIFO owner.
         db.tick().await.unwrap();
 
-        let exclusive = db.exclusive_tx().await.unwrap();
-        let exclusive_id = exclusive.tx_id;
-        exclusive
+        let serializable = db.serializable_tx().await.unwrap();
+        let serializable_id = serializable.tx_id;
+        serializable
             .insert(
                 "todos",
-                doctest_support::todo_cells("queued exclusive abandoned", false),
+                doctest_support::todo_cells("queued serializable abandoned", false),
                 InsertOptions {
                     row_id: Some(row(0xd4)),
                     ..Default::default()
@@ -1492,16 +1494,18 @@ fn queued_commits_reject_handles_abandoned_while_the_node_is_locked() {
             .await
             .unwrap();
         let node_owner = db.node.node.lock().await;
-        let exclusive_commit = db.enqueue_commit_exclusive_handle(exclusive_id).unwrap();
-        drop(exclusive);
+        let serializable_commit = db
+            .enqueue_commit_serializable_handle(serializable_id)
+            .unwrap();
+        drop(serializable);
         drop(node_owner);
         db.tick().await.unwrap();
-        let exclusive_error = exclusive_commit
+        let serializable_error = serializable_commit
             .wait(DurabilityTier::Local)
             .await
             .unwrap_err();
-        assert_eq!(exclusive_error.code, ErrorCode::Protocol);
-        assert!(exclusive_error.message.contains("was abandoned"));
+        assert_eq!(serializable_error.code, ErrorCode::Protocol);
+        assert!(serializable_error.message.contains("was abandoned"));
     });
 }
 
@@ -1515,7 +1519,7 @@ fn stale_transaction_abandonments_do_not_discard_later_queue_entries() {
     let already_terminal_id = already_terminal.tx_id;
     drop(already_terminal);
     let never_opened_id = OpenTransactionId::new();
-    let live = db.exclusive_tx().unwrap();
+    let live = db.serializable_tx().unwrap();
     let live_id = live.tx_id;
 
     db.node
@@ -1539,17 +1543,17 @@ fn close_gates_transaction_admission_and_terminalizes_close_races() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let queued_mergeable = db.mergeable_tx().unwrap();
     let queued_mergeable_id = queued_mergeable.tx_id;
-    let queued_exclusive = db.exclusive_tx().unwrap();
-    let queued_exclusive_id = queued_exclusive.tx_id;
+    let queued_serializable = db.serializable_tx().unwrap();
+    let queued_serializable_id = queued_serializable.tx_id;
     let late_mergeable = db.mergeable_tx().unwrap();
     let late_mergeable_id = late_mergeable.tx_id;
-    let late_exclusive = db.exclusive_tx().unwrap();
-    let late_exclusive_id = late_exclusive.tx_id;
+    let late_serializable = db.serializable_tx().unwrap();
+    let late_serializable_id = late_serializable.tx_id;
 
     block_on(async {
         let guard = db.node.node.lock().await;
         drop(queued_mergeable);
-        drop(queued_exclusive);
+        drop(queued_serializable);
         assert_eq!(db.node.pending_transaction_abandonments.borrow().len(), 2);
 
         let mut closing = pin!(db.close());
@@ -1562,14 +1566,14 @@ fn close_gates_transaction_admission_and_terminalizes_close_races() {
             Err(error) => error,
         };
         assert_eq!(mergeable_error.code, ErrorCode::WriteRejected);
-        let exclusive_error = match db.exclusive_tx().await {
-            Ok(_) => panic!("close must reject exclusive transaction admission"),
+        let serializable_error = match db.serializable_tx().await {
+            Ok(_) => panic!("close must reject serializable transaction admission"),
             Err(error) => error,
         };
-        assert_eq!(exclusive_error.code, ErrorCode::Protocol);
+        assert_eq!(serializable_error.code, ErrorCode::Protocol);
 
         drop(late_mergeable);
-        drop(late_exclusive);
+        drop(late_serializable);
         assert_eq!(
             db.node.pending_transaction_abandonments.borrow().len(),
             2,
@@ -1583,9 +1587,9 @@ fn close_gates_transaction_admission_and_terminalizes_close_races() {
     assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
     for tx_id in [
         queued_mergeable_id,
-        queued_exclusive_id,
+        queued_serializable_id,
         late_mergeable_id,
-        late_exclusive_id,
+        late_serializable_id,
     ] {
         let error = db.abandon_transaction_handle(tx_id).unwrap_err();
         assert!(error.message.contains("missing open transaction"));
@@ -1607,8 +1611,8 @@ fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
     block_on(async {
         let mergeable = db.mergeable_tx().await.unwrap();
         let mergeable_id = mergeable.tx_id;
-        let exclusive = db.exclusive_tx().await.unwrap();
-        let exclusive_id = exclusive.tx_id;
+        let serializable = db.serializable_tx().await.unwrap();
+        let serializable_id = serializable.tx_id;
 
         let mut observer_release = None;
         let mut queued_mutation_release = None;
@@ -1688,7 +1692,7 @@ fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
 
         db.tick().await.unwrap();
         assert!(db.node.pending_transaction_abandonments.borrow().is_empty());
-        for tx_id in [mergeable_id, exclusive_id] {
+        for tx_id in [mergeable_id, serializable_id] {
             let error = db.abandon_transaction_handle(tx_id).unwrap_err();
             assert!(
                 error.message.contains("missing open transaction"),
@@ -1697,7 +1701,7 @@ fn assert_cancelled_close_sweeps_transactions_at(wait: CloseCancellationWait) {
         }
 
         drop(mergeable);
-        drop(exclusive);
+        drop(serializable);
     });
 }
 
@@ -2070,7 +2074,7 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
 }
 
 #[test]
-fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
+fn serializable_overlay_reserves_stable_provenance_for_insert_and_update() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let existing = row(0xb1);
     db.insert(
@@ -2084,7 +2088,7 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     )
     .unwrap();
     let inserted = row(0xb2);
-    let tx = db.exclusive_tx().unwrap();
+    let tx = db.serializable_tx().unwrap();
     tx.insert(
         "todos",
         doctest_support::todo_cells("inserted", false),
@@ -2109,7 +2113,7 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
         .unwrap();
     let overlay = tx.all_prepared(&query).unwrap();
     let repeated = tx.all_prepared(&query).unwrap();
-    assert_eq!(overlay, repeated, "exclusive provenance must be stable");
+    assert_eq!(overlay, repeated, "serializable provenance must be stable");
     let provenance = |rows: &[CurrentRow], id| {
         rows.iter()
             .find(|row| row.row_uuid() == id)
@@ -2132,7 +2136,7 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
 }
 
 #[test]
-fn exclusive_crud_preserves_explicit_updated_at() {
+fn serializable_crud_preserves_explicit_updated_at() {
     let db = block_on(doctest_support::open_todos_db()).unwrap();
     let inserted = row(0xc1);
     let upserted = row(0xc2);
@@ -2165,7 +2169,7 @@ fn exclusive_crud_preserves_explicit_updated_at() {
     )
     .unwrap();
 
-    let tx = db.exclusive_tx().unwrap();
+    let tx = db.serializable_tx().unwrap();
     tx.insert(
         "todos",
         doctest_support::todo_cells("inserted", false),
@@ -2216,7 +2220,10 @@ fn exclusive_crud_preserves_explicit_updated_at() {
     let rows = block_on(db.all(
         &query,
         ReadOpts {
-            include_deleted: true,
+            read_view: crate::protocol::ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
             ..Default::default()
         },
     ))
@@ -2267,7 +2274,7 @@ fn out_of_range_explicit_timestamp_is_rejected_before_mutating() {
 /// point, table, and prepared-query paths are separate overlay consumers, so
 /// exercise all three with the same row UUID present in two logical tables.
 #[test]
-fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
+fn serializable_tx_overlay_scopes_same_row_uuid_by_table() {
     fn table_schema(name: &str) -> PublicTableSchemaBuilder {
         PublicTableSchemaBuilder::new(name)
             .column("status", PublicColumnType::Text)
@@ -2315,7 +2322,7 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
         expected_shared: &RowCells,
         expected_all: BTreeMap<RowUuid, RowCells>,
     ) where
-        T: ExclusiveTxOps,
+        T: SerializableTxOps,
     {
         assert_eq!(
             tx.read(table_name, shared_row).unwrap().as_ref(),
@@ -2386,7 +2393,7 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
                 .filter(eq(col("status"), lit("selected"))),
         )
         .unwrap();
-    let tx = db.exclusive_tx().unwrap();
+    let tx = db.serializable_tx().unwrap();
     let pending_a = cells("selected", "table A pending");
     tx.upsert("table_a", shared_row, pending_a.clone(), Default::default())
         .unwrap();
@@ -2830,7 +2837,10 @@ fn mergeable_tx_and_ref_have_identical_restore_and_reinsert_results() {
         doctest_support::block_on(db.all(
             &query,
             ReadOpts {
-                include_deleted: true,
+                read_view: crate::protocol::ReadViewSpec {
+                    include_deleted: true,
+                    ..Default::default()
+                },
                 ..ReadOpts::default()
             },
         ))
@@ -2911,7 +2921,7 @@ fn mergeable_tx_read_observes_its_staged_restore() {
 }
 
 #[test]
-fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
+fn serializable_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let table = &doctest_support::schema().tables[0];
     let row = row(1);
@@ -2927,9 +2937,9 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     .unwrap();
 
     let open_tx = OpenTransactionId::new();
-    db.begin_exclusive(open_tx).unwrap();
+    db.begin_serializable(open_tx).unwrap();
     {
-        let tx = db.exclusive_tx_ref(open_tx);
+        let tx = db.serializable_tx_ref(open_tx);
         assert_eq!(
             tx.read("todos", row).unwrap(),
             Some(doctest_support::todo_cells("base", false))
@@ -2942,7 +2952,7 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
         )
         .unwrap();
     }
-    db.commit_exclusive_handle(open_tx).unwrap();
+    db.commit_serializable_handle(open_tx).unwrap();
 
     let current = prepared_one(&db, &db.table("todos")).unwrap();
     assert_eq!(
@@ -2952,10 +2962,11 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     assert_eq!(current.cell(table, "done"), Some(Value::Bool(true)));
 }
 
-/// An exclusive transaction binds alice at begin: its staged read cannot be
+/// A serializable transaction binds alice at begin: its staged read cannot be
 /// re-authorized as bob, while the handle commit consumes that bound identity.
 #[test]
-fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
+fn identity_bound_serializable_transaction_rejects_cross_identity_reads_and_commits_as_bound_author()
+ {
     use crate::model::test_support::AllowAll;
     let schema = doctest_support::schema().allow_all();
     let db = open_db(0x11, AuthorSubject::for_test_bytes([0xa1; 16]), &schema);
@@ -2971,8 +2982,8 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
         )
         .unwrap();
 
-    db.begin_exclusive_for_identity(open, alice).unwrap();
-    db.exclusive_tx_ref(open)
+    db.begin_serializable_for_identity(open, alice).unwrap();
+    db.serializable_tx_ref(open)
         .insert(
             "todos",
             doctest_support::todo_cells("alice", false),
@@ -2985,7 +2996,7 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
 
     // Planted positive: the bound identity can read the transaction overlay.
     let staged = db
-        .exclusive_tx_ref(open)
+        .serializable_tx_ref(open)
         .all_prepared_for_identity(&prepared, alice)
         .unwrap();
     assert_eq!(staged.len(), 1);
@@ -2994,13 +3005,13 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
     assert_eq!(staged_provenance.updated_by, alice);
     assert!(matches!(
         doctest_support::block_on(
-            db.exclusive_tx_ref(open)
+            db.serializable_tx_ref(open)
                 .all_prepared_for_identity(&prepared, bob),
         ),
         Err(error) if error.code == ErrorCode::Protocol
     ));
 
-    db.commit_exclusive_handle(open).unwrap();
+    db.commit_serializable_handle(open).unwrap();
     let committed = prepared_one(
         &db,
         &db.table("todos")
@@ -3013,7 +3024,7 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
     assert_eq!(committed_provenance.updated_by, alice);
 }
 
-fn exclusive_read_for_write_schema() -> JazzSchema {
+fn serializable_read_for_write_schema() -> JazzSchema {
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -3196,13 +3207,13 @@ fn mergeable_read_for_write_is_decided_only_by_the_authority() {
     );
 }
 
-/// Alice's exclusive transaction cannot update or upsert Bob's read-hidden
+/// Alice's serializable transaction cannot update or upsert Bob's read-hidden
 /// snapshot row. Full and partial updates return the same non-disclosing error.
 ///
 /// alice tx ──full/partial UPDATE or UPSERT──► bob row ──► denied
 #[test]
-fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure() {
-    let schema = exclusive_read_for_write_schema();
+fn serializable_session_mutations_deny_hidden_existing_targets_without_disclosure() {
+    let schema = serializable_read_for_write_schema();
     let db = open_db(0xd4, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb4; 16]);
@@ -3233,9 +3244,9 @@ fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure()
         ),
     ] {
         let open = OpenTransactionId::new();
-        db.begin_exclusive_for_identity(open, alice).unwrap();
+        db.begin_serializable_for_identity(open, alice).unwrap();
         let error = db
-            .exclusive_tx_ref(open)
+            .serializable_tx_ref(open)
             .update("todos", target, patch, Default::default())
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::WriteRejected, "{label} update");
@@ -3243,13 +3254,13 @@ fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure()
             error.message,
             "read policy denied UPDATE on table todos: the operation requires read permission on the target row"
         );
-        db.abandon_exclusive_handle(open).unwrap();
+        db.abandon_serializable_handle(open).unwrap();
     }
 
     let open = OpenTransactionId::new();
-    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.begin_serializable_for_identity(open, alice).unwrap();
     let error = db
-        .exclusive_tx_ref(open)
+        .serializable_tx_ref(open)
         .upsert(
             "todos",
             target,
@@ -3262,7 +3273,7 @@ fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure()
         error.message,
         "read policy denied UPSERT on table todos: the operation requires read permission on the target row"
     );
-    db.abandon_exclusive_handle(open).unwrap();
+    db.abandon_serializable_handle(open).unwrap();
 }
 
 /// An explicit-id insert over Bob's read-hidden row answers exactly as an
@@ -3271,8 +3282,8 @@ fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure()
 ///
 /// alice tx ──INSERT(bob row id)──► same denial as UPSERT(bob row id)
 #[test]
-fn exclusive_session_insert_over_hidden_target_matches_upsert_denial() {
-    let schema = exclusive_read_for_write_schema();
+fn serializable_session_insert_over_hidden_target_matches_upsert_denial() {
+    let schema = serializable_read_for_write_schema();
     let db = open_db(0xd7, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
@@ -3296,9 +3307,9 @@ fn exclusive_session_insert_over_hidden_target_matches_upsert_denial() {
     );
 
     let open = OpenTransactionId::new();
-    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.begin_serializable_for_identity(open, alice).unwrap();
     let upsert_error = db
-        .exclusive_tx_ref(open)
+        .serializable_tx_ref(open)
         .upsert(
             "todos",
             target,
@@ -3306,12 +3317,12 @@ fn exclusive_session_insert_over_hidden_target_matches_upsert_denial() {
             Default::default(),
         )
         .unwrap_err();
-    db.abandon_exclusive_handle(open).unwrap();
+    db.abandon_serializable_handle(open).unwrap();
 
     let open = OpenTransactionId::new();
-    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.begin_serializable_for_identity(open, alice).unwrap();
     let insert_error = db
-        .exclusive_tx_ref(open)
+        .serializable_tx_ref(open)
         .insert(
             "todos",
             cells("replacement", true, alice),
@@ -3321,7 +3332,7 @@ fn exclusive_session_insert_over_hidden_target_matches_upsert_denial() {
             },
         )
         .unwrap_err();
-    db.abandon_exclusive_handle(open).unwrap();
+    db.abandon_serializable_handle(open).unwrap();
 
     assert_eq!(insert_error.code, upsert_error.code);
     assert_eq!(insert_error.message, upsert_error.message);
@@ -3340,23 +3351,23 @@ fn exclusive_session_insert_over_hidden_target_matches_upsert_denial() {
     );
 }
 
-/// Exclusive upsert distinguishes hidden-existing from absent internally: an
+/// Serializable upsert distinguishes hidden-existing from absent internally: an
 /// absent row is inserted, while an intervening insert conflicts with the
 /// recorded absence rather than silently overwriting it.
 ///
 /// alice tx ──upsert(absent)──► overlay; concurrent insert ──► commit conflict
 #[test]
-fn exclusive_session_absent_upsert_records_absence_and_observes_its_overlay() {
-    let schema = exclusive_read_for_write_schema();
+fn serializable_session_absent_upsert_records_absence_and_observes_its_overlay() {
+    let schema = serializable_read_for_write_schema();
     let db = open_db(0xd5, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
     db.set_test_provider_claims(alice, test_provider_claims(alice));
 
     let successful = row(0xc5);
     let success_open = OpenTransactionId::new();
-    db.begin_exclusive_for_identity(success_open, alice)
+    db.begin_serializable_for_identity(success_open, alice)
         .unwrap();
-    let success = db.exclusive_tx_ref(success_open);
+    let success = db.serializable_tx_ref(success_open);
     success
         .upsert(
             "todos",
@@ -3373,13 +3384,13 @@ fn exclusive_session_absent_upsert_records_absence_and_observes_its_overlay() {
             Default::default(),
         )
         .expect("the session can read and update its visible overlay row");
-    db.commit_exclusive_handle(success_open).unwrap();
+    db.commit_serializable_handle(success_open).unwrap();
 
     let conflicted = row(0xc6);
     let conflict_open = OpenTransactionId::new();
-    db.begin_exclusive_for_identity(conflict_open, alice)
+    db.begin_serializable_for_identity(conflict_open, alice)
         .unwrap();
-    db.exclusive_tx_ref(conflict_open)
+    db.serializable_tx_ref(conflict_open)
         .upsert(
             "todos",
             conflicted,
@@ -3396,18 +3407,18 @@ fn exclusive_session_absent_upsert_records_absence_and_observes_its_overlay() {
         },
     )
     .unwrap();
-    let error = db.commit_exclusive_handle(conflict_open).unwrap_err();
+    let error = db.commit_serializable_handle(conflict_open).unwrap_err();
     assert_eq!(error.code, ErrorCode::TransactionConflict);
 }
 
-/// Read-for-update authorization uses the exclusive transaction's fixed
+/// Read-for-update authorization uses the serializable transaction's fixed
 /// snapshot. A concurrent owner change cannot retroactively hide the snapshot
 /// row, but the recorded row/predicate reads make commit fail.
 ///
 /// alice tx snapshot(readable) ──concurrent owner change──► stage ✓, commit ✗
 #[test]
-fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change() {
-    let schema = exclusive_read_for_write_schema();
+fn serializable_session_update_authorizes_snapshot_then_conflicts_on_toctou_change() {
+    let schema = serializable_read_for_write_schema();
     let db = open_db(0xd6, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
     let bob = AuthorSubject::for_test_bytes([0xb6; 16]);
@@ -3424,7 +3435,7 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
     .unwrap();
 
     let open = OpenTransactionId::new();
-    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.begin_serializable_for_identity(open, alice).unwrap();
     db.update(
         "todos",
         target,
@@ -3432,7 +3443,7 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
         Default::default(),
     )
     .unwrap();
-    db.exclusive_tx_ref(open)
+    db.serializable_tx_ref(open)
         .update(
             "todos",
             target,
@@ -3440,7 +3451,7 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
             Default::default(),
         )
         .expect("the fixed snapshot still exposes Alice's target");
-    let error = db.commit_exclusive_handle(open).unwrap_err();
+    let error = db.commit_serializable_handle(open).unwrap_err();
     assert_eq!(error.code, ErrorCode::TransactionConflict);
 }
 
@@ -3451,7 +3462,7 @@ fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change(
 /// alice tx: INSERT visible row ──UPDATE/UPSERT──► same staged row
 #[test]
 fn mergeable_session_mutations_observe_visible_rows_in_their_overlay() {
-    let schema = exclusive_read_for_write_schema();
+    let schema = serializable_read_for_write_schema();
     let db = open_db(0xd7, AuthorSubject::SYSTEM, &schema);
     let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
     db.set_test_provider_claims(alice, test_provider_claims(alice));
@@ -3568,7 +3579,7 @@ fn identity_bound_mergeable_transaction_rejects_cross_identity_reads() {
 }
 
 #[test]
-fn exclusive_tx_insert_rejects_existing_and_hidden_targets() {
+fn serializable_tx_insert_rejects_existing_and_hidden_targets() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let table = &doctest_support::schema().tables[0];
@@ -3583,7 +3594,7 @@ fn exclusive_tx_insert_rejects_existing_and_hidden_targets() {
     )
     .unwrap();
 
-    let duplicate = db.exclusive_tx().unwrap();
+    let duplicate = db.serializable_tx().unwrap();
     let error = duplicate
         .insert(
             "todos",
@@ -3601,7 +3612,7 @@ fn exclusive_tx_insert_rejects_existing_and_hidden_targets() {
     );
 
     db.delete("todos", existing, Default::default()).unwrap();
-    let hidden = db.exclusive_tx().unwrap();
+    let hidden = db.serializable_tx().unwrap();
     let error = hidden
         .insert(
             "todos",
@@ -3617,11 +3628,11 @@ fn exclusive_tx_insert_rejects_existing_and_hidden_targets() {
 }
 
 #[test]
-fn exclusive_tx_insert_rejects_repeated_and_pending_tombstone_targets() {
+fn serializable_tx_insert_rejects_repeated_and_pending_tombstone_targets() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let repeated = row(0xa2);
-    let tx = db.exclusive_tx().unwrap();
+    let tx = db.serializable_tx().unwrap();
     tx.insert(
         "todos",
         doctest_support::todo_cells("first", false),
@@ -3652,7 +3663,7 @@ fn exclusive_tx_insert_rejects_repeated_and_pending_tombstone_targets() {
     );
 
     let pending_delete = row(0xa3);
-    let tx = db.exclusive_tx().unwrap();
+    let tx = db.serializable_tx().unwrap();
     tx.delete("todos", pending_delete, Default::default())
         .unwrap();
     let error = tx
@@ -3671,9 +3682,9 @@ fn exclusive_tx_insert_rejects_repeated_and_pending_tombstone_targets() {
 }
 
 /// Create-only insert existence is scoped by table: one row UUID absent from
-/// two tables can be created in both within one exclusive transaction.
+/// two tables can be created in both within one serializable transaction.
 #[test]
-fn exclusive_tx_insert_same_row_uuid_in_two_tables_creates_both() {
+fn serializable_tx_insert_same_row_uuid_in_two_tables_creates_both() {
     fn table_schema(name: &str) -> PublicTableSchemaBuilder {
         PublicTableSchemaBuilder::new(name).column("value", PublicColumnType::Text)
     }
@@ -3685,7 +3696,7 @@ fn exclusive_tx_insert_same_row_uuid_in_two_tables_creates_both() {
     let db = open_db(0x5f, AuthorSubject::SYSTEM, &schema);
     let shared_row = row(0x45);
 
-    let tx = db.exclusive_tx().unwrap();
+    let tx = db.serializable_tx().unwrap();
     for table in ["table_a", "table_b"] {
         tx.insert(
             table,
@@ -3712,16 +3723,16 @@ fn exclusive_tx_insert_same_row_uuid_in_two_tables_creates_both() {
     }
 }
 
-/// Two concurrent exclusive transactions create the same absent explicit id.
+/// Two concurrent serializable transactions create the same absent explicit id.
 /// Both stage successfully against their snapshots; the first committer wins
 /// and the second is rejected rather than replacing the created row.
 #[test]
-fn exclusive_tx_concurrent_inserts_of_absent_id_are_first_committer_wins() {
+fn serializable_tx_concurrent_inserts_of_absent_id_are_first_committer_wins() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let target = row(0xa4);
-    let first = db.exclusive_tx().unwrap();
-    let second = db.exclusive_tx().unwrap();
+    let first = db.serializable_tx().unwrap();
+    let second = db.serializable_tx().unwrap();
     for (tx, title) in [(&first, "first"), (&second, "second")] {
         tx.insert(
             "todos",
@@ -3746,7 +3757,7 @@ fn exclusive_tx_concurrent_inserts_of_absent_id_are_first_committer_wins() {
 }
 
 #[test]
-fn exclusive_tx_rejects_conflicting_concurrent_update() {
+fn serializable_tx_rejects_conflicting_concurrent_update() {
     let schema = schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
     let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
@@ -3755,8 +3766,8 @@ fn exclusive_tx_rejects_conflicting_concurrent_update() {
 
     core.insert_with_id("todos", row, cells("base", false, owner))
         .unwrap();
-    let first = core.exclusive_tx().unwrap();
-    let second = core.exclusive_tx().unwrap();
+    let first = core.serializable_tx().unwrap();
+    let second = core.serializable_tx().unwrap();
     assert_eq!(
         second.read("todos", row).unwrap().unwrap().get("title"),
         Some(&Value::String("base".to_owned()))
@@ -3777,7 +3788,7 @@ fn exclusive_tx_rejects_conflicting_concurrent_update() {
     let err = second.commit().unwrap_err();
 
     assert_eq!(err.code, ErrorCode::WriteRejected);
-    assert!(err.message.contains("ExclusiveConflict"));
+    assert!(err.message.contains("SerializationConflict"));
     assert_eq!(
         core.one(&core.table("todos"))
             .unwrap()
@@ -3788,8 +3799,8 @@ fn exclusive_tx_rejects_conflicting_concurrent_update() {
 }
 
 #[test]
-fn exclusive_tx_blind_writes_are_first_committer_wins() {
-    // Two concurrent exclusive transactions overwrite the same existing row
+fn serializable_tx_blind_writes_are_first_committer_wins() {
+    // Two concurrent serializable transactions overwrite the same existing row
     // WITHOUT reading it. With no read sets, only per-write first-committer-wins
     // (INV-TX-20) can catch the conflict — this is the exact case the earlier
     // broken validator let through (it short-circuited to "ok" on empty reads).
@@ -3802,8 +3813,8 @@ fn exclusive_tx_blind_writes_are_first_committer_wins() {
     core.insert_with_id("todos", row, cells("base", false, owner))
         .unwrap();
 
-    let first = core.exclusive_tx().unwrap();
-    let second = core.exclusive_tx().unwrap();
+    let first = core.serializable_tx().unwrap();
+    let second = core.serializable_tx().unwrap();
     first
         .insert_with_id("todos", row, cells("first", false, owner))
         .unwrap();
@@ -4086,7 +4097,7 @@ fn deferred_queued_mergeable_visibility_does_not_claim_blocked_or_failed_durabil
 // writes, without a synchronous bridge preflight or a whole-table read.
 #[test]
 fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
-    for exclusive in [false, true] {
+    for serializable in [false, true] {
         let schema = build_public_db_test_schema(
             PublicSchemaBuilder::new().table(
                 PublicTableSchemaBuilder::new("todos")
@@ -4111,8 +4122,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
         .unwrap();
         let missing = RowUuid::from_bytes([0x96; 16]);
         let bad = OpenTransactionId::new();
-        if exclusive {
-            db.begin_exclusive(bad).unwrap();
+        if serializable {
+            db.begin_serializable(bad).unwrap();
         } else {
             db.begin_mergeable(bad).unwrap();
         }
@@ -4124,8 +4135,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
             Default::default(),
         )
         .unwrap();
-        let rejected = if exclusive {
-            db.enqueue_commit_exclusive_handle(bad).unwrap()
+        let rejected = if serializable {
+            db.enqueue_commit_serializable_handle(bad).unwrap()
         } else {
             db.enqueue_commit_mergeable_handle(bad).unwrap()
         };
@@ -4141,8 +4152,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
         );
 
         let good = OpenTransactionId::new();
-        if exclusive {
-            db.begin_exclusive(good).unwrap();
+        if serializable {
+            db.begin_serializable(good).unwrap();
         } else {
             db.begin_mergeable(good).unwrap();
         }
@@ -4162,8 +4173,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
             Default::default(),
         )
         .unwrap();
-        let committed = if exclusive {
-            db.enqueue_commit_exclusive_handle(good).unwrap()
+        let committed = if serializable {
+            db.enqueue_commit_serializable_handle(good).unwrap()
         } else {
             db.enqueue_commit_mergeable_handle(good).unwrap()
         };
@@ -4184,8 +4195,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
         // preserve both that field and the preceding staged title.
         let default_row = RowUuid::from_bytes([0x97; 16]);
         let defaults = OpenTransactionId::new();
-        if exclusive {
-            db.begin_exclusive(defaults).unwrap();
+        if serializable {
+            db.begin_serializable(defaults).unwrap();
         } else {
             db.begin_mergeable(defaults).unwrap();
         }
@@ -4197,8 +4208,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
             Default::default(),
         )
         .unwrap();
-        let committed = if exclusive {
-            db.enqueue_commit_exclusive_handle(defaults).unwrap()
+        let committed = if serializable {
+            db.enqueue_commit_serializable_handle(defaults).unwrap()
         } else {
             db.enqueue_commit_mergeable_handle(defaults).unwrap()
         };
@@ -4215,8 +4226,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
         );
 
         let chain = OpenTransactionId::new();
-        if exclusive {
-            db.begin_exclusive(chain).unwrap();
+        if serializable {
+            db.begin_serializable(chain).unwrap();
         } else {
             db.begin_mergeable(chain).unwrap();
         }
@@ -4230,8 +4241,8 @@ fn queued_transaction_upsert_validates_insert_after_staged_overlay() {
             Default::default(),
         )
         .unwrap();
-        let committed = if exclusive {
-            db.enqueue_commit_exclusive_handle(chain).unwrap()
+        let committed = if serializable {
+            db.enqueue_commit_serializable_handle(chain).unwrap()
         } else {
             db.enqueue_commit_mergeable_handle(chain).unwrap()
         };

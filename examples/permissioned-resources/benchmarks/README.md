@@ -12,9 +12,9 @@ and the relay retains authorized input versions rather than acting as a server
 authority. The relay remains in the measured topology, as in the separate browser
 fanout benchmark (whose foreground is non-durable).
 
-The new `first_sync_local_relay_27518_rocksdb` identity starts a fresh baseline.
-Do not interpret differences from the retired `first_sync_27518_rocksdb` server-edge
-workload as a like-for-like optimization. Its metadata remains for historical runs.
+The `first_sync_local_relay_27518_rocksdb` identity started a fresh baseline. The
+retired `first_sync_27518_rocksdb` measured a Core → Edge → Client topology that is
+no longer supported; it has no metadata, so the examples page no longer lists it.
 
 The local profile's warm phase closes and reopens the persistence relay. Its row
 cache survives, and so does the durable "Q at W" watermark of each row-local view

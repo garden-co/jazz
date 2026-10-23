@@ -108,6 +108,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         })],
         peer_payload_inventory: Default::default(),
         supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(vec![crate::protocol::SupportingRow {
+                is_current: true,
                 physical_table: receiver.local_availability_table_id(reintroduced.version_id(), "tasks").unwrap(),
                 version_table: "tasks".to_owned().into(),
                 row: task_row,
@@ -141,10 +142,10 @@ fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
     let (_reader_dir, mut reader) = open_node_with_uuid(node(3));
     let row_uuid = row(0xc7);
     let open = OpenTransactionId::new();
-    core.open_exclusive(open).unwrap();
+    core.open_serializable(open).unwrap();
     core.tx_write(open, "todos", row_uuid, title_cells("restored"), None).unwrap();
     core.tx_write(open, "todos", row_uuid, BTreeMap::<String, Value>::new(), Some(DeletionEvent::Restored)).unwrap();
-    let (tx_id, _) = core.commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10).unwrap();
+    let (tx_id, _) = core.commit_serializable_settled(open, AuthorSubject::SYSTEM, 10).unwrap();
     core.apply_fate_update(tx_id, Fate::Accepted, Some(GlobalTime(1)), Some(DurabilityTier::Global)).unwrap();
     let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
@@ -173,12 +174,12 @@ fn supporting_snapshot_repairs_missing_same_transaction_deletion_layer() {
         "a resident content sibling must not hide the missing deletion witness");
 }
 
-/// Alice's exclusive write survives a table rename in Bob's scoped snapshot.
+/// Alice's serializable write survives a table rename in Bob's scoped snapshot.
 /// Alice -> two-table transaction -> server rename -> Bob's one-table view.
 /// The node-level wire assertion is needed to prove that a same-UUID sibling
 /// outside Bob's requested shape is not shipped alongside the selected body.
 #[test]
-fn renamed_exclusive_snapshot_preserves_only_selected_physical_rows() {
+fn renamed_serializable_snapshot_preserves_only_selected_physical_rows() {
     let base = build_public_test_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -202,7 +203,7 @@ fn renamed_exclusive_snapshot_preserves_only_selected_physical_rows() {
     let (_server_dir, mut server) = open_node_with_schema(node(0xa8), base.clone());
     let shared_uuid = row(0xa9);
     let open = OpenTransactionId::new();
-    server.open_exclusive(open).unwrap();
+    server.open_serializable(open).unwrap();
     server
         .tx_write(
             open,
@@ -222,7 +223,7 @@ fn renamed_exclusive_snapshot_preserves_only_selected_physical_rows() {
         )
         .unwrap();
     let (tx_id, _) = server
-        .commit_exclusive_settled(open, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(open, AuthorSubject::SYSTEM, 10)
         .unwrap();
     server
         .apply_fate_update(

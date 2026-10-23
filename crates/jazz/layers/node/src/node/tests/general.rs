@@ -664,10 +664,10 @@ fn malformed_version_receipts_fail_closed_at_direct_semantic_ingress() {
         },
     )));
 
-    let (_exclusive_dir, mut exclusive) = open_node();
+    let (_serializable_dir, mut serializable) = open_node();
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let outcome = exclusive
-            .finalize_local_exclusive_commit(tx.clone(), vec![malformed.clone()])
+        let outcome = serializable
+            .finalize_local_serializable_commit(tx.clone(), vec![malformed.clone()])
             .resolve()?;
         if matches!(outcome.value, Fate::Rejected(RejectionReason::MalformedCommit(_))) {
             Err(Error::UnsupportedCommitUnit("expected malformed rejection"))

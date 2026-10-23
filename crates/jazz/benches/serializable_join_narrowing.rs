@@ -1,4 +1,4 @@
-//! Payload and contention of exclusive reads through a join, which record the
+//! Payload and contention of serializable reads through a join, which record the
 //! joined source as the narrowed read of the rows the join could have
 //! consulted (garden-co/jazz#3694). Before narrowed reads, the joined source
 //! was recorded as its whole table: at 1,000 joined rows that downloaded
@@ -8,16 +8,16 @@
 //! A Core shell serves clients over queued wire transports. The owner seeds
 //! `JOINED_ROWS` invites, each already redeemed by one member, plus the
 //! invites the benchmark redeems. A redemption reads
-//! `invites where code = X join members on code` inside an exclusive
+//! `invites where code = X join members on code` inside a serializable
 //! transaction, inserts a member and commits.
 //!
 //! ```text
-//! cargo bench -p jazz --features testing --bench exclusive_join_narrowing
+//! cargo bench -p jazz --features testing --bench serializable_join_narrowing
 //! ```
 //!
 //! The default run exposes one wall-time redemption to Divan. Set
-//! `JAZZ_EXCLUSIVE_NARROWING_RECEIPT=1` to print a JSON receipt instead: the
-//! bytes the redeeming client downloads for its exclusive read, the bytes it
+//! `JAZZ_SERIALIZABLE_NARROWING_RECEIPT=1` to print a JSON receipt instead: the
+//! bytes the redeeming client downloads for its serializable read, the bytes it
 //! uploads to commit, and how many of `CONCURRENT` simultaneous redemptions
 //! of different invites conflict.
 
@@ -29,7 +29,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, ReadOpts, SerializableTxOps, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -51,7 +51,7 @@ const MAX_TURNS: usize = 400;
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
-    if std::env::var_os("JAZZ_EXCLUSIVE_NARROWING_RECEIPT").is_some() {
+    if std::env::var_os("JAZZ_SERIALIZABLE_NARROWING_RECEIPT").is_some() {
         run_receipt();
         return;
     }
@@ -59,7 +59,7 @@ fn main() {
 }
 
 #[divan::bench(sample_count = 10, sample_size = 1)]
-fn exclusive_join_redemption(bencher: divan::Bencher<'_, '_>) {
+fn serializable_join_redemption(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| {
             let net = Net::new(2);
@@ -107,7 +107,7 @@ fn run_receipt() {
     println!(
         "{}",
         json!({
-            "bench": "exclusive_join_narrowing",
+            "bench": "serializable_join_narrowing",
             "joined_rows": JOINED_ROWS,
             "read_download_bytes": read_down,
             "commit_upload_bytes": commit_up,
@@ -181,7 +181,7 @@ struct Net {
     clients: Vec<Client>,
 }
 
-/// An exclusive redemption whose reads are done and whose commit is not.
+/// A serializable redemption whose reads are done and whose commit is not.
 struct Redemption {
     client: usize,
     open: OpenTransactionId,
@@ -347,11 +347,11 @@ impl Net {
         );
     }
 
-    /// Open an exclusive transaction on `client` and check that `code` is a
+    /// Open a serializable transaction on `client` and check that `code` is a
     /// live invite nobody has redeemed.
     fn begin_redemption(&self, client: usize, code: &str) -> Redemption {
         let open = OpenTransactionId::new();
-        block_on(self.db(client).begin_exclusive(open)).unwrap();
+        block_on(self.db(client).begin_serializable(open)).unwrap();
         assert_eq!(
             self.read(
                 client,
@@ -380,13 +380,13 @@ impl Net {
     /// Redeem, commit and report whether the authority accepted the commit.
     fn finish_redemption(&self, redemption: Redemption) -> bool {
         let db = self.db(redemption.client);
-        self.drive(db.exclusive_tx_ref(redemption.open).insert(
+        self.drive(db.serializable_tx_ref(redemption.open).insert(
             "members",
             cells(&redemption.code),
             Default::default(),
         ))
         .unwrap();
-        let Ok(tx_id) = self.drive(db.commit_exclusive_handle(redemption.open)) else {
+        let Ok(tx_id) = self.drive(db.commit_serializable_handle(redemption.open)) else {
             return false;
         };
         self.settle(redemption.client, tx_id)

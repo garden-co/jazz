@@ -1241,11 +1241,11 @@ where
                         Value::Nullable(Some(value)) => match *value {
                             Value::Bytes(bytes) => Ok(Some(bytes)),
                             _ => Err(Error::InvalidStoredValue(
-                                "exclusive read evidence slot is not bytes",
+                                "serializable read evidence slot is not bytes",
                             )),
                         },
                         _ => Err(Error::InvalidStoredValue(
-                            "exclusive read evidence slot is not nullable",
+                            "serializable read evidence slot is not nullable",
                         )),
                     }
                 };
@@ -1255,24 +1255,26 @@ where
                     evidence_slot(PendingTransactionRowRecord::FIELD_ABSENT_READ_SET_IDX)?,
                     evidence_slot(PendingTransactionRowRecord::FIELD_PREDICATE_READ_SET_IDX)?,
                 ];
-                if kind != TxKind::Exclusive && slots.iter().any(Option::is_some) {
+                if kind != TxKind::Serializable && slots.iter().any(Option::is_some) {
                     return Err(Error::InvalidStoredValue(
-                        "mergeable transaction carries exclusive read evidence",
+                        "mergeable transaction carries serializable read evidence",
                     ));
                 }
                 if !matches!(fate, Fate::Pending) && slots.iter().any(Option::is_some) {
                     return Err(Error::InvalidStoredValue(
-                        "settled transaction keeps exclusive read evidence",
+                        "settled transaction keeps serializable read evidence",
                     ));
                 }
-                super::exclusive_read_evidence::decode_evidence_slots(
+                super::serializable_read_evidence::decode_evidence_slots(
                     slots[0].as_deref(),
                     slots[1].as_deref(),
                     slots[2].as_deref(),
                     slots[3].as_deref(),
                 )?
             }
-            None => super::exclusive_read_evidence::decode_evidence_slots(None, None, None, None)?,
+            None => {
+                super::serializable_read_evidence::decode_evidence_slots(None, None, None, None)?
+            }
         };
         let contribution_merge = if flags & TX_FLAG_HAS_PROVENANCE != 0 {
             let raw = self

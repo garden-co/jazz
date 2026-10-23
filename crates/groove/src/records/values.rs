@@ -1894,7 +1894,7 @@ impl ValueType {
         }
     }
 
-    pub(super) fn fixed_size(&self) -> Option<usize> {
+    pub(crate) fn fixed_size(&self) -> Option<usize> {
         match self {
             Self::U8 | Self::Bool => Some(1),
             Self::U16 => Some(2),

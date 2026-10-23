@@ -44,7 +44,7 @@ pub trait SettledNodeTestExt {
         &mut self,
         snapshot: CatalogueSnapshot,
     ) -> Result<(), Error>;
-    fn commit_exclusive_settled(
+    fn commit_serializable_settled(
         &mut self,
         tx_id: OpenTransactionId,
         author: AuthorSubject,
@@ -154,14 +154,14 @@ where
         })
     }
 
-    fn commit_exclusive_settled(
+    fn commit_serializable_settled(
         &mut self,
         tx_id: OpenTransactionId,
         author: AuthorSubject,
         now_ms: u64,
     ) -> Result<(TxId, SyncMessage), Error> {
         crate::local_executor::block_on(async {
-            let (published, unit) = self.commit_exclusive(tx_id, author, now_ms).await?;
+            let (published, unit) = self.commit_serializable(tx_id, author, now_ms).await?;
             let tx_id = self.persist_and_settle_transaction(published).await?;
             Ok((tx_id, unit))
         })

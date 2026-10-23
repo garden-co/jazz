@@ -178,7 +178,6 @@ fn room_query(db: &Db, room: &str) -> PreparedQuery {
 fn subscription_opts() -> ReadOpts {
     ReadOpts {
         tier: ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

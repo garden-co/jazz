@@ -90,7 +90,6 @@ fn query() -> Query {
 fn local_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

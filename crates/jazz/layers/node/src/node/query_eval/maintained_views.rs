@@ -435,6 +435,16 @@ where
                 settled_binding_view,
                 settled_authority_result_key.clone(),
                 PreparedClaimBindingMode::Strict,
+                // A local serving aggregate consumes its own result. Peer
+                // publishers instead request witnesses for receiver-side
+                // aggregation; authorization mode alone cannot distinguish them.
+                if shape.query().aggregate.is_some()
+                    && authorization_mode == QueryAuthorizationMode::TrustedServing
+                {
+                    CurrentQueryProgramOutput::AppRows
+                } else {
+                    CurrentQueryProgramOutput::MaintainedView
+                },
                 pending_overlay,
                 progress_waker,
             ),
@@ -1067,8 +1077,8 @@ where
     }
 
     /// Decode one exact covered source fact into its descriptor-bound runtime
-    /// tuple. Deletion witnesses are validated but intentionally contribute no
-    /// tuple: their absence retracts a previously installed content carrier.
+    /// tuple. Ordinary reads omit deleted images; include-deleted reads retain
+    /// the exact image admitted by the authority.
     async fn covered_input_runtime_record(
         &mut self,
         input: &SupportingRow,
@@ -1082,7 +1092,7 @@ where
             .covered_input_version(input, result_schema_version)
             .await?
             .ok_or(Error::MissingTransaction(input.version.tx))?;
-        if version.is_deleted() {
+        if version.is_deleted() && !read_view.include_deleted {
             return Ok(None);
         }
         let row = self
@@ -1114,6 +1124,11 @@ where
         // publication reloads the original record rather than treating the
         // logical projection as a synthetic version in the read schema.
         let schema_alias = version.schema_version_alias();
+        let row = if version.is_deleted() {
+            row.into_deleted()
+        } else {
+            row
+        };
         let record = super::read_sources::covered_input_record(
             &self.authors,
             &source_table,
@@ -1121,6 +1136,7 @@ where
             &row,
             schema_alias,
             &version.branch_key(),
+            input.is_current,
         )?;
         #[cfg(feature = "cold-settle-attribution")]
         version.record_conversion("covered_input_record", record.len());

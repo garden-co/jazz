@@ -226,15 +226,21 @@ fn content_row_members_for_bundle(
         .iter()
         .filter(|member| member.as_row().is_some())
         .map(|member| {
-            member.as_row().ok_or(Error::InvalidStoredValue(match member {
-                ResultMemberEntry::Row(_) | ResultMemberEntry::TypedRow { .. } => context,
+            let (table, row, tx) = member.as_row().ok_or(Error::InvalidStoredValue(match member {
+                ResultMemberEntry::Row(_) => context,
                 ResultMemberEntry::Synthetic { .. } => {
                     "synthetic result members require typed payload facts before row bundle shipping"
                 }
                 ResultMemberEntry::PathTuple { .. } => {
                     "path tuple result members require typed payload facts before row bundle shipping"
                 }
-            }))
+            }))?;
+            // Virtual history outputs refer to ordinary stored versions. Use
+            // their base table for immutable bodies and visibility witnesses,
+            // including restore-only events needed by local-first readers.
+            let table = crate::schema::history::history_source_table(&table)
+                .map(|name| name.to_owned().into()).unwrap_or(table);
+            Ok((table, row, tx))
         })
         .collect()
 }
@@ -268,7 +274,10 @@ pub fn single_table_scalar_query(query: &crate::query::Query) -> bool {
             Predicate::EnumMatch { .. } => false,
         }
     }
-    query.filters.iter().all(predicate)
+    // Current-row reconciliation is keyed by row UUID; history needs its
+    // full occurrence identity and stays on the maintained relational path.
+    !query.uses_history()
+        && query.filters.iter().all(predicate)
         && query.joins.is_empty()
         && query.flat_join.is_none()
         && query.policy_branches.is_empty()
@@ -301,7 +310,7 @@ pub struct MaintainedViewBundleInputs<'a> {
     pub settled_through: GlobalTime,
     /// Peer inventory of transactions whose full row-version payload has
     /// already shipped on this link. Partial payload coverage is not recorded
-    /// here, even when it is enough for a subscription-scoped exclusive result.
+    /// here, even when it is enough for a subscription-scoped serializable result.
     pub peer_complete_tx_payloads: BTreeSet<TxId>,
     /// Optional fast known-state declaration for this served subscription.
     pub known_state: Option<KnownStateDeclaration>,
@@ -309,9 +318,9 @@ pub struct MaintainedViewBundleInputs<'a> {
     /// for a full resend: rows that moved past it and left the set still
     /// ship their current image so the receiver's copy stops matching.
     pub leave_scan_after: Option<GlobalTime>,
-    /// Ship complete accepted exclusive transaction payloads so the receiver can
-    /// use refreshed rows as a write base for later exclusive transactions.
-    pub complete_exclusive_payloads: bool,
+    /// Ship complete accepted serializable transaction payloads so the receiver can
+    /// use refreshed rows as a write base for later serializable transactions.
+    pub complete_serializable_payloads: bool,
     #[doc(hidden)]
     pub previous_result_set: BTreeSet<TxId>,
     #[doc(hidden)]
@@ -438,7 +447,7 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            // The author or relay of a pending exclusive transaction stores
+            // The author or relay of a pending serializable transaction stores
             // its read evidence; view carriers never ship it. Compare the
             // payload, not the local-only evidence.
             if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
@@ -712,7 +721,7 @@ where
                 peer_complete_tx_payloads,
                 known_state: None,
                 leave_scan_after: None,
-                complete_exclusive_payloads: false,
+                complete_serializable_payloads: false,
                 previous_result_set,
                 identity,
                 tier,
@@ -729,6 +738,7 @@ where
         schema: SchemaVersionId,
         table: &str,
     ) -> Result<crate::ids::GlobalPhysicalTableId, Error> {
+        let table = crate::schema::history::history_source_table(&table).unwrap_or(table);
         self.catalogue
             .physical_mappings
             .get(&schema)
@@ -737,6 +747,25 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "scope physical table mapping missing",
             ))
+    }
+
+    pub(super) fn scope_tables<'a>(
+        &self,
+        schema: SchemaVersionId,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<CompiledScopeTables, Error> {
+        let mut tables = CompiledScopeTables::new();
+        for name in names {
+            let physical = self.scope_physical_table(schema, name)?;
+            tables.insert(
+                physical,
+                crate::schema::history::history_source_table(&name)
+                    .unwrap_or(name)
+                    .to_owned()
+                    .into(),
+            );
+        }
+        Ok(tables)
     }
 
     pub(super) fn scope_logical_table(
@@ -813,15 +842,23 @@ where
             }) else {
                 return Err(invalid());
             };
+            let replacement_coordinate = |input: &SupportingRow| {
+                let coordinate = CoveredInputCoordinate::from(input);
+                if input.is_current {
+                    coordinate.row_coordinate()
+                } else {
+                    coordinate
+                }
+            };
             let moved = changed
                 .iter()
                 .chain(left)
-                .map(CoveredInputCoordinate::from)
+                .map(replacement_coordinate)
                 .collect::<BTreeSet<_>>();
             let mut rows = state
                 .covered_input_versions
                 .iter()
-                .filter(|(coordinate, _)| !moved.contains(*coordinate))
+                .filter(|(_, row)| !moved.contains(&replacement_coordinate(row)))
                 .map(|(_, row)| row.clone())
                 .collect::<Vec<_>>();
             rows.extend(changed.iter().cloned());
@@ -919,7 +956,7 @@ where
             peer_complete_tx_payloads,
             known_state,
             leave_scan_after,
-            complete_exclusive_payloads,
+            complete_serializable_payloads,
             previous_result_set: _previous_result_set,
             result_member_adds,
             result_member_removes,
@@ -934,8 +971,12 @@ where
         // authoritative node store when shipping a newly admitted member.
         // Keep callers' explicit fallback flag for the legacy cases that
         // already use it.
+        // History witnesses use the virtual query schema (including magic
+        // columns). Ship their exact authored storage images, addressed by
+        // the already-authorized supporting row and transaction.
         let allow_storage_witness_fallback = allow_storage_witness_fallback
-            || maintained_facts.uses_storage_backed_result_materialization();
+            || maintained_facts.uses_storage_backed_result_materialization()
+            || shape.query().uses_history();
         let supporting_update = supporting_update.unwrap_or_else(|| {
             crate::protocol::SupportingRowsUpdate::snapshot(
                 maintained_facts.supporting_rows().cloned().collect(),
@@ -1084,7 +1125,7 @@ where
                 // require this transaction, while other siblings remain private.
                 tx_versions_cache
                     .entry(tx_id)
-                    .or_insert_with(|| maintained_facts.versions_by_tx(tx_id))
+                    .or_insert_with(|| maintained_facts.publication_versions_by_tx(tx_id))
                     .extend(versions.into_iter().filter(|version| !version.is_deleted()));
                 wanted_add_rows_by_tx
                     .entry(tx_id)
@@ -1137,7 +1178,7 @@ where
             }
             let tx_versions = tx_versions_cache
                 .entry(*tx_id)
-                .or_insert_with(|| maintained_facts.versions_by_tx(*tx_id));
+                .or_insert_with(|| maintained_facts.publication_versions_by_tx(*tx_id));
             // These checks only need content-witness presence, not a selected
             // version. Index once rather than decoding row identities while
             // scanning the transaction twice for every requested row. Keep
@@ -1148,10 +1189,24 @@ where
                 .filter(|version| !version.is_deleted())
                 .map(|version| (version.table().to_owned(), version.row_uuid()))
                 .collect::<BTreeSet<_>>();
+            let deletion_coordinates = tx_versions
+                .iter()
+                .filter(|version| version.is_deleted())
+                .map(|version| (version.table().to_owned(), version.row_uuid()))
+                .collect::<BTreeSet<_>>();
             let mut needs_storage_fallback = false;
             for (entry_table, row_uuid) in wanted_rows {
                 let coordinate = (entry_table.clone(), *row_uuid);
-                if content_coordinates.contains(&coordinate) {
+                // Supporting membership can name a deletion register alone.
+                // Only an actual result member requires a content witness.
+                if content_coordinates.contains(&coordinate)
+                    || (deletion_coordinates.contains(&coordinate)
+                        && !result_add_coordinates.contains(&(
+                            entry_table.as_str(),
+                            *row_uuid,
+                            *tx_id,
+                        )))
+                {
                     continue;
                 }
                 let (content_winner, _) = maintained_facts.replacement_for(entry_table, *row_uuid);
@@ -1175,17 +1230,18 @@ where
                     .query_transaction_memo(*tx_id, &mut context)
                     .await?
                     .ok_or(Error::MissingTransaction(*tx_id))?;
-                let fallback_versions =
-                    if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
-                        self.query_versions_for_tx(*tx_id).await?
-                    } else {
-                        self.query_versions_for_tx_rows_by_alias(
-                            *tx_id,
-                            stored_tx.node_alias,
-                            wanted_rows,
-                        )
-                        .await?
-                    };
+                let fallback_versions = if complete_serializable_payloads
+                    && stored_tx.tx.kind == TxKind::Serializable
+                {
+                    self.query_versions_for_tx(*tx_id).await?
+                } else {
+                    self.query_versions_for_tx_rows_by_alias(
+                        *tx_id,
+                        stored_tx.node_alias,
+                        wanted_rows,
+                    )
+                    .await?
+                };
                 tx_versions_cache.insert(*tx_id, fallback_versions);
             }
             let mut same_transaction_deletion_winners = Vec::new();
@@ -1238,13 +1294,13 @@ where
                     .await?
                     .ok_or(Error::MissingTransaction(*tx_id))?;
                 // A trusted writer link that explicitly requests complete
-                // exclusive payloads must receive the whole cross-table
+                // serializable payloads must receive the whole cross-table
                 // transaction, not one permanently redacted fragment per
                 // table subscription. Identity-scoped links remain bounded
                 // by their maintained policy witnesses even when the peer
                 // preference is enabled.
-                if complete_exclusive_payloads
-                    && stored_tx.tx.kind == TxKind::Exclusive
+                if complete_serializable_payloads
+                    && stored_tx.tx.kind == TxKind::Serializable
                     && usize::try_from(stored_tx.tx.n_total_writes).ok() != Some(tx_versions.len())
                 {
                     *tx_versions = self.query_versions_for_tx(*tx_id).await?;
@@ -1252,7 +1308,7 @@ where
                 let filtered_tx_versions = tx_versions
                     .iter()
                     .filter(|version| {
-                        complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive
+                        complete_serializable_payloads && stored_tx.tx.kind == TxKind::Serializable
                             || wanted_rows
                                 .contains(&(version.table().to_owned(), version.row_uuid()))
                     })
@@ -1536,7 +1592,7 @@ where
                 .collect::<BTreeSet<_>>();
             let tx_versions = tx_versions_cache
                 .entry(tx_id)
-                .or_insert_with(|| maintained_facts.versions_by_tx(tx_id));
+                .or_insert_with(|| maintained_facts.publication_versions_by_tx(tx_id));
             if winners.iter().any(|(_, _, winner, _)| {
                 !maintained_view_tx_versions_contain_winner(tx_versions, winner)
             }) {
@@ -1553,25 +1609,26 @@ where
                     .query_transaction_memo(tx_id, &mut context)
                     .await?
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                let fallback_versions =
-                    if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
-                        self.query_versions_for_tx(tx_id).await?
-                    } else {
-                        self.query_versions_for_tx_rows_by_alias(
-                            tx_id,
-                            stored_tx.node_alias,
-                            &wanted_rows,
-                        )
-                        .await?
-                    };
+                let fallback_versions = if complete_serializable_payloads
+                    && stored_tx.tx.kind == TxKind::Serializable
+                {
+                    self.query_versions_for_tx(tx_id).await?
+                } else {
+                    self.query_versions_for_tx_rows_by_alias(
+                        tx_id,
+                        stored_tx.node_alias,
+                        &wanted_rows,
+                    )
+                    .await?
+                };
                 tx_versions_cache.insert(tx_id, fallback_versions);
             }
             let stored_tx = self
                 .query_transaction_memo(tx_id, &mut context)
                 .await?
                 .ok_or(Error::MissingTransaction(tx_id))?;
-            if complete_exclusive_payloads
-                && stored_tx.tx.kind == TxKind::Exclusive
+            if complete_serializable_payloads
+                && stored_tx.tx.kind == TxKind::Serializable
                 && usize::try_from(stored_tx.tx.n_total_writes).ok()
                     != tx_versions_cache.get(&tx_id).map(Vec::len)
             {
@@ -1587,7 +1644,7 @@ where
             }
             emitted_versions.insert(tx_id);
             let bundled_versions =
-                if complete_exclusive_payloads && stored_tx.tx.kind == TxKind::Exclusive {
+                if complete_serializable_payloads && stored_tx.tx.kind == TxKind::Serializable {
                     tx_versions.clone()
                 } else {
                     tx_versions
@@ -1608,10 +1665,10 @@ where
             record_maintained_view_removal_stream_bundle();
         }
         for bundle in &mut version_bundles {
-            if bundle.tx.kind != TxKind::Exclusive {
+            if bundle.tx.kind != TxKind::Serializable {
                 continue;
             }
-            if complete_exclusive_payloads {
+            if complete_serializable_payloads {
                 continue;
             }
             let Some(wanted_rows) = wanted_add_rows_by_tx.get(&bundle.tx.tx_id) else {
@@ -2097,6 +2154,35 @@ where
                         }
                     };
                     if adding {
+                        // Each register has at most one admitted current winner,
+                        // alongside any number of exact historical versions.
+                        if row.is_current {
+                            let base = coordinate.row_coordinate();
+                            let changed = changes
+                                .range(base.clone()..)
+                                .take_while(|(key, _)| key.row_coordinate() == base)
+                                .any(|(key, value)| {
+                                    key != &coordinate
+                                        && value.as_ref().is_some_and(|row| row.is_current)
+                                });
+                            let retained = !*cleared
+                                && state.is_some_and(|state| {
+                                    state
+                                        .covered_input_versions
+                                        .range(base.clone()..)
+                                        .take_while(|(key, _)| key.row_coordinate() == base)
+                                        .any(|(key, row)| {
+                                            key != &coordinate
+                                                && row.is_current
+                                                && !changes.contains_key(key)
+                                        })
+                                });
+                            if changed || retained {
+                                return Err(invalid(
+                                    "scope addition conflicts with a retained current row version",
+                                ));
+                            }
+                        }
                         if let Some(retained) = current {
                             return Err(invalid(&format!(
                                 "scope addition duplicates a retained physical coordinate \
@@ -2653,14 +2739,14 @@ where
             stored_identity = transaction_without_permission_subject(&stored_identity);
             let mut incoming_identity = bundle.tx.clone();
             incoming_identity.n_total_writes = 0;
-            // The author or relay of a pending exclusive transaction stores
+            // The author or relay of a pending serializable transaction stores
             // its read evidence; view carriers never ship it. Compare the
             // payload, not the local-only evidence.
             if !known_transaction_payload_matches(&stored_identity, &incoming_identity) {
                 return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id));
             }
         }
-        if bundle.tx.kind != TxKind::Exclusive {
+        if bundle.tx.kind != TxKind::Serializable {
             if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
                 return self
                     .ingest_view_scoped_transaction_with_current_indexes(
@@ -2726,7 +2812,7 @@ where
             };
         }
         let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
-            Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
+            Error::InvalidStoredValue("serializable transaction write count does not fit usize")
         })?;
         let tx_id = bundle.tx.tx_id;
         let mut stored_versions = if self.query_transaction(tx_id).await?.is_some() {
@@ -2802,10 +2888,10 @@ where
             ));
         }
         if bundle.scope == crate::protocol::VersionBundleScope::ViewScoped {
-            // A view-scoped exclusive fragment may extend a projection already
+            // A view-scoped serializable fragment may extend a projection already
             // installed by an earlier reset. Its redacted cardinality is
             // deliberately not a whole-transaction completeness claim, so do
-            // not take the complete-exclusive fast path below merely because
+            // not take the complete-serializable fast path below merely because
             // the transaction itself is already known.
             if !staged_tx_ids.insert(bundle.tx.tx_id) {
                 return Ok(true);
@@ -2830,9 +2916,9 @@ where
         if self.query_transaction(bundle.tx.tx_id).await?.is_some() {
             return Ok(false);
         }
-        if bundle.tx.kind == TxKind::Exclusive {
+        if bundle.tx.kind == TxKind::Serializable {
             let complete_len = usize::try_from(bundle.tx.n_total_writes).map_err(|_| {
-                Error::InvalidStoredValue("exclusive transaction write count does not fit usize")
+                Error::InvalidStoredValue("serializable transaction write count does not fit usize")
             })?;
             if bundle.versions.len() != complete_len {
                 return Ok(false);
@@ -3039,7 +3125,7 @@ where
             // Policy capabilities are local authority state and never part of
             // a view or repair carrier. Durable made_by remains explicit.
             permission_subject: None,
-            // Exclusive read evidence is kept only for retransmitting the
+            // Serializable read evidence is kept only for retransmitting the
             // author's own pending unit; view carriers never expose it.
             base_snapshot: None,
             row_read_set: None,

@@ -165,69 +165,172 @@ pub fn authorized_deletion_preimage_source_request(
     Some(preimage)
 }
 
+// A join can supply a source's lookup keys without executing a query during
+// preparation. Lower its already-resolved input as a live graph; the lookup
+// consequently gains and loses keys with the ordinary maintained input.
+fn source_lookup(
+    compilation: &QueryProgramCompilation,
+    target: &SourceId,
+    sources: &ResolvedQuerySources,
+    supports: impl Fn(&str) -> bool,
+) -> Option<SourceLookup> {
+    fn key_source(value: &NormalizedValueRef) -> Option<(&SourceId, &str)> {
+        match value {
+            NormalizedValueRef::RowId(RowIdRef::Source(source)) => Some((source, "id")),
+            NormalizedValueRef::SourceField { source, field } => Some((source, field)),
+            NormalizedValueRef::Magic { source, column } => Some((source, column.name())),
+            _ => None,
+        }
+    }
+    for expression in compilation.request.input.shape.nodes.values() {
+        let RowSetExpr::Join {
+            left,
+            right,
+            mode: JoinMode::Inner,
+            on,
+        } = expression
+        else {
+            continue;
+        };
+        let PredicateExpr::Compare {
+            left: left_key,
+            op: ComparisonOp::Eq,
+            right: right_key,
+        } = on
+        else {
+            continue;
+        };
+        for (target_key, driver_key, driver_input) in
+            [(left_key, right_key, right), (right_key, left_key, left)]
+        {
+            let Some((source, target_field)) = key_source(target_key) else {
+                continue;
+            };
+            if source != target || !supports(target_field) {
+                continue;
+            }
+            let Some((driver, field)) = key_source(driver_key) else {
+                continue;
+            };
+            let Some(driver_source) = sources.get(driver) else {
+                continue;
+            };
+            let request = &compilation.request;
+            let Ok(plan) = planning::analyze_relation_input_node(
+                driver_input,
+                &request.input.shape.nodes,
+                &mut BTreeSet::new(),
+            ) else {
+                continue;
+            };
+            // A source-relative key must be read from that source's output,
+            // not from a preceding join's root with a coincidentally equal name.
+            if plan.root_source() != Some(driver) {
+                continue;
+            }
+            let context = LoweringContext::concrete(request);
+            let Ok(lowered) = graph_lowering::lower_relation_input(&plan, sources, &context) else {
+                continue;
+            };
+            let name = if field == "id" {
+                driver_source.row_shape.occurrence_key.row_field().clone()
+            } else {
+                user_column_field(field)
+            };
+            let Some(descriptor) = driver_source
+                .row_shape
+                .descriptor
+                .fields()
+                .iter()
+                .find(|entry| entry.name.as_ref() == Some(&name))
+            else {
+                continue;
+            };
+            let mut graph = lowered.graph;
+            if matches!(descriptor.value_type, ValueType::Nullable(_)) {
+                graph = graph
+                    .filter(GroovePredicateExpr::is_not_null(&name))
+                    .unwrap_nullable(&name);
+            }
+            let target_field = if target_field == "id" {
+                "row_uuid".to_owned()
+            } else {
+                user_column_field(target_field)
+            };
+            return Some(SourceLookup {
+                fields: vec![target_field.clone()],
+                keys: graph.project_fields([ProjectField::renamed(name, target_field)]),
+            });
+        }
+    }
+    None
+}
+
 /// Prepare concrete source descriptions, then synchronously lower the program.
 ///
 /// This is an explicit compatibility boundary while snapshot capture and
 /// physical-layout preparation remain async. Runtime production code calls
 /// this function; the lowering phase itself is [`lower_resolved_query_program`].
-pub async fn prepare_and_lower_query_program(
+pub async fn prepare_and_lower_query_program<P: SourceGraphPreparer>(
     compilation: QueryProgramCompilation,
-    source_preparer: &mut impl SourceGraphPreparer,
-) -> QueryCompileResult {
+    source_preparer: &mut P,
+) -> Result<QueryProgram, P::Error>
+where
+    P::Error: From<Box<CapabilityReport>>,
+{
     let (sources, explain) = prepare_query_program_sources(&compilation, source_preparer).await?;
-    lower_resolved_query_program(compilation, sources, explain)
+    lower_resolved_query_program(compilation, sources, explain).map_err(Into::into)
 }
 
 #[doc(hidden)]
-pub async fn prepare_query_program_sources(
+pub async fn prepare_query_program_sources<P: SourceGraphPreparer>(
     compilation: &QueryProgramCompilation,
-    source_preparer: &mut impl SourceGraphPreparer,
-) -> CapabilityResult<(ResolvedQuerySources, ExplainPlan)> {
+    source_preparer: &mut P,
+) -> Result<(ResolvedQuerySources, ExplainPlan), P::Error> {
     let mut explain = ExplainPlan::default();
 
     let request = compilation.request();
     let mut resolved_sources = BTreeMap::new();
-    for source_request in compilation.sources() {
+    let mut pending = compilation.sources().iter().collect::<Vec<_>>();
+    while !pending.is_empty() {
+        let mut selected = None;
+        for (index, request) in pending.iter().enumerate() {
+            if !source_preparer.requires_key_lookup(request) {
+                selected = Some((index, None));
+                break;
+            }
+            if let Some(keys) =
+                source_lookup(compilation, &request.source, &resolved_sources, |field| {
+                    source_preparer.supports_lookup(request, field)
+                })
+            {
+                selected = Some((index, Some(keys)));
+                break;
+            }
+        }
+        // Let the source owner report its precise unsupported access pattern
+        // when no dependency can supply a bound (including cyclic lookups).
+        let (index, keys) = selected.unwrap_or((0, None));
+        let source_request = pending.remove(index);
         let source = source_request.source.clone();
         // Source preparation is the remaining async compatibility boundary.
         // Policy programs have already been prepared by compilation
         // orchestration; this future is only for source-local snapshot and
         // physical-layout work that has not migrated to Groove yet.
-        let mut resolved_source =
-            match Box::pin(source_preparer.prepare_source_graph(source_request)).await {
-                Ok(resolved_source) => resolved_source,
-                Err(err) => {
-                    let mut failure_explain = explain.clone();
-                    failure_explain
-                        .read
-                        .push(format!("failed source request: {:#?}", err.request));
-                    return Err(Box::new(CapabilityReport {
-                        gaps: vec![UnsupportedReason::Source(err.gap)],
-                        explain: explain_with_request(&request, failure_explain),
-                    }));
-                }
-            };
+        let mut resolved_source = match keys {
+            Some(keys) => {
+                source_preparer
+                    .prepare_source_graph_with_lookup(source_request, keys)
+                    .await?
+            }
+            None => source_preparer.prepare_source_graph(source_request).await?,
+        };
         if resolved_source.deletion_register.is_some()
             && let Some(preimage_request) =
                 authorized_deletion_preimage_source_request(source_request)
         {
-            let preimage = Box::pin(source_preparer.prepare_source_graph(&preimage_request))
-                .await
-                .map_err(|err| {
-                    Box::new(CapabilityReport {
-                        gaps: vec![UnsupportedReason::Source(err.gap)],
-                        explain: explain_with_request(
-                            &request,
-                            ExplainPlan {
-                                read: vec![format!(
-                                    "failed authorized deletion preimage request: {:#?}",
-                                    err.request
-                                )],
-                                ..ExplainPlan::default()
-                            },
-                        ),
-                    })
-                })?;
+            let preimage =
+                Box::pin(source_preparer.prepare_source_graph(&preimage_request)).await?;
             resolved_source.authorized_deletion_preimage = Some(AuthorizedDeletionPreimage {
                 graph: preimage.graph,
                 routing_fields: preimage.routing_fields,
@@ -451,7 +554,7 @@ fn covered_input_source_descriptors(
 #[doc(hidden)]
 pub async fn lower_query_program(
     request: QueryProgramRequest,
-    source_preparer: &mut impl SourceGraphPreparer,
+    source_preparer: &mut impl SourceGraphPreparer<Error = Box<CapabilityReport>>,
 ) -> QueryCompileResult {
     prepare_and_lower_query_program(QueryProgramCompilation::analyze(request)?, source_preparer)
         .await
@@ -988,10 +1091,15 @@ fn param_route_field(param: &str) -> String {
 }
 
 fn source_value_ref(value: &NormalizedValueRef) -> bool {
-    matches!(
-        value,
-        NormalizedValueRef::SourceField { .. } | NormalizedValueRef::RowId(RowIdRef::Source(_))
-    )
+    match value {
+        // Whole authors and identities are records. Their equality must stay
+        // a predicate, rather than becoming an ordered binding-route key.
+        NormalizedValueRef::Magic { column, .. } => collect_by_ordered_scalar(column.value_type()),
+        NormalizedValueRef::SourceField { .. } | NormalizedValueRef::RowId(RowIdRef::Source(_)) => {
+            true
+        }
+        _ => false,
+    }
 }
 
 fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDomain) {

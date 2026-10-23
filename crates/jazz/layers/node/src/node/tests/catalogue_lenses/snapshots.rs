@@ -2100,7 +2100,7 @@ fn dynamic_catalogue_bootstrap_rejects_direct_ingest_and_fate_without_residue() 
         .expect("open explicit uninitialized receiver");
 
     assert!(matches!(
-        receiver.open_exclusive(OpenTransactionId::new()).resolve(),
+        receiver.open_serializable(OpenTransactionId::new()).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(

@@ -62,7 +62,7 @@ pub struct PeerState {
     /// Explicit host admission for SYSTEM authority query delegation only.
     pub authority_query_delegate: bool,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
-    ship_complete_exclusive_payloads: bool,
+    ship_complete_serializable_payloads: bool,
     /// Maintained evaluator and shipped-membership state for canonical
     /// coverage outputs and concrete downstream publications. These entries
     /// describe what was evaluated or sent; receiver cursors live separately.
@@ -91,7 +91,7 @@ impl Default for PeerState {
             transport_capability: RelayTransportCapability::OrdinarySession,
             authority_query_delegate: false,
             shipped_complete_tx_payloads: BTreeSet::new(),
-            ship_complete_exclusive_payloads: false,
+            ship_complete_serializable_payloads: false,
             publication_states: BTreeMap::new(),
             downstream_known_states: BTreeMap::new(),
             announced_catalogue_fingerprint: None,
