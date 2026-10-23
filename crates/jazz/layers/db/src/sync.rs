@@ -461,6 +461,18 @@ pub enum SyncMessage {
     Origins {
         commits: Vec<(u64, [u8; 16], u64)>,
     },
+    /// `jazz.sqlite.sync.scoped-fetch.v1`: a trusted backend's one-shot
+    /// read as a served identity, with immutable request claims. Append-only
+    /// tag; ordinary session connections cannot submit this request.
+    /// Uses the existing Rows/Answer/Refused responses and never persists.
+    ScopedFetchV1 {
+        id: u64,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        author: String,
+        claims: BTreeMap<String, Value>,
+        include_deleted: bool,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -2746,6 +2758,25 @@ impl Inner {
     }
 }
 
+struct FetchRequest {
+    inner: Rc<RefCell<Inner>>,
+    id: u64,
+}
+
+impl Drop for FetchRequest {
+    fn drop(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(client) = inner.client.as_mut() {
+            client.answers.remove(&self.id);
+            client.outbox.retain(|message| {
+                !matches!(message,
+                SyncMessage::Fetch { id, .. } | SyncMessage::ScopedFetchV1 { id, .. }
+                    if *id == self.id)
+            });
+        }
+    }
+}
+
 impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
@@ -2757,7 +2788,20 @@ impl Db {
         include_deleted: bool,
         deadline: Option<Instant>,
     ) -> Result<Option<u64>, Error> {
-        let id = {
+        self.fetch_answer(prepared, at, include_deleted, deadline, None)
+            .await
+            .map(|answer| answer.map(|(through, _)| through))
+    }
+
+    async fn fetch_answer(
+        &self,
+        prepared: &PreparedQuery,
+        at: Option<u64>,
+        include_deleted: bool,
+        deadline: Option<Instant>,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> Result<Option<(u64, Vec<[u8; 16]>)>, Error> {
+        let (id, connection) = {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
                 return Ok(None);
@@ -2768,21 +2812,50 @@ impl Db {
             let id = client.next_id;
             client.next_id += 1;
             client.answers.insert(id, None);
-            client.outbox.push(SyncMessage::Fetch {
-                id,
-                query: remote_query(&prepared.query).into_owned(),
-                binding: prepared.binding.clone(),
-                at,
-                include_deleted,
-            });
-            id
+            // Scoped answers carry the exact authority window. Ordinary
+            // fetches retain the existing prefix/aggregate hydration contract.
+            let query = if scope.is_some() {
+                prepared.query.clone()
+            } else {
+                remote_query(&prepared.query).into_owned()
+            };
+            let binding = prepared.binding.clone();
+            let message = match scope {
+                Some((author, claims)) => SyncMessage::ScopedFetchV1 {
+                    id,
+                    query,
+                    binding,
+                    author: author.canonical().to_owned(),
+                    claims,
+                    include_deleted,
+                },
+                None => SyncMessage::Fetch {
+                    id,
+                    query,
+                    binding,
+                    at,
+                    include_deleted,
+                },
+            };
+            client.outbox.push(message);
+            (id, client.connection)
+        };
+        let _request = FetchRequest {
+            inner: self.inner.clone(),
+            id,
         };
         poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let client = inner.client.as_mut().expect("client");
+            if client.connection != connection {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "one-shot read interrupted by an upstream reconnect",
+                )));
+            }
             if let Some(Some(_)) = client.answers.get(&id) {
                 let answer = client.answers.remove(&id).flatten().expect("answered");
-                return Poll::Ready(answer.map(|(through, _)| Some(through)));
+                return Poll::Ready(answer.map(Some));
             }
             if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
                 client.answers.remove(&id);
@@ -3565,7 +3638,9 @@ impl Db {
                 // A read the server cannot serve is refused to the client,
                 // which would otherwise wait on it.
                 let read = match &message {
-                    SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
+                    SyncMessage::Subscribe { id, .. }
+                    | SyncMessage::Fetch { id, .. }
+                    | SyncMessage::ScopedFetchV1 { id, .. } => Some(*id),
                     _ => None,
                 };
                 match (self.serve(index, message), read) {
@@ -4014,7 +4089,44 @@ impl Db {
         message: SyncMessage,
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
-        let identity = self.inner.borrow().sessions[index].identity;
+        let connection_identity = self.inner.borrow().sessions[index].identity;
+        // Delegation changes only this request, never the connection identity
+        // or the authority's cached claims for another request.
+        let (message, identity, claims, scoped) = match message {
+            SyncMessage::ScopedFetchV1 {
+                id,
+                query,
+                binding,
+                author,
+                claims,
+                include_deleted,
+            } => {
+                if connection_identity != AuthorSubject::SYSTEM {
+                    return Err(Error::new(
+                        ErrorCode::WriteRejected,
+                        "scoped reads require a trusted backend connection",
+                    ));
+                }
+                if self.is_client() {
+                    return Err(unsupported("scoped one-shot reads through a relay"));
+                }
+                let author = AuthorSubject::from_canonical(&author)
+                    .map_err(|error| Error::new(ErrorCode::Query, error.to_string()))?;
+                (
+                    SyncMessage::Fetch {
+                        id,
+                        query,
+                        binding,
+                        at: None,
+                        include_deleted,
+                    },
+                    author,
+                    Some(claims),
+                    true,
+                )
+            }
+            message => (message, connection_identity, claims, false),
+        };
         // A subscription's group keeps the session's claims for later runs.
         let with_claims = |prepared: PreparedQuery| match &claims {
             Some(claims) => prepared.with_identity_claims(identity, claims.clone()),
@@ -4220,6 +4332,9 @@ impl Db {
                 include_deleted,
             } => {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
+                if scoped {
+                    db.check_scoped_fetch(&prepared)?;
+                }
                 let mut inner = db.inner();
                 // A history read ships versions of its source table.
                 let history = history_source_table(&query.table);
@@ -4692,6 +4807,7 @@ fn overtakes_writes(message: &SyncMessage) -> bool {
         SyncMessage::Subscribe { .. }
             | SyncMessage::Unsubscribe { .. }
             | SyncMessage::Fetch { .. }
+            | SyncMessage::ScopedFetchV1 { .. }
             | SyncMessage::Advise { .. }
     )
 }
@@ -4782,7 +4898,63 @@ pub struct RelationSnapshot {
 #[derive(Debug)]
 pub struct QueryAttachment;
 
+fn row_local_policy(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().all(row_local_policy),
+        PolicyExpr::Not(item) => row_local_policy(item),
+        PolicyExpr::Cmp { .. }
+        | PolicyExpr::IsNull { .. }
+        | PolicyExpr::IsNotNull { .. }
+        | PolicyExpr::Contains { .. }
+        | PolicyExpr::In { .. }
+        | PolicyExpr::InList { .. }
+        | PolicyExpr::SessionCmp { .. }
+        | PolicyExpr::SessionIsNull { .. }
+        | PolicyExpr::SessionIsNotNull { .. }
+        | PolicyExpr::SessionContains { .. }
+        | PolicyExpr::SessionInList { .. }
+        | PolicyExpr::True
+        | PolicyExpr::False => true,
+        _ => false,
+    }
+}
+
 impl Db {
+    fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<(), Error> {
+        let query = &prepared.query;
+        if history_source_table(&query.table).is_some()
+            || !query.joins.is_empty()
+            || query.flat_join.is_some()
+            || !query.policy_branches.is_empty()
+            || !query.reachable.is_empty()
+            || !query.inherits.is_empty()
+            || !query.includes.is_empty()
+            || !query.array_subqueries.is_empty()
+            || query.aggregate.is_some()
+            || query.relation.is_some()
+        {
+            return Err(unsupported(
+                "scoped remote reads of relations, aggregates or history",
+            ));
+        }
+        let inner = self.inner();
+        let schema = prepared.schema.as_ref().unwrap_or(&inner.owner);
+        let table = schema.table(&query.table)?;
+        if !table.branch_by.is_empty() {
+            return Err(unsupported("scoped remote reads of branched tables"));
+        }
+        let policy = schema
+            .policy_schema()
+            .by_stored(&table.stored)
+            .and_then(|table| table.policy(crate::tools::Operation::Select));
+        if policy.is_some_and(|policy| !row_local_policy(policy)) {
+            return Err(unsupported(
+                "scoped remote reads with cross-row permission evidence",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn detach_query(&self, _attachment: QueryAttachment) {}
 
     /// The bindings' one-shot read: a postcard query, optionally inside an
@@ -4840,20 +5012,70 @@ impl Db {
                 _ => None,
             };
             if let Some(deadline) = wait {
-                // Fetch currently carries the connection's identity, not a
-                // served request's identity/claims. Never hydrate a session
-                // request as SYSTEM and filter an unrestricted result locally.
                 if author.is_some_and(|author| {
                     author != AuthorSubject::SYSTEM && author != self.inner().identity.author
                 }) || prepared.request_claims.is_some()
                 {
-                    return Err(unsupported(
-                        "remote one-shot reads with a served session or request-scoped claims",
-                    ));
+                    self.check_scoped_fetch(&prepared)?;
+                    let identity = author.unwrap_or(self.inner().identity.author);
+                    let claims = match &prepared.request_claims {
+                        Some((requested, claims)) if *requested == identity => claims.clone(),
+                        Some(_) => {
+                            return Err(Error::new(
+                                ErrorCode::Query,
+                                "request claims differ from the read identity",
+                            ));
+                        }
+                        None => self
+                            .inner()
+                            .claims
+                            .get(&identity)
+                            .cloned()
+                            .unwrap_or_default(),
+                    };
+                    let answer = self
+                        .fetch_answer(
+                            &prepared,
+                            None,
+                            opts.read_view.include_deleted,
+                            deadline,
+                            Some((identity, claims)),
+                        )
+                        .await?;
+                    if let Some((through, rows)) = answer {
+                        // Only these authority-approved roots, at this cut, belong
+                        // to this request. Other cached or pending rows do not.
+                        let mut exact = prepared.clone();
+                        exact.query.filters.push(crate::query::in_list(
+                            crate::query::col("id"),
+                            rows.into_iter().map(|row| {
+                                crate::query::lit(Value::Uuid(RowUuid::from_bytes(row).0))
+                            }),
+                        ));
+                        // The authority has already applied this window.
+                        exact.query.limit = None;
+                        exact.query.offset = 0;
+                        let read = ReadSpec {
+                            cut: Some(Cut::at(through)),
+                            include_deleted: opts.read_view.include_deleted,
+                            ..ReadSpec::default()
+                        };
+                        let rows = self.inner().run(&exact, Some(identity), &read)?;
+                        return Ok(result(rows));
+                    }
+                    if opts.tier == ReadTier::Remote {
+                        return Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "scoped remote read has no available authority",
+                        ));
+                    }
+                    // A local-first deadline may return the locally permitted
+                    // cache; it never promotes it to an authoritative answer.
+                } else {
+                    Self::remote_shape(&prepared.query)?;
+                    self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
+                        .await?;
                 }
-                Self::remote_shape(&prepared.query)?;
-                self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
-                    .await?;
             }
         }
         let inner = self.inner();
