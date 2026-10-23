@@ -14,6 +14,11 @@ import {
   type E2ee,
 } from "../e2ee/lifecycle.js";
 import type { SpaceRoot } from "../e2ee/spaces.js";
+import { equalityToken } from "../e2ee/equality-data.js";
+import { prepareEqualityQuery } from "../e2ee/equality-query.js";
+import { queryKeyDependencies, decryptedQuerySpaces } from "../e2ee/query-dependencies.js";
+import { E2eeDataError } from "../e2ee/data-error.js";
+import { equalityIndexColumn } from "../e2ee/encrypted-schema.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
@@ -99,8 +104,8 @@ export type {
   ColumnTransformRegistry,
 } from "./column-transforms.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
-import { encryptedSchemas } from "../e2ee/encrypted-schema.js";
-import { encryptCell, decryptCellRows } from "../e2ee/cell-data.js";
+import { encryptedSchemas, encryptedRowSpaces } from "../e2ee/encrypted-schema.js";
+import { encryptCell, decryptCellRows, decryptedIndexBytes } from "../e2ee/cell-data.js";
 import { TypedTableQueryBuilder, type AnyTableMeta } from "../typed-app.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
@@ -1970,6 +1975,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         values[name] = { type: "Null" };
       }
       physical[name] = { type: "Bytea", value: new Uint8Array() };
+      if (declaration.indexes?.[name])
+        physical[equalityIndexColumn(name)] = { type: "Bytea", value: new Uint8Array() };
     }
     const identifier = values[declaration.space];
     if (identifier?.type !== "Uuid") throw new Error("Encrypted writes require a space identifier");
@@ -2022,6 +2029,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           : undefined);
       const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
         for (const name of declaration.columns) {
+          if (declaration.indexes?.[name])
+            physical[equalityIndexColumn(name)] = {
+              type: "Bytea",
+              value: await equalityToken(db, table, name, values[name]!, secret, root),
+            };
           physical[name] = {
             type: "Bytea",
             value: await encryptCell(db, table, preview.id, name, values[name]!, secret, root),
@@ -2585,6 +2597,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         : undefined;
       const stage = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
         for (const name of changed) {
+          if (declaration.indexes?.[name])
+            updates[equalityIndexColumn(name)] = {
+              type: "Bytea",
+              value: await equalityToken(db, table, name, updates[name]!, secret, root),
+            };
           updates[name] = {
             type: "Bytea",
             value: await encryptCell(db, table, id, name, updates[name]!, secret, root),
@@ -2751,6 +2768,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         ? (table, rows) =>
             decryptCellRows(this.e2ee!.db, query._schema, table, rows, this.initialSpaceKeys)
         : undefined,
+      false,
+      this.e2ee
+        ? (json) =>
+            prepareEqualityQuery(this.e2ee!.db, query, json, {
+              ready: () =>
+                client.transactionPreparation(this.requireBinding("query").openTransactionId),
+              initialSpaceKeys: this.initialSpaceKeys,
+            })
+        : undefined,
     );
   }
 
@@ -2822,20 +2848,94 @@ async function decryptQueryRows(
   table: string,
   rows: Record<string, unknown>[],
   includes: NormalizedIncludeSpec,
-  _transforms: ColumnTransformRegistry | undefined,
+  transforms: ColumnTransformRegistry | undefined,
   decrypt: TransactionRowDecoder | undefined,
+  nested = false,
 ): Promise<Record<string, unknown>[]> {
-  const relations = analyzeRelations(schema).get(table) ?? [];
-  for (const [name, spec] of Object.entries(includes)) {
-    const relation = relations.find((candidate) => candidate.name === name);
-    if (relation && hasEncryptedResults(schema, relation.toTable, spec.includes))
-      throw new Error("Unsupported encrypted query: nested results are not supported yet");
-  }
-  if (!rows.length) return rows;
+  if (!rows.length || !hasEncryptedResults(schema, table, includes)) return rows;
   const columns = encryptedSchemas.get(schema)?.tables.get(table)?.columns ?? [];
   const needsKeys = rows.some((row) => columns.some((column) => Object.hasOwn(row, column)));
   if (needsKeys && !decrypt) throw new Error("Encrypted queries require E2EE configuration");
-  return needsKeys ? decrypt!(table, rows) : rows;
+  const result = needsKeys ? await decrypt!(table, rows) : rows.map((row) => ({ ...row }));
+  const declaration = encryptedSchemas.get(schema)?.tables.get(table);
+  for (const [index, row] of result.entries()) {
+    const original = rows[index]!;
+    const identifier =
+      declaration && (encryptedRowSpaces.get(original) ?? original[declaration.space]);
+    decryptedQuerySpaces.set(
+      row,
+      declaration &&
+        typeof identifier === "string" &&
+        columns.some((column) => Object.hasOwn(original, column))
+        ? [{ scope: declaration.scope, identifier }]
+        : [],
+    );
+  }
+  await decryptQueryIncludes(schema, table, result, includes, transforms, decrypt);
+  if (nested) {
+    for (const row of result)
+      for (const column of columns) {
+        const transform = transforms?.[table]?.[column];
+        if (transform && Object.hasOwn(row, column)) {
+          const tableTransforms = transforms?.[table];
+          const stored = tableTransforms
+            ? storedDependencyValues(columnTransformDependencies(tableTransforms).columns, row)
+            : undefined;
+          row[column] = transform.from(row[column], dependencyContext(transform, stored ?? {}));
+        }
+      }
+  }
+  return result;
+}
+
+async function decryptQueryIncludes(
+  schema: WasmSchema,
+  table: string,
+  result: Record<string, unknown>[],
+  includes: NormalizedIncludeSpec,
+  transforms: ColumnTransformRegistry | undefined,
+  decrypt: TransactionRowDecoder | undefined,
+) {
+  const relations = analyzeRelations(schema).get(table) ?? [];
+  for (const [name, spec] of Object.entries(includes)) {
+    const relation = relations.find((relation) => relation.name === name);
+    if (!relation) throw new Error(`Unknown relation "${name}" on table "${table}"`);
+    if (!hasEncryptedResults(schema, relation.toTable, spec.includes)) continue;
+    for (const row of result) {
+      const value = row[name];
+      const children = relation.isArray ? value : value === null ? [] : [value];
+      if (!Array.isArray(children)) throw new Error("Invalid encrypted included result");
+      const decoded = await decryptQueryRows(
+        schema,
+        relation.toTable,
+        children,
+        spec.includes,
+        transforms,
+        decrypt,
+        true,
+      );
+      row[name] = relation.isArray ? decoded : (decoded[0] ?? null);
+      for (const child of decoded)
+        decryptedQuerySpaces.get(row)!.push(...(decryptedQuerySpaces.get(child) ?? []));
+    }
+  }
+}
+
+async function decryptEqualityMatches(
+  schema: WasmSchema,
+  table: string,
+  candidates: Record<string, unknown>[],
+  includes: NormalizedIncludeSpec,
+  transforms: ColumnTransformRegistry | undefined,
+  decrypt: TransactionRowDecoder | undefined,
+  equality: NonNullable<Awaited<ReturnType<typeof prepareEqualityQuery>>>,
+) {
+  // Verify and paginate parents before acquiring keys for their children.
+  // Keep subscription candidates' child ciphertext untouched for later frontiers.
+  const matches = equality.verify(candidates).map((row) => ({ ...row }));
+  for (const row of matches) decryptedQuerySpaces.set(row, [equality.space]);
+  await decryptQueryIncludes(schema, table, matches, includes, transforms, decrypt);
+  return matches;
 }
 
 function readTransactionRows<T>(
@@ -2846,6 +2946,7 @@ function readTransactionRows<T>(
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
   global?: boolean,
+  prepare?: (json: string) => ReturnType<typeof prepareEqualityQuery>,
 ): Promise<T[]>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -2855,6 +2956,7 @@ function readTransactionRows<T>(
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
   global?: boolean,
+  prepare?: (json: string) => ReturnType<typeof prepareEqualityQuery>,
 ): Promise<RowSettlement[]>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -2864,6 +2966,7 @@ function readTransactionRows<T>(
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
   global?: boolean,
+  prepare?: (json: string) => ReturnType<typeof prepareEqualityQuery>,
 ): Promise<SettledRows<T>>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -2873,6 +2976,7 @@ function readTransactionRows<T>(
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
   global?: boolean,
+  prepare?: (json: string) => ReturnType<typeof prepareEqualityQuery>,
 ): Promise<T[] | SettledRows<T>>;
 function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -2882,6 +2986,7 @@ function readTransactionRows<T>(
   client: Pick<JazzClient, "queryInternal">,
   decrypt?: TransactionRowDecoder,
   global?: boolean,
+  prepare?: (json: string) => ReturnType<typeof prepareEqualityQuery>,
 ): Promise<T[] | RowSettlement[] | SettledRows<T>>;
 async function readTransactionRows<T>(
   query: QueryBuilder<T>,
@@ -2892,12 +2997,14 @@ async function readTransactionRows<T>(
     Partial<Pick<TransactionPreparationIO, "queryGlobal">>,
   decrypt?: TransactionRowDecoder,
   global = false,
+  prepare?: (json: string) => ReturnType<typeof prepareEqualityQuery>,
 ): Promise<T[] | RowSettlement[] | SettledRows<T>> {
   const { openTransactionId, readSession } = binding;
   const builderJson = query._build();
   const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
   const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
   const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
+  const outputSchema = requireSchemaWithTable(query._schema, outputTable);
   const prepared = prepareTransformRead(query, builtQuery, outputTable);
   // Transactions accept the same public options surface as Db. Lower before
   // reaching native options so JavaScript callers cannot smuggle runtime
@@ -2908,43 +3015,114 @@ async function readTransactionRows<T>(
   if (settlementMetadata) queryOptions.settlementMetadata = settlementMetadata;
   const queryClient = global ? client.queryGlobal : client.queryInternal;
   if (!queryClient) throw new Error("Global transaction preflight is unavailable");
-  const result = await queryClient.call(
-    client,
-    translateQuery(builderJson, planningSchema, prepared.physical),
-    {
-      ...queryOptions,
-      ...(!global && { openTransactionId }),
-    },
-    readSession,
-  );
-  if (settlementMetadata === true) return result as unknown as RowSettlement[];
-  let settled =
-    settlementMetadata === "with-rows"
-      ? (result as unknown as SettledRows<(typeof result)[number]>)
-      : undefined;
-  const rows = settled ? settled.rows : result;
-  const decoded = await finishComputedRead(
-    query,
-    builtQuery,
-    outputTable,
-    prepared,
-    rows,
-    async (physical) => {
+  const equality = !settlementMetadata && prepare ? await prepare(builderJson) : undefined;
+  try {
+    if (!equality) {
       const result = await queryClient.call(
         client,
-        translateQuery(builderJson, planningSchema, physical),
-        { ...queryOptions, ...(!global && { openTransactionId }) },
+        translateQuery(builderJson, planningSchema, prepared.physical),
+        {
+          ...queryOptions,
+          ...(!global && { openTransactionId }),
+        },
         readSession,
       );
-      if (settlementMetadata === "with-rows") {
-        settled = result as unknown as SettledRows<(typeof result)[number]>;
-        return settled.rows;
-      }
-      return result;
-    },
-    decrypt,
-  );
-  return settled ? { rows: decoded, settlements: settled.settlements } : decoded;
+      if (settlementMetadata === true) return result as unknown as RowSettlement[];
+      let settled =
+        settlementMetadata === "with-rows"
+          ? (result as unknown as SettledRows<(typeof result)[number]>)
+          : undefined;
+      const rows = settled ? settled.rows : result;
+      const decoded = await finishComputedRead(
+        query,
+        builtQuery,
+        outputTable,
+        prepared,
+        rows,
+        async (physical) => {
+          const result = await queryClient.call(
+            client,
+            translateQuery(builderJson, planningSchema, physical),
+            { ...queryOptions, ...(!global && { openTransactionId }) },
+            readSession,
+          );
+          if (settlementMetadata === "with-rows") {
+            settled = result as unknown as SettledRows<(typeof result)[number]>;
+            return settled.rows;
+          }
+          return result;
+        },
+        decrypt,
+      );
+      return settled ? { rows: decoded, settlements: settled.settlements } : decoded;
+    }
+    if (prepared.computedState)
+      throw new Error(
+        "Computed projections over encrypted equality queries are not supported by the draft SQLite restack yet",
+      );
+    const queryJson = equality?.json ?? builderJson;
+    const translated = equality
+      ? queryJson
+      : translateQuery(builderJson, planningSchema, prepared.physical);
+    const result = await queryClient.call(
+      client,
+      translated,
+      {
+        ...queryOptions,
+        ...(!global && { openTransactionId }),
+      },
+      readSession,
+    );
+    if (settlementMetadata === true) return result as unknown as RowSettlement[];
+    const settled =
+      settlementMetadata === "with-rows"
+        ? (result as unknown as SettledRows<(typeof result)[number]>)
+        : undefined;
+    const rows = settled ? settled.rows : result;
+    if (equality && !(await equality.isCurrent())) throw new E2eeDataError("key-unavailable");
+    const outputIncludes =
+      outputTable !== builtQuery.table
+        ? {}
+        : equality
+          ? builtQuery.includes
+          : prepared.physical.includes;
+    const decode = equality
+      ? createRowTransformer<Record<string, unknown>>(
+          outputSchema,
+          outputTable,
+          outputIncludes,
+          [],
+          query._columnTransformsByTable,
+          false,
+        )
+      : prepared.decode;
+    const rawRows = rows.map((row) => decode(row) as Record<string, unknown>);
+    const decryptedRows = await decryptQueryRows(
+      outputSchema,
+      outputTable,
+      rawRows,
+      equality ? {} : outputIncludes,
+      query._columnTransformsByTable,
+      decrypt,
+    );
+    const resolvedRows = equality
+      ? await decryptEqualityMatches(
+          outputSchema,
+          outputTable,
+          decryptedRows,
+          outputIncludes,
+          query._columnTransformsByTable,
+          decrypt,
+          equality,
+        )
+      : decryptedRows;
+    const decoded = resolvedRows.map(
+      (row) => prepared.finish(row as T & Record<string, unknown>) as T,
+    );
+    return settled ? { rows: decoded, settlements: settled.settlements } : decoded;
+  } finally {
+    equality?.dispose();
+  }
 }
 
 const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
@@ -4366,6 +4544,7 @@ export class Db {
   private async allInternal<T>(
     query: QueryBuilder<T>,
     options?: InternalDbQueryOptions,
+    equalityRetries = 0,
   ): Promise<T[]> {
     const client = this.getClient(query._schema);
     const preparation = getOwnerPreparation(client);
@@ -4382,31 +4561,114 @@ export class Db {
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const prepared = prepareTransformRead(query, builtQuery, outputTable);
     const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
-    const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
-    const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
-    const context = this.getAccessContext();
-    const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
-    await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
-    const rows =
-      context || usesRelationTraversal
-        ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
-        : await client.queryInternal(wasmQuery, queryOptions);
-    return finishComputedRead(
-      query,
-      builtQuery,
-      outputTable,
-      prepared,
-      rows,
-      (physical) =>
-        client.queryInternal(
-          translateQuery(builderJson, planningSchema, physical),
-          queryOptions,
-          context?.readSession,
-        ),
-      (table, encryptedRows) => decryptCellRows(this, query._schema, table, encryptedRows),
-    );
+    const equality = encryptedSchemas.has(query._schema)
+      ? await prepareEqualityQuery(this, query, builderJson)
+      : undefined;
+    try {
+      if (!equality) {
+        const wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
+        const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
+        const context = this.getAccessContext();
+        const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+        await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
+        const rows =
+          context || usesRelationTraversal
+            ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
+            : await client.queryInternal(wasmQuery, queryOptions);
+        return finishComputedRead(
+          query,
+          builtQuery,
+          outputTable,
+          prepared,
+          rows,
+          (physical) =>
+            client.queryInternal(
+              translateQuery(builderJson, planningSchema, physical),
+              queryOptions,
+              context?.readSession,
+            ),
+          (table, encryptedRows) => decryptCellRows(this, query._schema, table, encryptedRows),
+        );
+      }
+      if (prepared.computedState)
+        throw new Error(
+          "Computed projections over encrypted equality queries are not supported by the draft SQLite restack yet",
+        );
+      const wasmQuery = equality?.json
+        ? equality.json
+        : translateQuery(builderJson, planningSchema, prepared.physical);
+      const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
+      const context = this.getAccessContext();
+      const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+      await this.ensureReady(effectiveTier === "remote" ? "server" : "runtime");
+      const rows =
+        context || usesRelationTraversal
+          ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
+          : await client.queryInternal(wasmQuery, queryOptions);
+      const outputIncludes =
+        outputTable !== builtQuery.table
+          ? {}
+          : equality
+            ? builtQuery.includes
+            : prepared.physical.includes;
+      const decode = equality
+        ? createRowTransformer<Record<string, unknown>>(
+            outputSchema,
+            outputTable,
+            outputIncludes,
+            [],
+            query._columnTransformsByTable,
+            false,
+          )
+        : prepared.decode;
+      let candidateEpochs: ReadonlySet<string> | undefined;
+      const rawRows = rows.map((row) => decode(row) as Record<string, unknown>);
+      const decryptedRows = await decryptQueryRows(
+        query._schema,
+        outputTable,
+        rawRows,
+        equality ? {} : outputIncludes,
+        query._columnTransformsByTable,
+        (table, encryptedRows) =>
+          decryptCellRows(
+            this,
+            query._schema,
+            table,
+            encryptedRows,
+            undefined,
+            equality
+              ? (identifier, epochs) => {
+                  if (table === builtQuery.table && identifier === equality.space.identifier)
+                    candidateEpochs = epochs;
+                }
+              : undefined,
+          ),
+      );
+      if (
+        equality &&
+        !(candidateEpochs ? equality.matchesEpochs(candidateEpochs) : await equality.isCurrent())
+      ) {
+        if (equalityRetries >= 2) throw new E2eeDataError("key-unavailable");
+        return this.allInternal(query, options, equalityRetries + 1);
+      }
+      const resolvedRows = equality
+        ? await decryptEqualityMatches(
+            query._schema,
+            outputTable,
+            decryptedRows,
+            outputIncludes,
+            query._columnTransformsByTable,
+            (table, encryptedRows) => decryptCellRows(this, query._schema, table, encryptedRows),
+            equality,
+          )
+        : decryptedRows;
+      return resolvedRows.map((row) => prepared.finish(row as T & Record<string, unknown>) as T);
+    } finally {
+      equality?.dispose();
+    }
   }
 
   /**
@@ -4486,7 +4748,7 @@ export class Db {
     options?: InternalDbQueryOptions,
     session?: Session,
   ): SubscriptionHandle {
-    const { onDelta, onError } =
+    const { onDelta, onError, onPending } =
       typeof callbacks === "function" ? { onDelta: callbacks, onError: undefined } : callbacks;
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
@@ -4503,10 +4765,43 @@ export class Db {
     const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
-    if (hasEncryptedResults(query._schema, outputTable, builtQuery.includes))
-      throw new Error("Unsupported encrypted query: subscriptions are not supported yet");
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     let prepared = prepareTransformRead(query, builtQuery, outputTable);
-    let wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
+    const outputIncludes = outputTable !== builtQuery.table ? {} : prepared.physical.includes;
+    const encryptedDeclaration = encryptedSchemas.get(query._schema)?.tables.get(builtQuery.table);
+    const encryptedPredicates = builtQuery.conditions.filter((condition) =>
+      encryptedDeclaration?.columns.includes(condition.column),
+    );
+    const encryptedEquality =
+      encryptedPredicates.length > 0 &&
+      encryptedPredicates.every(
+        (condition) =>
+          encryptedDeclaration?.indexes?.[condition.column] &&
+          (condition.op === "eq" || condition.op === "match"),
+      );
+    let wasmQuery = encryptedEquality
+      ? builderJson
+      : translateQuery(builderJson, planningSchema, prepared.physical);
+    const decodeRow = encryptedEquality
+      ? createRowTransformer<Record<string, unknown>>(
+          outputSchema,
+          outputTable,
+          builtQuery.includes,
+          [],
+          query._columnTransformsByTable,
+          false,
+        )
+      : prepared.decode;
+    const finishRow = (row: Record<string, unknown>): T =>
+      prepared.finish(row as T & Record<string, unknown>) as T;
+    const encrypted =
+      encryptedEquality || hasEncryptedResults(query._schema, outputTable, outputIncludes);
+    if (encrypted && prepared.computedState)
+      throw new Error(
+        "Computed projections over encrypted subscriptions are not supported by the draft SQLite restack yet",
+      );
+    let pendingDecryption = Promise.resolve();
+    let encryptedFrontier = 0;
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
@@ -4520,6 +4815,9 @@ export class Db {
       retired: boolean;
       nativeUnsubscribed: boolean;
       predecessor: NativeSubscription | null;
+      equality?: Awaited<ReturnType<typeof prepareEqualityQuery>>;
+      dependencies?: ReturnType<typeof queryKeyDependencies>;
+      hasSnapshot?: boolean;
     };
     let activeSubscription: NativeSubscription | null = null;
     let unsubscribed = false;
@@ -4527,6 +4825,8 @@ export class Db {
     const readyAbort = new AbortController();
     const retireNativeSubscription = (subscription: NativeSubscription) => {
       subscription.retired = true;
+      subscription.dependencies?.stop();
+      if (subscription.equality) pendingDecryption.then(() => subscription.equality?.dispose());
       const id = subscription.id;
       if (id === null || subscription.nativeUnsubscribed) return;
       subscription.nativeUnsubscribed = true;
@@ -4607,37 +4907,126 @@ export class Db {
         if (subscription !== null) terminalizeSubscription(subscription, error);
       }
     };
+    const materializeEncryptedResult = async (subscription: NativeSubscription) => {
+      const rows = subscription.equality
+        ? await decryptEqualityMatches(
+            query._schema,
+            outputTable,
+            manager.all(),
+            outputIncludes,
+            query._columnTransformsByTable,
+            (table, rows) => decryptCellRows(this, query._schema, table, rows),
+            subscription.equality,
+          )
+        : manager.all();
+      await subscription.dependencies?.update([
+        ...(subscription.equality ? [subscription.equality.space] : []),
+        ...rows.flatMap((row) => decryptedQuerySpaces.get(row as object) ?? []),
+      ]);
+      await subscription.dependencies?.validate(subscription.equality?.space);
+      return subscription.equality ? rows.map(finishRow) : (rows as T[]);
+    };
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
       if (unsubscribed || terminalized || activeSubscription === null) return;
-      try {
-        deliver(manager.handleDelta(delta, prepared.transform));
-      } catch (error) {
-        if (
-          !(error instanceof MissingComputedDependency) ||
-          !prepared.computedState ||
-          prepared.computedState.version === prepared.version
-        )
-          throw error;
-        prepared = prepareTransformRead(query, builtQuery, outputTable, prepared.computedState);
-        wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
-        retireNativeSubscription(activeSubscription);
-        const replacement = createSubscriptionGeneration();
-        manager.clear();
-        bufferedDeltas.length = 0;
-        this.unregisterActiveQuerySubscriptionTrace(traceId);
-        traceId = this.registerActiveQuerySubscriptionTrace(
-          wasmQuery,
-          builtQuery.table,
-          queryOptions,
-        );
-        // Native initial snapshots may arrive synchronously. Defer the next
-        // generation to avoid recursive installation as new inputs are found.
-        queueMicrotask(() => {
-          if (!this.shutdownPromise) startNativeSubscription(replacement);
-        });
+      if (!encrypted) {
+        try {
+          deliver(manager.handleDelta(delta, prepared.transform));
+        } catch (error) {
+          if (
+            !(error instanceof MissingComputedDependency) ||
+            !prepared.computedState ||
+            prepared.computedState.version === prepared.version
+          )
+            throw error;
+          prepared = prepareTransformRead(query, builtQuery, outputTable, prepared.computedState);
+          wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
+          retireNativeSubscription(activeSubscription);
+          const replacement = createSubscriptionGeneration();
+          manager.clear();
+          bufferedDeltas.length = 0;
+          this.unregisterActiveQuerySubscriptionTrace(traceId);
+          traceId = this.registerActiveQuerySubscriptionTrace(
+            wasmQuery,
+            builtQuery.table,
+            queryOptions,
+          );
+          // Native initial snapshots may arrive synchronously. Defer the next
+          // generation to avoid recursive installation as new inputs are found.
+          queueMicrotask(() => {
+            if (!this.shutdownPromise) startNativeSubscription(replacement);
+          });
+        }
+        return;
       }
+      const subscription = activeSubscription;
+      const frontier = ++encryptedFrontier;
+      try {
+        onPending?.();
+      } catch (error) {
+        terminalizeSubscription(subscription, error);
+        return;
+      }
+      pendingDecryption = pendingDecryption
+        .then(async () => {
+          if (unsubscribed || terminalized || activeSubscription !== subscription) return;
+          const decodedRows: Record<string, unknown>[] = [];
+          const typedDelta = manager.handleDelta(delta, (row) => {
+            const decoded = decodeRow(row);
+            // Keep the reducer's occurrence identity and only decrypt changed rows.
+            // No result is delivered until every changed row has been decrypted.
+            decodedRows.push(decoded);
+            return decoded as T;
+          });
+          const plaintextRows = await decryptQueryRows(
+            query._schema,
+            outputTable,
+            decodedRows,
+            subscription.equality ? {} : outputIncludes,
+            query._columnTransformsByTable,
+            (table, rows) => decryptCellRows(this, query._schema, table, rows),
+          );
+          for (const [index, row] of plaintextRows.entries()) {
+            Object.assign(decodedRows[index]!, subscription.equality ? row : finishRow(row));
+            const spaces = decryptedQuerySpaces.get(row);
+            if (spaces) decryptedQuerySpaces.set(decodedRows[index]!, spaces);
+            if (subscription.equality) {
+              const indexed = decryptedIndexBytes.get(row);
+              if (indexed) decryptedIndexBytes.set(decodedRows[index]!, indexed);
+            }
+          }
+          subscription.hasSnapshot = true;
+          const materialized = await materializeEncryptedResult(subscription);
+          if (subscription.equality && !(await subscription.equality.isCurrent())) {
+            restartEncryptedSubscription(subscription);
+            return;
+          }
+          if (
+            !unsubscribed &&
+            !terminalized &&
+            activeSubscription === subscription &&
+            frontier === encryptedFrontier
+          ) {
+            if (subscription.equality) {
+              deliver({
+                reset: true,
+                delta: [],
+                all: materialized,
+              });
+            } else deliver(typedDelta);
+          }
+        })
+        .catch((error) => {
+          if (frontier === encryptedFrontier) {
+            terminalizeSubscription(subscription, error);
+          } else {
+            // The reducer may contain an undeciphered occurrence from this
+            // failed delta. Reopen from a complete snapshot instead of letting
+            // a newer delta reuse it or rejecting a now child-free frontier.
+            restartEncryptedSubscription(subscription);
+          }
+        });
     };
-    const startNativeSubscription = (
+    const installNativeSubscription = (
       subscription: NativeSubscription,
       subscriptionOptions = queryOptions,
     ) => {
@@ -4653,7 +5042,9 @@ export class Db {
       subscription.installing = true;
       try {
         subscription.id = client.subscribeInternal(
-          wasmQuery,
+          subscription.equality
+            ? translateQuery(subscription.equality.json, planningSchema)
+            : wasmQuery,
           {
             onUpdate: (delta) => {
               if (
@@ -4712,6 +5103,92 @@ export class Db {
       builtQuery.table,
       queryOptions,
     );
+    const startNativeSubscription = (
+      subscription: NativeSubscription,
+      subscriptionOptions = queryOptions,
+    ) => {
+      if (!encrypted) return installNativeSubscription(subscription, subscriptionOptions);
+      const prepare = encryptedEquality
+        ? prepareEqualityQuery(this, query, builderJson)
+        : Promise.resolve(undefined);
+      prepare
+        .then(async (equality) => {
+          if (unsubscribed || subscription.retired || activeSubscription !== subscription) {
+            equality?.dispose();
+            return;
+          }
+          subscription.equality = equality;
+          subscription.dependencies = queryKeyDependencies(
+            this,
+            query._schema,
+            () => {
+              if (unsubscribed || subscription.retired || activeSubscription !== subscription)
+                return;
+              const frontier = ++encryptedFrontier;
+              try {
+                onPending?.();
+              } catch (error) {
+                terminalizeSubscription(subscription, error);
+                return;
+              }
+              pendingDecryption = pendingDecryption
+                .then(async () => {
+                  if (
+                    unsubscribed ||
+                    subscription.retired ||
+                    activeSubscription !== subscription ||
+                    frontier !== encryptedFrontier
+                  )
+                    return;
+                  // The initial native snapshot validates its own current authority.
+                  // Before it arrives there is no result for a dependency to refresh.
+                  if (!subscription.hasSnapshot) return;
+                  const materialized = await materializeEncryptedResult(subscription);
+                  if (equality && !(await equality.isCurrent())) {
+                    restartEncryptedSubscription(subscription);
+                  } else if (
+                    !unsubscribed &&
+                    !subscription.retired &&
+                    activeSubscription === subscription &&
+                    frontier === encryptedFrontier &&
+                    subscription.hasSnapshot
+                  ) {
+                    deliver({
+                      reset: true,
+                      delta: [],
+                      all: materialized,
+                    });
+                  }
+                })
+                .catch((error) => {
+                  // A newer queued frontier revalidates its own dependency set.
+                  // An obsolete history failure must not reject a child-free result.
+                  if (frontier === encryptedFrontier) terminalizeSubscription(subscription, error);
+                });
+            },
+            (error) => terminalizeSubscription(subscription, error),
+            { tier: options?.tier === "local-only" ? "local-first" : (options?.tier ?? "remote") },
+          );
+          await subscription.dependencies.update(equality ? [equality.space] : []);
+          installNativeSubscription(subscription, subscriptionOptions);
+        })
+        .catch((error) => terminalizeSubscription(subscription, error));
+      return null;
+    };
+    const restartEncryptedSubscription = (subscription: NativeSubscription) => {
+      if (unsubscribed || subscription.retired || activeSubscription !== subscription) return;
+      const replacement = createSubscriptionGeneration();
+      retireNativeSubscription(subscription);
+      bufferedDeltas.length = 0;
+      manager.clear();
+      try {
+        onPending?.();
+      } catch (error) {
+        terminalizeSubscription(replacement, error);
+        return;
+      }
+      startNativeSubscription(replacement, queryOptions);
+    };
     const unsubscribe = () => {
       if (unsubscribed) return;
       unsubscribed = true;

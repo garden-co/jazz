@@ -1,6 +1,9 @@
 import { Utf8Decoder } from "../utf8.js";
 import { bytesToHex, formatUuidAt } from "../hex.js";
+import { parseUuid } from "../uuid.js";
 import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
+import { isProvenanceMagicColumn } from "../../magic-columns.js";
+import { validateStructuredAuthorValue } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { concatBytes, isValidUtf8 } from "../util.js";
 
@@ -807,14 +810,6 @@ export function encodeU32Le(value: number): Uint8Array {
   return bytes;
 }
 
-function parseUuid(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`invalid UUID value ${value}`);
-  }
-  return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
-}
-
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
   let valueType = storageColumnTypeToValueType(column.column_type, column.name);
   if (column.nullable) valueType = { tag: 15, inner: valueType };
@@ -1018,7 +1013,6 @@ function formatUuid(bytes: Uint8Array): string {
     20,
   )}-${hex.slice(20)}`;
 }
-
 export function nativeFixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
