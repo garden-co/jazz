@@ -540,6 +540,8 @@ pub(crate) struct Client {
     sent: Vec<SyncMessage>,
     node: [u8; 16],
     connection: u64,
+    /// Schema declared when this upstream connection opened.
+    upstream_schema: Option<crate::ids::SchemaVersionId>,
     fates: HashMap<u64, Result<(), Error>>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
@@ -654,6 +656,22 @@ impl SettledBy {
 /// An upstream subscription's identity: query, binding, include_deleted.
 type RemoteRead = (Query, BTreeMap<String, Value>, bool);
 
+/// A downstream request keeps its own upstream ID and immutable prepared scope.
+struct ForwardedFetch {
+    upstream: u64,
+    connection: u64,
+    owner: Rc<Schema>,
+    downstream_version: Option<crate::ids::SchemaVersionId>,
+    prepared: PreparedQuery,
+    identity: AuthorSubject,
+    include_deleted: bool,
+}
+
+struct ReleasedReads {
+    subscriptions: Vec<RemoteRead>,
+    fetches: Vec<u64>,
+}
+
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
     identity: AuthorSubject,
@@ -710,6 +728,7 @@ pub(crate) struct Session {
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
     relayed: BTreeMap<u64, RemoteRead>,
+    forwarded: BTreeMap<u64, ForwardedFetch>,
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
@@ -744,22 +763,26 @@ impl Session {
             version: None,
             schema: None,
             relayed: BTreeMap::new(),
+            forwarded: BTreeMap::new(),
         }
     }
 
     /// Release everything the session holds; its shared results are swept
     /// once no other member reads them.
-    /// Returns the upstream subscriptions it relayed, for the caller to
-    /// release.
+    /// Returns the upstream subscriptions and one-shot reads to release.
     #[must_use]
-    fn close(&mut self, dropped: &std::cell::Cell<usize>) -> Vec<RemoteRead> {
+    fn close(&mut self, dropped: &std::cell::Cell<usize>) -> ReleasedReads {
         dropped.set(dropped.get() + self.subs.len());
         let relayed = std::mem::take(&mut self.relayed);
+        let fetches = self.forwarded.values().map(|read| read.upstream).collect();
         *self = Session {
             open: false,
             ..Session::new(Box::new(ClosedTransport), self.identity)
         };
-        relayed.into_values().collect()
+        ReleasedReads {
+            subscriptions: relayed.into_values().collect(),
+            fetches,
+        }
     }
 
     /// Nothing to send this tick: no queued result events, no rows its
@@ -2358,10 +2381,21 @@ impl Inner {
 }
 
 impl Client {
+    fn cancel_fetch(&mut self, id: u64) {
+        self.answers.remove(&id);
+        self.outbox.retain(|message| {
+            !matches!(message,
+                SyncMessage::Fetch { id: request, .. }
+                    | SyncMessage::ScopedFetchV1 { id: request, .. }
+                    if *request == id)
+        });
+    }
+
     fn new(node: [u8; 16]) -> Self {
         Client {
             node,
             connection: 0,
+            upstream_schema: None,
             sent: Vec::new(),
             transport: None,
             hint: Rc::new(StdCell::new(Link {
@@ -2444,11 +2478,19 @@ impl Db {
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
+                    | SyncMessage::Fetch { .. }
+                    | SyncMessage::ScopedFetchV1 { .. }
             )
         });
-        let version = *inner.owner.jazz.version_id().as_bytes();
+        let version = inner.owner.jazz.version_id();
         let client = inner.client.as_mut().expect("client");
-        client.outbox.insert(0, SyncMessage::Schema { version });
+        client.upstream_schema = Some(version);
+        client.outbox.insert(
+            0,
+            SyncMessage::Schema {
+                version: *version.as_bytes(),
+            },
+        );
         // Every settled row the replica holds, whether or not a live query
         // still reads it: the new session watches them, so a later change
         // (a deletion, lost access) still reaches the cached copy.
@@ -2767,12 +2809,7 @@ impl Drop for FetchRequest {
     fn drop(&mut self) {
         let mut inner = self.inner.borrow_mut();
         if let Some(client) = inner.client.as_mut() {
-            client.answers.remove(&self.id);
-            client.outbox.retain(|message| {
-                !matches!(message,
-                SyncMessage::Fetch { id, .. } | SyncMessage::ScopedFetchV1 { id, .. }
-                    if *id == self.id)
-            });
+            client.cancel_fetch(self.id);
         }
     }
 }
@@ -3420,6 +3457,17 @@ impl Db {
 }
 
 impl Inner {
+    fn release_session_reads(&mut self, released: ReleasedReads) {
+        for (query, binding, include_deleted) in released.subscriptions {
+            self.release_remote(&query, &binding, include_deleted);
+        }
+        if let Some(client) = self.client.as_mut() {
+            for id in released.fetches {
+                client.cancel_fetch(id);
+            }
+        }
+    }
+
     /// The schema session `index` reads and writes by, when it declared an
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
@@ -3535,9 +3583,8 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let dropped = inner.fan.dropped.clone();
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
-            for (query, binding, include_deleted) in session.close(&dropped) {
-                inner.release_remote(&query, &binding, include_deleted);
-            }
+            let released = session.close(&dropped);
+            inner.release_session_reads(released);
         }
     }
 
@@ -3661,6 +3708,7 @@ impl Db {
                 self.inner.borrow_mut().sessions[index].backlog = held;
             }
         }
+        self.progress_scoped_fetches();
         self.notify();
         let mut inner = self.inner.borrow_mut();
         let through = inner.seq;
@@ -4040,14 +4088,268 @@ impl Db {
                 // reconnects and resumes from its last settled seq.
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
-                    for (query, binding, include_deleted) in released {
-                        inner.release_remote(&query, &binding, include_deleted);
-                    }
+                    inner.release_session_reads(released);
                     break;
                 }
             }
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn serve_fetch(
+        &self,
+        index: usize,
+        id: u64,
+        query: &Query,
+        prepared: &PreparedQuery,
+        policy: Option<AuthorSubject>,
+        at: Option<u64>,
+        include_deleted: bool,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner();
+        // A history read ships versions of its source table.
+        let history = history_source_table(&query.table);
+        let table = inner
+            .schema
+            .stored_table(history.unwrap_or(&query.table))?
+            .to_owned();
+        let read = ReadSpec {
+            cut: at.map(Cut::at),
+            include_deleted,
+            ..ReadSpec::default()
+        };
+        let rows = inner.run(prepared, policy, &read)?;
+        let mut images = Vec::new();
+        // Seqs of shipped history versions, for their origins.
+        let mut seqs = BTreeSet::new();
+        // A flat join ships each occurrence's joined rows.
+        let joined_tables = query
+            .flat_join
+            .iter()
+            .flat_map(|flat| &flat.sources)
+            .map(|source| {
+                let table = &source.table;
+                inner
+                    .schema
+                    .stored_table(history_source_table(table).unwrap_or(table))
+                    .map(str::to_owned)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for row in &rows {
+            for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
+                images.extend(inner.joined_images(table, joined, &mut seqs)?);
+            }
+        }
+        if history.is_some() {
+            let versions = rows.iter().map(|row| (row.id, row.seq));
+            inner.history_versions(&table, versions, &mut images, &mut seqs)?;
+        } else {
+            for row in &rows {
+                let rid = row.id.0.as_bytes().to_vec();
+                let seq = row.seq as i64;
+                let mut found = inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
+                if found.is_empty() {
+                    found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                }
+                images.extend(found);
+            }
+        }
+        let support = inner.support_of(query)?;
+        let mut extra = Vec::new();
+        let mut watch = std::mem::take(&mut inner.sessions[index].watch);
+        let mut held = std::mem::take(&mut inner.sessions[index].held);
+        // The replica keeps current rows it fetched: like supporting
+        // rows, a policy dependency's commit re-checks them.
+        if policy.is_some() && at.is_none() && history.is_none() {
+            for image in images.iter().filter(|image| image.table == table) {
+                held.entry(table.clone())
+                    .or_default()
+                    .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
+            }
+        }
+        for image in &images {
+            inner.follow_support(&support, image, policy, &mut extra, &mut watch, &mut held)?;
+        }
+        images.extend(extra);
+        for image in &images {
+            watch.insert(wk((
+                image.table.clone(),
+                "id".to_owned(),
+                watch_key(&Sql::Blob(image.id.to_vec())),
+            )));
+        }
+        let origins = inner.origins(&seqs)?;
+        let through = at.unwrap_or(inner.seq);
+        let session = &mut inner.sessions[index];
+        session.watch = watch;
+        session.held = held;
+        if !origins.is_empty() {
+            session
+                .outbox
+                .push(SyncMessage::Origins { commits: origins });
+        }
+        if !images.is_empty() {
+            session.outbox.push(SyncMessage::Rows { images });
+        }
+        session.outbox.push(SyncMessage::Answer {
+            id,
+            through,
+            rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
+        });
+        Ok(())
+    }
+
+    fn forward_scoped_fetch(
+        &self,
+        index: usize,
+        id: u64,
+        prepared: PreparedQuery,
+        identity: AuthorSubject,
+        include_deleted: bool,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner();
+        let owner = inner.owner.clone();
+        let downstream_version = inner.sessions[index].version;
+        if downstream_version.is_some_and(|version| version != owner.jazz.version_id()) {
+            return Err(unsupported(
+                "scoped relay reads across different schema versions",
+            ));
+        }
+        if inner.sessions[index].forwarded.contains_key(&id) {
+            return Err(query_error("duplicate pending scoped relay request ID"));
+        }
+        let client = inner.client.as_mut().expect("relay");
+        if client.transport.is_none() || !may_wait(client.hint.get()) {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "scoped relay read has no available authority",
+            ));
+        }
+        if client.upstream_schema != Some(owner.jazz.version_id()) {
+            return Err(unsupported(
+                "scoped relay reads after a schema change without upstream reconnect",
+            ));
+        }
+        let upstream = client.next_id;
+        client.next_id += 1;
+        let connection = client.connection;
+        let claims = prepared
+            .request_claims
+            .as_ref()
+            .expect("scoped claims")
+            .1
+            .clone();
+        client.answers.insert(upstream, None);
+        client.outbox.push(SyncMessage::ScopedFetchV1 {
+            id: upstream,
+            query: prepared.query.clone(),
+            binding: prepared.binding.clone(),
+            author: identity.canonical().to_owned(),
+            claims,
+            include_deleted,
+        });
+        inner.sessions[index].forwarded.insert(
+            id,
+            ForwardedFetch {
+                upstream,
+                connection,
+                owner,
+                downstream_version,
+                prepared,
+                identity,
+                include_deleted,
+            },
+        );
+        Ok(())
+    }
+
+    /// A relay answers only after its upstream does. Each hop uses normal row
+    /// sync, then the same fetch response path constrained to that exact cut.
+    fn progress_scoped_fetches(&self) {
+        let ready = {
+            let mut inner = self.inner.borrow_mut();
+            let mut ready = Vec::new();
+            for index in 0..inner.sessions.len() {
+                let mut completed = Vec::new();
+                for (&id, request) in &inner.sessions[index].forwarded {
+                    let error = if !Rc::ptr_eq(&request.owner, &inner.owner)
+                        || request.downstream_version != inner.sessions[index].version
+                    {
+                        Some(Error::new(
+                            ErrorCode::NotObserved,
+                            "scoped relay read interrupted by a schema change",
+                        ))
+                    } else if inner
+                        .client
+                        .as_ref()
+                        .is_none_or(|client| client.connection != request.connection)
+                    {
+                        Some(Error::new(
+                            ErrorCode::NotObserved,
+                            "scoped relay read interrupted by an upstream reconnect",
+                        ))
+                    } else {
+                        None
+                    };
+                    let answer = error.map(Err).or_else(|| {
+                        let client = inner.client.as_ref().expect("same connection");
+                        client
+                            .answers
+                            .get(&request.upstream)
+                            .cloned()
+                            .flatten()
+                            .or_else(|| {
+                                (client.transport.is_none() || !may_wait(client.hint.get())).then(
+                                    || {
+                                        Err(Error::new(
+                                            ErrorCode::NotObserved,
+                                            "scoped relay read has no available authority",
+                                        ))
+                                    },
+                                )
+                            })
+                    });
+                    if let Some(answer) = answer {
+                        completed.push((id, answer));
+                    }
+                }
+                for (id, answer) in completed {
+                    let request = inner.sessions[index]
+                        .forwarded
+                        .remove(&id)
+                        .expect("pending");
+                    if let Some(client) = inner.client.as_mut() {
+                        client.cancel_fetch(request.upstream);
+                    }
+                    ready.push((index, id, request, answer));
+                }
+            }
+            ready
+        };
+        for (index, id, request, answer) in ready {
+            let result = answer.and_then(|(through, rows)| {
+                let exact = scoped_result_query(&request.prepared, rows);
+                self.session_db(index).serve_fetch(
+                    index,
+                    id,
+                    &exact.query,
+                    &exact,
+                    Some(request.identity),
+                    Some(through),
+                    request.include_deleted,
+                )
+            });
+            if let Err(error) = result {
+                self.inner.borrow_mut().sessions[index]
+                    .outbox
+                    .push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    });
+            }
+        }
     }
 
     /// A handle that reads and writes through session `index`'s schema.
@@ -4106,9 +4408,6 @@ impl Db {
                         ErrorCode::WriteRejected,
                         "scoped reads require a trusted backend connection",
                     ));
-                }
-                if self.is_client() {
-                    return Err(unsupported("scoped one-shot reads through a relay"));
                 }
                 let author = AuthorSubject::from_canonical(&author)
                     .map_err(|error| Error::new(ErrorCode::Query, error.to_string()))?;
@@ -4335,99 +4634,11 @@ impl Db {
                 if scoped {
                     db.check_scoped_fetch(&prepared)?;
                 }
-                let mut inner = db.inner();
-                // A history read ships versions of its source table.
-                let history = history_source_table(&query.table);
-                let table = inner
-                    .schema
-                    .stored_table(history.unwrap_or(&query.table))?
-                    .to_owned();
-                let read = ReadSpec {
-                    cut: at.map(Cut::at),
-                    include_deleted,
-                    ..ReadSpec::default()
-                };
-                let rows = inner.run(&prepared, policy, &read)?;
-                let mut images = Vec::new();
-                // Seqs of shipped history versions, for their origins.
-                let mut seqs = BTreeSet::new();
-                // A flat join ships each occurrence's joined rows.
-                let joined_tables = query
-                    .flat_join
-                    .iter()
-                    .flat_map(|flat| &flat.sources)
-                    .map(|source| {
-                        let table = &source.table;
-                        inner
-                            .schema
-                            .stored_table(history_source_table(table).unwrap_or(table))
-                            .map(str::to_owned)
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                for row in &rows {
-                    for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                        images.extend(inner.joined_images(table, joined, &mut seqs)?);
-                    }
-                }
-                if history.is_some() {
-                    let versions = rows.iter().map(|row| (row.id, row.seq));
-                    inner.history_versions(&table, versions, &mut images, &mut seqs)?;
+                if scoped && self.is_client() {
+                    db.forward_scoped_fetch(index, id, prepared, identity, include_deleted)?;
                 } else {
-                    for row in &rows {
-                        let rid = row.id.0.as_bytes().to_vec();
-                        let seq = row.seq as i64;
-                        let mut found =
-                            inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
-                        if found.is_empty() {
-                            found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
-                        }
-                        images.extend(found);
-                    }
+                    db.serve_fetch(index, id, &query, &prepared, policy, at, include_deleted)?;
                 }
-                let support = inner.support_of(&query)?;
-                let mut extra = Vec::new();
-                let mut watch = std::mem::take(&mut inner.sessions[index].watch);
-                let mut held = std::mem::take(&mut inner.sessions[index].held);
-                // The replica keeps current rows it fetched: like supporting
-                // rows, a policy dependency's commit re-checks them.
-                if policy.is_some() && at.is_none() && history.is_none() {
-                    for image in images.iter().filter(|image| image.table == table) {
-                        held.entry(table.clone())
-                            .or_default()
-                            .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
-                    }
-                }
-                for image in &images {
-                    inner.follow_support(
-                        &support, image, policy, &mut extra, &mut watch, &mut held,
-                    )?;
-                }
-                images.extend(extra);
-                for image in &images {
-                    watch.insert(wk((
-                        image.table.clone(),
-                        "id".to_owned(),
-                        watch_key(&Sql::Blob(image.id.to_vec())),
-                    )));
-                }
-                let origins = inner.origins(&seqs)?;
-                let through = at.unwrap_or(inner.seq);
-                let session = &mut inner.sessions[index];
-                session.watch = watch;
-                session.held = held;
-                if !origins.is_empty() {
-                    session
-                        .outbox
-                        .push(SyncMessage::Origins { commits: origins });
-                }
-                if !images.is_empty() {
-                    session.outbox.push(SyncMessage::Rows { images });
-                }
-                session.outbox.push(SyncMessage::Answer {
-                    id,
-                    through,
-                    rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
-                });
             }
             SyncMessage::Commit {
                 node,
@@ -4899,6 +5110,19 @@ pub struct RelationSnapshot {
 #[derive(Debug)]
 pub struct QueryAttachment;
 
+fn scoped_result_query(prepared: &PreparedQuery, rows: Vec<[u8; 16]>) -> PreparedQuery {
+    let mut exact = prepared.clone();
+    exact.query.filters.push(crate::query::in_list(
+        crate::query::col("id"),
+        rows.into_iter()
+            .map(|row| crate::query::lit(Value::Uuid(RowUuid::from_bytes(row).0))),
+    ));
+    // The authority has already applied this window.
+    exact.query.limit = None;
+    exact.query.offset = 0;
+    exact
+}
+
 fn row_local_policy(policy: &PolicyExpr) -> bool {
     match policy {
         PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().all(row_local_policy),
@@ -5046,16 +5270,7 @@ impl Db {
                     if let Some((through, rows)) = answer {
                         // Only these authority-approved roots, at this cut, belong
                         // to this request. Other cached or pending rows do not.
-                        let mut exact = prepared.clone();
-                        exact.query.filters.push(crate::query::in_list(
-                            crate::query::col("id"),
-                            rows.into_iter().map(|row| {
-                                crate::query::lit(Value::Uuid(RowUuid::from_bytes(row).0))
-                            }),
-                        ));
-                        // The authority has already applied this window.
-                        exact.query.limit = None;
-                        exact.query.offset = 0;
+                        let exact = scoped_result_query(&prepared, rows);
                         let read = ReadSpec {
                             cut: Some(Cut::at(through)),
                             include_deleted: opts.read_view.include_deleted,
