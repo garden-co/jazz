@@ -339,4 +339,21 @@ describe("SQLite browser root", () => {
     expect(recovered.store.replicaNode).not.toEqual(node);
     expect(mocks.destroy).toHaveBeenCalledTimes(2);
   });
+  it("can reset an absent root repeatedly without retaining the probe connection", async () => {
+    await IndexedDbPageStore.destroy("missing");
+    await IndexedDbPageStore.destroy("missing");
+    const h = await open("missing");
+    await h.store.openSqliteRuntime(async () => runtime());
+    expect(mocks.destroy).not.toHaveBeenCalled();
+  });
+
+  it("closes the reset probe when an external deletion removed the sidecar", async () => {
+    const h = await open();
+    await h.store.close();
+    await request(indexedDB.deleteDatabase("notes"));
+    await expect(h.store.destroyUnderOwner(h.epoch)).rejects.toThrow();
+    await h.epoch.release();
+    await IndexedDbPageStore.destroy("notes");
+    expect(mocks.destroy).not.toHaveBeenCalled();
+  });
 });
