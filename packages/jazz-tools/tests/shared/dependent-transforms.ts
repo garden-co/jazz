@@ -48,21 +48,25 @@ export function testDependentTransforms(create: () => Promise<Db>) {
       );
     });
 
-    it("fetches missing update context and preserves unawaited transaction ordering", async () => {
-      const db = await open();
-      const table = app.products;
-      const { value: row } = db.insert(table, { price: 1, unit: "cents" });
-      await db.transaction(async (tx) => {
-        tx.update(table, row.id, { price: 2 });
-        tx.update(table, row.id, { label: "changed" });
-        expect(await tx.one(table.where({ id: row.id }))).toMatchObject({
-          price: 2,
-          label: "changed",
+    it.each(["update", "upsert"] as const)(
+      "fetches missing %s context and preserves unawaited transaction ordering",
+      async (operation) => {
+        const db = await open();
+        const table = app.products;
+        const { value: row } = db.insert(table, { price: 1, unit: "cents" });
+        await db.transaction(async (tx) => {
+          if (operation === "upsert") tx.upsert(table, row.id, { price: 2 });
+          else tx.update(table, row.id, { price: 2 });
+          tx.update(table, row.id, { label: "changed" });
+          expect(await tx.one(table.where({ id: row.id }))).toMatchObject({
+            price: 2,
+            label: "changed",
+          });
         });
-      });
-      await db.update(table, row.id, { unit: "dollars" });
-      await expect(db.one(table.where({ id: row.id }))).resolves.toMatchObject({ price: 200 });
-    });
+        await db.update(table, row.id, { unit: "dollars" });
+        await expect(db.one(table.where({ id: row.id }))).resolves.toMatchObject({ price: 200 });
+      },
+    );
 
     it("orders plain-table writes and transaction snapshots after dependency preparation", async () => {
       const db = await open();

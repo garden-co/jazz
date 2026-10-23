@@ -1,3 +1,4 @@
+import { assertNoSyntheticReferences } from "../magic-columns.js";
 import { canonicalJsonSchema, columnTypeSignature } from "../runtime/schema-metadata.js";
 import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
@@ -64,6 +65,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     writer.stringBytes(tableName);
     writer.byte(0);
     hashColumns(writer, table.columns);
+    assertNoSyntheticReferences(tableName, table.synthetic_references_v1);
 
     if (table.indexed_columns) {
       writer.byte(1);
@@ -375,6 +377,11 @@ export function tableSchemasEqual(
   if (!indexedColumnsEqual(left.branchBy, right.branchBy)) {
     return false;
   }
+  if (
+    canonicalJsonSchema(left.synthetic_references_v1 ?? {}) !==
+    canonicalJsonSchema(right.synthetic_references_v1 ?? {})
+  )
+    return false;
 
   const leftColumns = [...left.columns].sort((a, b) => a.name.localeCompare(b.name));
   const rightColumns = [...right.columns].sort((a, b) => a.name.localeCompare(b.name));

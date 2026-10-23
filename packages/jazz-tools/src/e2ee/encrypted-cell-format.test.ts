@@ -1,3 +1,8 @@
+import { TypedTableQueryBuilder } from "../typed-app.js";
+import {
+  spaceAdministrationSchema,
+  spaceAdministrationTable,
+} from "./space-administration-schema.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -42,6 +47,7 @@ it.each(["wasm", "native"])(
     const app = s.defineApp({
       ...deviceRequestSchema,
       ...spaceSchema,
+      [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
       projects: s.table({ title: s.string() }, {}),
       notes: s
         .table(
@@ -56,12 +62,16 @@ it.each(["wasm", "native"])(
       ...deviceRequestSchema,
       ...groupSchema,
       ...spaceSchema,
+      [spaceAdministrationTable("projects")]: spaceAdministrationSchema("projects"),
       projects: s.table({ title: s.string() }, {}),
       notes: s.table(
         { projectId: s.uuid(), title: s.bytes(), payload: s.bytes() },
         { project: s.rel("projects", "projectId") },
       ),
     });
+    const physicalTable = new TypedTableQueryBuilder("notes", {
+      ...app.wasmSchema,
+    }) as unknown as typeof physical.notes;
     const policies = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -158,7 +168,7 @@ it.each(["wasm", "native"])(
         tier: "remote",
       });
       expect(root).not.toBeNull();
-      const stored = await raw.one(physical.notes.where({ id: note.id }), { tier: "remote" });
+      const stored = await raw.one(physicalTable.where({ id: note.id }), { tier: "remote" });
       expect(hex(stored!.title)).toBe(
         outer + hex(new TextEncoder().encode(root!.epochId)) + inner + "00",
       );

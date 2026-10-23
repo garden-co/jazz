@@ -8,6 +8,9 @@ import { groupSchema } from "./managed-schema.js";
 /** Account and group UUIDs occupy separate namespaces. */
 export type GroupMember = Readonly<{ kind: "account" | "group"; id: string }>;
 
+/** Infer a bare Jazz account or group ID, or select its namespace explicitly. */
+export type GroupRecipient = string | GroupMember;
+
 export type GroupTables = Pick<
   App<typeof deviceRequestSchema & typeof groupSchema>,
   keyof typeof groupSchema

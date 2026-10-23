@@ -1,4 +1,5 @@
 import { assertRelationshipDeclaration } from "../relationships.js";
+import { assertNoSyntheticReferences, isProvenanceAccountColumn } from "../magic-columns.js";
 /**
  * Analyze schema to derive forward and reverse relations.
  */
@@ -43,6 +44,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
       columns.add(column.name);
     }
     result.set(tableName, []);
+    assertNoSyntheticReferences(tableName, table.synthetic_references_v1);
     for (const name of Object.keys(table.relations ?? {})) {
       if (
         !name ||
@@ -76,6 +78,10 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
           `Reverse relationship "${tableName}.${name}" references a forward relation targeting "${forward.table}", not "${tableName}".`,
         );
       const source = declaration.kind === "forward" ? table : schema[declaration.table]!;
+      if (isProvenanceAccountColumn(forward.column))
+        throw new Error(
+          `Relationships through "${tableName}.${forward.column}" are not supported yet. Use a stored UUID owner column.`,
+        );
       const column = source.columns.find((c) => c.name === forward.column);
       if (!column)
         throw new Error(

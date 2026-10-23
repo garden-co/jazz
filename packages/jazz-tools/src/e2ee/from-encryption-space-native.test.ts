@@ -5,23 +5,31 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
-import { encryptionSpacePolicySchema } from "./current-membership-schema.js";
 import { permissionSpaceColumn } from "./current-membership-names.js";
 import { prefetchPublicMembershipHistory } from "./public-membership.js";
+import { e2eeAccountRelation } from "./account-relation.js";
 
-async function fixture(denyMemberUpdates = false, ownNotesOnly = false) {
+async function fixture(
+  denyMemberUpdates = false,
+  spaceHelpers = false,
+  ownNotesOnly = false,
+  groupHelpers: boolean | "create-only" | "admin-only" | "delegated" = false,
+) {
   const app = s.defineApp({
-    ...encryptionSpacePolicySchema("projects"),
     projects: s.table(
       { ownerId: s.uuid(), title: s.string() },
-      { owner: s.rel("__e2ee_account_identities", "ownerId") },
+      { owner: e2eeAccountRelation("ownerId") },
     ),
     projectOwners: s.table(
       { projectId: s.uuid(), accountId: s.uuid() },
       {
         project: s.rel("projects", "projectId"),
-        account: s.rel("__e2ee_account_identities", "accountId"),
+        account: e2eeAccountRelation(),
       },
+    ),
+    groupOwners: s.table(
+      { groupId: s.uuid(), accountId: s.uuid() },
+      { group: s.rel("__e2ee_groups", "groupId"), account: e2eeAccountRelation() },
     ),
     notes: s
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
@@ -39,18 +47,14 @@ async function fixture(denyMemberUpdates = false, ownNotesOnly = false) {
       )
       .encrypted({ space: "projectId", columns: ["payload"] }),
   });
-  const permissions = definePermissions(app, ({ policy: p, session, allOf }) => {
+  const permissions = definePermissions(app, ({ policy: p, session, allOf, anyOf, e2ee }) => {
     p.projects.allowRead.always();
     p.projects.allowInsert.where({
       ownerId: session.user.account,
       "$createdBy.account": session.user.account,
     });
     p.notes.fromEncryptionSpace(
-      ownNotesOnly
-        ? {
-            write: { "$createdBy.account": session.user.account },
-          }
-        : undefined,
+      ownNotesOnly ? { write: { "$createdBy.account": session.user.account } } : undefined,
     );
     p.files.fromEncryptionSpace();
     p.drafts.allowRead.always();
@@ -66,75 +70,125 @@ async function fixture(denyMemberUpdates = false, ownNotesOnly = false) {
         }),
       ]),
     );
-    p.__e2ee_spaces.allowRead.always();
-    p.__e2ee_spaces.allowInsert.where((space) =>
-      allOf([
-        { creatorAccountId: session.user.account, "$createdBy.account": session.user.account },
+    if (spaceHelpers) {
+      p.notes.space.allowRead.always();
+      p.notes.space.allowInsert.where((space) =>
         p.projectOwners.existsIncludingCreated.where({
           accountId: space.creatorAccountId,
           projectId: space.identifier,
         }),
-      ]),
-    );
-    p.__e2ee_space_grants.allowRead.always();
-    p.__e2ee_space_grants.allowInsert.where((grant) =>
-      allOf([
-        { authorAccountId: session.user.account },
+      );
+      p.notes.space.allowUpdate.where((space) =>
+        p.projectOwners.existsIncludingCreated.where({
+          accountId: session.user.account,
+          projectId: space.identifier,
+        }),
+      );
+    } else {
+      p.__e2ee_spaces.allowRead.always();
+      p.__e2ee_spaces.allowInsert.where((space) =>
+        allOf([
+          { creatorAccountId: session.user.account, "$createdBy.account": session.user.account },
+          p.projectOwners.existsIncludingCreated.where({
+            accountId: space.creatorAccountId,
+            projectId: space.identifier,
+          }),
+        ]),
+      );
+      p.__e2ee_space_grants.allowRead.always();
+      p.__e2ee_space_grants.allowInsert.where((grant) =>
+        allOf([
+          { authorAccountId: session.user.account },
+          p.__e2ee_spaces.existsIncludingCreated.where({
+            id: grant.spaceId,
+            creatorAccountId: session.user.account,
+          }),
+        ]),
+      );
+      p.__e2ee_space_successors.allowRead.always();
+      p.__e2ee_space_successors.allowInsert.where((row) =>
         p.__e2ee_spaces.existsIncludingCreated.where({
-          id: grant.spaceId,
+          id: row.spaceId,
           creatorAccountId: session.user.account,
         }),
-      ]),
-    );
-    p.__e2ee_space_successors.allowRead.always();
-    p.__e2ee_space_successors.allowInsert.where((row) =>
-      p.__e2ee_spaces.existsIncludingCreated.where({
-        id: row.spaceId,
-        creatorAccountId: session.user.account,
-      }),
-    );
-    p.__e2ee_space_deliveries.allowRead.always();
-    p.__e2ee_space_deliveries.allowInsert.where((row) =>
-      p.__e2ee_spaces.existsIncludingCreated.where({
-        id: row.spaceId,
-        creatorAccountId: session.user.account,
-      }),
-    );
-    p.__e2ee_groups.allowInsert.where({
-      accountId: session.user.account,
-      "$createdBy.account": session.user.account,
-    });
-    p.__e2ee_group_membership.allowInsert.where((row) =>
-      p.__e2ee_groups.exists.where({ id: row.groupId, accountId: session.user.account }),
-    );
-    p.__e2ee_group_successors.allowInsert.where((row) =>
-      p.__e2ee_groups.exists.where({ id: row.groupId, accountId: session.user.account }),
-    );
-    p.__e2ee_group_deliveries.allowRead.always();
-    p.__e2ee_group_deliveries.allowInsert.where((row) =>
-      p.__e2ee_groups.exists.where({ id: row.groupId, accountId: session.user.account }),
-    );
-    p.__e2ee_group_repairs.allowRead.always();
-    p.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
-    p.__e2ee_v1_space_members_projects.allowInsert.where((member) =>
-      p.projects.existsIncludingCreated.where({
-        id: member.scopeId,
-        ownerId: session.user.account,
-      }),
-    );
-    if (!denyMemberUpdates)
-      p.__e2ee_v1_space_members_projects.allowUpdate.where((member) =>
-        p.projects.exists.where({ id: member.scopeId, ownerId: session.user.account }),
       );
-    p.__e2ee_v1_group_members.allowInsert.where((member) =>
-      p.__e2ee_groups.existsIncludingCreated.where({
-        id: member.groupId,
+      p.__e2ee_space_deliveries.allowRead.always();
+      p.__e2ee_space_deliveries.allowInsert.where((row) =>
+        p.__e2ee_spaces.existsIncludingCreated.where({
+          id: row.spaceId,
+          creatorAccountId: session.user.account,
+        }),
+      );
+    }
+    if (groupHelpers) {
+      if (groupHelpers !== "admin-only") e2ee.groups.allowInsert.always();
+      if (groupHelpers === "delegated") {
+        p.groupOwners.allowRead.always();
+        p.groupOwners.allowInsert.where((binding) =>
+          p.__e2ee_groups.exists.where({
+            id: binding.groupId,
+            accountId: session.user.account,
+          }),
+        );
+        p.groupOwners.allowDelete.where((binding) =>
+          p.__e2ee_groups.exists.where({
+            id: binding.groupId,
+            accountId: session.user.account,
+          }),
+        );
+        e2ee.groups.allowUpdate.where((group) =>
+          anyOf([
+            { creatorAccountId: session.user.account },
+            p.groupOwners.existsIncludingCreated.where({
+              groupId: group.id,
+              accountId: session.user.account,
+            }),
+          ]),
+        );
+      } else if (groupHelpers !== "create-only") {
+        e2ee.groups.allowUpdate.where({ creatorAccountId: session.user.account });
+      }
+    } else {
+      p.__e2ee_groups.allowInsert.where({
         accountId: session.user.account,
-      }),
-    );
-    p.__e2ee_v1_group_members.allowUpdate.where((member) =>
-      p.__e2ee_groups.exists.where({ id: member.groupId, accountId: session.user.account }),
-    );
+        "$createdBy.account": session.user.account,
+      });
+      p.__e2ee_group_membership.allowInsert.where((row) =>
+        p.__e2ee_groups.exists.where({ id: row.groupId, accountId: session.user.account }),
+      );
+      p.__e2ee_group_successors.allowInsert.where((row) =>
+        p.__e2ee_groups.exists.where({ id: row.groupId, accountId: session.user.account }),
+      );
+      p.__e2ee_group_deliveries.allowRead.always();
+      p.__e2ee_group_deliveries.allowInsert.where((row) =>
+        p.__e2ee_groups.exists.where({ id: row.groupId, accountId: session.user.account }),
+      );
+      p.__e2ee_group_repairs.allowRead.always();
+      p.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
+    }
+    if (!spaceHelpers) {
+      p.__e2ee_v1_space_members_projects.allowInsert.where((member) =>
+        p.projects.existsIncludingCreated.where({
+          id: member.scopeId,
+          ownerId: session.user.account,
+        }),
+      );
+      if (!denyMemberUpdates)
+        p.__e2ee_v1_space_members_projects.allowUpdate.where((member) =>
+          p.projects.exists.where({ id: member.scopeId, ownerId: session.user.account }),
+        );
+    }
+    if (!groupHelpers) {
+      p.__e2ee_v1_group_members.allowInsert.where((member) =>
+        p.__e2ee_groups.existsIncludingCreated.where({
+          id: member.groupId,
+          accountId: session.user.account,
+        }),
+      );
+      p.__e2ee_v1_group_members.allowUpdate.where((member) =>
+        p.__e2ee_groups.exists.where({ id: member.groupId, accountId: session.user.account }),
+      );
+    }
   });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
@@ -202,7 +256,7 @@ async function fixture(denyMemberUpdates = false, ownNotesOnly = false) {
 }
 
 it("restricts member writes to their own notes and retains membership checks after revocation", async () => {
-  const { app, owner, reader, createProject, close } = await fixture(false, true);
+  const { app, owner, reader, createProject, close } = await fixture(false, false, true);
   try {
     const project = await createProject("Shared project");
     const aliceNote = await owner.db
@@ -245,7 +299,7 @@ it("restricts member writes to their own notes and retains membership checks aft
   } finally {
     await close();
   }
-});
+}, 120_000);
 
 it("derives CRUD from direct and nested membership, retracts live rows and rejects mismatched scopes", async () => {
   const { app, owner, reader, createProject, close } = await fixture();
@@ -324,8 +378,17 @@ it("derives CRUD from direct and nested membership, retracts live rows and rejec
     await visible([]);
     const parent = await owner.db.e2ee.groups.create().wait();
     const child = await owner.db.e2ee.groups.create().wait();
-    await owner.db.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
-    await owner.db.e2ee.groups.add(child.id, { kind: "account", id: reader.id }).wait();
+    await expect(owner.db.e2ee.groups.add(parent.id, crypto.randomUUID()).wait()).rejects.toThrow(
+      "E2EE group recipient not found",
+    );
+    await expect(
+      owner.db.e2ee.groups.remove(parent.id, crypto.randomUUID()).wait(),
+    ).rejects.toThrow("E2EE group recipient not found");
+    await expect(owner.db.e2ee.groups.add(parent.id, "invalid").wait()).rejects.toThrow(
+      "Invalid E2EE group member selector",
+    );
+    await owner.db.e2ee.groups.add(parent.id, child.id).wait();
+    await owner.db.e2ee.groups.add(child.id, reader.id).wait();
     await owner.db.e2ee.spaces.grant(app.projects, project.id, parent.id).wait();
     await visible([{ id: note.id }]);
     const nested = await reader.db
@@ -339,7 +402,11 @@ it("derives CRUD from direct and nested membership, retracts live rows and rejec
     ).toMatchObject({ body: "Nested update" });
     await reader.db.delete(app.notes, nested.id).wait({ tier: "global" });
     await visible([{ id: note.id }]);
-    await owner.db.e2ee.groups.remove(child.id, { kind: "account", id: reader.id }).wait();
+    await owner.db.e2ee.groups.remove(parent.id, child.id).wait();
+    await visible([]);
+    await owner.db.e2ee.groups.add(parent.id, child.id).wait();
+    await visible([{ id: note.id }]);
+    await owner.db.e2ee.groups.remove(child.id, reader.id).wait();
     await visible([]);
   } finally {
     stop?.();
@@ -460,3 +527,230 @@ it("uses exact initial recipients and rejects missing spaces before consuming a 
 async function* bytes() {
   yield new Uint8Array([1, 2, 3]);
 }
+
+it.each([true, "delegated"] as const)(
+  "enforces current group administration independently of space creation (%s)",
+  async (mode) => {
+    const { app, owner, reader, close } = await fixture(false, true, false, mode);
+    try {
+      const group = await owner.db.e2ee.groups.create().wait();
+      await expect(reader.db.e2ee.groups.add(group.id, reader.id).wait()).rejects.toThrow();
+      await owner.db.e2ee.groups.add(group.id, reader.id).wait();
+      expect(
+        await reader.db.all(
+          app.__e2ee_v1_group_members.where({ groupId: group.id, accountId: reader.id }),
+          { tier: "remote" },
+        ),
+      ).toHaveLength(1);
+      await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+      if (mode === "delegated") {
+        await expect(
+          reader.db
+            .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+            .wait({ tier: "global" }),
+        ).rejects.toThrow();
+        const delegation = await owner.db
+          .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+          .wait({ tier: "global" });
+        await reader.db.e2ee.groups.remove(group.id, owner.id).wait();
+        await reader.db.e2ee.groups.add(group.id, owner.id).wait();
+        await owner.db.delete(app.groupOwners, delegation.id).wait({ tier: "global" });
+        await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+      }
+      await owner.db.e2ee.groups.remove(group.id, reader.id).wait();
+      expect(
+        await reader.db.all(
+          app.__e2ee_v1_group_members.where({ groupId: group.id, accountId: reader.id }),
+          { tier: "remote" },
+        ),
+      ).toEqual([]);
+    } finally {
+      await close();
+    }
+  },
+  120_000,
+);
+
+it.each(["create-only", "admin-only"] as const)(
+  "refuses group creation when only %s is configured",
+  async (mode) => {
+    const { app, owner, close } = await fixture(false, true, false, mode);
+    try {
+      const group = owner.db.e2ee.groups.create();
+      await expect(group.wait()).rejects.toThrow();
+      expect(
+        await owner.db.all(app.__e2ee_v1_group_members.where({ groupId: group.id }), {
+          tier: "remote",
+        }),
+      ).toEqual([]);
+    } finally {
+      await close();
+    }
+  },
+  120_000,
+);
+
+it("applies and revokes application-defined group administration without granting it through key possession", async () => {
+  const { app, owner, reader, createProject, close } = await fixture(
+    false,
+    true,
+    false,
+    "delegated",
+  );
+  try {
+    const project = await createProject("Delegated group administration");
+    const note = await owner.db
+      .insert(app.notes, { projectId: project.id, body: "Shared with the group" })
+      .wait({ tier: "global" });
+    const group = await owner.db.e2ee.groups.create().wait();
+    await owner.db.e2ee.groups.add(group.id, reader.id).wait();
+    await owner.db.e2ee.spaces.grant(app.projects, project.id, group.id).wait();
+    // This case exercises group-only access; the founder's direct grant is independent.
+    await owner.db.e2ee.spaces.revoke(app.projects, project.id, owner.id).wait();
+    await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+    // Group members cannot appoint themselves as administrators.
+    await expect(
+      reader.db
+        .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const delegation = await owner.db
+      .insert(app.groupOwners, { groupId: group.id, accountId: reader.id })
+      .wait({ tier: "global" });
+    await reader.db.e2ee.groups.remove(group.id, owner.id).wait();
+    expect(await owner.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
+    await reader.db.e2ee.groups.add(group.id, owner.id).wait();
+    // Settle group key changes while the scope administrator is available.
+    expect(await owner.db.e2ee.explain({ scope: app.projects, identifier: project.id })).toEqual({
+      state: "ready",
+    });
+    expect(await owner.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject({
+      body: "Shared with the group",
+    });
+    await owner.db.delete(app.groupOwners, delegation.id).wait({ tier: "global" });
+    // Removing administration preserves membership and its decryption key.
+    expect(await reader.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject(
+      {
+        body: "Shared with the group",
+      },
+    );
+    await expect(reader.db.e2ee.groups.remove(group.id, owner.id).wait()).rejects.toThrow();
+    await owner.db.e2ee.groups.remove(group.id, reader.id).wait();
+    expect(await reader.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
+  } finally {
+    await close();
+  }
+}, 120_000);
+
+it("enforces owner-managed group administration across nested sharing, recovery and revocation", async () => {
+  const { app, owner, reader, createProject, close } = await fixture(false, true, false, true);
+  try {
+    const project = await createProject("Group helper");
+    const note = await owner.db
+      .insert(app.notes, { projectId: project.id, body: "Private" })
+      .wait({ tier: "global" });
+    const parent = await owner.db.e2ee.groups.create().wait();
+    const child = await owner.db.e2ee.groups.create().wait();
+    await expect(reader.db.e2ee.groups.add(child.id, reader.id).wait()).rejects.toThrow();
+    await owner.db.e2ee.groups.add(parent.id, child.id).wait();
+    await owner.db.e2ee.groups.add(child.id, reader.id).wait();
+    await owner.db.e2ee.spaces.grant(app.projects, project.id, parent.id).wait();
+    expect(await reader.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject(
+      { body: "Private" },
+    );
+    // Possession of a group key must not grant administration authority.
+    await expect(reader.db.e2ee.groups.remove(child.id, owner.id).wait()).rejects.toThrow();
+    const root = await owner.db.one(app.__e2ee_groups.where({ id: child.id }), { tier: "remote" });
+    await expect(
+      owner.db
+        .update(app.__e2ee_groups, child.id, { epochId: crypto.randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const { id: _id, ...values } = root!;
+    await expect(
+      reader.db.insert(app.__e2ee_groups, values).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const member = (
+      await owner.db.all(
+        app.__e2ee_v1_group_members.where({
+          groupId: child.id,
+          accountId: reader.id,
+        }),
+        { tier: "remote" },
+      )
+    )[0]!;
+    await expect(
+      reader.db
+        .update(app.__e2ee_v1_group_members, member.id, { accountId: owner.id })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const readerGroup = await reader.db.e2ee.groups.create().wait();
+    const readerMember = (
+      await reader.db.all(app.__e2ee_v1_group_members.where({ groupId: readerGroup.id }), {
+        tier: "remote",
+      })
+    )[0]!;
+    // An administrator cannot move an edge into a group they do not administer.
+    await expect(
+      owner.db
+        .update(app.__e2ee_v1_group_members, member.id, { groupId: readerGroup.id })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await expect(
+      reader.db
+        .update(app.__e2ee_v1_group_members, readerMember.id, { groupId: child.id })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await owner.db.e2ee.recovery.create().wait();
+    expect(
+      (
+        await owner.db.all(app.__e2ee_group_recovery_deliveries.where({ groupId: child.id }), {
+          tier: "remote",
+        })
+      ).length,
+    ).toBeGreaterThan(0);
+    await owner.db.e2ee.groups.remove(child.id, reader.id).wait();
+    expect(await reader.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
+  } finally {
+    await close();
+  }
+}, 120_000);
+
+it("authorises space administration through the scoped helper while keeping roots immutable", async () => {
+  const { app, owner, reader, createProject, close } = await fixture(false, true);
+  try {
+    const project = await createProject("Helper administration");
+    const note = await owner.db
+      .insert(app.notes, { projectId: project.id, body: "Private" })
+      .wait({ tier: "global" });
+    await expect(
+      reader.db.e2ee.spaces.grant(app.projects, project.id, reader.id).wait(),
+    ).rejects.toThrow();
+    await owner.db.e2ee.spaces.grant(app.projects, project.id, reader.id).wait();
+    expect(await reader.db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toMatchObject(
+      { body: "Private" },
+    );
+    await expect(
+      reader.db.e2ee.spaces.revoke(app.projects, project.id, owner.id).wait(),
+    ).rejects.toThrow();
+    const root = await owner.db.one(app.__e2ee_spaces.where({ identifier: project.id }), {
+      tier: "remote",
+    });
+    expect(root).not.toBeNull();
+    await expect(
+      owner.db
+        .update(app.__e2ee_spaces, root!.id, { epochId: crypto.randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    const { id: _id, ...values } = root!;
+    await expect(
+      owner.db
+        .insert(app.__e2ee_spaces, { ...values, scopeId: crypto.randomUUID() })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await owner.db.e2ee.spaces.revoke(app.projects, project.id, reader.id).wait();
+    expect(await reader.db.all(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual([]);
+  } finally {
+    await close();
+  }
+}, 120_000);

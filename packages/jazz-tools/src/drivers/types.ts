@@ -176,6 +176,8 @@ export interface TablePolicies {
 }
 
 export interface TableSchema {
+  /** Versioned references from system-provided account UUID fields; no stored columns. */
+  synthetic_references_v1?: Record<string, string>;
   /** Authoring metadata; excluded from storage schema identity. */
   relations?: import("../relationships.js").Relationships;
   columns: ColumnDescriptor[];

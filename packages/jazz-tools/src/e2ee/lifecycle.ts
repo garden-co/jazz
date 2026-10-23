@@ -1,6 +1,7 @@
 import { serializableE2eeTransaction } from "../runtime/db.js";
 import { configureAcceptedHistory } from "./accepted-history.js";
 import type { AccountStore } from "../accounts/persistence.js";
+import { resolveE2eeStore } from "./browser-key-store.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { encryptedSchemas, assertEncryptionPoliciesRegistered } from "./encrypted-schema.js";
 import {
@@ -37,7 +38,7 @@ import {
 } from "./public-membership.js";
 import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
-import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
+import { groupSchema, type GroupRecipient, type GroupTables } from "./groups.js";
 import { Spaces, SpaceInitialisationRequired } from "./space-lifecycle.js";
 import type {
   SpaceDataPreparation,
@@ -72,8 +73,11 @@ export async function equalityCryptoForDb(db: Db): Promise<EqualityIndex> {
 export type E2eeConfig = {
   /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
   app?: DeviceTables | { readonly wasmSchema: WasmSchema };
-  /** Dedicated local key storage. Do not reuse the account-selection store value. */
-  store: AccountStore;
+  /**
+   * Dedicated local key storage; defaults to atomic IndexedDB in browsers.
+   * Native/server hosts must supply a store. Do not reuse account-selection storage.
+   */
+  store?: AccountStore;
   crypto?: JazzCrypto;
   /** Known-stale offline writes warn by default; revoked devices are always refused. */
   staleWrites?: "warn" | "reject";
@@ -371,6 +375,7 @@ export function e2eeForDb(db: Db): E2ee {
 
 /** First-device activation; approval and rotation are separate lifecycle operations. */
 export class E2ee {
+  private readonly store: AccountStore;
   private approval: DeviceApproval | undefined;
   private recoveryReader:
     | { approval: DeviceApproval; keys: KeyEnvelope; signer: DeviceSigner }
@@ -389,7 +394,7 @@ export class E2ee {
   readonly groups = {
     leave: (groupId: string): { wait(): Promise<void> } =>
       this.groups.remove(groupId, { kind: "account", id: this.account.id }),
-    remove: (groupId: string, member: GroupMember): { wait(): Promise<void> } => {
+    remove: (groupId: string, member: GroupRecipient): { wait(): Promise<void> } => {
       const completion = (async () => {
         await this.prepare();
         return this.requireGroups().remove(groupId, member);
@@ -397,7 +402,7 @@ export class E2ee {
       completion.catch(() => {});
       return { wait: () => completion };
     },
-    add: (groupId: string, member: GroupMember): { wait(): Promise<void> } => {
+    add: (groupId: string, member: GroupRecipient): { wait(): Promise<void> } => {
       const completion = (async () => {
         await this.prepare();
         return this.requireGroups().add(groupId, member);
@@ -720,6 +725,11 @@ export class E2ee {
     private readonly config: E2eeConfig,
     private readonly env: string,
   ) {
+    this.store = resolveE2eeStore(config.store, {
+      registry: accountRegistry(account),
+      env,
+      accountId: account.id,
+    });
     const app = config.app ?? deviceRequestApp;
     const schema = "wasmSchema" in app ? resolveSchemaSource(app) : undefined;
     const tables: Record<string, unknown> = {};
@@ -755,7 +765,7 @@ export class E2ee {
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
     this.journal = new InitializationJournal(
       db,
-      config.store,
+      this.store,
       this.scope,
       () => this.assertOpen(),
       async (proposal) => {
@@ -772,7 +782,7 @@ export class E2ee {
       (proposal) => this.requireSpaces().completeInitial(proposal.root),
     );
     configureAcceptedHistory(db, {
-      store: config.store,
+      store: this.store,
       scope: this.scope,
       assertOpen: () => this.assertOpen(),
     });
@@ -939,7 +949,7 @@ export class E2ee {
     const generatedHere = await accountGeneratedHere(this.account);
     const ownership = accountFounderOwnership(this.account);
     const device = await (retainedOnly && !generatedHere ? retainedLocalDevice : localDevice)(
-      this.config.store,
+      this.store,
       this.scope,
       envelope,
       signer,
@@ -1154,7 +1164,7 @@ export class E2ee {
               (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
               {
                 id: provider.id,
-                store: this.config.store,
+                store: this.store,
                 isKnownRevoked: () => this.approval!.isKnownRevoked(),
                 load: provider.load,
                 release: provider.release,
@@ -1179,7 +1189,7 @@ export class E2ee {
               () => this.assertOpen(),
               {
                 id: provider.id,
-                store: this.config.store,
+                store: this.store,
                 isKnownRevoked: () => this.approval!.isKnownRevoked(),
                 load: provider.load,
                 release: provider.release,

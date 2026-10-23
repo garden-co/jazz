@@ -104,6 +104,14 @@ impl Session {
     }
 }
 
+// Catalogue identities are accepted schema metadata, never identity-provider claims.
+fn reject_catalogue_identity_path(path: &[String]) -> Result<(), Error> {
+    if path.first().map(String::as_str) == Some("__jazz_table_identity_v1") {
+        return Err(unsupported("CatalogueTableIdentityV1 policies on SQLite"));
+    }
+    Ok(())
+}
+
 fn unwrap_nullable(value: Value) -> Option<Value> {
     match value {
         Value::Nullable(None) => None,
@@ -1396,6 +1404,9 @@ impl<'a> Ctx<'a> {
                 self.value_term(&value)
             }
             Operand::Claim(key) => {
+                if key.starts_with(crate::query::TABLE_IDENTITY_OPERAND_PREFIX) {
+                    return Err(unsupported("CatalogueTableIdentityV1 operands on SQLite"));
+                }
                 let value = self.claims.claim(key);
                 self.present(value)
             }
@@ -1572,6 +1583,7 @@ impl<'a> Ctx<'a> {
                 self.column_term(table, alias, column)
             }
             PolicyValue::SessionRef(path) => {
+                reject_catalogue_identity_path(path)?;
                 let value = session.resolve(path);
                 self.present(value)
             }
@@ -1587,6 +1599,21 @@ impl<'a> Ctx<'a> {
         session: &Session,
         depth: usize,
     ) -> Result<String, Error> {
+        // Every session-path fast path must reject reserved catalogue metadata,
+        // including null predicates that could otherwise authorize a missing claim.
+        match policy {
+            PolicyExpr::Cmp {
+                value: PolicyValue::SessionRef(path),
+                ..
+            }
+            | PolicyExpr::SessionCmp { path, .. }
+            | PolicyExpr::SessionIsNull { path }
+            | PolicyExpr::SessionIsNotNull { path }
+            | PolicyExpr::SessionInList { path, .. }
+            | PolicyExpr::SessionContains { path, .. } => reject_catalogue_identity_path(path)?,
+            PolicyExpr::In { session_path, .. } => reject_catalogue_identity_path(session_path)?,
+            _ => {}
+        }
         let recurse = |ctx: &mut Self, policy: &PolicyExpr| {
             ctx.policy_expr(policy, table, alias, outer, session, depth)
         };
@@ -2038,6 +2065,7 @@ impl<'a> Ctx<'a> {
                 self.value_term(&value)
             }
             RelationValueRef::SessionRef(path) => {
+                reject_catalogue_identity_path(path)?;
                 let value = scope.session.resolve(path);
                 self.present(value)
             }

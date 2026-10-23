@@ -177,6 +177,13 @@ fn validate_converted_references(tables: &[CoreTableSchema]) -> Result<(), Schem
                 ));
             }
 
+            if matches!(
+                column_name.as_str(),
+                "$createdBy.account" | "$updatedBy.account"
+            ) {
+                continue;
+            }
+
             let column_type = table
                 .columns
                 .iter()
@@ -577,6 +584,12 @@ fn convert_table(
     }
 
     let mut converted = CoreTableSchema::new(name.as_str(), columns);
+    if !table.synthetic_references_v1.is_empty() {
+        return Err(err(
+            format!("$.{}.synthetic_references_v1", name.as_str()),
+            "Synthetic account references are not supported. Use a stored UUID owner column.",
+        ));
+    }
     converted.branch_by = table
         .branch_by
         .iter()
@@ -1380,14 +1393,24 @@ fn append_inherited_referencing_policy(
         .columns
         .columns
         .iter()
-        .find(|column| column.name.as_str() == via_column)
-        .ok_or_else(|| {
-            err(policy_path(table, path), format!(
-                    "INHERITS_REFERENCING via_column '{via_column}' was not found on source_table '{source_table}'"
-                ),
-            )
-        })?;
-    match column.references.as_ref() {
+        .find(|column| column.name.as_str() == via_column);
+    if column.is_none()
+        && !source_schema
+            .synthetic_references_v1
+            .contains_key(via_column)
+    {
+        return Err(err(
+            policy_path(table, path),
+            format!(
+                "INHERITS_REFERENCING via_column '{via_column}' was not found on source_table '{source_table}'"
+            ),
+        ));
+    }
+    let reference = source_schema
+        .synthetic_references_v1
+        .get(via_column)
+        .or_else(|| column.and_then(|column| column.references.as_ref()));
+    match reference {
         Some(target) if target == table => {}
         Some(target) => {
             return Err(err(
@@ -1586,9 +1609,37 @@ fn append_exists_policy_clause(
         ));
         query
     } else {
+        // A row-id equality is not necessarily a declared reference (for
+        // example an E2EE root's polymorphic identifier). Prefer a correlation
+        // whose two endpoints declare the same entity; retain every remaining
+        // scalar equality as a checked correlation on that bounded lookup.
+        let reference = |name: &TableName, column: &str| {
+            if column == "id" {
+                return Some(*name);
+            }
+            if let Some(target) = schema.get(name)?.synthetic_references_v1.get(column) {
+                return Some(*target);
+            }
+            schema
+                .get(name)?
+                .columns
+                .columns
+                .iter()
+                .find(|candidate| candidate.name.as_str() == column)?
+                .references
+        };
         let primary_index = outer_correlations
             .iter()
-            .position(|correlation| correlation.join_column == "id")
+            .position(|correlation| {
+                let source = reference(table, &correlation.source_column);
+                source.is_some()
+                    && source == reference(&exists_table_name, &correlation.join_column)
+            })
+            .or_else(|| {
+                outer_correlations
+                    .iter()
+                    .position(|correlation| correlation.join_column == "id")
+            })
             .unwrap_or(0);
         let primary = outer_correlations.remove(primary_index);
         let join_column = primary.join_column;
@@ -2717,19 +2768,27 @@ fn append_inherited_policy(
         .columns
         .columns
         .iter()
-        .find(|column| column.name.as_str() == via_column)
+        .find(|column| column.name.as_str() == via_column);
+    if column.is_none()
+        && !table_schema
+            .synthetic_references_v1
+            .contains_key(via_column)
+    {
+        return Err(err(
+            policy_path(table, path),
+            format!("INHERITS via_column '{via_column}' was not found"),
+        ));
+    }
+    let parent_table = table_schema
+        .synthetic_references_v1
+        .get(via_column)
+        .or_else(|| column.and_then(|column| column.references.as_ref()))
         .ok_or_else(|| {
             err(
                 policy_path(table, path),
-                format!("INHERITS via_column '{via_column}' was not found"),
+                format!("INHERITS via_column '{via_column}' has no FK reference"),
             )
         })?;
-    let parent_table = column.references.as_ref().ok_or_else(|| {
-        err(
-            policy_path(table, path),
-            format!("INHERITS via_column '{via_column}' has no FK reference"),
-        )
-    })?;
     let parent_schema = schema.get(parent_table).ok_or_else(|| {
         err(
             policy_path(table, path),
@@ -3130,6 +3189,15 @@ fn convert_session_path_operand(
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if let [namespace, name] = path_segments
+        && namespace == "__jazz_table_identity_v1"
+        && !name.is_empty()
+    {
+        return Ok(Operand::Claim(format!(
+            "{}{name}",
+            crate::query::TABLE_IDENTITY_OPERAND_PREFIX,
+        )));
+    }
     if let Some(name) = crate::query::author_claim_path_key(path_segments) {
         return Ok(Operand::Claim(name));
     }
@@ -3548,6 +3616,30 @@ mod tests {
                 .column_type,
             GrooveColumnType::Bool
         );
+    }
+
+    /// Mallory's synthetic references must reject before catalogue publication,
+    /// whether supplied as a Rust schema or raw JSON. This lower-level boundary
+    /// test is needed because unsupported schemas cannot reach row operations.
+    #[test]
+    fn synthetic_account_references_reject_at_schema_admission() {
+        for column in [
+            "$createdBy.account",
+            "$updatedBy.account",
+            "$createdBy",
+            "$createdAt",
+            "$missing.account",
+        ] {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("accounts"))
+                .table(TableSchema::builder("projects").synthetic_reference_v1(column, "accounts"))
+                .build();
+            let error = convert_public_schema(&schema).unwrap_err();
+            assert!(error.to_string().contains("not supported"));
+            let json = serde_json::to_value(&schema).expect("schema JSON");
+            let error = serde_json::from_value::<Schema>(json).unwrap_err();
+            assert!(error.to_string().contains("not supported"));
+        }
     }
 
     #[test]
@@ -6133,5 +6225,17 @@ mod tests {
         assert_eq!(seed.user_column.as_deref(), Some("user_id"));
         assert_eq!(seed.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(seed.team_column, "team");
+    }
+
+    /// Pins the versioned SDK intrinsic at the public wire boundary. This
+    /// lower-level fixture is necessary because row effects do not pin bytes.
+    #[test]
+    fn catalogue_table_identity_v1_wire_fixture() {
+        let expr = PolicyExpr::eq_session(
+            "scopeId",
+            vec!["__jazz_table_identity_v1".to_owned(), "projects".to_owned()],
+        );
+        assert_eq!(serde_json::to_vec(&expr).unwrap(),
+            br#"{"type":"Cmp","column":"scopeId","op":"Eq","value":{"type":"SessionRef","path":["__jazz_table_identity_v1","projects"]}}"#);
     }
 }

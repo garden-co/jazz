@@ -2611,7 +2611,6 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
     // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    writeRecord("Upsert", table, data);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
     this.prepareMutation(
@@ -2672,17 +2671,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     this.encryptedUpdateBatch = undefined;
     this.bindTable(table);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const transformedData = transformInputColumns(table, data);
     const encrypted = encryptedSchemas.get(table._schema)?.tables.get(table._table);
     if (
       encrypted &&
-      (Object.hasOwn(transformedData, encrypted.space) ||
-        encrypted.columns.some((name) => Object.hasOwn(transformedData, name)))
+      (Object.hasOwn(data, encrypted.space) ||
+        encrypted.columns.some((name) => Object.hasOwn(data, name)))
     ) {
       return this.updateEncrypted(
         table,
         id,
-        transformedData,
+        transformInputColumns(table, data),
         options,
         "update",
         undefined,
@@ -3441,9 +3439,11 @@ async function readTransactionRows<T>(
         "Computed projections over encrypted equality queries are not supported by the draft SQLite restack yet",
       );
     const queryJson = equality?.json ?? builderJson;
-    const translated = equality
-      ? queryJson
-      : translateQuery(builderJson, planningSchema, prepared.physical);
+    const translated = translateQuery(
+      queryJson,
+      planningSchema,
+      equality ? undefined : prepared.physical,
+    );
     const result = await queryClient.call(
       client,
       translated,
@@ -5510,9 +5510,11 @@ export class Db {
         throw new Error(
           "Computed projections over encrypted equality queries are not supported by the draft SQLite restack yet",
         );
-      const wasmQuery = equality?.json
-        ? equality.json
-        : translateQuery(builderJson, planningSchema, prepared.physical);
+      const wasmQuery = translateQuery(
+        equality?.json ?? builderJson,
+        planningSchema,
+        equality ? undefined : prepared.physical,
+      );
       const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
       const context = this.getAccessContext();
       const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;

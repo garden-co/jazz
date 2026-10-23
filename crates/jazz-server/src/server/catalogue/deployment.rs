@@ -71,7 +71,7 @@ impl StoredCatalogue {
                     .get(&hash)
                     .copied()
                     .unwrap_or_else(unix_timestamp_millis),
-            );
+            )?;
             published.schemas.push(hash.to_string());
             next.apply_entry(&entry)?;
             next.schemas.insert(hash, schema.clone());
