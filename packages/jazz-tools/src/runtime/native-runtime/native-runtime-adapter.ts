@@ -2193,7 +2193,10 @@ export class NativeRuntimeAdapter implements Runtime {
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-    if (settlementMetadata && (pendingTx?.kind !== "exclusive" || !this.db.allSettlementMetadata))
+    if (
+      settlementMetadata &&
+      (pendingTx?.kind !== "serializable" || !this.db.allSettlementMetadata)
+    )
       throw new Error("E2EE settlement reads require a supported exclusive transaction");
     // The Rust serialized-query boundary rejects relation reads in transactions.
     if (settlementMetadata && queryHasArraySubqueries(coreQueryJson))

@@ -1980,7 +1980,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   allSettledForE2ee<T extends { id: string }>(
     query: QueryBuilder<T>,
   ): Promise<{ rows: T[]; settlements: RowSettlement[] }> {
-    if (this.kind !== "exclusive")
+    if (this.kind !== "serializable")
       throw new Error("E2EE settlement reads require an exclusive transaction");
     const reading = (async () => {
       const { rows, settlements } = await this.readAll(query, { tier: "remote" }, "with-rows");
@@ -2037,7 +2037,7 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
 
 /** @internal Typed operations needed by E2EE metadata preparation, not a public transaction surface. */
 export type E2eeTransactionScope = Pick<
-  TransactionScope<"exclusive">,
+  TransactionScope<"serializable">,
   "kind" | "all" | "one" | "insert" | "upsert" | "allSettledForE2ee"
 >;
 
@@ -2142,9 +2142,9 @@ async function readTransactionRows<T>(
 const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
 
 /** @internal Lifecycle work must not wait for the enrolment it implements. */
-export function exclusiveE2eeTransaction<TResult>(
+export function serializableE2eeTransaction<TResult>(
   db: Db,
-  callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
+  callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
 ): Promise<SerializableWriteResult<Awaited<TResult>>> {
   const transaction = beginDbTransactionAfter(db, async () => {});
   return runInTransaction(
@@ -2169,10 +2169,10 @@ export function beginDbTransactionAfter(
 
 /** @internal Register before returning; the outer commit drains this work. */
 export function prepareDbTransaction(
-  transaction: Transaction<"exclusive">,
+  transaction: Transaction<"serializable">,
   prepare: (scope: E2eeTransactionScope, io: TransactionPreparationIO) => Promise<void>,
 ): Promise<void> {
-  if (transaction.kind !== "exclusive")
+  if (transaction.kind !== "serializable")
     throw new Error("E2EE initialisation requires an exclusive transaction");
   transaction.openTransactionId();
   const binding = getDbTxHandleBinding(transaction, "prepare");
@@ -2188,7 +2188,7 @@ function preparedTransactionScope(
 ): E2eeTransactionScope {
   const { openTransactionId, session, attribution } = binding;
   const scope: E2eeTransactionScope = {
-    kind: "exclusive",
+    kind: "serializable",
     upsert(table, id, data, options) {
       binding.resolveClient(table._schema);
       const values = writeRecord("Upsert", table, data);
