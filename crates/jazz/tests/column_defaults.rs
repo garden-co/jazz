@@ -362,7 +362,11 @@ fn core_restore_applies_defaults_for_omitted_columns() {
     let missing =
         jazz::block_on(db.restore("events", row(9), Some(BTreeMap::new()), Default::default()))
             .expect_err("a required column without a default must be given");
-    assert!(missing.to_string().contains("`events.title` is required"));
+    assert!(
+        missing
+            .to_string()
+            .contains("missing required field `title` in `events`")
+    );
     jazz::block_on(db.restore(
         "events",
         row(9),
