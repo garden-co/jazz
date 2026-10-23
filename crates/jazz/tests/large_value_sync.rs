@@ -66,10 +66,20 @@ struct Pipe {
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     log: Rc<RefCell<Vec<&'static str>>>,
+    /// Flip a byte of every chunk it carries.
+    tamper: bool,
 }
 
 impl Transport for Pipe {
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+    fn send(&mut self, mut message: SyncMessage) -> Result<(), TransportError> {
+        if self.tamper
+            && let SyncMessage::Chunks { nodes, .. } = &mut message
+        {
+            for node in nodes {
+                let last = node.bytes.len() - 1;
+                node.bytes[last] ^= 1;
+            }
+        }
         let kind = match &message {
             SyncMessage::ChunkRequests { .. } => "requests",
             SyncMessage::PushChunks { .. } => "push",
@@ -92,6 +102,19 @@ type Log = Rc<RefCell<Vec<&'static str>>>;
 /// Connect `client` to `server` as `identity`; the log records what both
 /// sides sent, in order.
 fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> Log {
+    connect_as(server, client, identity, false, false)
+}
+
+/// [`connect`], serving `client` as a foreground of `server` (its rows
+/// carry their chunks), with the server's chunks tampered with in transit
+/// when `tamper`.
+fn connect_as(
+    server: &Db,
+    client: &Db,
+    identity: AuthorSubject,
+    foreground: bool,
+    tamper: bool,
+) -> Log {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let log = Rc::new(RefCell::new(Vec::new()));
@@ -99,15 +122,20 @@ fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> Log {
         out: up.clone(),
         inbound: down.clone(),
         log: log.clone(),
+        tamper: false,
     })));
-    server.accept_subscriber(
+    let subscriber = server.accept_subscriber(
         Box::new(Pipe {
             out: down,
             inbound: up,
             log: log.clone(),
+            tamper,
         }),
         identity,
     );
+    if foreground {
+        server.inline_chunks_for(subscriber);
+    }
     log
 }
 
@@ -407,4 +435,112 @@ fn reads_overtake_uploads_held_by_the_ingress_limit() {
     assert_eq!(opening.len(), 1);
     assert_eq!(opening[0].row.row_uuid(), row(9));
     assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
+}
+
+/// A tab over its own worker gets each row's chunks ahead of the row, so
+/// opening a document asks for nothing; an edit ships only its new nodes.
+#[test]
+fn a_foreground_gets_its_rows_chunks_inline() {
+    let worker = open(0, AuthorSubject::SYSTEM);
+    let tab = open(1, user(1));
+    tab.set_non_durable_client();
+    let log = connect_as(&worker, &tab, user(1), true, false);
+    let mut body = text(4, LARGE);
+    insert(
+        &worker,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let mut stream = subscribe(&tab, Query::from("docs"));
+    pump(&worker, &[&tab]);
+    let (nodes, _) = tab.large_value_nodes_for_test().unwrap();
+    assert_eq!(nodes, worker.large_value_nodes_for_test().unwrap().0);
+    let mut saw = false;
+    while let Some(event) = stream.try_next_event() {
+        let text = format!("{event:?}");
+        assert!(!text.contains("Rejected"), "{text}");
+        saw |= text.contains(&body[..64]);
+    }
+    assert!(saw, "the opening carried the value");
+
+    let before = log.borrow().len();
+    block_on(worker.append_value("docs", row(1), "body", b"<edit>".to_vec())).unwrap();
+    body.push_str("<edit>");
+    pump(&worker, &[&tab]);
+    let mut saw = false;
+    while let Some(event) = stream.try_next_event() {
+        saw |= format!("{event:?}").contains("<edit>");
+    }
+    assert!(saw, "the edit reached the tab");
+    assert!(
+        !log.borrow().contains(&"requests"),
+        "nothing was asked for: {:?}",
+        log.borrow()
+    );
+    // The append went in the descriptor's edit tail: no new nodes, so no
+    // chunks ship again.
+    assert!(
+        !log.borrow()[before..].contains(&"chunks"),
+        "{:?}",
+        &log.borrow()[before..]
+    );
+}
+
+/// Inlined chunks are verified like requested ones: a node that fails its
+/// hash fails the tick that receives it and is never installed.
+#[test]
+fn an_inlined_chunk_that_fails_its_hash_is_rejected() {
+    let worker = open(0, AuthorSubject::SYSTEM);
+    let tab = open(1, user(1));
+    tab.set_non_durable_client();
+    let _log = connect_as(&worker, &tab, user(1), true, true);
+    insert(
+        &worker,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(5, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let _stream = subscribe(&tab, Query::from("docs"));
+    let mut failed = None;
+    for _ in 0..6 {
+        block_on(worker.tick()).unwrap();
+        if let Err(error) = block_on(tab.tick()) {
+            failed = Some(error);
+            break;
+        }
+    }
+    let error = failed.expect("the tampered chunk is refused");
+    assert!(error.to_string().contains("large value"), "{error}");
+    assert_eq!(tab.large_value_nodes_for_test().unwrap().0, 0);
+}
+
+/// Only a foreground takes nodes it did not ask for: a durable replica
+/// served inline keeps just what it requested.
+#[test]
+fn a_durable_replica_ignores_chunks_it_did_not_ask_for() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let log = connect_as(&server, &alice, user(1), true, false);
+    let blob: Vec<u8> = (0..LARGE * 4).map(|n| (n * 7 % 251) as u8).collect();
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob)),
+        ],
+    );
+    let _stream = subscribe(&alice, Query::from("docs").select(["body"]));
+    pump(&server, &[&alice]);
+    assert!(log.borrow().contains(&"chunks"), "{:?}", log.borrow());
+    let (nodes, _) = alice.large_value_nodes_for_test().unwrap();
+    assert_eq!(nodes, 0, "the unasked nodes were dropped");
 }

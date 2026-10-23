@@ -1586,12 +1586,26 @@ impl Binding {
 
     /// Serve a subscriber (another replica) as `identity` with `claims`.
     pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
+        self.accept(identity, claims, false)
+    }
+
+    /// Serve a foreground of this store (a tab over its own worker): its
+    /// rows ship with their large values' chunks (see
+    /// [`Db::inline_chunks_for`]).
+    pub fn accept_foreground(&self, identity: AuthorSubject, claims: Cells) -> Link {
+        self.accept(identity, claims, true)
+    }
+
+    fn accept(&self, identity: AuthorSubject, claims: Cells, foreground: bool) -> Link {
         self.db.set_identity_claims(identity, claims);
         let queues = WireQueues::default();
         let transport = Box::new(WireTransportAdapter::current(QueueTransport {
             queues: queues.clone(),
         }));
         let subscriber = self.db.accept_subscriber(transport, identity);
+        if foreground {
+            self.db.inline_chunks_for(subscriber);
+        }
         Link {
             binding: self.clone(),
             queues,

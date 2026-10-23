@@ -789,6 +789,11 @@ pub(crate) struct Session {
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
+    /// The client is a foreground of this store (see
+    /// [`Db::inline_chunks_for`]): its rows ship with their chunks.
+    inline_chunks: bool,
+    /// The nodes shipped inline to it so far, with their subtrees.
+    sent_chunks: HashSet<jazz_types::large_values::Locator>,
 }
 
 impl Session {
@@ -822,6 +827,8 @@ impl Session {
             told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
+            inline_chunks: false,
+            sent_chunks: HashSet::new(),
         }
     }
 
@@ -2068,13 +2075,17 @@ impl Inner {
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     ) -> Result<(), Error> {
+        // A foreground's upstream is its own relay, which sends the nodes
+        // of the rows it ships unasked, ahead of them.
+        let unasked = self.non_durable;
         let client = self.client.as_mut().expect("client");
         let mut accepted = Vec::new();
         for node in nodes {
             let request = node.request();
-            // Only nodes this replica asked for, verified against the hash
-            // it learned from the parent or descriptor.
-            if client.requested.remove(&request) {
+            // Otherwise only nodes this replica asked for. Either way each
+            // is verified against its hash: a read finds it only under the
+            // hash its parent or descriptor names.
+            if client.requested.remove(&request) || unasked {
                 accepted.push((request, node.bytes));
             }
         }
@@ -2088,6 +2099,23 @@ impl Inner {
             crate::large::install_fetched(&self.conn, &self.chunks, &request, bytes)?;
         }
         Ok(())
+    }
+
+    /// Put the stored nodes of each shipped row's large values ahead of its
+    /// `Rows`, for a session served with its chunks inline.
+    fn inline_chunks(
+        &mut self,
+        index: usize,
+        out: Vec<SyncMessage>,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        let session = &mut self.sessions[index];
+        if !session.inline_chunks {
+            return Ok(out);
+        }
+        let mut sent = std::mem::take(&mut session.sent_chunks);
+        let inlined = inline_nodes(&self.conn, out, &mut sent);
+        self.sessions[index].sent_chunks = sent;
+        inlined
     }
 
     /// The nodes a commit's large values need pushed first: (their
@@ -3728,6 +3756,62 @@ impl Inner {
 
 // ---- server ---------------------------------------------------------------
 
+/// The largest value whose nodes ship inline to a foreground: a document
+/// opens with no round trips, while a large blob it may only range-read
+/// stays pulled on demand.
+pub const INLINE_CHUNKS_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// `out` with each `Rows` preceded by the stored nodes of its chunked cells
+/// that `sent` does not hold yet.
+fn inline_nodes(
+    conn: &rusqlite::Connection,
+    out: Vec<SyncMessage>,
+    sent: &mut HashSet<jazz_types::large_values::Locator>,
+) -> Result<Vec<SyncMessage>, Error> {
+    let mut with = Vec::with_capacity(out.len());
+    for message in out {
+        if let SyncMessage::Rows { images } = &message {
+            let mut nodes = Vec::new();
+            let mut size = 0;
+            for image in images {
+                for (_, cell) in &image.cells {
+                    let Cell::Text(cell) = cell else {
+                        continue;
+                    };
+                    if cell.first() != Some(&crate::large::CHUNKED) {
+                        continue;
+                    }
+                    let found =
+                        crate::large::nodes_to_inline(conn, cell, INLINE_CHUNKS_MAX_BYTES, sent)?;
+                    for (request, bytes) in found {
+                        size += bytes.len();
+                        nodes.push(WireChunk {
+                            locator: request.locator,
+                            hash: request.object_hash,
+                            bytes,
+                        });
+                        if size >= CHUNK_BATCH_BYTES {
+                            with.push(SyncMessage::Chunks {
+                                nodes: std::mem::take(&mut nodes),
+                                missing: Vec::new(),
+                            });
+                            size = 0;
+                        }
+                    }
+                }
+            }
+            if !nodes.is_empty() {
+                with.push(SyncMessage::Chunks {
+                    nodes,
+                    missing: Vec::new(),
+                });
+            }
+        }
+        with.push(message);
+    }
+    Ok(with)
+}
+
 impl Db {
     /// Serve a client over `transport` as `identity`.
     pub fn accept_subscriber(
@@ -3755,6 +3839,17 @@ impl Db {
         }
         inner.sessions.push(session);
         SubscriberId(inner.sessions.len() - 1)
+    }
+
+    /// Serve `subscriber` as a foreground of this store (a tab over its own
+    /// worker): each row it is sent carries the stored nodes of its large
+    /// values (up to [`INLINE_CHUNKS_MAX_BYTES`] each) ahead of it, so
+    /// opening a document costs no chunk round trips. Larger values stay
+    /// pulled on demand.
+    pub fn inline_chunks_for(&self, subscriber: SubscriberId) {
+        if let Some(session) = self.inner.borrow_mut().sessions.get_mut(subscriber.0) {
+            session.inline_chunks = true;
+        }
     }
 
     /// The client went away: drop its subscriptions, watches and pending
@@ -4273,6 +4368,8 @@ impl Db {
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
+            let out = inner.inline_chunks(index, out)?;
+            let session = &mut inner.sessions[index];
             for message in out {
                 let Some(message) = message_out(&names, message) else {
                     continue;

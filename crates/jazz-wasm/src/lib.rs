@@ -1570,7 +1570,8 @@ impl WasmDb {
         claims: JsValue,
     ) -> Result<js_sys::Promise, JsValue> {
         let claims = binding_host::claims(identity, json_or_null(claims)?).map_err(host_error)?;
-        let link = self.binding()?.accept_subscriber(identity, claims);
+        // Every subscriber of a browser store is one of its tabs.
+        let link = self.binding()?.accept_foreground(identity, claims);
         Ok(js_sys::Promise::resolve(&JsValue::from(
             WasmTransport::new(link),
         )))
