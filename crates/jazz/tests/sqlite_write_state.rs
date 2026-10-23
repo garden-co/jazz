@@ -195,34 +195,35 @@ fn rejected_receipt_and_reason_survive_replica_restart() {
     assert_eq!(count(&server), 0);
 }
 
-/// A trusted relay cannot accept an upload locally and present its optimistic
-/// sequence as an authority receipt while upload forwarding is unported.
+/// Alice's upload waits while Bob's relay queues it. Only the authority's
+/// acceptance can settle the original transaction globally.
 #[test]
-fn relay_uploads_fail_explicitly_without_applying_rows() {
+fn relay_uploads_wait_for_authority_acceptance() {
     let server = block_on(Db::open_history_complete(config(3))).unwrap();
     let relay = block_on(Db::open(config(2))).unwrap();
     let client = block_on(Db::open(config(1))).unwrap();
     connect(&relay, &server);
     connect(&client, &relay);
     let tx = insert(&client, "allowed");
-    let error = drive(
+    for _ in 0..4 {
+        block_on(client.tick()).unwrap();
+        block_on(relay.tick()).unwrap();
+    }
+    assert_eq!(client.write_state(tx).unwrap().fate, Fate::Pending);
+    assert_eq!(count(&relay), 0);
+    assert_eq!(count(&server), 0);
+    drive(
         &[&client, &relay, &server, &relay, &client],
         client.wait_for_transaction(tx, DurabilityTier::Global),
     )
-    .unwrap_err();
-    assert!(
-        error
-            .message
-            .contains("write uploads through a SQLite relay"),
-        "{error:?}"
-    );
-    assert!(matches!(
-        client.write_state(tx).unwrap().fate,
-        Fate::Rejected(_)
-    ));
-    assert_eq!(count(&relay), 0);
-    assert_eq!(count(&server), 0);
-    assert_eq!(count(&client), 0);
+    .unwrap();
+    let state = client.write_state(tx).unwrap();
+    assert_eq!(state.fate, Fate::Accepted);
+    assert_eq!(state.global_time.unwrap().0, server.seq_high_water());
+    assert!(state.global_time.unwrap().0 < LOCAL_BASE);
+    assert_eq!(count(&relay), 1);
+    assert_eq!(count(&server), 1);
+    assert_eq!(count(&client), 1);
 }
 
 /// This lower-level fixture deliberately freezes the durable result envelope:
