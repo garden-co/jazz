@@ -266,6 +266,22 @@ fn a_staged_write_refused_for_its_rows_state_rejects_the_commit() {
 }
 
 #[test]
+fn restoring_a_live_row_is_rejected_through_its_receipt() {
+    let db = open(0xa3);
+    let live = db.insert("notes", &title("live"), &none()).unwrap();
+    let receipt = db
+        .restore("notes", &live.row_id.to_bytes(), &title("again"), &none())
+        .unwrap();
+    let refusal = receipt.rejected.expect("the restore is rejected");
+    assert!(refusal.is_apply_time_rejection(), "{refusal:?}");
+    assert_eq!(
+        refusal.message,
+        format!("row not deleted: {}", live.row_id.0)
+    );
+    assert_eq!(titles(&db), ["live"]);
+}
+
+#[test]
 fn two_bindings_sync_over_frames_the_host_carries() {
     let server = authority();
     let client = open(0xa1);

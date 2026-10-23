@@ -245,6 +245,8 @@ pub enum WireOp {
 pub struct WireRead {
     pub query: Query,
     pub binding: BTreeMap<String, Value>,
+    /// The read listed deleted rows too (`includeDeleted`).
+    pub include_deleted: bool,
     pub rows: Vec<([u8; 16], u64)>,
 }
 
@@ -4289,8 +4291,12 @@ impl Db {
                     request_claims: None,
                     schema: self.view.clone(),
                 };
+                let spec = ReadSpec {
+                    include_deleted: read.include_deleted,
+                    ..ReadSpec::default()
+                };
                 let now = inner
-                    .run(&prepared, identity, &ReadSpec::default())
+                    .run(&prepared, identity, &spec)
                     .map_err(|e| (e, Vec::new()))?;
                 let now: Vec<([u8; 16], u64)> =
                     now.iter().map(|r| (*r.id.0.as_bytes(), r.seq)).collect();
@@ -4560,7 +4566,10 @@ impl Db {
             }
         };
         if let Some(tx) = open_tx {
-            let roots = self.serializable_tx_ref(tx).all_prepared(&prepared).await?;
+            let roots = self
+                .serializable_tx_ref(tx)
+                .all_prepared_with(&prepared, opts.read_view.include_deleted)
+                .await?;
             return Ok(result(self.nest_relations(&prepared, roots)?));
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();

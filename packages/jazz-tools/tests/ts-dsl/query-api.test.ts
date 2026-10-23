@@ -237,7 +237,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       // @ts-expect-error Deletion metadata requires includeDeleted.
       const query = app.projects.where({ id: project.id }).select("$deletedBy");
       await expect(readAll(query)).rejects.toMatchObject({
-        message: "Query: unsupported relation query: Reading $deletedBy requires includeDeleted",
+        message: "Query: Reading $deletedBy requires includeDeleted",
       });
     });
 
@@ -371,7 +371,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       // @ts-expect-error Deletion metadata requires includeDeleted.
       const query = app.projects.select("$deletedAt");
       await expect(readAll(query)).rejects.toMatchObject({
-        message: "Query: unsupported relation query: Reading $deletedAt requires includeDeleted",
+        message: "Query: Reading $deletedAt requires includeDeleted",
       });
     });
 
