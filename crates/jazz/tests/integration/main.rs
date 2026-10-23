@@ -16,6 +16,8 @@
 #[cfg(feature = "runtime")]
 #[path = "../account_author.rs"]
 mod account_author;
+#[path = "../aggregate_ordering.rs"]
+mod aggregate_ordering;
 #[cfg(feature = "testing")]
 #[path = "../async_open.rs"]
 mod async_open;
