@@ -865,6 +865,66 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
 }
 
 #[test]
+fn a_tab_subscribed_while_its_worker_is_offline_hears_the_server_once_it_is_back() {
+    let server = authority();
+    server.insert("notes", &title("server's"), &none()).unwrap();
+    let worker = open(0xac);
+    let up = worker.connect_upstream();
+    worker.set_remote_link_hint("failed").unwrap();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xad));
+    let tab_links = [(&tab_up, &tab_down)];
+
+    // Served from the worker's store at once: it holds nothing yet.
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut stream = tab.subscribe(&query, &none(), None, None).unwrap();
+    let opening =
+        binding_host::event_chunk(drive(&tab_links, tab.next_event(&mut stream))).unwrap();
+    let EventChunk::Delta { delta, .. } = opening else {
+        panic!("expected an opening, got {opening:?}");
+    };
+    let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+    assert_eq!(added.iter().map(|batch| batch.rows.len()).sum::<usize>(), 0);
+
+    // The link comes back: the server's row reaches the tab.
+    worker.set_remote_link_hint("live").unwrap();
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let change = binding_host::event_chunk(drive(&links, tab.next_event(&mut stream))).unwrap();
+    let EventChunk::Delta { delta, .. } = change else {
+        panic!("expected a change, got {change:?}");
+    };
+    let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+    assert_eq!(added.iter().map(|batch| batch.rows.len()).sum::<usize>(), 1);
+}
+
+#[test]
+fn tabs_changing_one_row_at_once_settle_on_their_workers_winner() {
+    // A worker with no server: it settles its tabs' commits itself.
+    let worker = open(0xc0);
+    worker.set_remote_link_hint("none").unwrap();
+    let (a, a_up, a_down) = tab_over(&worker, open(0xc1));
+    let (b, b_up, b_down) = tab_over(&worker, open(0xc2));
+    a.set_remote_link_hint("none").unwrap();
+    b.set_remote_link_hint("none").unwrap();
+    let links = [(&a_up, &a_down), (&b_up, &b_down)];
+    let write = a.insert("notes", &title("before"), &none()).unwrap();
+    pump(&links);
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut streams = [&a, &b].map(|tab| tab.subscribe(&query, &none(), None, None).unwrap());
+    for (tab, stream) in [&a, &b].into_iter().zip(&mut streams) {
+        binding_host::event_chunk(drive(&links, tab.next_event(stream))).unwrap();
+    }
+    let row = *write.row_id.0.as_bytes();
+
+    a.update("notes", &row, &title("from a"), &none()).unwrap();
+    b.update("notes", &row, &title("from b"), &none()).unwrap();
+    pump(&links);
+    let winner = titles(&worker);
+    assert_eq!(titles(&a), winner);
+    assert_eq!(titles(&b), winner);
+}
+
+#[test]
 fn a_tabs_local_reads_are_its_workers_store() {
     let server = authority();
     let worker = open(0xa8);

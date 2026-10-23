@@ -1304,6 +1304,8 @@ function carriesCredential(authJson: string): boolean {
 
 function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
+  // A worker with no server has the last word on its tabs' writes.
+  if (!requestedUrl) context.runtime?.setRemoteLinkHint("none");
   if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
   // A retained account's tabs open before the provider supplies a credential.

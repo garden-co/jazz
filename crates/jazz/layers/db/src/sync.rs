@@ -4360,18 +4360,21 @@ impl Db {
                 let windowed = query.limit.is_some() || query.offset > 0;
                 // A relay serves what its upstream lists, settled once the
                 // upstream answers: its own store may be cold. A relay
-                // whose upstream cannot answer (none, or its link failed)
-                // serves its own store instead, settled at once.
+                // whose upstream cannot answer yet (its link is down, or
+                // still to come) serves its own store, settled at once,
+                // while the upstream subscription it keeps fills that store
+                // once the link is up.
                 let upstream = db
                     .inner()
                     .client
                     .as_ref()
-                    .is_some_and(|client| may_wait(client.hint.get()));
-                let relayed = if upstream && !local {
+                    .map(|client| may_wait(client.hint.get()));
+                let attached = if upstream.is_some() && !local {
                     db.attach_remote(&prepared, include_deleted, false)
                 } else {
                     None
                 };
+                let relayed = attached.as_ref().filter(|_| upstream == Some(true));
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
@@ -4383,14 +4386,14 @@ impl Db {
                         members_only: relayed.is_some(),
                         ..ReadSpec::default()
                     },
-                    match &relayed {
+                    match relayed {
                         Some((answered, _, global)) => {
                             SettledBy::Remote(answered.clone(), global.clone())
                         }
                         None => SettledBy::Always(authority),
                     },
                 );
-                if relayed.is_some() {
+                if attached.is_some() {
                     match &subscribed {
                         Ok(_) => {
                             let read = (
@@ -4777,12 +4780,14 @@ impl Db {
                 session.touched.extend(rows.iter().cloned());
                 // A relay's accepted commit is final once its upstream
                 // accepts the upload carrying it: the session waits for that
-                // fate, not this store's.
+                // fate, not this store's. A relay its host says has no
+                // server is the last word on it.
                 let upload = result.is_ok()
-                    && inner
-                        .client
-                        .as_ref()
-                        .is_some_and(|client| client.pending.iter().any(|p| p.tx == through));
+                    && inner.client.as_ref().is_some_and(|client| {
+                        let link = client.hint.get();
+                        !(link.reported && link.hint == RemoteLinkHint::NoServer)
+                            && client.pending.iter().any(|p| p.tx == through)
+                    });
                 if upload {
                     let client = inner.client.as_mut().expect("client");
                     client
