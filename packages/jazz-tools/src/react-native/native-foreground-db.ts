@@ -372,7 +372,7 @@ export class NativeForegroundDb {
     return this;
   }
 
-  beginTransaction(openTransactionId: string, kind: "mergeable" | "exclusive"): void {
+  beginTransaction(openTransactionId: string, kind: "mergeable" | "serializable"): void {
     this.assertOpen();
     if (this.transactions.has(openTransactionId)) {
       throw new Error(
@@ -745,7 +745,7 @@ export class NativeForegroundDb {
 
 type NativeForegroundTransaction = {
   handle: number;
-  kind: "mergeable" | "exclusive";
+  kind: "mergeable" | "serializable";
   closed: boolean;
 };
 

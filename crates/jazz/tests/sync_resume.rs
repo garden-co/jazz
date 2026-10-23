@@ -321,3 +321,51 @@ fn caught_up_resume_cost() {
         times[times.len() / 2]
     );
 }
+
+/// A row the replica cached from an ended read, across a reconnect: its
+/// deletion on the server still reaches the replica.
+#[test]
+fn a_deletion_reaches_a_row_cached_by_an_ended_read_after_reconnect() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let room = id(1, 1);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "rooms",
+            room,
+            AuthorSubject::SYSTEM,
+            cells(&[("name", Value::String("lobby".into()))]),
+        )
+        .unwrap();
+    let client = open(1, alice());
+    let rooms = |db: &Db| {
+        let prepared = db.prepare_query(&Query::from("rooms")).unwrap();
+        let opts = ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        };
+        block_on(db.all(&prepared, opts))
+            .unwrap()
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>()
+    };
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let prepared = client.prepare_query(&Query::from("rooms")).unwrap();
+    let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    drop(stream);
+    pump(&server, &client);
+    assert_eq!(rooms(&client), [room]);
+
+    assert!(client.detach_connection(&upstream));
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    pump(&server, &client);
+
+    block_on(server.delete("rooms", room, Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(rooms(&client), [], "the deletion reaches the cached row");
+}

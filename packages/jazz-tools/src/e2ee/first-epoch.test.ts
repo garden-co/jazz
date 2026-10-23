@@ -152,7 +152,7 @@ it("accepts only one first device and never reinitialises an existing account fo
       tier: "remote",
     });
     expect(original).not.toBeNull();
-    const settled = await first.exclusiveTransaction(async (tx) => ({
+    const settled = await first.serializableTransaction(async (tx) => ({
       identities: await tx.allSettledForE2ee(identities.where({ id: config.account.id })),
       roots: await tx.allSettledForE2ee(
         deviceRequestApp.__e2ee_account_roots.where({ accountId: config.account.id }),

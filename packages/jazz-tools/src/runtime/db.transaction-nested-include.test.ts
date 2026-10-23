@@ -61,7 +61,7 @@ it.each(["inline", "large"])(
 );
 
 it.each(["local-first", "remote"] as const)(
-  "reads a reverse include of a JSON child inside an exclusive transaction (%s)",
+  "reads a reverse include of a JSON child inside a serializable transaction (%s)",
   async (tier) => {
     const app = s.defineApp({
       parent: s.table({ name: s.string() }, { childViaParent: s.reverse("child", "parent") }),
@@ -93,7 +93,7 @@ it.each(["local-first", "remote"] as const)(
       const query = app.parent.where({ id: parent.id }).include({ childViaParent: app.child });
       const expected = { ...parent, childViaParent: [child] };
       expect(await db.one(query, { tier: "remote" })).toEqual(expected);
-      const write = await db.exclusiveTransaction((tx) => tx.one(query, { tier }));
+      const write = await db.serializableTransaction((tx) => tx.one(query, { tier }));
       expect(await write.wait()).toEqual(expected);
     } finally {
       await db?.shutdown();

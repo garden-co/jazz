@@ -489,6 +489,44 @@ impl RowAuthor {
     }
 }
 
+/// A whole author or one of its public fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AuthorField {
+    /// The complete author.
+    Whole,
+    /// Author account.
+    Account,
+    /// Provider identity.
+    Identity,
+    /// Identity issuer.
+    IdentityIssuer,
+    /// Identity subject.
+    IdentitySubject,
+}
+impl AuthorField {
+    /// Parse one supported nested author path.
+    pub fn parse_path(path: &str) -> Option<Self> {
+        match path {
+            "account" => Some(Self::Account),
+            "identity" => Some(Self::Identity),
+            "identity.issuer" => Some(Self::IdentityIssuer),
+            "identity.subject" => Some(Self::IdentitySubject),
+            _ => None,
+        }
+    }
+
+    /// Record members traversed to obtain this field.
+    pub fn path(self) -> &'static [&'static str] {
+        match self {
+            Self::Whole => &[],
+            Self::Account => &["account"],
+            Self::Identity => &["identity"],
+            Self::IdentityIssuer => &["identity", "issuer"],
+            Self::IdentitySubject => &["identity", "subject"],
+        }
+    }
+}
+
 impl AuthorSubject {
     /// Internal authority subject that bypasses policy checks.
     pub const SYSTEM: Self = Self::System;
@@ -641,35 +679,46 @@ impl AuthorSubject {
     /// as provider claims or user-defined columns.
     pub fn metadata_path(column: &str) -> Option<(&str, &'static [&'static str])> {
         let (root, path) = column.split_once('.')?;
-        if !matches!(root, "$createdBy" | "$updatedBy") {
+        if !matches!(root, "$createdBy" | "$updatedBy" | "$deletedBy") {
             return None;
         }
-        let path: &'static [&'static str] = match path {
-            "account" => &["account"],
-            "identity" => &["identity"],
-            "identity.issuer" => &["identity", "issuer"],
-            "identity.subject" => &["identity", "subject"],
-            _ => return None,
-        };
+        let path = AuthorField::parse_path(path)?.path();
         Some((root, path))
     }
 
     /// Declared native type for an author root or an explicit nested field.
     pub fn metadata_type(column: &str) -> Option<&'static crate::records::ValueType> {
         use crate::records::ValueType;
+        let (root, path) = if matches!(column, "$createdBy" | "$updatedBy" | "$deletedBy") {
+            (column, &[][..])
+        } else {
+            Self::metadata_path(column)?
+        };
         static AUTHOR: std::sync::OnceLock<ValueType> = std::sync::OnceLock::new();
         let mut ty = AUTHOR.get_or_init(RowAuthor::value_type);
-        if matches!(column, "$createdBy" | "$updatedBy") {
-            return Some(ty);
-        }
-        let (_, path) = Self::metadata_path(column)?;
         for name in path {
             let ValueType::Record(record) = ty else {
                 return None;
             };
             ty = &record.fields().get(record.field_index(name)?)?.value_type;
         }
-        Some(ty)
+        if root == "$deletedBy" {
+            // Deletion authors are nullable. This runs per published row, so
+            // build each path's nullable type once instead of interning it.
+            const PATHS: [AuthorField; 5] = [
+                AuthorField::Whole,
+                AuthorField::Account,
+                AuthorField::Identity,
+                AuthorField::IdentityIssuer,
+                AuthorField::IdentitySubject,
+            ];
+            static DELETED: [std::sync::OnceLock<ValueType>; PATHS.len()] =
+                [const { std::sync::OnceLock::new() }; PATHS.len()];
+            let slot = PATHS.iter().position(|field| field.path() == path)?;
+            Some(DELETED[slot].get_or_init(|| ValueType::Nullable(Box::new(ty.clone()))))
+        } else {
+            Some(ty)
+        }
     }
 
     /// Structured native author value; intern handles are never serialized.

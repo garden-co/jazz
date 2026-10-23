@@ -11,7 +11,7 @@ mod duplex_transport;
 use std::collections::BTreeMap;
 
 use duplex_transport::duplex;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SubscriptionEvent, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::records::Value;
@@ -151,8 +151,22 @@ fn losing_and_regaining_access_to_an_include_target_reaches_the_replica() {
     pump(&server, &client);
     assert_eq!(
         local(&client, "rooms"),
+        [id(1, 1), id(1, 2)],
+        "the room she can no longer read stays readable locally (INV-SYNC-14)"
+    );
+    let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
+    let mut synced = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let mut listed = Vec::new();
+    while let Some(event) = synced.try_next_event() {
+        if let SubscriptionEvent::Delta { added, .. } = event {
+            listed.extend(added.iter().map(|row| row.row_uuid()));
+        }
+    }
+    assert_eq!(
+        listed,
         [id(1, 2)],
-        "the room she can no longer read leaves her replica"
+        "a synced read follows the server's results"
     );
     assert_eq!(local(&client, "messages").len(), 2, "public messages stay");
 

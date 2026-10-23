@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db, E2eeTransactionScope } from "../runtime/db.js";
 import { PersistedWriteRejectedError, type RowSettlement } from "../runtime/client.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
@@ -236,7 +236,7 @@ export class DeviceApproval {
             tier: "remote",
           });
         }
-        const read = await exclusiveE2eeTransaction(this.db, (tx) => this.readSnapshot(tx));
+        const read = await serializableE2eeTransaction(this.db, (tx) => this.readSnapshot(tx));
         const snapshot = await read.wait({ tier: "global" });
         this.assertOpen();
         if (!snapshot.identity) throw new Error("Missing accepted E2EE account identity");
@@ -857,7 +857,7 @@ export class DeviceApproval {
       const members = this.members(snapshot, revision);
       if (!members.has(this.deviceId) || !members.delete(deviceId))
         throw new Error("Unknown or inactive E2EE device");
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "remote" });
         this.assertOpen();
         if (
