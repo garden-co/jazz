@@ -1,4 +1,12 @@
 import {
+  SQLITE_BROWSER_DATABASE_VERSION,
+  decodeSqliteBrowserRoot,
+  encodeSqliteBrowserRoot,
+  sqliteBrowserDescriptor,
+  sqliteReplicaKey,
+  type SqliteBrowserRoot,
+} from "./browser-sqlite-storage.js";
+import {
   acquireBrowserPhysicalDatabaseEpoch,
   claimBrowserStorageAdmissionOwnership,
   claimBrowserReclamationOwnership,
@@ -197,9 +205,17 @@ export class IndexedDbPageStore {
   private ownedEpoch: BrowserPhysicalDatabaseEpoch | null = null;
   private borrowedEpoch: BrowserPhysicalDatabaseEpoch | null = null;
   private closing: Promise<void> | null = null;
+  private sqliteRoot: SqliteBrowserRoot | null = null;
+  private sqliteOpening: Promise<unknown> | null = null;
+  private sqliteRuntime: { close(): Promise<unknown> } | null = null;
+  private sqliteReserved = false;
+  private sqliteRetiring: Promise<void> | null = null;
+  private runtimeSources?: RuntimeSourcesConfig;
 
   /** One independently opened tree per exclusive owner; IdbTree clones share it. */
   claimTreeOwnership(): number {
+    if (this.sqliteRoot)
+      throw new Error("Groove page operations are unsupported on SQLite browser storage");
     this.assertValid();
     if (this.reclamationOwnership && (this.treeClaims.size > 0 || this.treeTransactions.size > 0)) {
       throw new Error("IndexedDB reclamation owner already has a tree or pending transaction");
@@ -224,9 +240,25 @@ export class IndexedDbPageStore {
   }
 
   /** Revoke cached handles first, then drain every already-started tree commit. */
-  async retireTreeOwnership(): Promise<void> {
+  retireTreeOwnership(): Promise<void> {
+    if (this.sqliteRetiring) return this.sqliteRetiring;
     this.treeClaims.clear();
-    await Promise.allSettled(this.treeTransactions);
+    this.ownershipRevision++;
+    const retiring = (async () => {
+      await this.sqliteOpening?.catch(() => undefined);
+      const runtime = this.sqliteRuntime;
+      this.sqliteRuntime = null;
+      try {
+        await runtime?.close();
+        await Promise.allSettled(this.treeTransactions);
+      } finally {
+        this.sqliteReserved = false;
+      }
+    })();
+    this.sqliteRetiring = retiring;
+    return retiring.finally(() => {
+      if (this.sqliteRetiring === retiring) this.sqliteRetiring = null;
+    });
   }
 
   get canReclaimObsoletePages(): boolean {
@@ -264,14 +296,23 @@ export class IndexedDbPageStore {
       onInvalidated?: (error: IndexedDbStorageInvalidatedError) => void;
       epoch?: BrowserPhysicalDatabaseEpoch;
       runtimeSources?: RuntimeSourcesConfig;
+      /** SQLite uses this store only for ownership, identity and lease records. */
+      format?: "sqlite";
     } = {},
   ): Promise<IndexedDbPageStore> {
+    if (options.format === "sqlite" && (!options.owner || !name))
+      throw new Error("SQLite browser storage requires a name and exact owner");
     const epoch = options.epoch ?? (await acquireBrowserPhysicalDatabaseEpoch(name));
     let live: () => boolean;
     let request: IDBOpenDBRequest;
     try {
       live = claimBrowserStorageAdmissionOwnership(epoch, name);
-      request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
+      request = indexedDB.open(
+        name,
+        options.format === "sqlite"
+          ? SQLITE_BROWSER_DATABASE_VERSION
+          : INDEXEDDB_BTREE_DATABASE_VERSION,
+      );
     } catch (error) {
       if (!options.epoch) await epoch.release();
       throw error;
@@ -288,6 +329,22 @@ export class IndexedDbPageStore {
         return;
       }
       const db = request.result;
+      if (options.format === "sqlite") {
+        const manifest = db.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+        const node = randomReplicaNodeBytes();
+        manifest.put(
+          encodeSqliteBrowserRoot({
+            name,
+            owner: options.owner!,
+            node: sqliteReplicaKey(node),
+            state: "opening",
+          }),
+          INDEXEDDB_STORAGE_MANIFEST_KEY,
+        );
+        manifest.put(nodeBytesToBuffer(node), INDEXEDDB_REPLICA_NODE_KEY);
+        manifest.put(options.owner, INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY);
+        return;
+      }
       if (!db.objectStoreNames.contains(INDEXEDDB_BTREE_PAGES_STORE))
         db.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
       if (!db.objectStoreNames.contains(INDEXEDDB_BTREE_METADATA_STORE))
@@ -313,6 +370,7 @@ export class IndexedDbPageStore {
     }
     const store = new IndexedDbPageStore(db, name, options.onInvalidated);
     store.admissionLive = live;
+    store.runtimeSources = options.runtimeSources;
     store.ownedEpoch = options.epoch ? null : epoch;
     store.borrowedEpoch = options.epoch ?? null;
     try {
@@ -329,12 +387,131 @@ export class IndexedDbPageStore {
           );
         }
       }
-      await store.admitStorage(options.runtimeSources);
+      if (options.format === "sqlite") await store.admitSqliteStorage(options.owner!);
+      else await store.admitStorage(options.runtimeSources);
       if (options.owner) await store.claimBrowserRuntimeOwner(options.owner);
       return store;
     } catch (error) {
       await store.close();
       throw error;
+    }
+  }
+
+  /** Reserve the sole SQLite owner before opening its VFS file. */
+  async openSqliteRuntime<T extends { flush(): Promise<unknown>; close(): Promise<unknown> }>(
+    open: (storage: ReturnType<typeof sqliteBrowserDescriptor>) => Promise<T>,
+  ): Promise<T> {
+    this.assertValid();
+    if (!this.sqliteRoot || this.sqliteRoot.state === "resetting")
+      throw new Error("SQLite browser storage is not admitted");
+    if (this.sqliteReserved || this.sqliteRetiring)
+      throw new Error("SQLite browser storage already has a runtime owner");
+    this.sqliteReserved = true;
+    const revision = this.ownershipRevision;
+    const assertOwner = () => {
+      this.assertValid();
+      if (revision !== this.ownershipRevision)
+        throw new Error("SQLite runtime ownership was retired");
+    };
+    const opening = (async () => {
+      let runtime: T | undefined;
+      try {
+        runtime = await open(sqliteBrowserDescriptor(this.sqliteRoot!));
+        assertOwner();
+        // A ready sidecar promises that this exact file reached IndexedDB.
+        await runtime.flush();
+        assertOwner();
+        if (this.sqliteRoot!.state === "opening") {
+          const root: SqliteBrowserRoot = { ...this.sqliteRoot!, state: "ready" };
+          const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite", {
+            durability: "strict",
+          });
+          const done = transactionDone(tx);
+          tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
+            encodeSqliteBrowserRoot(root),
+            INDEXEDDB_STORAGE_MANIFEST_KEY,
+          );
+          await done;
+          this.sqliteRoot = root;
+        }
+        assertOwner();
+        this.sqliteRuntime = runtime;
+        return runtime;
+      } catch (error) {
+        await runtime?.close().catch(() => undefined);
+        this.sqliteReserved = false;
+        throw error;
+      }
+    })();
+    this.sqliteOpening = opening;
+    try {
+      return await opening;
+    } finally {
+      if (this.sqliteOpening === opening) this.sqliteOpening = null;
+    }
+  }
+
+  private async admitSqliteStorage(owner: string): Promise<void> {
+    this.replicaNodeBytes = await this.readReplicaNodeBytes();
+    const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const done = transactionDone(tx);
+    const value = await requestResult(
+      tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_MANIFEST_KEY),
+    );
+    await done;
+    this.sqliteRoot = decodeSqliteBrowserRoot(value, this.name, owner, this.replicaNodeBytes);
+    if (this.sqliteRoot.state !== "resetting") return;
+    // A crash after deleting the file must never reuse its old transaction node.
+    const wasm = await loadWasmModule(this.runtimeSources);
+    await wasm.WasmDb.destroyBrowserStorage(sqliteBrowserDescriptor(this.sqliteRoot), owner);
+    this.assertValid();
+    const node = randomReplicaNodeBytes();
+    const root: SqliteBrowserRoot = {
+      name: this.name,
+      owner,
+      node: sqliteReplicaKey(node),
+      state: "opening",
+    };
+    const reset = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite", {
+      durability: "strict",
+    });
+    const resetDone = transactionDone(reset);
+    const plane = reset.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    plane.clear();
+    plane.put(encodeSqliteBrowserRoot(root), INDEXEDDB_STORAGE_MANIFEST_KEY);
+    plane.put(nodeBytesToBuffer(node), INDEXEDDB_REPLICA_NODE_KEY);
+    plane.put(owner, INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY);
+    await resetDone;
+    this.replicaNodeBytes = node;
+    this.sqliteRoot = root;
+  }
+
+  /** The caller retains the live physical Web Lock after closing this handle. */
+  private async destroySqliteFile(): Promise<void> {
+    const request = indexedDB.open(this.name, SQLITE_BROWSER_DATABASE_VERSION);
+    request.onupgradeneeded = () => request.transaction?.abort();
+    const db = await requestResult(request);
+    try {
+      const tx = db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite", {
+        durability: "strict",
+      });
+      const done = transactionDone(tx);
+      const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+      const value = await requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY));
+      const root = decodeSqliteBrowserRoot(
+        value,
+        this.name,
+        this.sqliteRoot!.owner,
+        this.replicaNodeBytes!,
+      );
+      root.state = "resetting";
+      plane.put(encodeSqliteBrowserRoot(root), INDEXEDDB_STORAGE_MANIFEST_KEY);
+      await done;
+      this.sqliteRoot = root;
+      const wasm = await loadWasmModule(this.runtimeSources);
+      await wasm.WasmDb.destroyBrowserStorage(sqliteBrowserDescriptor(root), root.owner);
+    } finally {
+      db.close();
     }
   }
 
@@ -490,6 +667,8 @@ export class IndexedDbPageStore {
   }
 
   async metadata(): Promise<IndexedDbBtreeMetadata | null> {
+    if (this.sqliteRoot)
+      throw new Error("Groove page operations are unsupported on SQLite browser storage");
     this.assertValid();
     const tx = this.db.transaction(INDEXEDDB_BTREE_METADATA_STORE, "readonly");
     const done = transactionDone(tx);
@@ -646,7 +825,9 @@ export class IndexedDbPageStore {
     update: (pool: StoredForegroundNodeLeasePool) => T,
   ): Promise<T> {
     this.assertValid();
-    const tx = relaxedReadWriteTransaction(this.db, [INDEXEDDB_STORAGE_MANIFEST_STORE]);
+    const tx = this.sqliteRoot
+      ? this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite", { durability: "strict" })
+      : relaxedReadWriteTransaction(this.db, [INDEXEDDB_STORAGE_MANIFEST_STORE]);
     const done = transactionDone(tx);
     const store = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
     try {
@@ -813,18 +994,24 @@ export class IndexedDbPageStore {
     this.ownershipRevision++;
     this.reclamationOwnership = null;
     this.removeInvalidationListeners();
-    this.db.close();
+    if (!this.sqliteRoot) this.db.close();
     this.closing = (async () => {
-      await Promise.allSettled(this.treeTransactions);
-      if (this.ownedEpoch) {
-        await this.ownedEpoch.release();
-        this.ownedEpoch = null;
+      try {
+        await this.retireTreeOwnership();
+      } finally {
+        this.db.close();
+        if (this.ownedEpoch) {
+          await this.ownedEpoch.release();
+          this.ownedEpoch = null;
+        }
       }
     })();
     return this.closing;
   }
 
   async clear(): Promise<void> {
+    if (this.sqliteRoot)
+      throw new Error("Groove page operations are unsupported on SQLite browser storage");
     this.assertValid();
     const tx = relaxedReadWriteTransaction(this.db, [
       INDEXEDDB_BTREE_PAGES_STORE,
@@ -838,10 +1025,43 @@ export class IndexedDbPageStore {
 
   static async destroy(name: string): Promise<void> {
     const epoch = await acquireBrowserPhysicalDatabaseEpoch(name);
+    let db: IDBDatabase | undefined;
     try {
-      claimBrowserStorageAdmissionOwnership(epoch, name);
-      await IndexedDbPageStore.deletePhysicalRoot(name);
+      const live = claimBrowserStorageAdmissionOwnership(epoch, name);
+      let missing = false;
+      const request = indexedDB.open(name);
+      request.onupgradeneeded = () => {
+        missing = true;
+        request.transaction?.abort();
+      };
+      try {
+        db = await requestResult(request);
+      } catch (error) {
+        if (!missing) throw error;
+      }
+      if (db?.version === SQLITE_BROWSER_DATABASE_VERSION) {
+        const store = new IndexedDbPageStore(db, name);
+        store.admissionLive = live;
+        store.borrowedEpoch = epoch;
+        store.replicaNodeBytes = await store.readReplicaNodeBytes();
+        const tx = db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+        const done = transactionDone(tx);
+        const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+        const [owner, value] = await Promise.all([
+          requestResult(plane.get(INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY)),
+          requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY)),
+        ]);
+        await done;
+        if (typeof owner !== "string" || !owner)
+          throw new Error("Invalid SQLite browser storage owner");
+        store.sqliteRoot = decodeSqliteBrowserRoot(value, name, owner, store.replicaNodeBytes);
+        await store.destroyUnderOwner(epoch);
+      } else {
+        db?.close();
+        await IndexedDbPageStore.deletePhysicalRoot(name);
+      }
     } finally {
+      db?.close();
       await epoch.release();
     }
   }
@@ -853,6 +1073,7 @@ export class IndexedDbPageStore {
     }
     await this.close();
     if (!this.admissionLive()) throw new Error("IndexedDB physical owner expired before deletion");
+    if (this.sqliteRoot) await this.destroySqliteFile();
     await IndexedDbPageStore.deletePhysicalRoot(this.name);
   }
 

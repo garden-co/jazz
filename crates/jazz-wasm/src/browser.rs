@@ -15,6 +15,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use jazz::db::{Db, DbConfig, FileOptions, Journal};
+use sha2::{Digest, Sha256};
 use sqlite_wasm_vfs::relaxed_idb::{self, Preload, RelaxedIdbCfgBuilder, RelaxedIdbUtil};
 use sqlite_wasm_vfs::sahpool::{self, OpfsSAHPoolCfgBuilder};
 use wasm_bindgen::prelude::*;
@@ -35,12 +36,14 @@ pub(crate) enum Backend {
 pub(crate) struct StoreSpec {
     backend: Backend,
     path: String,
+    require_existing: bool,
 }
 
 impl StoreSpec {
-    /// `storage` is `{ backend?: "indexeddb" | "opfs", path?: string }`, or
-    /// `undefined` for the IndexedDB default. Without a path the file is
-    /// named after the worker's storage owner.
+    /// `storage` accepts `backend`, `path` and `requireExisting`, or is
+    /// `undefined` for the IndexedDB default. Without an explicit path, the
+    /// versioned filename hashes the complete storage owner. A ready SDK
+    /// sidecar passes its replica-specific path and requires an existing file.
     pub(crate) fn from_js(storage: &JsValue, storage_owner: &str) -> Result<Self, JsValue> {
         let field = |name: &str| -> Result<Option<String>, JsValue> {
             if storage.is_undefined() || storage.is_null() {
@@ -67,17 +70,12 @@ impl StoreSpec {
         let path = match field("path")? {
             Some(path) => path,
             None => {
-                let owner: String = storage_owner
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                format!("jazz-{owner}.sqlite")
+                // Punctuation replacement aliases distinct admitted owners.
+                // This named default-path format hashes the complete UTF-8 owner.
+                let mut hash = Sha256::new();
+                hash.update(b"jazz.browser.default-path.v1\0");
+                hash.update(storage_owner.as_bytes());
+                format!("jazz-owner-v1-{:x}.sqlite", hash.finalize())
             }
         };
         // Both VFSes key files by absolute name.
@@ -86,7 +84,23 @@ impl StoreSpec {
         } else {
             format!("/{path}")
         };
-        Ok(Self { backend, path })
+        let require_existing = if storage.is_null() || storage.is_undefined() {
+            false
+        } else {
+            let value = js_sys::Reflect::get(storage, &JsValue::from_str("requireExisting"))?;
+            if value.is_undefined() {
+                false
+            } else {
+                value
+                    .as_bool()
+                    .ok_or_else(|| JsValue::from_str("storage.requireExisting must be a boolean"))?
+            }
+        };
+        Ok(Self {
+            backend,
+            path,
+            require_existing,
+        })
     }
 }
 
@@ -162,6 +176,9 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
             util.preload_db(vec![spec.path.clone()])
                 .await
                 .map_err(vfs_error)?;
+            if spec.require_existing && !util.exists(&spec.path) {
+                return Err(JsValue::from_str("Admitted SQLite browser file is missing; reset this storage root before reopening"));
+            }
             (
                 Store::IndexedDb(Rc::new(util)),
                 FileOptions {
@@ -173,7 +190,10 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
         }
         Backend::Opfs => {
             require_sync_access_handles()?;
-            install_opfs().await?;
+            let util = install_opfs().await?;
+            if spec.require_existing && !util.exists(&spec.path).map_err(vfs_error)? {
+                return Err(JsValue::from_str("Admitted SQLite browser file is missing; reset this storage root before reopening"));
+            }
             (
                 Store::Opfs,
                 FileOptions {
