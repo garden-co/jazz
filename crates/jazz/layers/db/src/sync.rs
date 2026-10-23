@@ -4160,9 +4160,30 @@ impl Db {
                 {
                     inner.release_remote(&query, &binding, include_deleted);
                 }
-                if let Some((_, group, ..)) = inner.sessions[index].subs.remove(&id) {
+                if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
                     dropped.set(dropped.get() + 1);
+                    // Rows the result lost since the last tick were not
+                    // re-checked yet: the client may still hold them.
+                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+                    if let Some(group) = group.upgrade() {
+                        let table = group.borrow().root().to_owned();
+                        for event in events {
+                            let SubscriptionEvent::Delta { removed, .. } = event else {
+                                continue;
+                            };
+                            for gone in removed {
+                                let id = gone.row_uuid.0.as_bytes().to_vec();
+                                for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
+                                    inner.sessions[index].touched.insert((
+                                        table.clone(),
+                                        gone.row_uuid,
+                                        image.key,
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     // The replica keeps the rows it was shipped: held, a
                     // policy dependency's commit still re-checks them, so a
                     // retained copy is unlisted once the client loses access.
