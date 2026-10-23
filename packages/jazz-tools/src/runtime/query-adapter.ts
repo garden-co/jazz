@@ -401,6 +401,17 @@ function conditionToRelPredicate(
       `Unsupported encrypted query: predicates on "${table}.${column}" are not available`,
     );
   }
+  const isNullValue = cond.value === undefined ? true : cond.value;
+  if (cond.op === "isNull") {
+    if (typeof isNullValue !== "boolean") {
+      throw new Error('"isNull" operator requires a boolean value.');
+    }
+    return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
+  }
+  if (cond.value === null) {
+    if (cond.op === "eq") return { IsNull: { column: columnRef } };
+    if (cond.op === "ne") return { IsNotNull: { column: columnRef } };
+  }
   if (columnType.type === "Row" && magicColumnType(column)) {
     if (cond.op !== "eq" && cond.op !== "ne") {
       throw new Error(`Structured author column "${column}" only supports eq/ne operators.`);
@@ -417,7 +428,8 @@ function conditionToRelPredicate(
       }
       return value as Record<string, unknown>;
     };
-    const wholeAuthor = column === "$createdBy" || column === "$updatedBy";
+    const wholeAuthor =
+      column === "$createdBy" || column === "$updatedBy" || column === "$deletedBy";
     const author = wholeAuthor ? object(cond.value, ["account", "identity"]) : undefined;
     const identity = object(author ? author.identity : cond.value, ["issuer", "subject"]);
     if (
@@ -509,13 +521,6 @@ function conditionToRelPredicate(
     };
     return cond.op === "notIn" ? { Not: membership } : membership;
   }
-  const isNullValue = cond.value === undefined ? true : cond.value;
-  if (cond.op === "isNull") {
-    if (typeof isNullValue !== "boolean") {
-      throw new Error('"isNull" operator requires a boolean value.');
-    }
-    return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
-  }
   const valueTypeForCondition =
     cond.op === "contains" && columnType.type === "Array" ? columnType.element : columnType;
   const rightLiteral =
@@ -535,14 +540,8 @@ function conditionToRelPredicate(
   }
   switch (cond.op) {
     case "eq":
-      if (cond.value === null) {
-        return { IsNull: { column: columnRef } };
-      }
       return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral } };
     case "ne":
-      if (cond.value === null) {
-        return { IsNotNull: { column: columnRef } };
-      }
       return {
         Cmp: {
           left: columnRef,

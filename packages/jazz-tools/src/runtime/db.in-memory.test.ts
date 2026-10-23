@@ -99,14 +99,14 @@ describe("createDb in-memory driver", () => {
     });
     const { value: unset } = db.insert(optionalJson.jobs, { title: "unset" });
     await db.update(optionalJson.jobs, unset.id, { meta: [1, "two"] }).wait({ tier: "local" });
-    const { value: exclusive } = await db.exclusiveTransaction((tx) =>
-      tx.insert(optionalJson.jobs, { title: "exclusive", meta: { b: 2 } }),
+    const { value: serializable } = await db.serializableTransaction((tx) =>
+      tx.insert(optionalJson.jobs, { title: "serializable", meta: { b: 2 } }),
     );
 
     const rows = await db.all(optionalJson.jobs);
     expect(rows.find((row) => row.id === withObject.id)?.meta).toEqual({ a: 1 });
     expect(rows.find((row) => row.id === unset.id)?.meta).toEqual([1, "two"]);
-    expect(rows.find((row) => row.id === exclusive.id)?.meta).toEqual({ b: 2 });
+    expect(rows.find((row) => row.id === serializable.id)?.meta).toEqual({ b: 2 });
   });
 
   it("executes typed partial selects and page-relative diffs end to end", async () => {
@@ -199,7 +199,7 @@ describe("createDb in-memory driver", () => {
     });
   });
 
-  it("composes page-relative diffs inside mergeable and exclusive transactions", async () => {
+  it("composes page-relative diffs inside mergeable and serializable transactions", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-large-value-transaction-diff-test")),
       driver: { type: "memory" },
@@ -258,7 +258,7 @@ describe("createDb in-memory driver", () => {
       done: true,
     });
 
-    await db.exclusiveTransaction((tx) => {
+    await db.serializableTransaction((tx) => {
       tx.update(
         largeValues.documents,
         inserted.id,

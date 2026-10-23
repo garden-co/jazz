@@ -338,3 +338,73 @@ fn a_streamed_upload_reaches_other_replicas() {
         Some(Value::Bytes(blob))
     );
 }
+
+/// A client uploading past the server's ingress limit can still read: its
+/// held-back pushes and commit wait for a later window, but a subscription it
+/// opens after them is served now.
+///
+/// ```text
+/// alice ──push 1, commit 1──► server (within the window)
+/// alice ──push 2, commit 2──► held until the next window
+/// alice ──subscribe(titled)──► served, settles with the server's row
+/// ```
+#[test]
+fn reads_overtake_uploads_held_by_the_ingress_limit() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    server.set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
+        incoming_bytes_per_window: LARGE as u64,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    insert(
+        &server,
+        "titled",
+        9,
+        vec![("title", Value::String("on the server".into()))],
+    );
+    let alice = open(1, user(1));
+    let _log = connect(&server, &alice, user(1));
+    pump(&server, &[&alice]);
+    for n in [1, 2] {
+        insert(
+            &alice,
+            "docs",
+            n,
+            vec![
+                ("body", Value::String(text(u64::from(n), LARGE))),
+                ("blob", Value::Bytes(Vec::new())),
+            ],
+        );
+    }
+    pump(&server, &[&alice]);
+    assert!(local_cell(&server, "docs", 1, "body").unwrap().is_some());
+    assert_eq!(
+        local_cell(&server, "docs", 2, "body").unwrap(),
+        None,
+        "the second upload waits for the next ingress window"
+    );
+
+    let titled = alice.prepare_query(&Query::from("titled")).unwrap();
+    let mut stream = block_on(alice.subscribe(
+        &titled,
+        ReadOpts {
+            tier: ReadTier::Remote,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&alice]);
+    let opening = std::iter::from_fn(|| stream.try_next_event())
+        .find_map(|event| match event {
+            jazz::db::SubscriptionEvent::Delta {
+                settled: true,
+                added,
+                ..
+            } => Some(added),
+            _ => None,
+        })
+        .expect("the read is served while the upload is held");
+    assert_eq!(opening.len(), 1);
+    assert_eq!(opening[0].row.row_uuid(), row(9));
+    assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
+}

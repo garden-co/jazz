@@ -90,7 +90,7 @@ it("delivers a cold encrypted subscription while optional device delivery is pen
     clients.push(reader);
     await owner.e2ee.devices.list();
     await reader.e2ee.devices.list();
-    const tx = owner.beginExclusiveTransaction();
+    const tx = owner.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Shared project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Shared note" });
     await tx.commit().wait({ tier: "global" });

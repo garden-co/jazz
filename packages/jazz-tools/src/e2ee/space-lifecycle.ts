@@ -1,5 +1,5 @@
 import { sha256 } from "@noble/hashes/sha2.js";
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db, TableProxy, E2eeTransactionScope, QueryBuilder } from "../runtime/db.js";
 import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
@@ -236,7 +236,7 @@ export class Spaces {
   }> {
     await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
     await this.groups?.warmMembership({ accountId: this.accountId });
-    const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+    const read = await serializableE2eeTransaction(this.db, async (tx) => {
       const device = requireActiveDevice ? await this.requireDevice().states(tx) : undefined;
       const own =
         device?.publicHistory ??
@@ -323,7 +323,7 @@ export class Spaces {
               recoveryRootId,
             });
       if (query) await this.db.all(query, { tier: "remote" });
-      const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const read = await serializableE2eeTransaction(this.db, async (tx) => {
         const device = restore ? await this.requireDevice().states(tx) : undefined;
         const own =
           device?.publicHistory ??
@@ -634,7 +634,7 @@ export class Spaces {
       const secret = runtimeRandomBytes(32);
       let prepared: SpaceRoot | undefined;
       try {
-        const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
           prepared = await this.stageInitial(
             tx,
             scope,
@@ -675,7 +675,7 @@ export class Spaces {
     prepareData: SpaceDataPreparation,
     recipientIds: readonly string[] = [this.accountId],
   ): Promise<void> {
-    if (tx.kind !== "exclusive")
+    if (tx.kind !== "serializable")
       throw new Error("E2EE initialisation requires an exclusive transaction");
     const address = await this.address(scope, identifier);
     const device = await this.loadDevice();
@@ -990,7 +990,7 @@ export class Spaces {
     await this.warm(observed, [recipientId]);
     const device = await this.loadDevice();
     try {
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         // Envelopes do not establish membership authority. Reading them here
         // would make background delivery unnecessarily conflict with a grant.
         const snapshot = await this.readSnapshot(tx, address, observed.id, [recipientId], false);
@@ -1893,7 +1893,7 @@ export class Spaces {
   ) {
     const secret = runtimeRandomBytes(32);
     try {
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const snapshot = await this.readSnapshot(tx, address, expected.id);
         const state = await this.validate(snapshot, address);
         if (state.keyRoot.epochId !== expected.epochId || state.root.id !== expected.id)
@@ -2114,7 +2114,7 @@ export class Spaces {
     secret: Uint8Array,
     device: LocalDevice,
   ) {
-    const delivery = await exclusiveE2eeTransaction(this.db, async (tx) =>
+    const delivery = await serializableE2eeTransaction(this.db, async (tx) =>
       this.prepareDelivery(
         tx,
         await this.readSnapshot(tx, address, expected.id),

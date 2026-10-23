@@ -14,8 +14,8 @@ export {
   type StreamingValueSource,
   WriteHandle,
   WriteResult,
-  ExclusiveWriteHandle,
-  ExclusiveWriteResult,
+  SerializableWriteHandle,
+  SerializableWriteResult,
 } from "./client.js";
 export { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 export {

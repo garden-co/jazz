@@ -245,3 +245,107 @@ fn shapes_reading_further_tables_are_refused_explicitly() {
         error.message
     );
 }
+
+/// Every string inside a cell, nested arrays and records included.
+fn strings(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|item| strings(item, out)),
+        Value::Record(record) => record
+            .to_values()
+            .unwrap()
+            .iter()
+            .for_each(|item| strings(item, out)),
+        Value::Nullable(Some(inner)) => strings(inner, out),
+        _ => {}
+    }
+}
+
+/// The nested strings of each root row the subscription last reported,
+/// by root id.
+fn nested_seen(
+    stream: &mut jazz::db::SubscriptionStream,
+    seen: &mut BTreeMap<RowUuid, Vec<String>>,
+) {
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            ..
+        } = event
+        {
+            if reset {
+                seen.clear();
+            }
+            for row in added.iter().chain(updated.iter()) {
+                let mut out = Vec::new();
+                for (_, value) in row.row.cells() {
+                    if let Some(value) = value {
+                        strings(value, &mut out);
+                    }
+                }
+                seen.insert(row.row.row_uuid(), out);
+            }
+        }
+    }
+}
+
+/// Nested arrays sync: the server ships every level's children and
+/// watches each level's correlation, so children that join later (under a
+/// middle row that itself joined later) reach the replica, and the
+/// subscription reports them inside its root rows.
+#[test]
+fn nested_array_children_ship_at_every_level() {
+    let (server, client) = setup();
+    let query =
+        Query::from("users").array_subquery(
+            ArraySubquery::new("messages", "messages", "senderId", "id").nested(
+                ArraySubquery::new("comments", "comments", "messageId", "id"),
+            ),
+        );
+    let prepared = client.prepare_query(&query).unwrap();
+    let mut stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    let mut seen = BTreeMap::new();
+    nested_seen(&mut stream, &mut seen);
+    assert_eq!(seen[&id(1, 1)], ["ada", "m1", "c1"]);
+    assert_eq!(seen[&id(1, 2)], ["bob", "m2"]);
+    assert_eq!(local(&client, "comments").len(), 1);
+
+    // A grandchild under a shipped child.
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "comments",
+            id(3, 2),
+            AuthorSubject::SYSTEM,
+            cells(&[("messageId", Value::Uuid(id(2, 2).0)), ("text", text("c2"))]),
+        )
+        .unwrap();
+    pump(&server, &client);
+    nested_seen(&mut stream, &mut seen);
+    assert_eq!(seen[&id(1, 2)], ["bob", "m2", "c2"]);
+
+    // A child that joins later, then a grandchild under it.
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "messages",
+            id(2, 3),
+            AuthorSubject::SYSTEM,
+            cells(&[("senderId", Value::Uuid(id(1, 3).0)), ("body", text("m3"))]),
+        )
+        .unwrap();
+    pump(&server, &client);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "comments",
+            id(3, 3),
+            AuthorSubject::SYSTEM,
+            cells(&[("messageId", Value::Uuid(id(2, 3).0)), ("text", text("c3"))]),
+        )
+        .unwrap();
+    pump(&server, &client);
+    nested_seen(&mut stream, &mut seen);
+    assert_eq!(seen[&id(1, 3)], ["cy", "m3", "c3"]);
+    assert_eq!(local(&client, "comments").len(), 3);
+}

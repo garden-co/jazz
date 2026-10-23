@@ -346,7 +346,7 @@ descriptor.
 
 Present nullable scalar cells use the same inline/indirect physical choice
 inside their nullable wrapper. Partial reads and edits preserve that wrapper;
-exclusive and mergeable transactions share the same lowering seam before
+serializable and mergeable transactions share the same lowering seam before
 version publication.
 
 ## 19.5 Groove storage contract
@@ -557,7 +557,7 @@ transaction compose. Each diff stages only the Groove nodes it touches, exactly
 like the root-context update, and the open transaction retains the staged root
 as engine-private provenance; nothing is visible outside the transaction until
 it commits, and the commit publishes one ordinary row version per row. The row
-read counts as a transaction point read, so an exclusive transaction conflicts
+read counts as a transaction point read, so a serializable transaction conflicts
 if the row changes before commit. In a mergeable transaction the diffed column
 is authored like any patched column and resolves last-writer-wins at commit.
 The diff is authored by the transaction's bound identity, so session and

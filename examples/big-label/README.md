@@ -59,13 +59,13 @@ bootstrap route from the verified sign-in, and unreadable by browsers). It then
 writes the membership as the caller, via `forRequest()`, so `permissions.ts`
 decides: only admins add members, only as editors or viewers. The route
 answers non-admins with "forbidden" before looking anything up, so it can't be
-used to probe emails or membership. The write is an exclusive
+used to probe emails or membership. The write is a serializable
 transaction that first reads the person's membership, so a double submit adds
 them once. The person needs to have signed in once.
 
 Catalogue numbers are unique per label, but the permissions don't enforce
 that: a policy can't compare a row with its siblings. `saveRelease` in
-`src/lib/mutations.ts` does, in an exclusive transaction that reads the
+`src/lib/mutations.ts` does, in a serializable transaction that reads the
 number's current holders; the authority rejects the transaction if a
 concurrent one changed that read. The release form uses it, so numbers stay
 unique for writes made through the app. A client writing to `releases`
@@ -112,7 +112,7 @@ All names, emails and IDs are generated; no real data is used.
 ## Admission boundary
 
 The first organization is provisioned by the app-owned, authenticated bootstrap
-route—not by a client-settable JWT claim. Its exclusive transaction reads and
+route—not by a client-settable JWT claim. Its serializable transaction reads and
 then gets-or-creates the external user's one profile,
 `personal-<external-user-id>` organization, and admin membership as one
 durable triple. A concurrent request retries its transaction against the

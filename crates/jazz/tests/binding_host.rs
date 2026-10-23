@@ -9,9 +9,9 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ReadOpts, ReadTier, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{ArraySubquery, Query};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
@@ -25,6 +25,12 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("notes")
                     .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("comments")
+                    .column("note", ColumnType::Uuid)
+                    .column("body", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .build(),
@@ -154,7 +160,7 @@ fn options_objects_decode_as_the_typescript_runtime_sends_them() {
     }))
     .unwrap();
     assert_eq!(read.tier, ReadTier::LocalOnly);
-    assert!(read.include_deleted);
+    assert!(read.read_view.include_deleted);
     // Only a local-first read waits for its first remote load.
     assert_eq!(read.first_load, jazz::db::FirstLoad::Deliver);
     assert!(
@@ -219,6 +225,97 @@ fn writes_transactions_and_attribution_go_through_one_binding() {
     assert!(
         argument(db.begin_transaction(tx, "optimistic", None, None))
             .contains("unknown transaction kind")
+    );
+}
+
+#[test]
+fn a_staged_write_refused_for_its_rows_state_rejects_the_commit() {
+    let db = open(0xa2);
+    let row = RowUuid::from_bytes([0x42; 16]);
+    for kind in ["mergeable", "serializable"] {
+        let tx = &OpenTransactionId::new().to_string();
+        db.begin_transaction(tx, kind, None, None).unwrap();
+        // Patching nothing is fine for a stored row but cannot create one:
+        // the call stages, and the commit carries the refusal.
+        db.upsert_in_transaction(tx, "notes", &row.to_bytes(), &empty_cells(), &none())
+            .unwrap();
+        db.insert_in_transaction(tx, "notes", &title("kept out"), &none())
+            .unwrap();
+        let commit = db.commit_transaction(tx, Some(kind)).unwrap();
+        let refusal = commit.rejected.expect("the commit is rejected");
+        assert!(refusal.is_apply_time_rejection(), "{refusal:?}");
+        assert!(refusal.message.contains("missing required field `title`"));
+        assert!(titles(&db).is_empty(), "no staged write applies");
+        assert!(
+            db.commit_transaction(tx, Some(kind)).is_err(),
+            "the transaction is closed"
+        );
+    }
+
+    // A rolled back transaction forgets its refusal.
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    db.upsert_in_transaction(tx, "notes", &row.to_bytes(), &empty_cells(), &none())
+        .unwrap();
+    db.rollback_transaction(tx).unwrap();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    db.insert_in_transaction(tx, "notes", &title("after"), &none())
+        .unwrap();
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db), ["after"]);
+}
+
+#[test]
+fn restoring_a_live_row_is_rejected_through_its_receipt() {
+    let db = open(0xa3);
+    let live = db.insert("notes", &title("live"), &none()).unwrap();
+    let receipt = db
+        .restore("notes", &live.row_id.to_bytes(), &title("again"), &none())
+        .unwrap();
+    let refusal = receipt.rejected.expect("the restore is rejected");
+    assert!(refusal.is_apply_time_rejection(), "{refusal:?}");
+    assert_eq!(
+        refusal.message,
+        format!("row not deleted: {}", live.row_id.0)
+    );
+    assert_eq!(titles(&db), ["live"]);
+}
+
+#[test]
+fn a_row_changed_after_a_serializable_read_rejects_the_commit() {
+    let db = open(0xa4);
+    let read = db.insert("notes", &title("read"), &none()).unwrap();
+    let other = db.insert("notes", &title("other"), &none()).unwrap();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "serializable", None, None)
+        .unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes").filter(jazz::query::eq(
+        jazz::query::col("id"),
+        jazz::query::lit(Value::Uuid(read.row_id.0)),
+    )))
+    .unwrap();
+    block_on(db.all(query, &none(), Some(tx), None, None).unwrap()).unwrap();
+    db.update("notes", &read.row_id.to_bytes(), &title("changed"), &none())
+        .unwrap();
+    db.update_in_transaction(
+        tx,
+        "notes",
+        &other.row_id.to_bytes(),
+        &title("staged"),
+        &none(),
+    )
+    .unwrap();
+    let commit = db.commit_transaction(tx, Some("serializable")).unwrap();
+    let conflict = commit.rejected.expect("the commit is rejected");
+    assert_eq!(
+        conflict.code,
+        ErrorCode::TransactionConflict,
+        "{conflict:?}"
+    );
+    assert_eq!(
+        titles(&db),
+        ["changed", "other"],
+        "the staged write is not applied"
     );
 }
 
@@ -327,4 +424,91 @@ fn empty_cells() -> Vec<u8> {
         descriptor,
     ))
     .unwrap()
+}
+
+fn comment(note: RowUuid, body: &str) -> Vec<u8> {
+    let descriptor =
+        RecordDescriptor::new([("note", ValueType::Uuid), ("body", ValueType::String)]);
+    let record = OwnedRecord::new(
+        descriptor
+            .create(&[Value::Uuid(note.0), Value::String(body.to_owned())])
+            .unwrap(),
+        descriptor,
+    );
+    jazz::binding_codec::encode_named_cells(&record).unwrap()
+}
+
+#[test]
+fn a_relation_read_nests_each_relation_in_its_parents_cells() {
+    let db = open(0xa1);
+    let note = db
+        .insert("notes", &title("with comments"), &none())
+        .unwrap();
+    db.insert("notes", &title("without"), &none()).unwrap();
+    for body in ["first", "second"] {
+        db.insert("comments", &comment(note.row_id, body), &none())
+            .unwrap();
+    }
+
+    let query = Query::from("notes")
+        .array_subquery(ArraySubquery::new("comments", "comments", "note", "id"));
+    let read = db
+        .all(
+            postcard::to_allocvec(&query).unwrap(),
+            &json!({ "tier": "local-only" }),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let (root_count, batches) =
+        jazz::binding_codec::decode_relation_snapshot(&block_on(read).unwrap()).unwrap();
+    let roots = batches
+        .iter()
+        .flat_map(|batch| &batch.rows)
+        .collect::<Vec<_>>();
+    assert_eq!((root_count, roots.len()), (2, 2));
+
+    let mut bodies = Vec::new();
+    for root in roots {
+        let Value::Array(children) = &root.cells["comments"] else {
+            panic!(
+                "expected a comments array, got {:?}",
+                root.cells["comments"]
+            );
+        };
+        let mut row_bodies = Vec::new();
+        for child in children {
+            let Value::Record(record) = child else {
+                panic!("expected a nested record, got {child:?}");
+            };
+            let names = record
+                .descriptor()
+                .fields()
+                .iter()
+                .map(|field| field.name.clone().unwrap())
+                .collect::<Vec<_>>();
+            let values = record.to_values().unwrap();
+            assert_eq!(names[0], "row_uuid");
+            let cell = |name: &str| values[names.iter().position(|n| n == name).unwrap()].clone();
+            assert_eq!(cell("note"), Value::Uuid(note.row_id.0));
+            row_bodies.push(cell("body"));
+        }
+        row_bodies.sort_by_key(|body| format!("{body:?}"));
+        bodies.push((root.cells["title"].clone(), row_bodies));
+    }
+    bodies.sort_by_key(|(title, _)| format!("{title:?}"));
+    assert_eq!(
+        bodies,
+        [
+            (
+                Value::String("with comments".to_owned()),
+                vec![
+                    Value::String("first".to_owned()),
+                    Value::String("second".to_owned())
+                ]
+            ),
+            (Value::String("without".to_owned()), vec![]),
+        ]
+    );
 }

@@ -63,9 +63,9 @@ it("accepts a task inserted in the same transaction as the show it requires", as
   });
 }, 60_000);
 
-it("accepts the same rows in one exclusive transaction", async () => {
+it("accepts the same rows in one serializable transaction", async () => {
   await withChief(async (db, me) => {
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const show = tx.insert(app.shows, { chiefAccount: me });
     const task = tx.insert(app.tasks, { showId: show.id, title: "Load-in" });
     await tx.commit().wait();
