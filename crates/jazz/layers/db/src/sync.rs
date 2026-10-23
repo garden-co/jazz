@@ -361,6 +361,10 @@ pub enum SyncMessage {
         kind: WireKind,
         ops: Vec<WireOp>,
         author: Option<String>,
+        /// The writes are `author`'s as a session, with these claims (a
+        /// trusted link acting for it): the authority checks their
+        /// policies as that session. Otherwise `author` is provenance only.
+        session: Option<BTreeMap<String, Value>>,
         /// The writes' explicit provenance timestamp (Unix ms), if any.
         updated_at: Option<u64>,
     },
@@ -2186,6 +2190,7 @@ impl Inner {
             let SyncMessage::Commit {
                 ops,
                 author,
+                session,
                 updated_at,
                 ..
             } = &commit
@@ -2199,7 +2204,8 @@ impl Inner {
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-                ops.iter_mut().for_each(|op| op.attribute(author));
+                ops.iter_mut()
+                    .for_each(|op| op.attribute(author, session.is_some()));
             }
             if let Some(at) = *updated_at {
                 ops.iter_mut().for_each(|op| op.stamp_at(at));
@@ -2452,6 +2458,10 @@ impl Db {
         let author = ops.iter().find_map(StagedOp::author).or_else(|| {
             (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
         });
+        // A session's writes carry its claims, for the authority's check.
+        let session_claims = author
+            .filter(|_| ops.iter().any(StagedOp::is_session))
+            .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq).unwrap_or_default();
         let mut shadows = Vec::new();
         for (table, row, key) in &rows {
@@ -2489,6 +2499,7 @@ impl Db {
                     kind,
                     ops: wire,
                     author: author.map(|author| author.canonical().to_owned()),
+                    session: session_claims,
                     updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
                 };
                 client.unsent.push(commit.clone());
@@ -4066,16 +4077,43 @@ impl Db {
                 kind,
                 ops,
                 author,
+                session,
                 updated_at,
             } => {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
-                    None => match commit_who(policy, author.as_deref())
+                    None => match commit_who(policy, author.as_deref(), session.is_some())
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
-                            db.authorize_commit(who, policy, kind, ops, updated_at, (node, tx))
+                            // A trusted link's session write is checked
+                            // with the claims the link vouches for.
+                            let vouched = match (who, session) {
+                                (Who::Session(author), Some(claims)) if policy.is_none() => {
+                                    Some((author, claims))
+                                }
+                                _ => None,
+                            };
+                            let previous = vouched.as_ref().map(|(author, claims)| {
+                                (
+                                    *author,
+                                    self.inner
+                                        .borrow_mut()
+                                        .claims
+                                        .insert(*author, claims.clone()),
+                                )
+                            });
+                            let result =
+                                db.authorize_commit(who, policy, kind, ops, updated_at, (node, tx));
+                            if let Some((author, previous)) = previous {
+                                let mut inner = self.inner.borrow_mut();
+                                match previous {
+                                    Some(previous) => inner.claims.insert(author, previous),
+                                    None => inner.claims.remove(&author),
+                                };
+                            }
+                            result
                         }) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
@@ -4317,8 +4355,13 @@ impl Db {
 
 /// Who an uploaded commit is applied as. A session link writes under its
 /// own identity and may not name another author; a trusted link (no policy
-/// identity) writes unchecked, attributed to the author it names.
-fn commit_who(policy: Option<AuthorSubject>, author: Option<&str>) -> Result<Who, Error> {
+/// identity) writes as the session it names (checked as it), or unchecked,
+/// attributed to the author it names.
+fn commit_who(
+    policy: Option<AuthorSubject>,
+    author: Option<&str>,
+    session: bool,
+) -> Result<Who, Error> {
     let author = author
         .map(AuthorSubject::from_canonical)
         .transpose()
@@ -4332,6 +4375,9 @@ fn commit_who(policy: Option<AuthorSubject>, author: Option<&str>) -> Result<Who
             "attribution requires a trusted serving node",
         )),
         (Some(session), _) => Ok(Who::Session(session)),
+        (None, Some(author)) if session && author != AuthorSubject::SYSTEM => {
+            Ok(Who::Session(author))
+        }
         (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
         (None, _) => Ok(Who::Local),
     }
