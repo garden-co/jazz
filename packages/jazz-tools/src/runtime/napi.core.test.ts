@@ -27,6 +27,11 @@ import {
   createNapiRuntimeFixture,
 } from "./testing/napi-runtime-test-utils.js";
 import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
+import {
+  markTrustedReservedSession,
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  trustedReservedSessionToken,
+} from "./client-session.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
@@ -776,6 +781,53 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.delete("todos", inserted.id);
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+  });
+
+  it("writes with a client's own local-first session as the runtime itself", async () => {
+    const napi = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d0f1";
+    const token = napi.mintLocalFirstToken(Buffer.alloc(32, 7).toString("base64url"), appId, 600);
+    const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as {
+      iss: string;
+      sub: string;
+    };
+    const session = markTrustedReservedSession({
+      issuer: claims.iss,
+      user_id: claims.sub,
+      authMode: "local-first" as const,
+      claims: {},
+    });
+    const claimedAuthor = JSON.stringify([session.issuer, session.user_id]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: (schema, config) => napi.NapiDb.openMemory(schema, config) as never,
+        openMemoryWithSelfSignedProof: (schema, config, token, appId, author) =>
+          napi.NapiDb.openMemoryWithSelfSignedProof(schema, config, token, appId, author) as never,
+      },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-own-session:node"),
+      new TextEncoder().encode(claimedAuthor),
+      1,
+      true,
+      { selfSignedClientProof: { token, appId, claimedAuthor } },
+    );
+    runtimes.push(runtime);
+
+    const inserted = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "own session row" },
+        done: { type: "Boolean", value: false },
+      },
+      JSON.stringify({
+        ...session,
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(session),
+      }),
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toMatchObject([
+      { id: inserted.id },
+    ]);
   });
 
   it("streams a typed text column through NAPI before publishing the row", async () => {
