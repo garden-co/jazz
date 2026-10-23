@@ -3843,14 +3843,6 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).toThrow("unsupported read tier");
   });
 
-  it("rejects include_deleted subscription query intent", () => {
-    const runtime = emptyNativeRuntime();
-
-    expect(() =>
-      runtime.createSubscription(JSON.stringify({ table: "todos", include_deleted: true })),
-    ).toThrow("include_deleted subscriptions");
-  });
-
   it("rejects permission introspection selected columns before preparing flat queries", async () => {
     const calls: string[] = [];
     const runtime = new NativeRuntimeAdapter(
@@ -5859,10 +5851,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(transactionCall?.[2]).toBeUndefined();
     expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
 
-    runtime.beginTransaction("exclusive", "attributed-exclusive" as never, context);
-    const exclusiveCall = beginTransaction.mock.calls[1];
-    expect(exclusiveCall?.[1]).toBe("exclusive");
-    expect(new TextDecoder().decode(exclusiveCall?.[3])).toBe(attribution);
+    runtime.beginTransaction("serializable", "attributed-serializable" as never, context);
+    const serializableCall = beginTransaction.mock.calls[1];
+    expect(serializableCall?.[1]).toBe("serializable");
+    expect(new TextDecoder().decode(serializableCall?.[3])).toBe(attribution);
 
     await runtime.streamingMutation(
       "insert",
@@ -7586,7 +7578,7 @@ function encodeArrayRows(): Uint8Array {
 
 function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
-    kind: "mergeable" | "exclusive";
+    kind: "mergeable" | "serializable";
     author?: Uint8Array;
   };
   const implementation = db as T & {

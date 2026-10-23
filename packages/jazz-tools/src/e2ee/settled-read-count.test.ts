@@ -30,7 +30,7 @@ it("captures non-empty E2EE history with one covered query", async () => {
     await inserted.wait({ tier: "global" });
     const queries = vi.spyOn(NativeRuntimeAdapter.prototype, "query");
     try {
-      const read = await db.exclusiveTransaction((tx) => tx.allSettledForE2ee(app.proposals));
+      const read = await db.serializableTransaction((tx) => tx.allSettledForE2ee(app.proposals));
       const snapshot = await read.wait({ tier: "global" });
       expect(snapshot.rows).toEqual([{ id: inserted.value.id, value: "accepted" }]);
       expect(snapshot.settlements).toEqual([

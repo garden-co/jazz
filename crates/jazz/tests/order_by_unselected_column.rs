@@ -53,7 +53,6 @@ fn open_db() -> Db {
 fn local() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

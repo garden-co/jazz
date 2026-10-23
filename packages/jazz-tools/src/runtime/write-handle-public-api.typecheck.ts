@@ -1,7 +1,7 @@
 import type {
   Db,
-  ExclusiveWriteHandle,
-  ExclusiveWriteResult,
+  SerializableWriteHandle,
+  SerializableWriteResult,
   TableProxy,
   WriteHandle,
   WriteResult,
@@ -75,17 +75,17 @@ async function assertWriteHandleContract() {
   // @ts-expect-error Transaction results use the same two write durability tiers.
   callbackResult.wait({ tier: "edge" });
 
-  const exclusiveResult: ExclusiveWriteResult<string> = await db.exclusiveTransaction(
+  const serializableResult: SerializableWriteResult<string> = await db.serializableTransaction(
     () => "committed",
   );
-  exclusiveResult.wait();
+  serializableResult.wait();
   // Explicit global waits require authority confirmation, including while offline.
-  exclusiveResult.wait({ tier: "global" });
+  serializableResult.wait({ tier: "global" });
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
-  const exclusiveCommit: ExclusiveWriteHandle = db.beginExclusiveTransaction().commit();
-  exclusiveCommit.wait();
-  exclusiveCommit.wait({ tier: "global" });
+  const serializableCommit: SerializableWriteHandle = db.beginSerializableTransaction().commit();
+  serializableCommit.wait();
+  serializableCommit.wait({ tier: "global" });
 
   void restored;
   void updated;
@@ -96,7 +96,7 @@ async function assertWriteHandleContract() {
   void streamedUpsert;
   void txId;
   void mergeableCommit;
-  void exclusiveCommit;
+  void serializableCommit;
 }
 
 void assertWriteHandleContract;

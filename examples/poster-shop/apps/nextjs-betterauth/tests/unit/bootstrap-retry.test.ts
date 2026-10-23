@@ -11,7 +11,7 @@ it("retries a transient first-open conflict and then succeeds", async () => {
   const result = await withBoundedConflictRetry(
     async () => {
       calls += 1;
-      if (calls < 3) throw rejected("exclusive_conflict");
+      if (calls < 3) throw rejected("serialization_conflict");
       return "canvas";
     },
     { sleep: noSleep },
@@ -36,22 +36,25 @@ it("terminates a persistent conflict with a recoverable error (#2615)", async ()
   expect(delays).toEqual([10, 20, 40]);
 });
 
-it.each(["transaction_conflict", "exclusive_conflict"])("retries a %s rejection", async (code) => {
-  let calls = 0;
-  await withBoundedConflictRetry(
-    async () => {
-      calls += 1;
-      if (calls === 1) throw rejected(code);
-    },
-    { sleep: noSleep },
-  );
-  expect(calls).toBe(2);
-});
+it.each(["transaction_conflict", "serialization_conflict"])(
+  "retries a %s rejection",
+  async (code) => {
+    let calls = 0;
+    await withBoundedConflictRetry(
+      async () => {
+        calls += 1;
+        if (calls === 1) throw rejected(code);
+      },
+      { sleep: noSleep },
+    );
+    expect(calls).toBe(2);
+  },
+);
 
 it("does not retry other rejections or errors that only mention a conflict", async () => {
   for (const error of [
     rejected("permission_denied"),
-    new Error("exclusive_conflict mentioned in an unrelated message"),
+    new Error("serialization_conflict mentioned in an unrelated message"),
     // An untyped error with a conflict `code` is no longer accepted (#3753).
     Object.assign(new Error("TransactionConflict"), { code: "transaction_conflict" }),
   ]) {

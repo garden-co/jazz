@@ -62,7 +62,7 @@ it("publishes a verifiable key-free approval while keeping the handshake account
     const rows = await observer.all(app.__e2ee_public_device_approvals, { tier: "remote" });
     expect(rows).toHaveLength(1);
     const approval = rows[0]!;
-    const settled = await owner.exclusiveTransaction(async (tx) => ({
+    const settled = await owner.serializableTransaction(async (tx) => ({
       public: await tx.allSettledForE2ee(app.__e2ee_public_device_approvals),
       private: await tx.allSettledForE2ee(app.__e2ee_device_approvals),
     }));
@@ -143,7 +143,7 @@ it("publishes a verifiable key-free approval while keeping the handshake account
         successor.signature,
       ),
     ).toBe(true);
-    const rotation = await owner.exclusiveTransaction(async (tx) => ({
+    const rotation = await owner.serializableTransaction(async (tx) => ({
       public: await tx.allSettledForE2ee(app.__e2ee_public_account_successors),
       private: await tx.allSettledForE2ee(app.__e2ee_account_successors),
     }));

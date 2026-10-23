@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { accountRegistry, exportLocalFirstSecret } from "../accounts/enrollment.js";
@@ -128,7 +128,7 @@ export class E2ee {
       this.assertOpen();
       if (material !== undefined) return this.inspectRecovery(material);
       await prefetchPublicMembershipHistory(this.db, this.account.id, this.app);
-      const read = await exclusiveE2eeTransaction(this.db, (tx) =>
+      const read = await serializableE2eeTransaction(this.db, (tx) =>
         readPublicMembershipHistory(tx, this.account.id, this.app),
       );
       const history = await read.wait({ tier: "global" });
