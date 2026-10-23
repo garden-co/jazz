@@ -1391,22 +1391,30 @@ impl WasmDb {
         Err(not_supported("E2EE accepted catalogue coverage"))
     }
 
-    /// Ordinary history reads do not provide the paired accepted-content and
-    /// settlement observation required by E2EE transactions.
+    /// Accepted content and its transaction evidence from one serializable
+    /// snapshot. Global transaction acceptance remains a separate wait.
     #[wasm_bindgen(js_name = allSettlementMetadata)]
     pub fn all_settlement_metadata(
         &self,
-        _query: Vec<u8>,
-        _opts: JsValue,
-        _open_transaction_id: String,
-        _author: Option<Vec<u8>>,
-        _claims: JsValue,
-        _include_rows: Option<bool>,
+        query: Vec<u8>,
+        opts: JsValue,
+        open_transaction_id: String,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+        include_rows: Option<bool>,
     ) -> Result<JsValue, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE accepted-history transaction observations",
-        ))
+        let read = self
+            .binding()?
+            .all_settlement_metadata(
+                query,
+                &options(opts),
+                &open_transaction_id,
+                author.as_deref(),
+                json(claims)?,
+                include_rows.unwrap_or(false),
+            )
+            .map_err(host_error)?;
+        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
     }
 
     /// Bind correlation claims to this already-open client's own identity.
