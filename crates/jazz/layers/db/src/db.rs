@@ -40,6 +40,9 @@ pub use large_ops::{
 #[path = "catalogue.rs"]
 mod catalogue;
 pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
+#[path = "catalogue_cache.rs"]
+mod catalogue_cache;
+pub use catalogue_cache::{AuthenticatedCatalogueState, validate_catalogue_capture_replacement};
 #[path = "accepted.rs"]
 mod accepted;
 #[path = "sync.rs"]
@@ -377,6 +380,10 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// A cache bootstrap requires accepted metadata for each requested schema.
+    catalogue_cache_required: bool,
+    /// Shared by every view; observation moves the capture once.
+    catalogue_capture_pending: std::cell::Cell<bool>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -903,6 +910,14 @@ impl Db {
         conn.execute_batch(accepted::ACCEPTED_DDL)
             .map_err(storage)?;
         conn.execute_batch(catalogue::DDL).map_err(storage)?;
+        conn.execute_batch(catalogue_cache::DDL).map_err(storage)?;
+        let catalogue_cache_required = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _jazz_catalogue_cache_mode_v1 WHERE slot=1)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
         for table in physical.tables.keys() {
@@ -922,6 +937,8 @@ impl Db {
             view: None,
             inner: Rc::new(RefCell::new(Inner {
                 conn,
+                catalogue_cache_required,
+                catalogue_capture_pending: std::cell::Cell::new(true),
                 chunks,
                 pending_nodes: Vec::new(),
                 derived: Vec::new(),
@@ -1092,6 +1109,7 @@ impl Db {
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let inner = self.inner();
+        inner.require_catalogue_schema(&inner.schema)?;
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
         // Validate: tables, columns, parameters, supported forms. Read
@@ -1921,6 +1939,7 @@ impl Inner {
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        self.require_catalogue_schema(schema)?;
         Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_catalogue(self)
             .with_view(read.view.clone())
@@ -4129,6 +4148,7 @@ impl Inner {
     }
 
     fn apply_op(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
+        self.require_catalogue_schema(&self.schema)?;
         match op.clone() {
             StagedOp::Insert(t, c, o) => {
                 self.insert(&t, c, o.row_id, &Target::exact(&o.target), who, seq)

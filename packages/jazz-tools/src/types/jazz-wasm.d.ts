@@ -187,6 +187,7 @@ declare module "jazz-wasm" {
       rowId: Uint8Array,
     ): Promise<void>;
     initializationTransactionStatus(ids: string[]): Promise<string>;
+    hasAuthenticatedCatalogue(): Promise<boolean>;
     takeAuthenticatedCatalogueState(): Promise<{ capture?: Uint8Array | null; ready: boolean }>;
     validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void;
 

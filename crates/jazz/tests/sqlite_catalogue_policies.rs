@@ -699,3 +699,53 @@ fn cold_relay_paired_read_hydrates_the_catalogue_policy_dependency() {
     );
     client.abandon_serializable_handle(tx).unwrap();
 }
+
+/// Alice restores Bob's authenticated capture offline. E17 policy intrinsics
+/// use its accepted UUIDs for reads and writes; Mallory's claims cannot rebind
+/// the scope and the cache does not provide fresh authority coverage.
+#[test]
+fn offline_cache_restores_intrinsic_policy_scope_without_trusting_claims() {
+    let snapshot = snapshot(schema("documents", intrinsic("documents")));
+    let bob = authority(&snapshot);
+    let capture = bob
+        .take_authenticated_catalogue_state()
+        .unwrap()
+        .capture
+        .unwrap();
+    let alice_db = open(1, snapshot.schemas[0].schema.clone());
+    // SAFETY: these bytes were captured from this fixture's own authenticated
+    // authority, in the same app scope, before exposing the new owner.
+    unsafe { alice_db.install_cached_catalogue(&capture) }.unwrap();
+    assert!(alice_db.has_authenticated_catalogue().unwrap());
+    let scope = bob.table_identity("documents").unwrap().unwrap().0;
+    let fake = uuid::Uuid::from_bytes([0xfa; 16]);
+    let expected = seed(&alice_db, "documents", scope, "cached scope");
+    seed(&alice_db, "documents", fake, "forged scope");
+    spoof(&alice_db, fake);
+    assert_eq!(ids(&alice_db, "documents"), vec![expected]);
+    assert_eq!(
+        block_on(alice_db.insert(
+            "documents",
+            cells(fake, "forbidden"),
+            InsertOptions {
+                identity: WriteIdentity::Session(alice()),
+                ..Default::default()
+            }
+        ))
+        .err()
+        .unwrap()
+        .code,
+        ErrorCode::WriteRejected
+    );
+    block_on(alice_db.insert(
+        "documents",
+        cells(scope, "permitted"),
+        InsertOptions {
+            identity: WriteIdentity::Session(alice()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(ids(&alice_db, "documents").len(), 2);
+    assert!(block_on(alice_db.cover_catalogue("documents", None)).is_err());
+}

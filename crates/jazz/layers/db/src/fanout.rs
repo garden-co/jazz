@@ -408,6 +408,7 @@ impl Inner {
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        self.require_catalogue_schema(schema)?;
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_catalogue(self)
             .with_view(read.view.clone())

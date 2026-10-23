@@ -1,6 +1,5 @@
-//! E14 keeps its public binding surface while its authenticated catalogue and
-//! initialization journal contracts await a SQLite implementation. Never treat
-//! an ordinary schema open or commit as proof of authenticated initialization.
+//! Authenticated catalogue capture is implemented by SQLite. Initialization
+//! transaction seals and journals remain separate, explicitly unsupported contracts.
 use super::*;
 
 #[wasm_bindgen]
@@ -8,29 +7,37 @@ impl WasmDb {
     #[wasm_bindgen(js_name = validateCatalogueCaptureReplacement)]
     pub fn validate_catalogue_capture_replacement(
         &self,
-        _previous: Vec<u8>,
-        _next: Vec<u8>,
+        previous: Vec<u8>,
+        next: Vec<u8>,
     ) -> Result<(), JsValue> {
         self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: validateCatalogueCaptureReplacement",
-        ))
+        jazz::db::validate_catalogue_capture_replacement(&previous, &next).map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = hasAuthenticatedCatalogue)]
     pub fn has_authenticated_catalogue(&self) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: hasAuthenticatedCatalogue",
-        ))
+        let ready = self
+            .binding()?
+            .db
+            .has_authenticated_catalogue()
+            .map_err(to_js_error)?;
+        Ok(js_sys::Promise::resolve(&JsValue::from_bool(ready)))
     }
 
     #[wasm_bindgen(js_name = takeAuthenticatedCatalogueState)]
     pub fn take_authenticated_catalogue_state(&self) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: takeAuthenticatedCatalogueState",
-        ))
+        let result = js_sys::Object::new();
+        let state = self
+            .binding()?
+            .db
+            .take_authenticated_catalogue_state()
+            .map_err(to_js_error)?;
+        js_sys::Reflect::set(&result, &"ready".into(), &state.ready.into())?;
+        if let Some(capture) = state.capture {
+            js_sys::Reflect::set(&result, &"capture".into(), &bytes_to_js(capture)?)?;
+        }
+        let result: JsValue = result.into();
+        Ok(js_sys::Promise::resolve(&result))
     }
 
     #[wasm_bindgen(js_name = sealInitializationTransaction)]
