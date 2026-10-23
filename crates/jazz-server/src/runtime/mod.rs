@@ -105,7 +105,7 @@ pub enum ServerLinkAdmission {
     /// protocol cannot express a delegated scope yet.
     AuthorityQueryDelegate,
     /// A durable relay for exactly the one session authenticated by this
-    /// connection. Not supported yet on SQLite.
+    /// connection. On SQLite it is served as that session.
     ScopeIsolatedClientRelay {
         /// Fresh server-issued capability epoch for this accepted connection.
         admission_epoch: u64,
@@ -304,13 +304,16 @@ impl ServerRuntimeHandle {
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
+        // The SQLite sync protocol has no per-query delegated scope yet, so
+        // an authority link is served as the trusted SYSTEM link it is. A
+        // client relay (a browser worker relaying for its tabs) is served as
+        // the one session it authenticated as: everything it relays is read
+        // and written under that session's policies, so it can never reach
+        // past that scope, and its tabs share it.
         match link_admission {
-            // The SQLite sync protocol has no per-query delegated scope yet,
-            // so an authority link is served as the trusted SYSTEM link it is.
-            ServerLinkAdmission::OrdinarySession | ServerLinkAdmission::AuthorityQueryDelegate => {}
-            ServerLinkAdmission::ScopeIsolatedClientRelay { .. } => {
-                return Err("client relays are not supported yet on SQLite".into());
-            }
+            ServerLinkAdmission::OrdinarySession
+            | ServerLinkAdmission::AuthorityQueryDelegate
+            | ServerLinkAdmission::ScopeIsolatedClientRelay { .. } => {}
         }
         // Trusted links are served with full access; a session reads and
         // writes under its identity's policies.

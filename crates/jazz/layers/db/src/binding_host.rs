@@ -584,6 +584,7 @@ impl Progress {
         Parked {
             future: Box::pin(future),
             progress: self.clone(),
+            kick: None,
         }
     }
 }
@@ -592,19 +593,24 @@ impl Progress {
 pub struct Parked<F: Future> {
     future: Pin<Box<F>>,
     progress: Progress,
+    /// Asked for a tick after the future's first poll: what it queued for
+    /// the upstream (a remote read, or a local-first read's refresh) goes
+    /// out without waiting for unrelated work.
+    kick: Option<Rc<Hooks>>,
 }
 
 impl<F: Future> Future for Parked<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
-        match self.future.as_mut().poll(context) {
-            Poll::Ready(output) => Poll::Ready(output),
-            Poll::Pending => {
-                self.progress.park(context);
-                Poll::Pending
-            }
+        let poll = self.future.as_mut().poll(context);
+        if poll.is_pending() {
+            self.progress.park(context);
         }
+        if let Some(hooks) = self.kick.take() {
+            hooks.schedule_tick();
+        }
+        poll
     }
 }
 
@@ -657,9 +663,13 @@ impl Hooks {
     }
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
-    fn report(&self, node: NodeUuid, rejections: Vec<(u64, Error)>) {
-        for (seq, error) in rejections {
-            let claim = self.claims.borrow_mut().remove(&seq);
+    /// A relayed session's refused commit is reported under its own id.
+    fn report(&self, node: NodeUuid, rejections: Vec<([u8; 16], u64, Error)>) {
+        for (writer, seq, error) in rejections {
+            let writer = NodeUuid::from_bytes(writer);
+            let claim = (writer == node)
+                .then(|| self.claims.borrow_mut().remove(&seq))
+                .flatten();
             if claim
                 .and_then(|claim| claim.upgrade())
                 .is_some_and(|claim| claim.get())
@@ -667,7 +677,7 @@ impl Hooks {
                 continue;
             }
             if let Some(rejected) = self.rejected.borrow().as_ref() {
-                let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), node));
+                let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
                 rejected(&tx_id, &error);
             }
         }
@@ -759,6 +769,15 @@ impl Binding {
             refused: Rc::default(),
             bound: Rc::default(),
             admitted: Rc::default(),
+        }
+    }
+
+    /// `future`, parked on this binding's progress, asking for a tick
+    /// after its first poll (it may have queued a request upstream).
+    fn parked<F: Future>(&self, future: F) -> Parked<F> {
+        Parked {
+            kick: Some(Rc::clone(&self.hooks)),
+            ..self.hooks.progress.parked(future)
         }
     }
 
@@ -1279,7 +1298,7 @@ impl Binding {
             });
             first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
         };
-        Ok(Box::pin(self.hooks.progress.parked(async move {
+        Ok(Box::pin(self.parked(async move {
             let result = db
                 .all_serialized_query(
                     &query,
@@ -1385,9 +1404,9 @@ impl Binding {
     pub fn capture_snapshot(&self) -> HostFuture<Vec<u8>> {
         let db = self.db.clone();
         Box::pin(
-            self.hooks.progress.parked(async move {
-                Ok(db.capture_snapshot().await?.to_persisted().into_bytes())
-            }),
+            self.parked(
+                async move { Ok(db.capture_snapshot().await?.to_persisted().into_bytes()) },
+            ),
         )
     }
 

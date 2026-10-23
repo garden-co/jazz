@@ -256,14 +256,20 @@ pub struct SubscriptionStream {
     /// Why the server refused the remote read, once it has; reported once.
     refused: Option<Rc<RefCell<Option<Error>>>>,
     /// The remote attachment to release on drop.
-    remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>, bool)>,
+    remote: Option<(
+        Rc<RefCell<Inner>>,
+        Query,
+        BTreeMap<String, Value>,
+        bool,
+        bool,
+    )>,
 }
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted);
+        if let Some((inner, query, binding, include_deleted, local)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, local);
         }
     }
 }
@@ -401,7 +407,7 @@ struct Inner {
     authority: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
-    upstream_rejections: Option<Vec<(u64, Error)>>,
+    upstream_rejections: Option<Vec<([u8; 16], u64, Error)>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Rows written since the last server tick (only while serving).
@@ -961,9 +967,10 @@ impl Db {
         inner.upstream_rejections.get_or_insert_with(Vec::new);
     }
 
-    /// The uploads the authority refused since the last call, by commit
-    /// seq (empty unless [`Db::track_upstream_rejections`] was called).
-    pub fn take_upstream_rejections(&self) -> Vec<(u64, Error)> {
+    /// The uploads the authority refused since the last call, by the node
+    /// and seq of the commit (this store's, or the relayed session's that
+    /// wrote it) (empty unless [`Db::track_upstream_rejections`] was called).
+    pub fn take_upstream_rejections(&self) -> Vec<([u8; 16], u64, Error)> {
         self.inner
             .borrow_mut()
             .upstream_rejections
@@ -1187,8 +1194,12 @@ impl Db {
     ) -> Result<SubscriptionStream, Error> {
         let mut read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
-        // A frozen read is answered from the replica alone.
-        let remote_read = client && opts.tier != ReadTier::LocalOnly && !read.frozen();
+        // A frozen read is answered from the replica alone. A non-durable
+        // foreground's store starts empty: even its LocalOnly read is its
+        // relay's store.
+        let non_durable = self.inner().non_durable;
+        let local = opts.tier == ReadTier::LocalOnly;
+        let remote_read = client && (!local || non_durable) && !read.frozen();
         // A synced subscription follows the server's results: a row the
         // server stopped listing leaves it, though the copy stays readable.
         read.members_only |= remote_read;
@@ -1196,7 +1207,7 @@ impl Db {
             Self::remote_shape(&prepared.query)?;
         }
         let remote = if remote_read {
-            self.attach_remote(prepared, read.include_deleted)
+            self.attach_remote(prepared, read.include_deleted, local)
         } else {
             None
         };
@@ -1211,7 +1222,7 @@ impl Db {
             (Some((answered, _, global)), Some(hint)) => {
                 let deadline = match (opts.tier, &opts.first_load) {
                     (ReadTier::Remote, _) => Some(None),
-                    _ if self.inner().non_durable => Some(None),
+                    _ if non_durable => Some(None),
                     (_, FirstLoad::WaitForRemote { timeout_ms })
                         if *timeout_ms > 0 && sync::may_wait(hint.get()) =>
                     {
@@ -1229,6 +1240,7 @@ impl Db {
                     hint,
                     live,
                     deadline,
+                    relay_view: non_durable && opts.tier != ReadTier::Remote,
                 })
             }
             _ => None,
@@ -1248,6 +1260,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
+                    local,
                 )
             }),
         })
@@ -4646,7 +4659,7 @@ impl TxRef<'_> {
             Db::remote_shape(&prepared.query)?;
             let through = self
                 .db
-                .fetch(prepared, at, include_deleted, None, None)
+                .fetch(prepared, at, include_deleted, ReadTier::Remote, None, None)
                 .await?;
             if let Some(Batch {
                 kind:
