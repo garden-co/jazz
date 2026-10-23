@@ -1,3 +1,4 @@
+import type { EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
 import {
   assertRelationshipDeclaration,
   type Relationships,
@@ -32,15 +33,77 @@ type StoredColumnKeys<C extends TableDefinition> = {
 export class DefinedTable<
   TColumns extends TableDefinition = TableDefinition,
   TRelations extends Relationships = Relationships,
+  TEncryption extends EncryptionDeclaration | undefined = EncryptionDeclaration | undefined,
 > {
   public readonly __jazzTableDefinition = true as const;
+
+  encrypted(options: {
+    space: StoredColumnKeys<TColumns>;
+    columns?: readonly StoredColumnKeys<TColumns>[];
+  }): DefinedTable<TColumns, TRelations, EncryptionDeclaration> {
+    const referenceColumns = new Set<string>();
+    for (const relation of Object.values(this.relations)) {
+      if (relation.kind === "forward") referenceColumns.add(relation.column);
+    }
+    const selected: readonly string[] =
+      options.columns ??
+      Object.keys(this.columns).filter(
+        (name) => !referenceColumns.has(name) && !isComputedColumn(this.columns[name]!),
+      );
+    for (const name of selected) {
+      if (!(name in this.columns)) throw new Error(`Unknown encrypted column "${name}"`);
+      if (referenceColumns.has(name)) {
+        throw new Error(`Encrypted column "${name}" must not be a reference`);
+      }
+      const builder = this.columns[name]!;
+      if (isComputedColumn(builder))
+        throw new Error(`Computed field "${name}" cannot be encrypted`);
+      const column = builder._build(name);
+      if (column.default !== undefined || column.mergeStrategy !== undefined)
+        throw new Error(
+          `Encrypted column "${name}" cannot have a server default or merge strategy`,
+        );
+      if (
+        this.indexedColumns?.some((key) => key === name) ||
+        this.branchColumns?.some((key) => key === name) ||
+        this.compositeIndexes?.some((index) => index.some((column) => column === name))
+      )
+        throw new Error(`Encrypted column "${name}" cannot be an ordinary index or branch key`);
+    }
+    const spaceBuilder = this.columns[options.space];
+    const space =
+      spaceBuilder && !isComputedColumn(spaceBuilder)
+        ? spaceBuilder._build(options.space)
+        : undefined;
+    if (Object.hasOwn(options, "indexes"))
+      throw new Error("Encrypted equality indexes are not supported yet");
+    if (
+      !referenceColumns.has(options.space) ||
+      !space ||
+      space.sqlType !== "UUID" ||
+      space.nullable
+    )
+      throw new Error("An encryption space must be selected by a required UUID reference");
+    return new DefinedTable(
+      this.columns,
+      this.relations,
+      this.indexedColumns,
+      this.branchColumns,
+      this.compositeIndexes,
+      {
+        space: options.space,
+        columns: [...new Set(selected)],
+      },
+    );
+  }
 
   constructor(
     public readonly columns: TColumns,
     public readonly relations: TRelations,
-    public readonly indexedColumns?: readonly (keyof TColumns & string)[],
-    public readonly branchColumns?: readonly (keyof TColumns & string)[],
-    public readonly compositeIndexes?: readonly (readonly (keyof TColumns & string)[])[],
+    public readonly indexedColumns?: readonly StoredColumnKeys<TColumns>[],
+    public readonly branchColumns?: readonly StoredColumnKeys<TColumns>[],
+    public readonly compositeIndexes?: readonly (readonly StoredColumnKeys<TColumns>[])[],
+    public readonly encryption?: TEncryption,
   ) {
     validateTransformDependencies(columns);
     for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
@@ -51,20 +114,23 @@ export class DefinedTable<
       StoredColumnKeys<TColumns>,
       ...StoredColumnKeys<TColumns>[],
     ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = [...columns];
+  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations, TEncryption> {
+    const normalizedColumns = [...columns] as StoredColumnKeys<TColumns>[];
     for (const column of normalizedColumns) {
       if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
         throw new Error(`table.indexOnly(...) references unknown column "${column}".`);
       }
     }
 
+    if (normalizedColumns.some((name) => this.encryption?.columns.includes(name)))
+      throw new Error("Encrypted columns cannot be ordinary index keys");
     return new DefinedTable(
       this.columns,
       this.relations,
       normalizedColumns,
       this.branchColumns,
       this.compositeIndexes,
+      this.encryption,
     );
   }
 
@@ -74,53 +140,61 @@ export class DefinedTable<
       StoredColumnKeys<TColumns>,
       ...StoredColumnKeys<TColumns>[],
     ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
+  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations, TEncryption> {
     if (
       new Set(columns).size !== columns.length ||
       columns.some((column) => !(column in this.columns) || isComputedColumn(this.columns[column]!))
     ) {
       throw new Error("table.compositeIndex(...) requires distinct declared columns.");
     }
+    if (columns.some((name) => this.encryption?.columns.includes(name)))
+      throw new Error("Encrypted columns cannot be ordinary index keys");
     const key = JSON.stringify(columns);
     if ((this.compositeIndexes ?? []).some((existing) => JSON.stringify(existing) === key)) {
       throw new Error("table.compositeIndex(...) declares the same index twice.");
     }
-    return new DefinedTable(this.columns, this.relations, this.indexedColumns, this.branchColumns, [
-      ...(this.compositeIndexes ?? []),
-      [...columns],
-    ]);
+    return new DefinedTable(
+      this.columns,
+      this.relations,
+      this.indexedColumns,
+      this.branchColumns,
+      [...(this.compositeIndexes ?? []), [...columns]],
+      this.encryption,
+    );
   }
 
   branchBy<const TBranchColumn extends StoredColumnKeys<TColumns>>(
     column: TBranchColumn,
-  ): DefinedTable<TColumns, TRelations>;
+  ): DefinedTable<TColumns, TRelations, TEncryption>;
   branchBy<
     const TBranchColumns extends readonly [
       StoredColumnKeys<TColumns>,
       ...StoredColumnKeys<TColumns>[],
     ],
-  >(columns: TBranchColumns): DefinedTable<TColumns, TRelations>;
+  >(columns: TBranchColumns): DefinedTable<TColumns, TRelations, TEncryption>;
   branchBy(
     columns:
-      | Extract<keyof TColumns, string>
-      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
-  ): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
-      keyof TColumns,
-      string
-    >[];
+      | StoredColumnKeys<TColumns>
+      | readonly [StoredColumnKeys<TColumns>, ...StoredColumnKeys<TColumns>[]],
+  ): DefinedTable<TColumns, TRelations, TEncryption> {
+    const normalizedColumns = (
+      Array.isArray(columns) ? [...columns] : [columns]
+    ) as StoredColumnKeys<TColumns>[];
     for (const column of normalizedColumns) {
       if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
         throw new Error(`table.branchBy(...) references unknown column "${column}".`);
       }
     }
 
+    if (normalizedColumns.some((name) => this.encryption?.columns.includes(name)))
+      throw new Error("Encrypted columns cannot be branch keys");
     return new DefinedTable(
       this.columns,
       this.relations,
       this.indexedColumns,
       normalizedColumns,
       this.compositeIndexes,
+      this.encryption,
     );
   }
 }
@@ -188,7 +262,7 @@ export function defineTable<
   ]
     ? []
     : [invalidFields: never]
-): DefinedTable<TColumns & ComputedColumns<TFields>, TableRelations<TFields>> {
+): DefinedTable<TColumns & ComputedColumns<TFields>, TableRelations<TFields>, undefined> {
   if (!fields || typeof fields !== "object" || Array.isArray(fields))
     throw new Error(
       "s.table(columns, fields) requires a relationship map, optionally containing computed fields; use {} for no fields.",

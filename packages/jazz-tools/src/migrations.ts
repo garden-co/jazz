@@ -566,6 +566,15 @@ function normalizeSchemaDefinition(
   );
 }
 
+function assertUnencryptedMigrationSchema(definition: SchemaDefinition): void {
+  if (
+    Object.values(definition).some(
+      (table) => table instanceof DefinedTable && table.encryption !== undefined,
+    )
+  )
+    throw new Error("Encrypted schema migrations are not supported yet");
+}
+
 export function renameTableFrom<const TOldName extends string>(
   oldName: TOldName,
 ): RenameTableFromOp<TOldName> {
@@ -1014,6 +1023,7 @@ function buildForwardLenses<
 }
 
 export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<any>): SchemaAst {
+  assertUnencryptedMigrationSchema(definition as SchemaDefinition);
   return compileSchemaDefinition(definition as SchemaDefinition);
 }
 
@@ -1084,6 +1094,8 @@ export function defineMigration<
     migrate?: TMigrate;
   } & ValidateMigrationConfig<TFrom, TTo, TRenameTables, TCreateTables, TDropTables, TMigrate>,
 ): DefinedMigration<TFrom, TTo> {
+  assertUnencryptedMigrationSchema(config.from as SchemaDefinition);
+  assertUnencryptedMigrationSchema(config.to as SchemaDefinition);
   const fromDefinition = normalizeSchemaDefinition(
     config.from as SchemaDefinition,
   ) as NormalizedSchema<TFrom>;

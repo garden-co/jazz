@@ -1,5 +1,6 @@
 import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db, E2eeTransactionScope } from "../runtime/db.js";
+import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -58,7 +59,7 @@ type GroupDevice = {
   load(): Promise<LocalDevice>;
   release(device: LocalDevice): void;
   readonly keyLifetime: DeviceKeyLifetime;
-  states(transaction?: E2eeTransactionScope): Promise<{
+  states(transaction?: E2eeHistoryReader): Promise<{
     active: Set<string>;
     epochId: string;
     publicHistory: PublicMembershipHistory;
@@ -142,7 +143,7 @@ export class Groups {
   private loadDevice(): Promise<LocalDevice> {
     return this.requireDevice().load();
   }
-  private deviceStates(transaction?: E2eeTransactionScope) {
+  private deviceStates(transaction?: E2eeHistoryReader) {
     return this.requireDevice().states(transaction);
   }
 
@@ -591,14 +592,25 @@ export class Groups {
   async explain(id: string): Promise<GroupState> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
-    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "remote" });
+    const offline = await this.db.e2eeIsExplicitlyOffline();
+    const rootQuery = this.tables.__e2ee_groups.where({ id });
+    const observed = offline
+      ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
+      : await this.db.one(rootQuery, { tier: "remote" });
     if (!observed) return { state: "unavailable", reason: "group-not-found" };
-    await this.warmMembership({ groupIds: [observed.id] });
+    if (!offline) await this.warmMembership({ groupIds: [observed.id] });
     const device = await this.loadDevice();
     try {
-      await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
-        tier: "remote",
-      });
+      if (!offline)
+        await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
+          tier: "remote",
+        });
+      if (offline) {
+        const snapshot = await observeE2eeHistory(this.db, (tx) =>
+          this.readInspectionSnapshot(tx, observed),
+        );
+        return (await this.inspectSnapshot(snapshot, observed, device, true))!;
+      }
       // Observations can suppress duplicate envelopes, but never authorise them.
       // Keep them outside the publication predicate so concurrent deliveries
       // do not conflict with a valid independently prepared delivery.
@@ -612,7 +624,7 @@ export class Groups {
       try {
         const transaction = await serializableE2eeTransaction(this.db, async (tx) => {
           const snapshot = await this.readInspectionSnapshot(tx, observed, observations.deliveries);
-          const result = await this.inspectSnapshot(snapshot, observed, device, {
+          const result = await this.inspectSnapshot(snapshot, observed, device, false, {
             deliver: async (expected, secret) => {
               await this.prepareDelivery(tx, expected, secret, device, observations, snapshot);
               delivered = expected;
@@ -640,7 +652,7 @@ export class Groups {
           // Delivery was denied, but key confirmation can itself race with
           // revocation. Keep even this read-only fallback inside fresh authority
           // coverage and wait for its global acceptance before reporting ready.
-          const result = await this.inspectSnapshot(snapshot, observed, device, {
+          const result = await this.inspectSnapshot(snapshot, observed, device, false, {
             deliver: async () => {},
             unavailable: (expected, failed, error) => {
               unavailable = { expected, failed, error };
@@ -657,7 +669,7 @@ export class Groups {
         throw unavailable.error;
       }
       if (!accepted.result)
-        return (await this.inspectSnapshot(accepted.snapshot, observed, device))!;
+        return (await this.inspectSnapshot(accepted.snapshot, observed, device, false))!;
       if (delivered) {
         try {
           await this.clearDeliveredStaging(delivered);
@@ -673,7 +685,7 @@ export class Groups {
   }
 
   private async readInspectionSnapshot(
-    tx: E2eeTransactionScope,
+    tx: E2eeHistoryReader,
     observed: GroupRoot,
     deliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
   ) {
@@ -696,6 +708,7 @@ export class Groups {
     snapshot: Awaited<ReturnType<Groups["readInspectionSnapshot"]>>,
     observed: GroupRoot,
     device: LocalDevice,
+    offline: boolean,
     maintenance?: {
       deliver(expected: GroupKey, secret: Uint8Array): Promise<void>;
       unavailable(expected: GroupKey, failed: string[], error: unknown): void;
@@ -720,6 +733,8 @@ export class Groups {
     );
     if (sealed) return { state: "refused", reason: "group-sealed" };
     if (!members.has(this.accountId)) return { state: "refused", reason: "not-a-group-member" };
+    if (offline && rotationRequired)
+      return { state: "maintenance-required", reason: "recipient-removed" };
     if (maintenance && rotationRequired) return undefined;
     const staged = await loadStagedGroupKey(
       this.store,
@@ -738,7 +753,7 @@ export class Groups {
           await this.confirmHistory(root, position, snapshot.group, staged.secret);
           try {
             if (rotationRequired) await this.rotate(keyRoot, staged.secret, device);
-            else
+            else if (!offline)
               await (maintenance
                 ? maintenance.deliver(keyRoot, staged.secret)
                 : this.deliver(keyRoot, staged.secret, device, snapshot.deliveries));
@@ -776,7 +791,7 @@ export class Groups {
           await this.confirmHistory(root, position, snapshot.group, payload);
           try {
             if (rotationRequired) await this.rotate(keyRoot, payload, device);
-            else
+            else if (!offline)
               await (maintenance
                 ? maintenance.deliver(keyRoot, payload)
                 : this.deliver(keyRoot, payload, device, snapshot.deliveries));
@@ -828,7 +843,7 @@ export class Groups {
           usable = true;
           try {
             if (rotationRequired) await this.rotate(keyRoot, payload, device);
-            else
+            else if (!offline)
               await (maintenance
                 ? maintenance.deliver(keyRoot, payload)
                 : this.deliver(keyRoot, payload, device, snapshot.deliveries));
@@ -862,7 +877,8 @@ export class Groups {
         maintenance.unavailable(keyRoot, failedDeliveries, candidateFailure.error);
         return undefined;
       }
-      if (failedDeliveries.length) await this.requestRepair(keyRoot, device, failedDeliveries);
+      if (!offline && failedDeliveries.length)
+        await this.requestRepair(keyRoot, device, failedDeliveries);
       throw candidateFailure.error;
     }
     return { state: "unavailable", reason: "group-key-pending" };
@@ -1424,9 +1440,9 @@ export class Groups {
     return this.verifySigner(senderHistory, delivery.senderDeviceId, bytes, delivery.signature);
   }
 
-  /** Explicit-scope snapshot; its enclosing exclusive transaction must be accepted globally. */
+  /** Explicit-scope coherent reader; authority transactions must be accepted globally. */
   async readMembership(
-    tx: E2eeTransactionScope,
+    tx: E2eeHistoryReader,
     scope: GroupHistoryScope,
     ownHistory: PublicMembershipHistory,
   ): Promise<GroupMembershipSnapshot> {
@@ -1480,7 +1496,7 @@ export class Groups {
   }
 
   private async readGroupMembership(
-    tx: E2eeTransactionScope,
+    tx: E2eeHistoryReader,
     root: Pick<GroupRoot, "id" | "accountId">,
     ownHistory: PublicMembershipHistory,
     relatedGroupId?: string,

@@ -52,6 +52,7 @@ export {
   type StreamingInsertOptions,
   type RestoreOptions,
   type UpdateOptions,
+  type UpsertOptions,
   type DeleteOptions,
   type TableProxy,
 } from "./db.js";

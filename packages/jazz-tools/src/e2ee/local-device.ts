@@ -171,6 +171,36 @@ async function checked(
   return device;
 }
 
+/** Retained-only probing never generates or publishes a new device. */
+export async function retainedLocalDevice(
+  store: AccountStore,
+  scope: string,
+  envelope: KeyEnvelope,
+  signer: DeviceSigner,
+  lifetime: DeviceKeyLifetime,
+  assertOpen: () => void,
+): Promise<LocalDevice | undefined> {
+  const attempt = new Set<SecretBuffer>();
+  const own = <T extends SecretBuffer>(buffer: T): T => {
+    lifetime.own(buffer);
+    attempt.add(buffer);
+    return buffer;
+  };
+  try {
+    assertOpen();
+    const stored = await store.read();
+    assertOpen();
+    const existing = withLocalDeviceStore(stored, lifetime, ({ devices }) => {
+      const record = devices.find((device) => device.scope === scope);
+      return record ? load(record, envelope, signer, own) : undefined;
+    });
+    return existing ? await checked(existing, scope, envelope, signer, assertOpen) : undefined;
+  } catch (error) {
+    for (const buffer of attempt) lifetime.release(buffer);
+    throw error;
+  }
+}
+
 /** Validate before persisting, persist before publishing. Host updates choose one winner. */
 export async function localDevice(
   store: AccountStore,
