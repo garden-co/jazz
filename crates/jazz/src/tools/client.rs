@@ -865,6 +865,7 @@ impl JazzClient {
                         .all_prepared(&prepared),
                 )
                 .await?
+                .and_then(|roots| db.nest_relations(&prepared, roots))
                 .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
             || matches!(opts.first_load, FirstLoad::WaitForRemote { timeout_ms } if timeout_ms > 0)
@@ -886,13 +887,16 @@ impl JazzClient {
             let db = self.db()?;
             let read_local = || {
                 crate::db::block_on(async {
-                    match &session {
+                    let roots = match &session {
                         Some(author) => {
                             db.all_for_identity(&prepared, opts.clone(), author.clone())
                                 .await
                         }
                         None => db.all(&prepared, opts.clone()).await,
-                    }
+                    }?;
+                    // Array relations nest in their parents' cells, as a
+                    // subscription's rows carry them.
+                    db.nest_relations(&prepared, roots)
                 })
             };
             // A row whose large values are still being fetched answers once

@@ -694,10 +694,15 @@ pub(crate) enum Support {
     /// Children `table.inner = parent.outer` (all readable ones; the client
     /// applies the array's own filters and window), and the support of each
     /// child (nested arrays).
+    /// A forward array relation (`outer` holds child ids) correlates each
+    /// element; a reverse one (`inner` holds parent ids) each child whose
+    /// array contains the parent's value.
     Array {
         table: String,
         inner: String,
         outer: String,
+        outer_array: bool,
+        inner_array: bool,
         nested: Vec<Support>,
     },
     /// The edges of a gather from the row's `frontier` value: edge rows
@@ -796,6 +801,32 @@ fn image_cell(image: &Image, column: &str) -> Option<Sql> {
         .iter()
         .find(|(name, _)| name == column)
         .map(|(_, cell)| Sql::from(cell))
+}
+
+/// The elements of an array cell, a UUID as its stored blob: the values
+/// an array relation correlates (and its watches key) one by one.
+fn array_elements(cell: &Sql) -> Option<Vec<Sql>> {
+    let text = match cell {
+        Sql::Text(text) if text.starts_with(b"[") => text,
+        _ => return None,
+    };
+    let elements: Vec<serde_json::Value> = serde_json::from_slice(text).ok()?;
+    Some(
+        elements
+            .into_iter()
+            .map(|element| match element {
+                serde_json::Value::String(s) => match uuid::Uuid::parse_str(&s) {
+                    Ok(id) => Sql::Blob(id.as_bytes().to_vec()),
+                    Err(_) => Sql::Text(s.into_bytes()),
+                },
+                serde_json::Value::Number(n) => n
+                    .as_i64()
+                    .map(Sql::Integer)
+                    .unwrap_or_else(|| Sql::Real(n.as_f64().unwrap_or_default())),
+                other => Sql::Text(other.to_string().into_bytes()),
+            })
+            .collect(),
+    )
 }
 
 /// Handle for an accepted subscriber.
@@ -1042,6 +1073,8 @@ impl Inner {
                 table: child.stored.clone(),
                 inner: child.stored_name(&array.inner_column).to_owned(),
                 outer: parent.stored_name(&array.outer_column).to_owned(),
+                outer_array: crate::compile::is_array(parent, &array.outer_column),
+                inner_array: crate::compile::is_array(child, &array.inner_column),
                 nested: self.array_support(child, &array.nested_arrays)?,
             });
         }
@@ -1065,6 +1098,8 @@ impl Inner {
                 outer: parent
                     .stored_name(join.source_column.as_deref().unwrap_or("id"))
                     .to_owned(),
+                outer_array: false,
+                inner_array: false,
                 nested: self.join_support(target, &join.nested_joins)?,
             });
         }
@@ -1174,7 +1209,7 @@ impl Inner {
         held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
     ) -> Result<(), Error> {
         for item in support {
-            let (table, column, value, nested) = match item {
+            let (table, column, values, nested, contains) = match item {
                 Support::Reach {
                     frontier,
                     edges,
@@ -1192,61 +1227,102 @@ impl Inner {
                     continue;
                 }
                 Support::Include { column, target } => match image_cell(image, column) {
-                    Some(value @ Sql::Blob(_)) => (target, "id", value, &[][..]),
+                    Some(value @ Sql::Blob(_)) => (target, "id", vec![value], &[][..], false),
                     _ => continue,
                 },
                 Support::Array {
                     table,
                     inner,
                     outer,
+                    outer_array,
+                    inner_array,
                     nested,
                 } => match image_cell(image, outer) {
                     Some(Sql::Null) | None => continue,
-                    Some(value) => (table, inner.as_str(), value, &nested[..]),
+                    Some(value) if *outer_array => {
+                        let elements = array_elements(&value).unwrap_or_default();
+                        (table, inner.as_str(), elements, &nested[..], *inner_array)
+                    }
+                    Some(value) => (
+                        table,
+                        inner.as_str(),
+                        vec![value],
+                        &nested[..],
+                        *inner_array,
+                    ),
                 },
             };
-            // A watched key's rows were shipped with it, and later writes
-            // to them ship as they happen. Nested support is followed
-            // again: a child that joined since may have unwatched children.
-            let fresh = watch.insert(wk((table.clone(), column.to_owned(), watch_key(&value))));
-            if !fresh && nested.is_empty() {
+            for value in values {
+                self.follow_value(
+                    table, column, value, contains, nested, identity, out, watch, held,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Ship the readable rows of `table` whose `column` is `value` (or,
+    /// `contains`, whose array `column` holds it) and their nested
+    /// support, watching the correlation so later writes reach the replica.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_value(
+        &self,
+        table: &str,
+        column: &str,
+        value: Sql,
+        contains: bool,
+        nested: &[Support],
+        identity: Option<AuthorSubject>,
+        out: &mut Vec<Image>,
+        watch: &mut HashSet<u64>,
+        held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
+    ) -> Result<(), Error> {
+        // A watched key's rows were shipped with it, and later writes
+        // to them ship as they happen. Nested support is followed
+        // again: a child that joined since may have unwatched children.
+        let fresh = watch.insert(wk((table.to_owned(), column.to_owned(), watch_key(&value))));
+        if !fresh && nested.is_empty() {
+            return Ok(());
+        }
+        let filter = if column == "id" {
+            "id = ?1".to_owned()
+        } else if contains {
+            format!(
+                "EXISTS (SELECT 1 FROM json_each({}) AS r WHERE unhex(replace(r.value, '-', '')) = ?1)",
+                quote(column)
+            )
+        } else {
+            format!("{} = ?1", quote(column))
+        };
+        for found in self.images_where(table, false, &filter, &[&value])? {
+            let row = RowUuid::from_bytes(found.id);
+            let can = readable(self, table, row, &found.key, identity)?;
+            if identity.is_some() {
+                held.entry(table.to_owned())
+                    .or_default()
+                    .insert((row, found.key.clone()), can);
+            }
+            if !can {
                 continue;
             }
-            let filter = if column == "id" {
-                "id = ?1".to_owned()
-            } else {
-                format!("{} = ?1", quote(column))
-            };
-            for found in self.images_where(table, false, &filter, &[&value])? {
-                let row = RowUuid::from_bytes(found.id);
-                let can = readable(self, table, row, &found.key, identity)?;
-                if identity.is_some() {
-                    held.entry(table.clone())
-                        .or_default()
-                        .insert((row, found.key.clone()), can);
-                }
-                if !can {
-                    continue;
-                }
-                let unwatched = watch.insert(wk((
-                    table.clone(),
-                    "id".to_owned(),
-                    watch_key(&Sql::Blob(found.id.to_vec())),
-                )));
-                // Not watched yet, so the replica does not hold it (rows it
-                // declared on resume are watched already).
-                let ship = fresh || unwatched;
-                if nested.is_empty() {
-                    if ship {
-                        out.push(found);
-                    }
-                    continue;
-                }
+            let unwatched = watch.insert(wk((
+                table.to_owned(),
+                "id".to_owned(),
+                watch_key(&Sql::Blob(found.id.to_vec())),
+            )));
+            // Not watched yet, so the replica does not hold it (rows it
+            // declared on resume are watched already).
+            let ship = fresh || unwatched;
+            if nested.is_empty() {
                 if ship {
-                    out.push(found.clone());
+                    out.push(found);
                 }
-                self.follow_support(nested, &found, identity, out, watch, held)?;
+                continue;
             }
+            if ship {
+                out.push(found.clone());
+            }
+            self.follow_support(nested, &found, identity, out, watch, held)?;
         }
         Ok(())
     }
@@ -3254,11 +3330,13 @@ impl Db {
             ))];
             if let Some(image) = inner.current_image(&table, row, &key)? {
                 for (column, cell) in &image.cells {
-                    keys.push(wk((
-                        table.clone(),
-                        column.clone(),
-                        watch_key(&Sql::from(cell)),
-                    )));
+                    let cell = Sql::from(cell);
+                    // An array cell matches a reverse array relation's
+                    // watch on each element it holds.
+                    for element in array_elements(&cell).unwrap_or_default() {
+                        keys.push(wk((table.clone(), column.clone(), watch_key(&element))));
+                    }
+                    keys.push(wk((table.clone(), column.clone(), watch_key(&cell))));
                 }
             }
             written_keys.push(((table, row, key), keys));
