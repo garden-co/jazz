@@ -37,6 +37,8 @@ pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
     LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
+#[path = "accepted.rs"]
+mod accepted;
 #[path = "sync.rs"]
 pub(crate) mod sync;
 pub use crate::names::LensEffects;
@@ -46,6 +48,7 @@ pub use crate::values::CurrentRow;
 use crate::values::{
     AuthorKey, Schema, Sql, Table, author_key, from_sql, quote, storage, to_sql, unsupported,
 };
+pub use accepted::{AcceptedContent, AcceptedRow, BindingSettledRead};
 pub use sync::{
     Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, QueryAttachment,
     RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
@@ -894,6 +897,8 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        conn.execute_batch(accepted::ACCEPTED_DDL)
+            .map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
         for table in physical.tables.keys() {
@@ -3896,6 +3901,8 @@ struct Batch {
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+    reads_state: Rc<RefCell<accepted::ReadState>>,
+    paired_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
 }
 
 #[derive(Default)]
@@ -3922,6 +3929,7 @@ enum BatchKind {
     /// known cut when the first read answers offline.
     Serializable {
         snapshot: u64,
+        accepted_begin: Cut,
         reads: Vec<ReadRecord>,
         pinned: bool,
         /// On a client, its own commits still unsettled at begin: the
@@ -4258,10 +4266,12 @@ impl Db {
                 .map_or(inner.seq, |client| client.known);
             (snapshot, inner.unsettled_own())
         };
+        let accepted_begin = self.inner().accepted_cut(snapshot)?;
         self.begin(
             id,
             BatchKind::Serializable {
                 snapshot,
+                accepted_begin,
                 reads: Vec::new(),
                 pinned: !self.is_client(),
                 own,
@@ -4316,6 +4326,8 @@ impl Db {
                 ops: Vec::new(),
                 uploads: Vec::new(),
                 edits: LargeEdits::default(),
+                reads_state: Rc::new(RefCell::new(accepted::ReadState::default())),
+                paired_scope: None,
             },
         );
         Ok(())
@@ -4335,12 +4347,7 @@ impl Db {
     }
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.inner
-            .borrow_mut()
-            .batches
-            .remove(&id)
-            .map(drop)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+        self.take_batch(id).map(drop)
     }
 
     pub fn abandon_serializable_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
@@ -4348,15 +4355,19 @@ impl Db {
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
-        self.inner
+        let batch = self
+            .inner
             .borrow_mut()
             .batches
             .remove(&id)
-            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        accepted::close_pending_reads(&batch.reads_state);
+        Ok(batch)
     }
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
         if !matches!(batch.kind, BatchKind::Mergeable) {
             return Err(rejected(format!("transaction {id:?} is not mergeable")));
         }
@@ -4374,6 +4385,7 @@ impl Db {
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        batch.reads_state.borrow().check_commit()?;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -4481,6 +4493,7 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        let _scope = accepted::ClaimsScope::new(self, batch.paired_scope.as_ref());
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
@@ -4657,6 +4670,15 @@ impl Db {
             ..ReadSpec::default()
         };
         let rows = inner.read_versions(prepared, batch.reader(), &read)?;
+        let prepared = if prepared.request_claims.is_none() {
+            let author = batch.reader().unwrap_or(inner.identity.author);
+            prepared.clone().with_identity_claims(
+                author,
+                inner.claims.get(&author).cloned().unwrap_or_default(),
+            )
+        } else {
+            prepared.clone()
+        };
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, .. },
             ..
@@ -4755,6 +4777,44 @@ impl TxRef<'_> {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let mut guard = self.db.transaction_read_guard(self.id, false)?;
+        guard.wait().await?;
+        self.db.check_read_guard(self.id, &guard)?;
+        let scope = self
+            .db
+            .inner()
+            .batches
+            .get(&self.id)
+            .and_then(|batch| batch.paired_scope.clone());
+        let prepared = match scope {
+            Some((author, claims)) => {
+                guard.require_success();
+                if prepared
+                    .request_claims
+                    .as_ref()
+                    .is_some_and(|scope| *scope != (author, claims.clone()))
+                {
+                    return Err(rejected(
+                        "transaction read claims differ from its paired reads",
+                    ));
+                }
+                prepared.clone().with_identity_claims(author, claims)
+            }
+            None => prepared.clone(),
+        };
+        let result = self
+            .all_prepared_with_inner(&prepared, include_deleted, &guard)
+            .await;
+        guard.finish(&result);
+        result
+    }
+
+    async fn all_prepared_with_inner(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        guard: &accepted::ReadGuard,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
         // answers and the authority's validation decides).
@@ -4809,6 +4869,7 @@ impl TxRef<'_> {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
             let through = self.db.fetch(prepared, at, include_deleted, None).await?;
+            self.db.check_read_guard(self.id, guard)?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
