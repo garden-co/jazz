@@ -123,6 +123,8 @@ struct State {
     /// upstream starts it with its first subscription; until then its
     /// calls tick inline, so it needs no `LocalSet`.
     driven: bool,
+    /// Failed upstream connect attempts so far, and the last one's error.
+    connect_failures: (u64, Option<String>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -410,6 +412,11 @@ async fn keep_upstream(
                         tracing::debug!(%error, "jazz client upstream connect failed");
                         if let Some(shared) = shared.upgrade() {
                             shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+                            let mut state = shared.state();
+                            let failures = state.connect_failures.0 + 1;
+                            state.connect_failures = (failures, Some(error.to_string()));
+                            drop(state);
+                            shared.tick_soon();
                         }
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(RECONNECT_MAX_DELAY);
@@ -1430,13 +1437,30 @@ impl JazzClient {
     /// Let the keeper open a fresh link for the preserved client state and
     /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        if !self.shared.upstream_paused.send_replace(false) {
+        let (failed, attached) = {
+            let state = self.shared.state.borrow();
+            (state.connect_failures.0, state.upstream.is_some())
+        };
+        // Neither detached nor reconnecting: nothing to reattach.
+        if !self.shared.upstream_paused.send_replace(false) && attached {
             return Ok(false);
         }
+        // The first attempt either attaches or fails; the keeper retries
+        // after a failure on its own.
         self.shared
-            .until(|| self.shared.state.borrow().upstream.is_some().then_some(()))
-            .await?;
-        Ok(true)
+            .until(|| {
+                let state = self.shared.state.borrow();
+                if state.upstream.is_some() {
+                    return Some(Ok(true));
+                }
+                match &state.connect_failures {
+                    (n, error) if *n > failed => Some(Err(JazzError::Connection(
+                        error.clone().unwrap_or_default(),
+                    ))),
+                    _ => None,
+                }
+            })
+            .await?
     }
 }
 
