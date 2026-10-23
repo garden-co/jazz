@@ -2007,6 +2007,67 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 impl Inner {
+    fn write_rejection(&self, tx: u64) -> Result<Option<Error>, Error> {
+        if let Some(Err(error)) = self
+            .client
+            .as_ref()
+            .and_then(|client| client.fates.get(&tx))
+        {
+            return Ok(Some(error.clone()));
+        }
+        let node = *self.identity.node.as_bytes();
+        if let Some(Err(error)) = self.applied_fate(node, tx)? {
+            return Ok(Some(from_wire_error(error)));
+        }
+        if self.settled(node, tx)? == Some(None) {
+            // Earlier SQLite replicas retained the rejection but not its reason.
+            // Never interpret that absence of detail as successful acceptance.
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "write was rejected; stored rejection detail is unavailable",
+            ));
+        }
+        Ok(None)
+    }
+
+    fn write_state(&self, tx: u64) -> Result<WriteState, Error> {
+        if let Some(error) = self.write_rejection(tx)? {
+            return Ok(WriteState::rejected(&error, DurabilityTier::None));
+        }
+        let node = *self.identity.node.as_bytes();
+        if let Some(Some(seq)) = self.settled(node, tx)? {
+            if seq >= LOCAL_BASE {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "upstream write receipt is not an authority sequence",
+                ));
+            }
+            return Ok(WriteState {
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(seq)),
+                durability: DurabilityTier::Global,
+            });
+        }
+        if tx > self.seq {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "write has not been observed by this database",
+            ));
+        }
+        if self.authority && self.client.is_none() && tx < LOCAL_BASE {
+            return Ok(WriteState {
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(tx)),
+                durability: DurabilityTier::Global,
+            });
+        }
+        Ok(WriteState {
+            fate: Fate::Pending,
+            global_time: None,
+            durability: DurabilityTier::Local,
+        })
+    }
+
     /// Store requested nodes the server sent.
     fn receive_chunks(
         &mut self,
@@ -2161,7 +2222,12 @@ impl Inner {
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
         ) {
-            Ok(bytes) => Ok(postcard::from_bytes(&bytes).ok()),
+            Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(|error| {
+                Error::new(
+                    ErrorCode::Storage,
+                    format!("invalid stored write fate: {error}"),
+                )
+            }),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
@@ -2957,21 +3023,41 @@ impl Db {
 
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
-        if tier < DurabilityTier::Global || !self.is_client() {
-            return Ok(tx);
-        }
         poll_fn(|_| {
             let inner = self.inner.borrow();
-            let client = inner.client.as_ref().expect("client");
-            match client.fates.get(&tx) {
-                Some(Ok(())) => Poll::Ready(Ok(tx)),
-                Some(Err(error)) => Poll::Ready(Err(error.clone())),
-                None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
-                // Not pending and no fate: a local no-op or pre-connection commit.
-                None => Poll::Ready(Ok(tx)),
+            if let Some(error) = inner.write_rejection(tx)? {
+                return Poll::Ready(Err(error));
             }
+            if tier < DurabilityTier::Global {
+                return Poll::Ready(Ok(tx));
+            }
+            let state = inner.write_state(tx)?;
+            if matches!(state.fate, Fate::Accepted) && state.global_time.is_some() {
+                return Poll::Ready(Ok(tx));
+            }
+            if inner
+                .client
+                .as_ref()
+                .is_some_and(|client| client.pending.iter().any(|p| p.tx == tx))
+            {
+                return Poll::Pending;
+            }
+            Poll::Ready(Err(Error::new(
+                ErrorCode::NotObserved,
+                "write has no observed authority acceptance",
+            )))
         })
         .await
+    }
+
+    /// Snapshot this node's write without consuming rejection reporting or
+    /// waiting. Hosts with asynchronous local persistence qualify durability.
+    pub fn write_state(&self, tx: u64) -> Result<WriteState, Error> {
+        let inner = self
+            .inner
+            .try_borrow()
+            .map_err(|_| Error::new(ErrorCode::NotObserved, "write state is temporarily busy"))?;
+        inner.write_state(tx)
     }
 
     /// Wait until every transaction pending upload when called (recovered
@@ -3303,6 +3389,27 @@ impl Db {
                         if accepted {
                             inner.keep_unlisted_own(tx, through)?;
                         }
+                        let node = inner.client.as_ref().expect("client").node;
+                        inner
+                            .conn
+                            .execute_batch("SAVEPOINT jazz_write_fate")
+                            .map_err(storage)?;
+                        let persisted = inner
+                            .record_fate(node, tx, &result)
+                            .and_then(|()| {
+                                inner.record_settled(node, tx, accepted.then_some(through))
+                            })
+                            .and_then(|()| inner.forget_pending(tx));
+                        if let Err(error) = persisted {
+                            inner
+                                .rollback_savepoint("jazz_write_fate")
+                                .map_err(storage)?;
+                            return Err(error);
+                        }
+                        inner
+                            .conn
+                            .execute_batch("RELEASE jazz_write_fate")
+                            .map_err(storage)?;
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         client.pending.retain(|p| p.tx != tx);
@@ -3310,12 +3417,9 @@ impl Db {
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
                         client.fates.insert(tx, result.map_err(from_wire_error));
-                        let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &locators)?;
                         }
-                        inner.record_settled(node, tx, accepted.then_some(through))?;
-                        inner.forget_pending(tx)?;
                         rebase = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
@@ -4786,6 +4890,12 @@ impl Db {
         updated_at: Option<u64>,
         origin: ([u8; 16], u64),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
+        if self.is_client() {
+            return Err((
+                unsupported("write uploads through a SQLite relay"),
+                Vec::new(),
+            ));
+        }
         // A trusted backend's session batch validates reads under the same
         // session as its writes, not under the transport's SYSTEM privilege.
         let identity = match who {
