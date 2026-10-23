@@ -1,5 +1,4 @@
-//! Authenticated catalogue capture is implemented by SQLite. Initialization
-//! transaction seals and journals remain separate, explicitly unsupported contracts.
+//! Authenticated catalogue capture and owner-bound initialization on SQLite.
 use super::*;
 
 #[wasm_bindgen]
@@ -43,57 +42,81 @@ impl WasmDb {
     #[wasm_bindgen(js_name = sealInitializationTransaction)]
     pub fn seal_initialization_transaction(
         &self,
-        _open_id: String,
+        open_id: String,
     ) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: sealInitializationTransaction",
-        ))
+        let inner = self.open_inner()?;
+        let seal = inner
+            .binding
+            .seal_initialization_transaction(&open_id)
+            .map_err(host_error)?;
+        let through = inner.binding.db.seq_high_water();
+        Ok(future_to_promise(async move {
+            if let Err(error) = inner.host.flush(through).await {
+                let _ = inner.binding.cancel_initialization_transaction(&seal.token);
+                return Err(error);
+            }
+            inner
+                .binding
+                .check_initialization_token(&seal.token)
+                .map_err(host_error)?;
+            match serde_wasm_bindgen::to_value(&seal) {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    let _ = inner.binding.cancel_initialization_transaction(&seal.token);
+                    Err(js_sys::Error::new(&error.to_string()).into())
+                }
+            }
+        }))
     }
 
     #[wasm_bindgen(js_name = publishInitializationTransaction)]
     pub fn publish_initialization_transaction(
         &self,
-        _token: String,
+        token: String,
     ) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: publishInitializationTransaction",
-        ))
+        let inner = self.open_inner()?;
+        let write = inner.write(inner.binding.publish_initialization_transaction(&token))?;
+        Ok(js_sys::Promise::resolve(&JsValue::from(write)))
     }
 
     #[wasm_bindgen(js_name = cancelInitializationTransaction)]
     pub fn cancel_initialization_transaction(
         &self,
-        _token: String,
+        token: String,
     ) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: cancelInitializationTransaction",
-        ))
+        self.binding()?
+            .cancel_initialization_transaction(&token)
+            .map_err(host_error)?;
+        Ok(js_sys::Promise::resolve(&JsValue::UNDEFINED))
     }
 
     #[wasm_bindgen(js_name = recordInitializationInsertAbsence)]
     pub fn record_initialization_insert_absence(
         &self,
-        _open_id: String,
-        _table: String,
-        _row_id: Vec<u8>,
+        open_id: String,
+        table: String,
+        row_id: Vec<u8>,
     ) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: recordInitializationInsertAbsence",
-        ))
+        self.binding()?
+            .record_initialization_insert_absence(&open_id, &table, &row_id)
+            .map_err(host_error)?;
+        Ok(js_sys::Promise::resolve(&JsValue::UNDEFINED))
     }
 
     #[wasm_bindgen(js_name = initializationTransactionStatus)]
     pub fn initialization_transaction_status(
         &self,
-        _ids: Vec<String>,
+        ids: Vec<String>,
     ) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported(
-            "E2EE offline initialization: initializationTransactionStatus",
-        ))
+        let inner = self.open_inner()?;
+        let statuses = inner
+            .binding
+            .initialization_transaction_status(&ids)
+            .map_err(host_error)?;
+        let through = inner.binding.db.seq_high_water();
+        Ok(future_to_promise(async move {
+            inner.host.flush(through).await?;
+            Ok(JsValue::from_str(&statuses))
+        }))
     }
 }

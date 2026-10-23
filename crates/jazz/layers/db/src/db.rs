@@ -43,6 +43,9 @@ pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
 #[path = "catalogue_cache.rs"]
 mod catalogue_cache;
 pub use catalogue_cache::{AuthenticatedCatalogueState, validate_catalogue_capture_replacement};
+#[path = "initialization.rs"]
+mod initialization;
+pub use initialization::{InitializationSeal, InitializationTransactionStatus, ReservedTxId};
 #[path = "accepted.rs"]
 mod accepted;
 #[path = "sync.rs"]
@@ -415,6 +418,7 @@ struct Inner {
     views: BTreeMap<SchemaViewId, JazzSchema>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
+    retired_initializations: BTreeSet<OpenTransactionId>,
     identity: DbIdentity,
     /// Provenance for the write being applied (set by `apply_as`).
     writer: Option<Stamp>,
@@ -911,6 +915,7 @@ impl Db {
             .map_err(storage)?;
         conn.execute_batch(catalogue::DDL).map_err(storage)?;
         conn.execute_batch(catalogue_cache::DDL).map_err(storage)?;
+        conn.execute_batch(initialization::DDL).map_err(storage)?;
         let catalogue_cache_required = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM _jazz_catalogue_cache_mode_v1 WHERE slot=1)",
@@ -952,6 +957,7 @@ impl Db {
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
+                retired_initializations: BTreeSet::new(),
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
@@ -1470,7 +1476,7 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
-            self.record_upload(vec![op], handle.seq, None, sync::Kind::Mergeable);
+            self.record_upload(vec![op], handle.seq, None, sync::Kind::Mergeable)?;
             Ok(handle)
         })
     }
@@ -1523,6 +1529,7 @@ impl Db {
             let mark = inner.changed.borrow().len();
             let applied = apply(&mut inner, seq).and_then(|handle| {
                 if standalone && handle.seq == seq {
+                    inner.record_local_commit(seq, None, inner.identity.author)?;
                     inner.record_issued_seq(seq)?;
                 }
                 Ok(handle)
@@ -1597,7 +1604,10 @@ impl Db {
             captured = std::mem::take(&mut inner.capture);
             match &result {
                 Ok(_) => {
-                    if let Err(error) = inner.record_issued_seq(seq) {
+                    if let Err(error) = inner
+                        .record_local_commit(seq, None, inner.identity.author)
+                        .and_then(|()| inner.record_issued_seq(seq))
+                    {
                         inner.rollback_savepoint("tx").map_err(storage)?;
                         inner.changed.borrow_mut().clear();
                         return Err(error);
@@ -1622,7 +1632,7 @@ impl Db {
             } else {
                 WriteIdentity::Session(author)
             });
-        self.record_upload(captured, seq, identity, sync::Kind::Mergeable);
+        self.record_upload(captured, seq, identity, sync::Kind::Mergeable)?;
         self.inner
             .borrow()
             .conn
@@ -4346,7 +4356,7 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
-        if inner.batches.contains_key(&id) {
+        if inner.batches.contains_key(&id) || inner.retired_initializations.contains(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
         inner.batches.insert(
@@ -4416,6 +4426,14 @@ impl Db {
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        self.commit_serializable_batch(&batch, None)
+    }
+
+    fn commit_serializable_batch(
+        &self,
+        batch: &Batch,
+        reservation: Option<ReservedTxId>,
+    ) -> Result<TxReceipt, Error> {
         batch.reads_state.borrow().check_commit()?;
         let BatchKind::Serializable {
             snapshot,
@@ -4424,7 +4442,7 @@ impl Db {
             ..
         } = &batch.kind
         else {
-            return Err(rejected(format!("transaction {id:?} is not serializable")));
+            return Err(rejected("transaction is not serializable"));
         };
         // On a client the authority validates, against its own state; the
         // commit applies optimistically here meanwhile. A row the replica
@@ -4486,13 +4504,14 @@ impl Db {
                         .collect(),
                 })
                 .collect();
-            return self.commit_ops(
-                &batch,
+            return self.commit_ops_reserved(
+                batch,
                 sync::Kind::Serializable {
                     snapshot: *snapshot,
                     reads,
                     own: own.clone(),
                 },
+                reservation,
             );
         }
         {
@@ -4520,15 +4539,29 @@ impl Db {
                 }
             }
         }
-        self.commit_ops(&batch, sync::Kind::Mergeable)
+        self.commit_ops_reserved(batch, sync::Kind::Mergeable, reservation)
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
-        let _scope = accepted::ClaimsScope::new(self, batch.paired_scope.as_ref());
-        self.with_upload(|| self.commit_ops_now(batch, kind))
+        self.commit_ops_reserved(batch, kind, None)
     }
 
-    fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+    fn commit_ops_reserved(
+        &self,
+        batch: &Batch,
+        kind: sync::Kind,
+        reservation: Option<ReservedTxId>,
+    ) -> Result<TxReceipt, Error> {
+        let _scope = accepted::ClaimsScope::new(self, batch.paired_scope.as_ref());
+        self.with_upload(|| self.commit_ops_now(batch, kind, reservation))
+    }
+
+    fn commit_ops_now(
+        &self,
+        batch: &Batch,
+        kind: sync::Kind,
+        reservation: Option<ReservedTxId>,
+    ) -> Result<TxReceipt, Error> {
         if self.inner().non_durable {
             return Err(unsupported(
                 "commits from a non-durable foreground through its storage owner",
@@ -4545,6 +4578,7 @@ impl Db {
             let mark = inner.changed.borrow().len();
             let applied = inner
                 .apply_with_edits(ops, &batch.edits, 0, seq)
+                .and_then(|()| inner.record_local_commit(seq, reservation, inner.identity.author))
                 .and_then(|()| inner.record_issued_seq(seq));
             if let Err(error) = applied {
                 inner.rollback_savepoint("commit_batch").map_err(storage)?;
@@ -4563,7 +4597,7 @@ impl Db {
             seq,
             Some(batch.identity),
             kind,
-        );
+        )?;
         self.notify();
         Ok(TxReceipt(seq))
     }
