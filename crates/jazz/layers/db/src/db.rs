@@ -261,15 +261,15 @@ pub struct SubscriptionStream {
         Query,
         BTreeMap<String, Value>,
         bool,
-        bool,
+        ReadTier,
     )>,
 }
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted, local)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, local);
+        if let Some((inner, query, binding, include_deleted, tier)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, tier);
         }
     }
 }
@@ -1206,8 +1206,15 @@ impl Db {
         if remote_read {
             Self::remote_shape(&prepared.query)?;
         }
+        // A non-durable foreground tells its relay how far the read
+        // reaches, as its fetches do; to an authority it is always remote.
+        let tier = if non_durable {
+            opts.tier
+        } else {
+            ReadTier::Remote
+        };
         let remote = if remote_read {
-            self.attach_remote(prepared, read.include_deleted, local)
+            self.attach_remote(prepared, read.include_deleted, tier)
         } else {
             None
         };
@@ -1260,7 +1267,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
-                    local,
+                    tier,
                 )
             }),
         })
