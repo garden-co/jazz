@@ -19,22 +19,24 @@ use serde_json::json;
 
 use common::{allow_all_policies, compile_schema};
 
+fn public_schema() -> jazz::tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("title", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
+        .table(
+            TableSchemaBuilder::new("comments")
+                .column("note", ColumnType::Uuid)
+                .column("body", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
+        .build()
+}
+
 fn schema() -> JazzSchema {
-    compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("notes")
-                    .column("title", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("comments")
-                    .column("note", ColumnType::Uuid)
-                    .column("body", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .build(),
-    )
+    compile_schema(&public_schema())
 }
 
 fn identity(node: u8) -> DbIdentity {
@@ -589,4 +591,43 @@ fn a_relation_read_nests_each_relation_in_its_parents_cells() {
             (Value::String("without".to_owned()), vec![]),
         ]
     );
+}
+
+/// A receipt belongs to its database node, including shared schema views; a
+/// different database with the same numeric sequence cannot reinterpret it.
+#[test]
+fn write_state_and_wait_preserve_receipt_ownership() {
+    use jazz::tx::{DurabilityTier, Fate, RejectionReason};
+    let alice = open(1);
+    let bob = open(2);
+    let write = alice
+        .insert("notes", &title("first"), &json!({"rowId": vec![9;16]}))
+        .unwrap();
+    assert_eq!(alice.write_state(&write).unwrap().fate, Fate::Pending);
+    assert!(argument(bob.write_state(&write)).contains("different database node"));
+    assert!(matches!(
+        bob.wait_for_write(&write, "local"),
+        Err(HostError::Argument(_))
+    ));
+    let view = alice
+        .register_schema(&serde_json::to_vec(&public_schema()).unwrap())
+        .unwrap();
+    assert_eq!(
+        view.write_state(&write).unwrap(),
+        alice.write_state(&write).unwrap()
+    );
+    block_on(view.wait_for_write(&write, "local").unwrap()).unwrap();
+    let rejected = alice
+        .insert("notes", &title("duplicate"), &json!({"rowId": vec![9;16]}))
+        .unwrap();
+    let state = alice.write_state(&rejected).unwrap();
+    assert!(matches!(
+        state.fate,
+        Fate::Rejected(RejectionReason::MalformedCommit(_))
+    ));
+    assert_eq!(state.durability, DurabilityTier::None);
+    for _ in 0..2 {
+        assert!(block_on(alice.wait_for_write(&rejected, "local").unwrap()).is_err());
+    }
+    assert_eq!(alice.write_state(&rejected).unwrap(), state);
 }

@@ -640,6 +640,7 @@ fn replica_session_read_sets_validate_as_the_bound_session() {
 fn session_transaction_relations_keep_the_bound_reader() {
     for replica in [false, true] {
         let authority = open(15, true, None);
+        authority.db.set_authority();
         authority
             .insert("files", &cells("alice"), &json!({"rowId": vec![1; 16]}))
             .unwrap();
@@ -849,6 +850,7 @@ fn one_shot_binding_reads_keep_the_requested_session() {
 #[test]
 fn mergeable_session_batches_are_atomic_and_policy_checked() {
     let backend = open(22, true, None);
+    backend.db.set_authority();
     backend
         .insert("files", &cells("bob"), &json!({"rowId": vec![9; 16]}))
         .unwrap();
