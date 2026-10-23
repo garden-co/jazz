@@ -5226,7 +5226,7 @@ impl Db {
         if let Some(tx) = open_tx {
             let rows = self
                 .serializable_tx_ref(tx)
-                .all_prepared_with(&prepared, opts.read_view.include_deleted)
+                .all_prepared_as(&prepared, opts.read_view.include_deleted, identity)
                 .await?;
             return Ok(result(rows));
         }
