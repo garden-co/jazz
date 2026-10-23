@@ -113,6 +113,7 @@ binaries cannot decode them. A newer replica with no accepted proof cannot infer
 it from legacy Origins or a local receipt. Downgrade and mixed-version deployment
 are unsupported; no compatibility with retired Groove or earlier unreleased
 E2EE schemas is claimed. Catalogue identity/coverage is covered separately in
-`sqlite-catalogue-compatibility.md`. Catalogue policy intrinsics and browser SDK
-storage admission remain separate boundaries, so these scoped checks do not
-qualify the full browser E2EE runtime.
+`sqlite-catalogue-compatibility.md` and E17’s
+`sqlite-catalogue-policies-compatibility.md`. Browser SDK storage admission remains
+a separate boundary, so these scoped checks do not qualify the full browser
+E2EE runtime.

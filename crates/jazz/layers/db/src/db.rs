@@ -1098,7 +1098,9 @@ impl Db {
         // options are not known yet: validate the widest read (deleted rows
         // included, so their metadata columns are accepted).
         let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
+        Ctx::new(&inner.schema, None, &session, &binding)
+            .with_catalogue(&*inner)
+            .compile_query(query, true)?;
         let shape =
             blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
         let bound = blake3::hash(format!("{binding:?}").as_bytes());
@@ -1920,6 +1922,7 @@ impl Inner {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
+            .with_catalogue(self)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
@@ -2179,6 +2182,7 @@ impl Inner {
             };
             let (policy, claims) = self.read_sessions(prepared, identity);
             let compiled = Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
+                .with_catalogue(self)
                 .compile_children(array, &parent)?;
             let children = self.execute(&compiled, &array.table)?;
             let mut nodes = Vec::with_capacity(children.len());
@@ -2391,7 +2395,9 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut);
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
+            .with_catalogue(self)
+            .with_cut(cut);
         let condition = policy(&mut ctx)?;
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
@@ -2422,7 +2428,7 @@ impl Inner {
     ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding);
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_catalogue(self);
         let condition = match author {
             Some(author) => {
                 let session = self.session(author);

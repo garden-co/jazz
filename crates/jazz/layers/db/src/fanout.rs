@@ -409,6 +409,7 @@ impl Inner {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
+            .with_catalogue(self)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
