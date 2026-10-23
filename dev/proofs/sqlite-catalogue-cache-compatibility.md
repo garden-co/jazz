@@ -43,9 +43,9 @@ re-exports the union for the host to publish.
 Restoration does not install permissions, become an authority, mint IDs or
 provide fresh catalogue coverage. A fresh coverage request still goes through
 the normal authority/query/policy path. Cached memory opens cannot also request
-creation of a standalone authority. Initialization seals, absence evidence,
-publish/cancel/status journals and browser-worker storage admission remain
-explicitly unsupported.
+creation of a standalone authority. Initialization seals, absence evidence and publish/cancel/status primitives
+are covered by `sqlite-initialization-compatibility.md`. Browser-worker storage
+admission and full journal orchestration through that owner remain unqualified.
 
 ## Encoding and compatibility
 
