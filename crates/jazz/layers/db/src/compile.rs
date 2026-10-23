@@ -1380,6 +1380,11 @@ impl<'a> Ctx<'a> {
             Predicate::Gt(l, r) => self.cmp2(CmpOp::Gt, l, r, table, alias)?,
             Predicate::Gte(l, r) => self.cmp2(CmpOp::Ge, l, r, table, alias)?,
             Predicate::In(left, options) => {
+                if let Operand::Column(column) = left {
+                    for option in options {
+                        check_candidate(table, column, option)?;
+                    }
+                }
                 let left = self.operand(left, table, alias)?;
                 let options = options
                     .iter()
@@ -1388,6 +1393,9 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             Predicate::Contains(l, r) => {
+                if let Operand::Column(column) = l {
+                    check_haystack(table, column)?;
+                }
                 let array = matches!(l, Operand::Column(column) if is_array(table, column));
                 let l = self.operand(l, table, alias)?;
                 let r = self.operand(r, table, alias)?;
@@ -2107,6 +2115,107 @@ fn flatten_all<'p>(predicate: &'p Predicate, out: &mut Vec<&'p Predicate>) {
 /// hyphenated text (see [`crate::values::to_sql`]).
 fn array_element_id(element: &str) -> String {
     format!("unhex(replace({element}.value, '-', ''))")
+}
+
+/// What a value or column type is, for operand type checks: numbers of
+/// any width compare with each other, a UUID with its string spelling.
+#[derive(PartialEq, Debug)]
+enum Kind {
+    Number,
+    Text,
+    Bool,
+    Uuid,
+    Array,
+    Bytes,
+    Other,
+}
+
+fn type_kind(ty: &ValueType) -> Kind {
+    match ty {
+        ValueType::Nullable(inner) => type_kind(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64 => Kind::Number,
+        ValueType::String => Kind::Text,
+        ValueType::Bool => Kind::Bool,
+        ValueType::Uuid => Kind::Uuid,
+        ValueType::Array(_) => Kind::Array,
+        ValueType::Bytes => Kind::Bytes,
+        _ => Kind::Other,
+    }
+}
+
+fn value_kind(value: &Value) -> Option<Kind> {
+    Some(match value {
+        Value::Nullable(None) => return None,
+        Value::Nullable(Some(inner)) => return value_kind(inner),
+        Value::U8(_)
+        | Value::U16(_)
+        | Value::U32(_)
+        | Value::U64(_)
+        | Value::U48(_)
+        | Value::I32(_)
+        | Value::I64(_)
+        | Value::F64(_) => Kind::Number,
+        Value::String(_) => Kind::Text,
+        Value::Bool(_) => Kind::Bool,
+        Value::Uuid(_) => Kind::Uuid,
+        Value::Array(_) => Kind::Array,
+        Value::Bytes(_) => Kind::Bytes,
+        _ => Kind::Other,
+    })
+}
+
+fn value_type_name(value: &Value) -> String {
+    match value {
+        Value::Nullable(Some(inner)) => value_type_name(inner),
+        value => format!("{value:?}")
+            .split(['(', ' ', '{'])
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    }
+}
+
+/// An `in` literal must be a whole value of the column's type: a scalar
+/// is no candidate for an array column (that is `contains`).
+fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), Error> {
+    let (Operand::Literal(value), Some(declared)) = (option, table.column(column)) else {
+        return Ok(());
+    };
+    let (want, Some(got)) = (type_kind(&declared.ty), value_kind(value)) else {
+        return Ok(());
+    };
+    let compatible = want == got
+        || want == Kind::Other
+        || got == Kind::Other
+        || (want == Kind::Uuid && got == Kind::Text);
+    if compatible {
+        return Ok(());
+    }
+    Err(query_error(format!(
+        "in candidate for column {column} has type {}, but the column has type {:?}",
+        value_type_name(value),
+        declared.ty
+    )))
+}
+
+/// `contains` searches text, bytes or an array.
+fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
+    let Some(declared) = table.column(column) else {
+        return Ok(());
+    };
+    match type_kind(&declared.ty) {
+        Kind::Text | Kind::Bytes | Kind::Array | Kind::Other => Ok(()),
+        _ => Err(query_error(format!(
+            "operand type mismatch: contains on {column}, which has type {:?}",
+            declared.ty
+        ))),
+    }
 }
 
 /// Whether `column` is a UUID column (nullable or not).
