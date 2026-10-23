@@ -2778,13 +2778,16 @@ impl Inner {
 impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
-    /// answer is complete through, if it answered, or why it refused.
+    /// answer is complete through, if it answered, or why it refused. Once
+    /// `expired` says the caller's coverage budget is spent, the read fails
+    /// with `NotObserved` instead.
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
         deadline: Option<Instant>,
+        expired: &dyn Fn() -> bool,
     ) -> Result<Option<u64>, Error> {
         let id = {
             let mut inner = self.inner.borrow_mut();
@@ -2816,6 +2819,13 @@ impl Db {
             if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
                 client.answers.remove(&id);
                 return Poll::Ready(Ok(None));
+            }
+            if expired() {
+                client.answers.remove(&id);
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "Timed out waiting for query coverage",
+                )));
             }
             Poll::Pending
         })
@@ -4824,8 +4834,8 @@ impl Db {
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         _author: Option<AuthorSubject>,
-        _require_coverage: bool,
-        _coverage_expired: E,
+        require_coverage: bool,
+        coverage_expired: E,
         _release_coverage: F,
     ) -> Result<SerializedReadResult, Error>
     where
@@ -4871,8 +4881,21 @@ impl Db {
             };
             if let Some(deadline) = wait {
                 Self::remote_shape(&prepared.query)?;
-                self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
-                    .await?;
+                // A read that must be covered by the server fails once
+                // the caller's budget is spent; others fall back to local.
+                let expired: &dyn Fn() -> bool = if require_coverage {
+                    &coverage_expired
+                } else {
+                    &|| false
+                };
+                self.fetch(
+                    &prepared,
+                    None,
+                    opts.read_view.include_deleted,
+                    deadline,
+                    expired,
+                )
+                .await?;
             }
         }
         let opts = ReadOpts {

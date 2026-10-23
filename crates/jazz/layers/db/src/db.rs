@@ -4622,7 +4622,10 @@ impl TxRef<'_> {
         {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
-            let through = self.db.fetch(prepared, at, include_deleted, None).await?;
+            let through = self
+                .db
+                .fetch(prepared, at, include_deleted, None, &|| false)
+                .await?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
