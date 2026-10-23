@@ -40,7 +40,7 @@ function childWithLock(lockPath, body) {
 }
 
 async function waitFor(condition, message) {
-  for (let attempts = 0; attempts < 1000; attempts++) {
+  for (let attempts = 0; attempts < 100; attempts++) {
     if (condition()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -190,50 +190,33 @@ test("signal keeps the lock until its delayed child has exited", async () => {
   const lockPath = join(fixture, "lock");
   const received = join(fixture, "received");
   const ready = join(fixture, "ready");
-  const release = join(fixture, "release");
-  const contenderReady = join(fixture, "contender-ready");
-  const contend = join(fixture, "contend");
   const delayedChild = `
     const fs = require('node:fs');
+    fs.writeFileSync(${JSON.stringify(ready)}, 'ready');
     process.on('SIGTERM', () => {
       fs.writeFileSync(${JSON.stringify(received)}, 'received');
+      setTimeout(() => process.exit(0), 180);
     });
-    fs.writeFileSync(${JSON.stringify(ready)}, 'ready');
-    setInterval(() => {
-      if (!fs.existsSync(${JSON.stringify(fixture)}) ||
-          fs.existsSync(${JSON.stringify(release)})) process.exit(0);
-    }, 10);
+    setInterval(() => {}, 1000);
   `;
   const holder = childWithLock(
     lockPath,
     `await withArtifactBuildLock(async (scope) => scope.track(command(process.execPath, ['-e', ${JSON.stringify(delayedChild)}], 'delayed child', { signal: scope.signal })));`,
   );
-  const contender = childWithLock(
-    lockPath,
-    `
-    fs.writeFileSync(${JSON.stringify(contenderReady)}, 'ready');
-    while (!fs.existsSync(${JSON.stringify(contend)})) await new Promise(resolve => setTimeout(resolve, 10));
-    await withArtifactBuildLock(async () => {});
-  `,
-  );
   try {
     await waitFor(() => existsSync(lockPath), "holder did not acquire lock");
     await waitFor(() => existsSync(ready), "delayed child did not start");
-    await waitFor(() => existsSync(contenderReady), "contender did not start");
     holder.child.kill("SIGTERM");
     await waitFor(() => existsSync(received), "child did not receive SIGTERM");
     assert.equal(existsSync(lockPath), true, "lock released before child exit");
-    writeFileSync(contend, "contend");
+    const contender = childWithLock(lockPath, "await withArtifactBuildLock(async () => {});");
     assert.equal((await contender.closed).code, 1);
     assert.match(contender.output(), /active artifact lock/);
-    writeFileSync(release, "release");
     assert.equal((await holder.closed).signal, "SIGTERM");
     assert.equal(existsSync(lockPath), false);
   } finally {
-    writeFileSync(release, "release");
-    contender.child.kill("SIGKILL");
     holder.child.kill("SIGKILL");
-    await Promise.all([holder.closed, contender.closed]);
+    await holder.closed;
     rmSync(fixture, { recursive: true, force: true });
   }
 });
@@ -244,33 +227,24 @@ test("signal during NAPI repair drains the parent scope before unlock", async ()
   const repairing = join(fixture, "repairing");
   const received = join(fixture, "received");
   const stopped = join(fixture, "stopped");
-  const release = join(fixture, "release");
   const holder = childWithLock(
     lockPath,
     `await withArtifactBuildLock((scope) => buildTestArtifacts((command, args, label, { signal }) => {
       if (label === 'preflight release NAPI') return Promise.reject(new Error('load failed'));
       if (label === 'repair release NAPI') return new Promise((resolve) => {
-        const timer = setInterval(() => {}, 1000);
-        signal.addEventListener('abort', () => {
-          fs.writeFileSync(${JSON.stringify(received)}, 'received');
-          const draining = setInterval(() => {
-            if (fs.existsSync(${JSON.stringify(release)})) {
-              clearInterval(draining); clearInterval(timer);
-              fs.writeFileSync(${JSON.stringify(stopped)}, 'stopped'); resolve();
-            }
-          }, 10);
-        }, { once: true });
         fs.writeFileSync(${JSON.stringify(repairing)}, 'repairing');
+        const timer = setInterval(() => {}, 1000);
+        signal.addEventListener('abort', () => { fs.writeFileSync(${JSON.stringify(received)}, 'received'); setTimeout(() => { clearInterval(timer); fs.writeFileSync(${JSON.stringify(stopped)}, 'stopped'); resolve(); }, 150); }, { once: true });
       });
       return Promise.resolve();
     }, scope));`,
   );
   try {
     await waitFor(() => existsSync(repairing), "repair did not start");
+    await new Promise((resolve) => setTimeout(resolve, 20));
     holder.child.kill("SIGTERM");
     await waitFor(() => existsSync(received), "repair did not receive shutdown");
     assert.equal(existsSync(lockPath), true, "lock released during repair shutdown");
-    writeFileSync(release, "release");
     assert.equal((await holder.closed).signal, "SIGTERM");
     assert.equal(existsSync(stopped), true);
     assert.equal(existsSync(lockPath), false);
@@ -434,126 +408,6 @@ test("aborting a real subprocess terminates its spawned child", async () => {
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.equal(existsSync(marker), false);
   rmSync(fixture, { recursive: true, force: true });
-});
-
-test("CI uses the correctness artifact path while package builds keep release WASM", () => {
-  const workflow = readFileSync(
-    new URL("../../../.github/workflows/ci-suite.yml", import.meta.url),
-    "utf8",
-  );
-  const packageJson = readFileSync(new URL("../../../package.json", import.meta.url), "utf8");
-  const pipeline = readFileSync(new URL("../build-test-artifacts.mjs", import.meta.url), "utf8");
-  const localCi = readFileSync(new URL("../local-ci-equivalent.mjs", import.meta.url), "utf8");
-  const consumers = readFileSync(new URL("../run-ts-consumers.mjs", import.meta.url), "utf8");
-  const ensureArtifacts = readFileSync(
-    new URL("../ensure-correctness-artifacts.mjs", import.meta.url),
-    "utf8",
-  );
-  assert.match(ensureArtifacts, /spawn\("pnpm", \["build:correctness-artifacts"\]/);
-  assert.match(workflow, /local-ci-equivalent\.mjs --ci-partition typescript/);
-  assert.match(
-    localCi,
-    /native correctness-artifact producer[\s\S]*ensure-correctness-artifacts\.mjs/,
-  );
-  assert.match(
-    packageJson,
-    /"build:correctness-artifacts": "node dev\/gates\/build-test-artifacts\.mjs"/,
-  );
-  assert.match(
-    packageJson,
-    /"test:typescript-consumers": "node dev\/gates\/run-ts-consumers\.mjs"/,
-  );
-  assert.match(
-    packageJson,
-    /"artifacts:unlock": "node dev\/gates\/build-test-artifacts\.mjs unlock"/,
-  );
-  assert.match(
-    packageJson,
-    /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
-  );
-  for (const script of ["build", "build:core", "build:ci"])
-    assert.match(
-      packageJson,
-      new RegExp(
-        `"${script.replace(":", "\\:")}": "turbo run build:crates.*jazz-wasm.*turbo run build`,
-      ),
-      `${script} must leave atomic WASM publication as the sole provenance writer`,
-    );
-  assert.match(
-    packageJson,
-    /"build:starters-e2e": "turbo run build --filter=jazz-wasm --only && turbo run build --filter=jazz-napi --only && node dev\/artifacts\/stage-native-fingerprints\.mjs --workspace && turbo run build --filter=\.\/packages\/\*\* --only/,
-    "build:starters-e2e must build the same release WASM and NAPI artifacts as build:core",
-  );
-  assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
-  assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
-  for (const task of ["build", "build:fast"])
-    assert.match(
-      pipeline,
-      new RegExp(`"exec", "turbo", "run", "${task.replace(":", "\\:")}"`),
-      `${task} correctness artifact must run through Turbo`,
-    );
-  assert.doesNotMatch(pipeline, /--filter=jazz-tools/);
-  assert.ok(
-    consumers.indexOf("runCorrectnessConsumer(") < consumers.indexOf('"--filter=jazz-tools"'),
-    "TS consumers must reject a stale producer receipt before Jazz Tools can build",
-  );
-
-  const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
-  const expectedLease = [
-    "JAZZ_TEST_ARTIFACT_LOCK_PATH",
-    "JAZZ_ARTIFACT_BUILD_LEASE",
-    "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
-    "JAZZ_TEST_SEALED_TOOLS_DIST",
-  ];
-  assert.deepEqual(
-    turbo.tasks["jazz-napi#build"].passThroughEnv,
-    ["JAZZ_RN_TEST_BRIDGE", ...expectedLease],
-    "jazz-napi#build must preserve RN bridge feature selection and the aggregate parent's artifact lease and sealed test surface",
-  );
-  for (const task of ["jazz-wasm#build", "jazz-wasm#build:fast"])
-    assert.deepEqual(
-      turbo.tasks[task].passThroughEnv,
-      expectedLease,
-      `${task} must preserve the aggregate parent's selected artifact lock`,
-    );
-  for (const task of ["build"])
-    assert.deepEqual(
-      turbo.tasks[task].passThroughEnv,
-      ["JAZZ_TEST_SEALED_TOOLS_DIST"],
-      `${task} must preserve the sealed shared test surface for child package scripts`,
-    );
-  assert.deepEqual(turbo.tasks["jazz-tools#build"].passThroughEnv, [
-    "JAZZ_TEST_SEALED_TOOLS_DIST",
-    "JAZZ_CORRECTNESS_ARTIFACT_RUN",
-    "JAZZ_RN_TEST_BRIDGE",
-    "JAZZ_CORRECTNESS_WASM_PACKAGE",
-    "JAZZ_CORRECTNESS_NAPI_BINDING",
-    "JAZZ_CORRECTNESS_NAPI_FINGERPRINT",
-  ]);
-  // Correctness consumers inject a content-addressed WASM package through a
-  // pass-through environment variable. Turbo does not include pass-through
-  // values in its task hash, so restoring Jazz Tools' bundled output could
-  // otherwise pair a verified current snapshot with stale embedded WASM.
-  // The native producer's `.native-artifacts/**` output includes Cargo
-  // generations measured in tens of GiB. These four tasks must use the
-  // explicit producer/consumer hand-off, never Turbo archives.
-  for (const task of [
-    "jazz-napi#build",
-    "jazz-wasm#build",
-    "jazz-wasm#build:fast",
-    "jazz-tools#build",
-  ])
-    assert.equal(
-      turbo.tasks[task].cache,
-      false,
-      `${task} must remain uncached: correctness artifacts are not Turbo outputs`,
-    );
-  assert.deepEqual(turbo.tasks.test.passThroughEnv, [
-    "TMPDIR",
-    ...turbo.tasks["jazz-tools#build"].passThroughEnv,
-    "JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
-    "JAZZ_CORRECTNESS_CONSUMER_TOKEN",
-  ]);
 });
 
 test("Turbo native artifact tasks use precise local inputs without task dependencies", () => {

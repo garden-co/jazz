@@ -202,6 +202,8 @@
       "cache": false,
       "passThroughEnv": [
         "TMPDIR",
+        "TMP",
+        "TEMP",
         "JAZZ_TEST_SEALED_TOOLS_DIST",
         "JAZZ_CORRECTNESS_ARTIFACT_RUN",
         "JAZZ_RN_TEST_BRIDGE",
