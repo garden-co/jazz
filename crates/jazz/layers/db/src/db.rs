@@ -351,7 +351,7 @@ struct Inner {
     authors: RefCell<AuthorCodes>,
     ids: Box<dyn RowIdSource>,
     seq: u64,
-    claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
+    pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
     /// Rows written since the last dispatch: (table, id, branch key).
