@@ -31,7 +31,7 @@ export type BootstrapResult = { workspaceId: string; created: boolean };
  * first-open side effect and runs on the server with backend authority, never
  * from a query hook.
  *
- * Everything is written in one exclusive transaction: a retry after a network
+ * Everything is written in one serializable transaction: a retry after a network
  * failure, a double click or two tabs opening at once either sees the finished
  * workspace or writes the whole thing, never half of it. Rows get creation
  * times one millisecond apart in tree order, so the sidebar's `$createdAt`
@@ -45,7 +45,7 @@ export async function ensureDemoWorkspace(
 ): Promise<BootstrapResult> {
   const workspaceId = seedId(account, "workspace");
   return await retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const existing = await tx.one(app.workspaces.where({ id: workspaceId }).includeDeleted());
       if (existing) return false;
       let clock = now();

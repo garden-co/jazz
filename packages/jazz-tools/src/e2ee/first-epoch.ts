@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db } from "../runtime/db.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
@@ -66,7 +66,7 @@ export async function firstAccountEpoch(
   for (let attempt = 0; ; attempt++) {
     assertOpen();
     try {
-      const proposal = await exclusiveE2eeTransaction(db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(db, async (tx) => {
         const existing = await tx.one(identities.where({ id: accountId }), { tier: "local-first" });
         assertOpen();
         if (existing) return existing;

@@ -185,11 +185,13 @@ impl Names {
     /// table or column takes the stored name its source has: the source of a
     /// lens into `schema` (`lenses` may name others; only lenses targeting
     /// `schema` count) where one says it was renamed, else `base`'s table or
-    /// column of the same name. A new one is stored under its own name, unless
-    /// another admitted version stores a differently named table or column
+    /// column of the same name. A new table or column is stored under its own
+    /// name unless another admitted version stores a differently named one
     /// there (a rename freed the logical name, not the stored one), when it
-    /// gets a fresh suffix. A dropped name added again reads its old stored
-    /// column, as without renames.
+    /// gets a fresh suffix. Where a lens from an admitted source adds it, any
+    /// admitted version storing one there counts: the lens says the source
+    /// lacks it, so a table or column dropped and added again is a new
+    /// lineage with its own default, not the data it held before.
     pub(crate) fn resolve(
         &self,
         schema: &JazzSchema,
@@ -209,10 +211,9 @@ impl Names {
             .copied();
         let effects = lens.map(LensEffects::of).transpose()?.unwrap_or_default();
         let empty = StoredNames::default();
-        let source = lens
-            .and_then(|lens| self.get(&lens.source))
-            .or(base)
-            .unwrap_or(&empty);
+        let admitted_source = lens.and_then(|lens| self.get(&lens.source));
+        let lineage = admitted_source.is_some();
+        let source = admitted_source.or(base).unwrap_or(&empty);
         let mut target = Schema::new(schema);
         let mut names = StoredNames::default();
         // Tables with a source first, so a new table cannot take the stored
@@ -236,7 +237,7 @@ impl Names {
                 }
                 None => (
                     self.fresh(name, &taken_tables, |stored, logical| {
-                        self.claims_table(stored, logical)
+                        self.claims_table(stored, logical, lineage)
                     }),
                     None,
                 ),
@@ -271,7 +272,7 @@ impl Names {
             }
             for column in fresh {
                 let stored_column = self.fresh(&column, &taken, |candidate, logical| {
-                    self.claims_column(&stored, candidate, logical)
+                    self.claims_column(&stored, candidate, logical, lineage)
                 });
                 taken.insert(stored_column.clone());
                 columns.insert(column, stored_column);
@@ -299,26 +300,26 @@ impl Names {
         candidate
     }
 
-    /// Whether an admitted version stores a table other than `logical` as
-    /// `stored`.
-    fn claims_table(&self, stored: &str, logical: &str) -> bool {
+    /// Whether an admitted version stores a table other than `logical` (any
+    /// table, for a new `lineage`) as `stored`.
+    fn claims_table(&self, stored: &str, logical: &str, lineage: bool) -> bool {
         self.versions.values().any(|(_, names)| {
             names
                 .tables
                 .iter()
-                .any(|(name, (s, _))| s == stored && name != logical)
+                .any(|(name, (s, _))| s == stored && (lineage || name != logical))
         })
     }
 
-    /// Whether an admitted version stores a column other than `logical` as
-    /// `stored` in stored table `table`.
-    fn claims_column(&self, table: &str, stored: &str, logical: &str) -> bool {
+    /// Whether an admitted version stores a column other than `logical` (any
+    /// column, for a new `lineage`) as `stored` in stored table `table`.
+    fn claims_column(&self, table: &str, stored: &str, logical: &str, lineage: bool) -> bool {
         self.versions.values().any(|(_, names)| {
             names.tables.values().any(|(s, columns)| {
                 s == table
                     && columns
                         .iter()
-                        .any(|(name, c)| c == stored && name != logical)
+                        .any(|(name, c)| c == stored && (lineage || name != logical))
             })
         })
     }

@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db, E2eeTransactionScope } from "../runtime/db.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { DeviceSigner } from "./types.js";
@@ -91,7 +91,7 @@ export async function readAccountMembership(
   tables: DeviceTables = app,
 ) {
   await prefetchPublicMembershipHistory(db, accountId, tables);
-  const read = await exclusiveE2eeTransaction(db, (tx) =>
+  const read = await serializableE2eeTransaction(db, (tx) =>
     readPublicMembershipHistory(tx, accountId, tables),
   );
   // Refuse unavailable coverage; a partial history must never imply active membership.

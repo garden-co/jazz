@@ -37,6 +37,7 @@ import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
   magicColumnType,
   type ProvenanceMagicColumn,
+  type RowAuthor,
   type NoExplicitIdColumn,
   assertUserTableColumnNameAllowed,
 } from "./magic-columns.js";
@@ -477,20 +478,27 @@ type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> &
   _serializeRelation(): unknown;
 };
 
-type ProvenanceMagicColumns = {
-  $createdBy: import("./magic-columns.js").RowAuthor;
-  $createdAt: Date;
-  $updatedBy: import("./magic-columns.js").RowAuthor;
-  $updatedAt: Date;
-  "$createdBy.account": string;
-  "$createdBy.identity": import("./magic-columns.js").RowAuthor["identity"];
-  "$createdBy.identity.issuer": string;
-  "$createdBy.identity.subject": string;
-  "$updatedBy.account": string;
-  "$updatedBy.identity": import("./magic-columns.js").RowAuthor["identity"];
-  "$updatedBy.identity.issuer": string;
-  "$updatedBy.identity.subject": string;
+type AuthorFields = {
+  "": RowAuthor;
+  ".account": RowAuthor["account"];
+  ".identity": RowAuthor["identity"];
+  ".identity.issuer": RowAuthor["identity"]["issuer"];
+  ".identity.subject": RowAuthor["identity"]["subject"];
 };
+
+type AuthorColumns<Prefix extends string> = {
+  [K in keyof AuthorFields as `${Prefix}${K}`]: AuthorFields[K];
+};
+
+type NullableColumns<T> = {
+  [K in keyof T]: T[K] | null;
+};
+
+type ProvenanceMagicColumns = {
+  $createdAt: Date;
+  $updatedAt: Date;
+} & AuthorColumns<"$createdBy"> &
+  AuthorColumns<"$updatedBy">;
 
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
@@ -507,10 +515,27 @@ export type TableSelected<
   TSelection extends TableSelectableColumn<TSchema, TTable> = BaseColumnName<TSchema, TTable>,
 > = SelectedRow<TableRow<TSchema, TTable>, TSelection>;
 
+type DeletionMagicColumns = {
+  $deletedAt: Date | null;
+} & NullableColumns<AuthorColumns<"$deletedBy">>;
+type DeletedColumn<TDeleted extends boolean> = TDeleted extends true
+  ? keyof DeletionMagicColumns
+  : never;
+type DeletedWhere<TDeleted extends boolean> = TDeleted extends true
+  ? {
+      [K in keyof DeletionMagicColumns]?: K extends "$deletedAt"
+        ? TimestampWhere<true>
+        : WhereEqNe<NonNullable<DeletionMagicColumns[K]>, true>;
+    }
+  : {};
+
 /** Shared projection typing for ordinary and history rows. */
 type SelectedRow<TRow, TSelection> = Simplify<
   ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
-    Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
+    Pick<
+      ProvenanceMagicColumns & DeletionMagicColumns,
+      Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns>
+    >
 >;
 
 type ApplyRelationCardinality<
@@ -967,6 +992,7 @@ export class TypedTableQueryBuilder<
   TInclude extends BuilderInclude<TMeta> = {},
   TSelection = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
+  TDeleted extends boolean = false,
 > implements QueryBuilder<SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>> {
   readonly _table: TableNameFromMeta<TMeta>;
   readonly _schema: WasmSchema;
@@ -1003,28 +1029,35 @@ export class TypedTableQueryBuilder<
   }
 
   where(
-    conditions: TableWhereFromMeta<TMeta>,
-  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+    conditions: TableWhereFromMeta<TMeta> & DeletedWhere<TDeleted>,
+  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TDeleted> {
     if (this._unionVal) {
       throw new Error("union(...) currently only supports gather(...) in MVP.");
     }
-    const clone = this._clone<TInclude, TSelection, TRequired>();
+    const clone = this._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._conditions.push(...this._whereConditions(conditions as Record<string, unknown>));
     return clone;
   }
 
   select<
-    FirstSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>,
-    RestSelection extends readonly TableSelectableFromMeta<TMeta>[] = [],
+    FirstSelection extends
+      | (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)
+      | LargeValueSelection<TMeta>,
+    RestSelection extends readonly (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)[] =
+      [],
   >(
     first: FirstSelection,
     ...rest: RestSelection
-  ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired>;
-  select<NewSelection extends TableSelectableFromMeta<TMeta> | LargeValueSelection<TMeta>>(
+  ): MetaQueryHandle<TMeta, TInclude, FirstSelection | RestSelection[number], TRequired, TDeleted>;
+  select<
+    NewSelection extends
+      | (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)
+      | LargeValueSelection<TMeta>,
+  >(
     ...selection: [NewSelection] | [NewSelection, ...NewSelection[]]
-  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
+  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired, TDeleted> {
     this._rejectUnsupportedUnionModifier("select(...)");
-    const clone = this._clone<TInclude, NewSelection, TRequired>();
+    const clone = this._clone<TInclude, NewSelection, TRequired, TDeleted>();
     const first = selection[0];
     if (typeof first === "object" && first !== null) {
       const transforms = this._outputColumnTransforms();
@@ -1037,7 +1070,9 @@ export class TypedTableQueryBuilder<
         ? selection.length > 1
           ? [...Object.keys(first), ...selection.slice(1).map(String)]
           : ({ ...first } as Record<string, LargeValuePage>)
-        : (selection as TableSelectableFromMeta<TMeta>[]).map((column) => String(column));
+        : (selection as (TableSelectableFromMeta<TMeta> | DeletedColumn<TDeleted>)[]).map(
+            (column) => String(column),
+          );
     clone._partialSelect =
       typeof first === "object" && first !== null && selection.length > 1
         ? ({ ...first } as Record<string, LargeValuePage>)
@@ -1047,48 +1082,48 @@ export class TypedTableQueryBuilder<
 
   include<NewInclude extends BuilderInclude<TMeta>>(
     relations: NewInclude,
-  ): MetaQueryHandle<TMeta, TInclude & NewInclude, TSelection, TRequired> {
+  ): MetaQueryHandle<TMeta, TInclude & NewInclude, TSelection, TRequired, TDeleted> {
     this._rejectUnsupportedUnionModifier("include(...)");
-    const clone = this._clone<TInclude & NewInclude, TSelection, TRequired>();
+    const clone = this._clone<TInclude & NewInclude, TSelection, TRequired, TDeleted>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  requireIncludes(): MetaQueryHandle<TMeta, TInclude, TSelection, true> {
+  requireIncludes(): MetaQueryHandle<TMeta, TInclude, TSelection, true, TDeleted> {
     this._rejectUnsupportedUnionModifier("requireIncludes()");
-    const clone = this._clone<TInclude, TSelection, true>();
+    const clone = this._clone<TInclude, TSelection, true, TDeleted>();
     clone._requireIncludes = true;
     return clone;
   }
 
   orderBy(
-    column: TableOrderableFromMeta<TMeta>,
+    column: TableOrderableFromMeta<TMeta> | DeletedColumn<TDeleted>,
     direction: "asc" | "desc" = "asc",
-  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+  ): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TDeleted> {
     if (this._outputColumnTransforms()?.[column as string]?.computed)
       throw new TypeError(
         `Computed field "${String(column)}" cannot be ordered in a stored query.`,
       );
-    const clone = this._clone<TInclude, TSelection, TRequired>();
+    const clone = this._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
-    const clone = this._clone<TInclude, TSelection, TRequired>();
+  limit(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TDeleted> {
+    const clone = this._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
-    const clone = this._clone<TInclude, TSelection, TRequired>();
+  offset(n: number): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TDeleted> {
+    const clone = this._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._offsetVal = n;
     return clone;
   }
 
-  includeDeleted(): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+  includeDeleted(): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, true> {
     this._rejectUnsupportedUnionModifier("includeDeleted()");
-    const clone = this._clone<TInclude, TSelection, TRequired>();
+    const clone = this._clone<TInclude, TSelection, TRequired, true>();
     clone._includeDeleted = true;
     return clone;
   }
@@ -1099,12 +1134,13 @@ export class TypedTableQueryBuilder<
     RelationTargetFromMeta<TMeta, TRelation>,
     {},
     DefaultTableSelection<RelationTargetFromMeta<TMeta, TRelation>>,
-    TRequired
+    TRequired,
+    TDeleted
   > {
     if (this._unionVal) {
       throw new Error("union(...) currently only supports gather(...) in MVP.");
     }
-    const clone = this._clone<TInclude, TSelection, TRequired>();
+    const clone = this._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._hops.push(relation as string);
     // The type now represents the destination table while `_table` at runtime
     // is still the source — the destination is encoded in `_hops` and resolved
@@ -1115,7 +1151,8 @@ export class TypedTableQueryBuilder<
       RelationTargetFromMeta<TMeta, TRelation>,
       {},
       DefaultTableSelection<RelationTargetFromMeta<TMeta, TRelation>>,
-      TRequired
+      TRequired,
+      TDeleted
     >;
   }
 
@@ -1124,7 +1161,7 @@ export class TypedTableQueryBuilder<
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
-  }): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired> {
+  }): MetaQueryHandle<TMeta, TInclude, TSelection, TRequired, TDeleted> {
     if (typeof options.step !== "function") {
       throw new Error("gather(...) requires step callback.");
     }
@@ -1188,8 +1225,8 @@ export class TypedTableQueryBuilder<
       this._unionVal !== undefined || this._hops.length > 0 || this._gatherVal !== undefined;
     const seedSource = options.start === undefined ? this : this.where(options.start);
     const clone = needsExplicitSeed
-      ? this._clone<TInclude, TSelection, TRequired>()
-      : seedSource._clone<TInclude, TSelection, TRequired>();
+      ? this._clone<TInclude, TSelection, TRequired, TDeleted>()
+      : seedSource._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._conditions = [];
     clone._hops = [];
     clone._gatherVal = {
@@ -1234,13 +1271,15 @@ export class TypedTableQueryBuilder<
     TNewInclude extends BuilderInclude<TMeta>,
     TNewSelection,
     TNewRequired extends boolean,
-  >(): TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired> {
-    const clone = new TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired>(
-      this._table,
-      this._schema,
-      this._columnTransforms,
-      this._columnTransformsByTable,
-    );
+    TNewDeleted extends boolean = TDeleted,
+  >(): TypedTableQueryBuilder<TMeta, TNewInclude, TNewSelection, TNewRequired, TNewDeleted> {
+    const clone = new TypedTableQueryBuilder<
+      TMeta,
+      TNewInclude,
+      TNewSelection,
+      TNewRequired,
+      TNewDeleted
+    >(this._table, this._schema, this._columnTransforms, this._columnTransformsByTable);
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes } as Partial<BuilderInclude<TMeta>>;
     clone._requireIncludes = this._requireIncludes;
@@ -1331,7 +1370,8 @@ interface MetaQueryHandle<
   TInclude extends BuilderInclude<TMeta> = {},
   TSelection = DefaultTableSelection<TMeta>,
   TRequired extends boolean = false,
-> extends TypedTableQueryBuilder<TMeta, TInclude, TSelection, TRequired> {}
+  TDeleted extends boolean = false,
+> extends TypedTableQueryBuilder<TMeta, TInclude, TSelection, TRequired, TDeleted> {}
 
 export interface Query<
   TTable extends string,
@@ -1339,35 +1379,46 @@ export interface Query<
   TSelection = any,
   TSchema extends SchemaLike = SchemaLike,
   TRequired extends boolean = false,
-> extends TypedTableQueryBuilder<SchemaMeta<TTable, TSchema>, TInclude, TSelection, TRequired> {
+  TDeleted extends boolean = false,
+> extends TypedTableQueryBuilder<
+  SchemaMeta<TTable, TSchema>,
+  TInclude,
+  TSelection,
+  TRequired,
+  TDeleted
+> {
   /** @internal Phantom used by `Db.update` to retain column-specific diff shapes. */
   readonly _largeValueUpdateType: TableLargeValueUpdate<
     TSchema,
     Extract<TTable, TableName<TSchema>>
   >;
   where(
-    conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>,
-  ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+    conditions: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>> &
+      DeletedWhere<TDeleted>,
+  ): Query<TTable, TInclude, TSelection, TSchema, TRequired, TDeleted>;
   select<
     FirstSelection extends
-      | TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>
+      | (TableSelectableFromMeta<SchemaMeta<TTable, TSchema>> | DeletedColumn<TDeleted>)
       | LargeValueSelection<SchemaMeta<TTable, TSchema>>,
-    RestSelection extends readonly TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>[] = [],
+    RestSelection extends readonly (
+      | TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>
+      | DeletedColumn<TDeleted>
+    )[] = [],
   >(
     first: FirstSelection,
     ...rest: RestSelection
-  ): Query<TTable, TInclude, FirstSelection | RestSelection[number], TSchema, TRequired>;
+  ): Query<TTable, TInclude, FirstSelection | RestSelection[number], TSchema, TRequired, TDeleted>;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,
-  ): Query<TTable, TInclude & NewInclude, TSelection, TSchema, TRequired>;
-  requireIncludes(): Query<TTable, TInclude, TSelection, TSchema, true>;
+  ): Query<TTable, TInclude & NewInclude, TSelection, TSchema, TRequired, TDeleted>;
+  requireIncludes(): Query<TTable, TInclude, TSelection, TSchema, true, TDeleted>;
   orderBy(
-    column: TableOrderableFromMeta<SchemaMeta<TTable, TSchema>>,
+    column: TableOrderableFromMeta<SchemaMeta<TTable, TSchema>> | DeletedColumn<TDeleted>,
     direction?: "asc" | "desc",
-  ): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
-  limit(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
-  offset(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
-  includeDeleted(): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  ): Query<TTable, TInclude, TSelection, TSchema, TRequired, TDeleted>;
+  limit(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired, TDeleted>;
+  offset(n: number): Query<TTable, TInclude, TSelection, TSchema, TRequired, TDeleted>;
+  includeDeleted(): Query<TTable, TInclude, TSelection, TSchema, TRequired, true>;
   hopTo<TRelation extends RelationNameFromMeta<SchemaMeta<TTable, TSchema>>>(
     relation: TRelation,
   ): Query<
@@ -1375,14 +1426,15 @@ export interface Query<
     {},
     DefaultTableSelection<RelationTargetFromMeta<SchemaMeta<TTable, TSchema>, TRelation>>,
     TSchema,
-    TRequired
+    TRequired,
+    TDeleted
   >;
   gather(options: {
     start?: TableWhereInput<TSchema, Extract<TTable, TableName<TSchema>>>;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     /** Maximum recursive hops. Zero evaluates the seed only. */
     maxDepth?: number;
-  }): Query<TTable, TInclude, TSelection, TSchema, TRequired>;
+  }): Query<TTable, TInclude, TSelection, TSchema, TRequired, TDeleted>;
 }
 
 export type HistoryRow<TRow extends { id: string }> = TRow & {
@@ -1399,21 +1451,28 @@ export type HistoryRow<TRow extends { id: string }> = TRow & {
 export interface HistoryQuery<
   TRow extends { id: string },
   TWhere,
-  TSelection extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | "*" = keyof HistoryRow<TRow>,
+  TSelection extends
+    | keyof HistoryRow<TRow>
+    | ProvenanceMagicColumn
+    | keyof DeletionMagicColumns
+    | "*" = keyof HistoryRow<TRow>,
+  TDeleted extends boolean = false,
 > extends QueryBuilder<SelectedRow<HistoryRow<TRow>, TSelection>> {
   where(
-    input: TWhere & { $acceptedAt?: TimestampWhere<false> },
-  ): HistoryQuery<TRow, TWhere, TSelection>;
-  select<TColumn extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | "*">(
+    input: TWhere & { $acceptedAt?: TimestampWhere<false> } & DeletedWhere<TDeleted>,
+  ): HistoryQuery<TRow, TWhere, TSelection, TDeleted>;
+  select<
+    TColumn extends keyof HistoryRow<TRow> | ProvenanceMagicColumn | DeletedColumn<TDeleted> | "*",
+  >(
     ...columns: [TColumn, ...TColumn[]]
-  ): HistoryQuery<TRow, TWhere, TColumn>;
+  ): HistoryQuery<TRow, TWhere, TColumn, TDeleted>;
   orderBy(
-    column: keyof TRow | "$acceptedAt" | ProvenanceMagicColumn,
+    column: keyof TRow | "$acceptedAt" | ProvenanceMagicColumn | DeletedColumn<TDeleted>,
     direction?: "asc" | "desc",
-  ): HistoryQuery<TRow, TWhere, TSelection>;
-  limit(count: number): HistoryQuery<TRow, TWhere, TSelection>;
-  offset(count: number): HistoryQuery<TRow, TWhere, TSelection>;
-  includeDeleted(): HistoryQuery<TRow, TWhere, TSelection>;
+  ): HistoryQuery<TRow, TWhere, TSelection, TDeleted>;
+  limit(count: number): HistoryQuery<TRow, TWhere, TSelection, TDeleted>;
+  offset(count: number): HistoryQuery<TRow, TWhere, TSelection, TDeleted>;
+  includeDeleted(): HistoryQuery<TRow, TWhere, TSelection, true>;
 }
 
 export interface Table<TTable extends string, TSchema extends SchemaLike> extends Query<

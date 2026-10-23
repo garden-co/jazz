@@ -21,7 +21,7 @@ use std::time::Duration;
 use crate::kv::SqliteKv;
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
-    TransportError, block_on,
+    TransportError, WireError, block_on,
 };
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::{
@@ -210,7 +210,17 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, false)
+        Self::start(schema, storage, role, false, false)
+    }
+
+    /// Start a core runtime for a catalogue-driven server whose permissions
+    /// head is not published yet: until the first schema activation,
+    /// session reads wait and session writes are rejected.
+    pub fn start_awaiting_permissions(
+        schema: JazzSchema,
+        storage: StorageConfig,
+    ) -> Result<Self, String> {
+        Self::start(schema, storage, NodeRole::Core, false, true)
     }
 
     fn start(
@@ -218,6 +228,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
         any_stored_catalogue: bool,
+        awaiting_permissions: bool,
     ) -> Result<Self, String> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
@@ -230,16 +241,18 @@ impl ServerRuntimeHandle {
         let join = thread::Builder::new()
             .name("jazz-server-runtime".to_owned())
             .spawn(move || {
-                let owner = match Owner::open(schema, &storage, any_stored_catalogue) {
-                    Ok(owner) => {
-                        let _ = started_tx.send(Ok(()));
-                        owner
-                    }
-                    Err(error) => {
-                        let _ = started_tx.send(Err(error));
-                        return;
-                    }
-                };
+                let owner =
+                    match Owner::open(schema, &storage, any_stored_catalogue, awaiting_permissions)
+                    {
+                        Ok(owner) => {
+                            let _ = started_tx.send(Ok(()));
+                            owner
+                        }
+                        Err(error) => {
+                            let _ = started_tx.send(Err(error));
+                            return;
+                        }
+                    };
                 owner.run(receiver, &owner_ticks);
             })
             .map_err(|error| format!("failed to spawn server runtime thread: {error}"))?;
@@ -266,7 +279,7 @@ impl ServerRuntimeHandle {
         storage: StorageConfig,
         role: NodeRole,
     ) -> Result<Self, String> {
-        Self::start(schema, storage, role, true)
+        Self::start(schema, storage, role, true, true)
     }
 
     /// Subscribe to activity notices.
@@ -436,7 +449,15 @@ impl ServerRuntimeHandle {
         self.run(move |owner| {
             let id = owner
                 .catalogue
-                .publish(schema, lens, new_tables, dropped_tables)?;
+                .publish(schema.clone(), lens, new_tables, dropped_tables)?;
+            // Clients on the published version read and write by it before
+            // (and without) it becoming current.
+            block_on(
+                owner
+                    .db
+                    .admit_schema_with_lenses(schema, &owner.catalogue.lenses_for(id)),
+            )
+            .map_err(|error| error.to_string())?;
             owner.catalogue.persist()?;
             Ok(id)
         })
@@ -532,7 +553,13 @@ impl ServerRuntimeHandle {
         &self,
         snapshot: CatalogueSnapshot,
     ) -> Result<(), String> {
-        let result = self.run(move |owner| owner.apply_snapshot(snapshot)).await;
+        let result = self
+            .run(move |owner| {
+                owner.apply_snapshot(snapshot)?;
+                owner.release_held_reads();
+                Ok(())
+            })
+            .await;
         if result.is_ok() {
             self.notify_activity();
         }
@@ -610,10 +637,18 @@ struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
     catalogue: Catalogue,
+    /// No permissions head is published yet: session reads wait in
+    /// `OwnerSession::held` and session commits are rejected.
+    awaiting_permissions: bool,
 }
 
 struct OwnerSession {
     subscriber: SubscriberId,
+    /// A session under its own identity (not a trusted backend or
+    /// authority link).
+    untrusted: bool,
+    /// Reads held until the permissions head is published, in order.
+    held: VecDeque<SyncMessage>,
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
@@ -829,6 +864,7 @@ impl Owner {
         schema: JazzSchema,
         storage: &StorageConfig,
         any_stored_catalogue: bool,
+        awaiting_permissions: bool,
     ) -> Result<Self, String> {
         let (db, store, stored) = match storage {
             StorageConfig::InMemory => (block_on(Db::open(config(schema.clone()))), None, None),
@@ -868,10 +904,12 @@ impl Owner {
             }
         };
         let db = db.map_err(|error| format!("open server store: {error}"))?;
+        db.set_authority();
         let mut owner = Self {
             db,
             sessions: HashMap::new(),
             catalogue: Catalogue::new(&schema),
+            awaiting_permissions,
         };
         if let Some(snapshot) = stored {
             owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
@@ -917,17 +955,22 @@ impl Owner {
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
     ) {
-        if identity != AuthorSubject::SYSTEM {
-            self.db.set_identity_claims(identity, claims);
-        }
+        let claims = (identity != AuthorSubject::SYSTEM).then(|| {
+            self.db.set_identity_claims(identity, claims.clone());
+            claims
+        });
         let queues = Rc::new(SessionQueues::default());
-        let subscriber = self
-            .db
-            .accept_subscriber(Box::new(SessionTransport(Rc::clone(&queues))), identity);
+        let subscriber = self.db.accept_subscriber_with_claims(
+            Box::new(SessionTransport(Rc::clone(&queues))),
+            identity,
+            claims,
+        );
         self.sessions.insert(
             session,
             OwnerSession {
                 subscriber,
+                untrusted: identity != AuthorSubject::SYSTEM,
+                held: VecDeque::new(),
                 queues,
                 output,
                 egress,
@@ -939,9 +982,33 @@ impl Owner {
         let Some(owner_session) = self.sessions.get(&session) else {
             return;
         };
+        let gated = self.awaiting_permissions && owner_session.untrusted;
+        let Some(owner_session) = self.sessions.get_mut(&session) else {
+            return;
+        };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
             match postcard::from_bytes::<SyncMessage>(&frame) {
+                Ok(SyncMessage::Commit { tx, .. }) if gated => {
+                    owner_session
+                        .queues
+                        .outbound
+                        .borrow_mut()
+                        .push_back(SyncMessage::Fate {
+                            tx,
+                            through: self.db.seq_high_water(),
+                            result: Err(WireError::Rejected(
+                                "permissions_head_missing: no published permissions head"
+                                    .to_owned(),
+                            )),
+                        });
+                }
+                Ok(
+                    message @ (SyncMessage::Subscribe { .. }
+                    | SyncMessage::Unsubscribe { .. }
+                    | SyncMessage::Fetch { .. }
+                    | SyncMessage::Hold { .. }),
+                ) if gated => owner_session.held.push_back(message),
                 Ok(message) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
@@ -951,6 +1018,18 @@ impl Owner {
                     self.close_session(session);
                     return;
                 }
+            }
+        }
+    }
+
+    /// The permissions head is published: reads held meanwhile are served,
+    /// ahead of anything that arrived after them.
+    fn release_held_reads(&mut self) {
+        self.awaiting_permissions = false;
+        for session in self.sessions.values_mut() {
+            let mut inbound = session.queues.inbound.borrow_mut();
+            for message in std::mem::take(&mut session.held).into_iter().rev() {
+                inbound.push_front(message);
             }
         }
     }
@@ -1053,6 +1132,7 @@ impl Owner {
             schema: id,
         };
         self.catalogue.persist()?;
+        self.release_held_reads();
         Ok(id)
     }
 
@@ -1073,6 +1153,23 @@ impl Owner {
                 self.catalogue
                     .admit_lens(publication.schema.id, predecessor.lens.clone());
             }
+        }
+        // Published versions that were never made current stay readable by
+        // the clients that declare them.
+        let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
+        lineages.sort_by_key(|(sequence, _)| *sequence);
+        for (_, publication) in lineages {
+            let id = publication.schema.id;
+            if self.catalogue.schemas.contains_key(&id) {
+                continue;
+            }
+            let schema = publication.schema.schema.clone();
+            block_on(
+                self.db
+                    .admit_schema_with_lenses(schema.clone(), &self.catalogue.lenses_for(id)),
+            )
+            .map_err(|error| error.to_string())?;
+            self.catalogue.schemas.insert(id, schema);
         }
         self.catalogue.snapshot = snapshot;
         self.catalogue.persist()

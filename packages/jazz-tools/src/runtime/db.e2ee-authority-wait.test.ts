@@ -25,10 +25,10 @@ it("confirms exclusive writes at the global authority and preserves callback res
     });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     await db.all(app.epochs, { tier: "remote" });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     tx.insert(app.epochs, { generation: 1 });
     await expect(tx.commit().wait({ tier: "global" })).resolves.toBeUndefined();
-    const result = await db.exclusiveTransaction((scope) =>
+    const result = await db.serializableTransaction((scope) =>
       scope.insert(app.epochs, { generation: 2 }),
     );
     await expect(result.wait({ tier: "global" })).resolves.toMatchObject({ generation: 2 });
@@ -50,11 +50,11 @@ it.each(["explicit", "callback", "mapped"] as const)(
       await db.all(app.epochs, { tier: "local-first" });
       const handle = await (async () => {
         if (kind === "explicit") {
-          const tx = db.beginExclusiveTransaction();
+          const tx = db.beginSerializableTransaction();
           tx.insert(app.epochs, { generation: 1 });
           return tx.commit();
         }
-        const result = await db.exclusiveTransaction((tx) =>
+        const result = await db.serializableTransaction((tx) =>
           tx.insert(app.epochs, { generation: 1 }),
         );
         return kind === "mapped" ? result.mapValue((row) => row.generation) : result;
