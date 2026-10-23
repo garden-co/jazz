@@ -1433,12 +1433,12 @@ impl WasmDb {
         })
     }
 
-    /// The optimistic in-memory side of a browser client/worker pair needs
-    /// the relay tier, which is not built on SQLite yet.
+    /// The optimistic in-memory side of a browser client/worker pair: its
+    /// subscriptions open with the worker's answer.
     #[wasm_bindgen(js_name = setNonDurableClient)]
     pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
-        self.open_inner()?;
-        Err(not_supported("a non-durable client over a relaying worker"))
+        self.binding()?.set_non_durable_client();
+        Ok(())
     }
 
     /// Report what the host knows about the path to the authoritative server

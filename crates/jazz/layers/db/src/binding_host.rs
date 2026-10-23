@@ -1301,6 +1301,14 @@ impl Binding {
         Ok(result?)
     }
 
+    /// Make this store the optimistic, non-durable foreground of a durable
+    /// relay (a browser tab over its worker): its store starts empty, so
+    /// every subscription's opening waits for the relay's answer.
+    pub fn set_non_durable_client(&self) {
+        self.db.set_non_durable_client();
+        self.hooks.progress.wake_all();
+    }
+
     /// Report the path to the authoritative server (`"none" | "attempting"
     /// | "live" | "failed"`, or the TypeScript aliases).
     pub fn set_remote_link_hint(&self, state: &str) -> HostResult<()> {
