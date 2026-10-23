@@ -19,6 +19,26 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Query, what.to_string())
 }
 
+/// One-row queries through the connection's statement cache. jazz-db asks
+/// the same few shapes per row (a row's state, an interned author), so
+/// re-parsing each one costs more than running it.
+pub(crate) trait CachedRow {
+    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+}
+
+impl CachedRow for rusqlite::Connection {
+    fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.prepare_cached(sql)?.query_row(params, f)
+    }
+}
+
 pub(crate) fn storage(error: rusqlite::Error) -> Error {
     // Only the large-value collation and functions interrupt a statement,
     // when a chunk it needs is not local (see `crate::large`).
