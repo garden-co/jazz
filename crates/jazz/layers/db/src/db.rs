@@ -4635,7 +4635,7 @@ impl TxRef<'_> {
             Db::remote_shape(&prepared.query)?;
             let through = self
                 .db
-                .fetch(prepared, at, include_deleted, None, &|| false)
+                .fetch(prepared, at, include_deleted, None, None)
                 .await?;
             if let Some(Batch {
                 kind:

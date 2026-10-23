@@ -479,3 +479,66 @@ fn a_remote_read_fails_once_its_coverage_budget_is_spent_unanswered() {
     rows.sort();
     assert_eq!(rows, all_rows());
 }
+
+/// A client on a schema version the server has not admitted is told so:
+/// a Remote read that needs the server's coverage fails with the reason
+/// at once instead of waiting out its budget.
+#[test]
+fn a_remote_read_on_an_unadmitted_schema_version_fails_with_the_reason() {
+    let server = seeded_server();
+    let draft = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("items")
+                    .column("label", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("controls")
+                    .column("value", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let client = block_on(Db::open(DbConfig::new(
+        draft,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x77; 16]),
+            author: AuthorSubject::for_test_bytes([0x77; 16]),
+        },
+    )))
+    .expect("open client");
+    connect(&client, &server);
+    let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let read = client.all_serialized_query(
+        &bytes,
+        ReadOpts {
+            tier: jazz::db::ReadTier::Remote,
+            ..ReadOpts::default()
+        },
+        None,
+        None,
+        None,
+        true,
+        || false,
+        |attachment| client.detach_query(attachment),
+    );
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    let mut turns = 0;
+    let error = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            break result.expect_err("an unadmitted version cannot be served");
+        }
+        turns += 1;
+        assert!(turns < MAX_TURNS, "the read waited instead of failing");
+        turn(&client, Some(&server));
+    };
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema);
+    assert!(
+        error
+            .message
+            .contains("awaiting published catalogue admission"),
+        "{error:?}"
+    );
+}
