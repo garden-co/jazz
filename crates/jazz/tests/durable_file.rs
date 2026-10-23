@@ -139,6 +139,43 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
     db.abandon_serializable_handle(open).unwrap();
 }
 
+/// The page size in a SQLite file's header (bytes 16-17; 1 means 65536).
+fn header_page_size(path: &Path) -> u32 {
+    let header = std::fs::read(path).unwrap();
+    match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65536,
+        size => u32::from(size),
+    }
+}
+
+#[test]
+fn a_new_file_takes_the_page_size_and_an_existing_one_keeps_its_own() {
+    let large = FileOptions {
+        page_size: Some(65536),
+        ..FileOptions::default()
+    };
+    let path = scratch("page-size");
+    {
+        let db = block_on(Db::open_at(config(1), &path, large.clone())).unwrap();
+        block_on(db.insert("items", item(1), Default::default())).unwrap();
+    }
+    assert_eq!(header_page_size(&path), 65536);
+
+    // A file created at the default size keeps it when reopened with another.
+    let path = scratch("page-size-existing");
+    {
+        let db = open_file(&path, 1);
+        block_on(db.insert("items", item(1), Default::default())).unwrap();
+    }
+    let default_size = header_page_size(&path);
+    assert_ne!(default_size, 65536);
+    let db = block_on(Db::open_at(config(1), &path, large)).unwrap();
+    assert_eq!(count(&db), 1);
+    block_on(db.insert("items", item(2), Default::default())).unwrap();
+    drop(db);
+    assert_eq!(header_page_size(&path), default_size);
+}
+
 const CHILD: &str = "JAZZ_SQLITE_CRASH_CHILD";
 
 /// Child process body: commit `committed` single writes, then open a Jazz

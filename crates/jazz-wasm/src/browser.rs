@@ -159,6 +159,10 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
                 FileOptions {
                     vfs: Some(IDB_VFS),
                     journal: Journal::Memory,
+                    // Each page is one IndexedDB record, and opening reads
+                    // them all: few large records load far faster than
+                    // many small ones.
+                    page_size: Some(65536),
                     ..FileOptions::default()
                 },
             )
