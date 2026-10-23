@@ -1720,12 +1720,12 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
-    /// The optimistic in-memory side of a client/worker pair needs the relay
-    /// tier, which is not built on SQLite yet.
+    /// The optimistic in-memory side of a client/worker pair: its
+    /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]
     pub fn set_non_durable_client(&self) -> js::Result<()> {
-        self.open_inner()?;
-        Err(not_supported("a non-durable client over a relaying worker").into())
+        self.binding()?.set_non_durable_client();
+        Ok(())
     }
 
     /// Report what the host knows about the path to the authoritative server
