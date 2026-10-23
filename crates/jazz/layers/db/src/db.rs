@@ -47,9 +47,9 @@ use crate::values::{
     AuthorKey, Schema, Sql, Table, author_key, from_sql, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
-    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
+    Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, QueryAttachment,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
