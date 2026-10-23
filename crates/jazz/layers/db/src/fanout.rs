@@ -114,6 +114,10 @@ pub struct FanoutStats {
     pub shared_joins: u64,
     pub woken: u64,
     pub skipped: u64,
+    /// Woken groups that applied their root rows by re-checking ids.
+    pub rechecked: u64,
+    /// Woken groups that re-ran their query and diffed the whole result.
+    pub reran: u64,
 }
 
 #[derive(Default)]
@@ -630,7 +634,11 @@ impl Inner {
             let mut group = group.borrow_mut();
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
-                self.refresh_group(&mut group, ids.as_ref());
+                if self.refresh_group(&mut group, ids.as_ref()) {
+                    self.fan.stats.reran += 1;
+                } else {
+                    self.fan.stats.rechecked += 1;
+                }
             }
             if let Some(changed) = targets.remove(&gid) {
                 refresh_includes(&mut group, &changed);
@@ -887,11 +895,13 @@ impl Inner {
                     previous_index: None,
                     index,
                 }),
-                // A row whose order key moved is reported even when its
-                // shown cells did not change: it changed place.
+                // A row whose order key moved, or that a same-value write
+                // gave a newer version, is reported even when its shown
+                // cells did not change.
                 Some((previous, prior, prior_key))
                     if prior.cells != row.cells
                         || prior.deleted != row.deleted
+                        || new_version(prior, row)
                         || prior_key != key =>
                 {
                     updated.push(SubscriptionOutputRow {
@@ -1117,17 +1127,22 @@ impl Inner {
         }
     }
 
-    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) {
+    /// Bring a group's result up to date; true when it re-ran the query.
+    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
-                Some(Ok(Some(event))) => return group.push(event),
-                Some(Ok(None)) => return,
+                Some(Ok(Some(event))) => {
+                    group.push(event);
+                    return false;
+                }
+                Some(Ok(None)) => return false,
                 // Missing chunks: the full run below decides to wait.
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
-                    return group.push(SubscriptionEvent::Rejected {
+                    group.push(SubscriptionEvent::Rejected {
                         reason: error.to_string(),
                     });
+                    return false;
                 }
                 None => {}
             }
@@ -1136,14 +1151,14 @@ impl Inner {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
-                return;
+                return true;
             }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
                     reason: error.to_string(),
                 };
                 group.push(event);
-                return;
+                return true;
             }
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
@@ -1158,6 +1173,7 @@ impl Inner {
         group.rows = rows;
         group.keys.clear();
         self.read_keys(group);
+        true
     }
 
     /// Reads the sort keys of a re-checkable group whose order is not
@@ -1219,7 +1235,10 @@ impl Group {
 /// single-table query, unbounded or a first page, (no joins, arrays, required includes,
 /// aggregates, windows), outside branch views and cuts, whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
-/// rows of the same table would let one row's change move another).
+/// rows of the same table would let one row's change move another). A
+/// synced read (`members_only`) qualifies: whether the server lists a row
+/// is a fact about that row alone, and listing or unlisting it reports the
+/// row as changed.
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
     !is_history_table(&query.table)
         && query.offset == 0
@@ -1232,7 +1251,6 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()
-        && !read.members_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
 }
