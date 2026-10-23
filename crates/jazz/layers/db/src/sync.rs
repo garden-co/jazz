@@ -396,6 +396,13 @@ pub enum SyncMessage {
         through: u64,
         rows: Vec<[u8; 16]>,
     },
+    /// A `Subscribe` or `Fetch` the server cannot serve, with why: the
+    /// read ends with this error instead of waiting for an answer.
+    Refused {
+        id: u64,
+        code: ErrorCode,
+        message: String,
+    },
     Fate {
         tx: u64,
         through: u64,
@@ -457,6 +464,8 @@ pub(crate) struct Remote {
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
     pub(crate) answered: Rc<StdCell<bool>>,
+    /// Why the server refused this query, once it has.
+    pub(crate) refused: Rc<RefCell<Option<Error>>>,
     /// The server seq this query's result was last settled through.
     through: Option<u64>,
     /// Resubscribed with `since`: on its opening, fetch result rows the
@@ -499,7 +508,7 @@ pub(crate) struct Client {
     pub(crate) known: u64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
-    answers: HashMap<u64, Option<(u64, Vec<[u8; 16]>)>>,
+    answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// Large-value nodes asked for and not yet answered.
@@ -2474,23 +2483,25 @@ impl Db {
         Ok(())
     }
 
-    /// Attach a remote query (refcounted per query and binding).
+    /// Attach a remote query (refcounted per query and binding): whether
+    /// the server answered it, and why it refused it.
     pub(crate) fn attach_remote(
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
-    ) -> Option<Rc<StdCell<bool>>> {
+    ) -> Option<(Rc<StdCell<bool>>, Rc<RefCell<Option<Error>>>)> {
         let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
         let key = remote_key(&query, &prepared.binding, include_deleted);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
-            return Some(remote.answered.clone());
+            return Some((remote.answered.clone(), remote.refused.clone()));
         }
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
+        let refused = Rc::new(RefCell::new(None));
         client.outbox.push(SyncMessage::Subscribe {
             id,
             query: query.clone().into_owned(),
@@ -2507,12 +2518,13 @@ impl Db {
                 binding: prepared.binding.clone(),
                 include_deleted,
                 answered: answered.clone(),
+                refused: refused.clone(),
                 through: None,
                 resumed: false,
             },
         );
         client.remote_ids.insert(id, key);
-        Some(answered)
+        Some((answered, refused))
     }
 
     pub(crate) fn detach_remote(
@@ -2544,19 +2556,21 @@ impl Db {
 
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
-    /// answer is complete through, if it answered.
+    /// answer is complete through, if it answered, or why it refused.
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
         deadline: Option<Instant>,
-    ) -> Option<u64> {
+    ) -> Result<Option<u64>, Error> {
         let id = {
             let mut inner = self.inner.borrow_mut();
-            let client = inner.client.as_mut()?;
+            let Some(client) = inner.client.as_mut() else {
+                return Ok(None);
+            };
             if !may_wait(client.hint.get()) {
-                return None;
+                return Ok(None);
             }
             let id = client.next_id;
             client.next_id += 1;
@@ -2573,14 +2587,13 @@ impl Db {
         poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let client = inner.client.as_mut().expect("client");
-            if let Some(Some((through, _))) = client.answers.get(&id) {
-                let through = *through;
-                client.answers.remove(&id);
-                return Poll::Ready(Some(through));
+            if let Some(Some(_)) = client.answers.get(&id) {
+                let answer = client.answers.remove(&id).flatten().expect("answered");
+                return Poll::Ready(answer.map(|(through, _)| Some(through)));
             }
             if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
                 client.answers.remove(&id);
-                return Poll::Ready(None);
+                return Poll::Ready(Ok(None));
             }
             Poll::Pending
         })
@@ -2960,7 +2973,18 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some((through, rows));
+                            *slot = Some(Ok((through, rows)));
+                        }
+                    }
+                    SyncMessage::Refused { id, code, message } => {
+                        let client = inner.client.as_mut().expect("client");
+                        let error = Error::new(code, message);
+                        if let Some(slot) = client.answers.get_mut(&id) {
+                            *slot = Some(Err(error));
+                        } else if let Some(key) = client.remote_ids.get(&id)
+                            && let Some(remote) = client.remote.get(key)
+                        {
+                            *remote.refused.borrow_mut() = Some(error);
                         }
                     }
                     SyncMessage::Fate {
@@ -3312,7 +3336,25 @@ impl Db {
                         break;
                     }
                 }
-                self.serve(index, message)?;
+                // A read the server cannot serve is refused to the client,
+                // which would otherwise wait on it.
+                let read = match &message {
+                    SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
+                    _ => None,
+                };
+                match (self.serve(index, message), read) {
+                    (Ok(()), _) => {}
+                    (Err(error), Some(id)) => {
+                        self.inner.borrow_mut().sessions[index]
+                            .outbox
+                            .push(SyncMessage::Refused {
+                                id,
+                                code: error.code,
+                                message: error.message,
+                            });
+                    }
+                    (Err(error), None) => return Err(error),
+                }
             }
         }
         self.notify();
@@ -4392,7 +4434,7 @@ impl Db {
             if let Some(deadline) = wait {
                 Self::remote_shape(&prepared.query)?;
                 self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
-                    .await;
+                    .await?;
             }
         }
         let roots = self

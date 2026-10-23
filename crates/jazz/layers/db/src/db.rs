@@ -250,6 +250,8 @@ pub struct SubscriptionStream {
     /// A withheld opening, released as one reset of the current rows.
     gate: Option<sync::Gate>,
     group: Weak<RefCell<fanout::Group>>,
+    /// Why the server refused the remote read, once it has; reported once.
+    refused: Option<Rc<RefCell<Option<Error>>>>,
     /// The remote attachment to release on drop.
     remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>, bool)>,
 }
@@ -265,6 +267,15 @@ impl Drop for SubscriptionStream {
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
+        let reason = self
+            .refused
+            .as_ref()
+            .and_then(|refused| refused.borrow().as_ref().map(Error::to_string));
+        if let Some(reason) = reason {
+            self.refused = None;
+            self.gate = None;
+            return Some(SubscriptionEvent::Rejected { reason });
+        }
         if let Some(gate) = &self.gate {
             if !gate.open() {
                 return None;
@@ -1020,12 +1031,12 @@ impl Db {
             None
         };
         let settled = match (&remote, client) {
-            (Some(answered), _) => sync::SettledBy::Remote(answered.clone()),
+            (Some((answered, _)), _) => sync::SettledBy::Remote(answered.clone()),
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always,
         };
         let gate = match (&remote, self.link_hint()) {
-            (Some(answered), Some(hint)) => {
+            (Some((answered, _)), Some(hint)) => {
                 let deadline = match (opts.tier, &opts.first_load) {
                     (ReadTier::Remote, _) => Some(None),
                     (_, FirstLoad::WaitForRemote { timeout_ms })
@@ -1056,6 +1067,7 @@ impl Db {
             dropped: inner.fan.dropped.clone(),
             gate,
             group,
+            refused: remote.as_ref().map(|(_, refused)| refused.clone()),
             remote: remote.map(|_| {
                 (
                     self.inner.clone(),
@@ -4278,7 +4290,7 @@ impl TxRef<'_> {
         {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
-            let through = self.db.fetch(prepared, at, false, None).await;
+            let through = self.db.fetch(prepared, at, false, None).await?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {

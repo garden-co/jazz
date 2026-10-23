@@ -2889,12 +2889,9 @@ impl Ctx<'_> {
                 }
             }
         }
-        let tie = match order.last().map(|key| key.direction) {
-            Some(OrderDirection::Desc) => "DESC",
-            _ => "ASC",
-        };
-        keys.push(format!("{alias}.id {tie}"));
-        ranked.push(format!("{alias}.id {tie}"));
+        // Ties break by ascending row id, whatever the keys' directions.
+        keys.push(format!("{alias}.id ASC"));
+        ranked.push(format!("{alias}.id ASC"));
         Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
     }
 }
