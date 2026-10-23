@@ -115,7 +115,7 @@ same conformance scenarios with topology-specific configuration only.**
   the protocol and transaction machinery stay shared.
 - **Conformance matrix.** Add black-box tests that run the same API scenarios
   against Rust-only, WASM, NAPI, browser-worker, local Core server, and local-relay
-  layouts. Cover mergeable/exclusive transactions, RLS,
+  layouts. Cover mergeable/serializable transactions, RLS,
   subscription deltas, branch views, and lenses.
 - **Operational surface.** Standardize config, logging, metrics, health checks,
   storage migration reporting, sync lag, full-recompute counters, and protocol

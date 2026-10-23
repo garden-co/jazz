@@ -15,7 +15,7 @@ class PreparationSource extends DefaultRuntimeSource {
   }
 }
 
-it.each(["mergeable", "exclusive"] as const)(
+it.each(["mergeable", "serializable"] as const)(
   "keeps generated IDs native for immediate %s transaction inserts without dependencies",
   async (kind) => {
     const app = s.defineApp({
@@ -37,7 +37,8 @@ it.each(["mergeable", "exclusive"] as const)(
     );
     try {
       await db.one(app.plain);
-      const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+      const tx =
+        kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
       const insert = vi.spyOn(source.client, "insertInternal");
       const plain = tx.insert(app.plain, { title: "plain" });
       const transformed = tx.insert(app.transformed, { title: "Mixed" });

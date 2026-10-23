@@ -33,7 +33,7 @@ function describeCause(cause: unknown): string {
 
 /**
  * A write was applied locally but rejected when it reached the requested
- * durability tier (for example by permissions or exclusive-transaction
+ * durability tier (for example by permissions or serializable-transaction
  * validation at the authority). The local write has already been undone.
  */
 export class JazzWriteRejected extends Data.TaggedError("JazzWriteRejected")<{

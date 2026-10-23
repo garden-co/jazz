@@ -3,8 +3,8 @@ use jazz_testkit as support;
 
 use std::time::{Duration, Instant};
 
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::query::{Aggregate, AggregateFunction, OrderDirection};
+use jazz::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::row_input;
 use jazz::tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, Row, RowDescriptor,
@@ -269,7 +269,7 @@ impl ObservedSubscription {
         // Keep the raw compiler-record fallback for non-testing consumers
         // that do not attach decoded public fields.
         let query_fields = self.descriptor.fields();
-        let output_wire_type = |field: &jazz::groove::records::DescriptorField,
+        let output_wire_type = |field: &jazz::records::DescriptorField,
                                 function: AggregateFunction| {
             if function == AggregateFunction::Count {
                 field.value_type.clone()

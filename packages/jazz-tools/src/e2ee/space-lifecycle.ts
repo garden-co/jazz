@@ -1,7 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import {
   beginDbTransactionAfter,
-  exclusiveE2eeTransaction,
+  serializableE2eeTransaction,
   insertInitializationRow,
   prepareDbTransaction,
 } from "../runtime/db.js";
@@ -109,7 +109,7 @@ function spaceRootId(address: Address): string {
 export class SpaceInitialisationRequired extends Error {
   constructor() {
     super(
-      "Initialising an encryption space requires beginExclusiveTransaction() or exclusiveTransaction()",
+      "Initialising an encryption space requires beginSerializableTransaction() or serializableTransaction()",
     );
     this.name = "SpaceInitialisationRequired";
   }
@@ -274,11 +274,11 @@ export class Spaces {
   async assertWriteTransaction<T, Init>(
     scope: TableProxy<T, Init>,
     identifier: string,
-    kind: "mergeable" | "exclusive",
+    kind: "mergeable" | "serializable",
   ): Promise<void> {
     const address = await this.address(scope, identifier, true);
     const pending = await this.device?.journal?.space(spaceRootId(address));
-    if (pending && kind !== "exclusive") throw new ProvisionalSpaceRequiresExclusive();
+    if (pending && kind !== "serializable") throw new ProvisionalSpaceRequiresExclusive();
   }
 
   private async address<T, Init>(
@@ -303,7 +303,7 @@ export class Spaces {
   }> {
     await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
     await this.groups?.warmMembership({ accountId: this.accountId });
-    const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+    const read = await serializableE2eeTransaction(this.db, async (tx) => {
       const device = requireActiveDevice ? await this.requireDevice().states(tx) : undefined;
       const own =
         device?.publicHistory ??
@@ -390,7 +390,7 @@ export class Spaces {
               recoveryRootId,
             });
       if (query) await this.db.all(query, { tier: "remote" });
-      const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const read = await serializableE2eeTransaction(this.db, async (tx) => {
         const device = restore ? await this.requireDevice().states(tx) : undefined;
         const own =
           device?.publicHistory ??
@@ -700,7 +700,7 @@ export class Spaces {
     try {
       const secret = runtimeRandomBytes(32);
       try {
-        const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
           return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
         });
         // Global acceptance includes the journal's initial recipient handoff.
@@ -893,7 +893,7 @@ export class Spaces {
     recipientIds?: readonly string[],
     seed?: InitialSpaceSeed,
   ): Promise<void> {
-    if (tx.kind !== "exclusive")
+    if (tx.kind !== "serializable")
       throw new Error("E2EE initialisation requires an exclusive transaction");
     const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
     const address = await this.address(scope, identifier, retainedScopeId !== null);
@@ -1369,7 +1369,7 @@ export class Spaces {
           throw new E2eeDataError("key-unavailable");
         return this.initialEligibility(tx, device.id, recipients);
       };
-      const read = await exclusiveE2eeTransaction(this.db, readInitial);
+      const read = await serializableE2eeTransaction(this.db, readInitial);
       const eligibility = await read.wait({ tier: "local" });
       const records = await this.initialRecords(
         address,
@@ -1572,7 +1572,7 @@ export class Spaces {
     await this.warm(observed, [recipientId]);
     const device = await this.loadDevice();
     try {
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         // Envelopes do not establish membership authority. Reading them here
         // would make background delivery unnecessarily conflict with a grant.
         const snapshot = await this.readSnapshot(tx, address, observed.id, [recipientId], false);
@@ -2546,7 +2546,7 @@ export class Spaces {
   ) {
     const secret = runtimeRandomBytes(32);
     try {
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const snapshot = await this.readSnapshot(tx, address, expected.id);
         const state = await this.validate(snapshot, address);
         if (state.keyRoot.epochId !== expected.epochId || state.root.id !== expected.id)
@@ -2767,7 +2767,7 @@ export class Spaces {
     secret: Uint8Array | undefined,
     device: LocalDevice,
   ) {
-    const delivery = await exclusiveE2eeTransaction(this.db, async (tx) =>
+    const delivery = await serializableE2eeTransaction(this.db, async (tx) =>
       this.prepareDelivery(
         tx,
         await this.readSnapshot(tx, address, expected.id),

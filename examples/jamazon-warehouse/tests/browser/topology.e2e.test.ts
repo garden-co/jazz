@@ -203,7 +203,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 () => {
                   // Do not await here: the scheduler deterministically starts
                   // both duplicated deliveries before either preflight or
-                  // exclusive transaction can settle. This is the real
+                  // serializable transaction can settle. This is the real
                   // same-key overlap that a double submit or retry can cause.
                   duplicateCheckouts.push(
                     purchase(publicDb(owner), {
@@ -277,7 +277,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
 
               // This is an app-owned checkout relay boundary, not an attempt to
               // instrument Jazz's transport.  The first handoff is dropped and
-              // the retry reaches the same exclusive checkout with the same
+              // the retry reaches the same serializable checkout with the same
               // request key.  It models the important adopter-visible client ↔
               // core failure mode without coupling this example to runtime
               // protocol details.

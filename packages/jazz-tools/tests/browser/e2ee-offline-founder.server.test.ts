@@ -115,7 +115,7 @@ it("automatically creates and reopens a fresh founder's encrypted text and image
         },
       );
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(
       app.projects,
       { title: "Created entirely offline" },

@@ -53,11 +53,11 @@ the turn's row, like every other open client.
 
 **Streaming is a lease write.** The runner (`src/agent/runner.ts`) collects
 tokens while its previous write is in flight and writes each batch in an
-exclusive transaction that first checks the turn is still `streaming` under
+serializable transaction that first checks the turn is still `streaming` under
 this runner's lease:
 
 ```ts
-const write = await db.exclusiveTransaction(async (tx) => {
+const write = await db.serializableTransaction(async (tx) => {
   const turn = await tx.one(app.turns.where({ id: turnId }));
   if (turn?.runnerId !== lease.id || turn.status !== "streaming") return false;
   const end = turn.body.length;
@@ -86,7 +86,7 @@ kind of lease transaction), so they show up in `ChatToolCalls` while they run.
 **Durable execution.** The server writes with backend authority; permissions
 let a client write only its own user turns and attachments, never an agent
 reply. Queueing a reply and moving the conversation's head to it happen in one
-exclusive transaction. A runner claims the turn with a lease id of its own
+serializable transaction. A runner claims the turn with a lease id of its own
 (`runnerId`). Everything it writes afterwards (body batches, tool calls, a
 heartbeat every 3 seconds when nothing else was written, and the final
 status) goes through that lease transaction, one at a time. Each commits only
@@ -97,7 +97,7 @@ runner that was taken over can't land a late write.
 `instrumentation.ts` checks the provider and starts a sweeper when the server
 boots: a `streaming` turn whose heartbeat is older than 15 seconds lost its
 process, and a `queued` turn that no runner claimed within 15 seconds never
-started; both are marked `interrupted` (in an exclusive transaction, so two
+started; both are marked `interrupted` (in a serializable transaction, so two
 servers never disagree). The conversation then offers **Resume**, which claims
 the turn again and continues in place, or **Regenerate**. The scripted agent is
 deterministic, so resuming replays it and skips what was already written; Claude

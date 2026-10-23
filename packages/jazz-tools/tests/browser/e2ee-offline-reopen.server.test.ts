@@ -62,7 +62,7 @@ it("reopens accepted encrypted data from IndexedDB and updates it offline in Chr
       },
     };
     db = await createDb(config);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Persistent offline project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Before reopening" });
     await tx.commit().wait({ tier: "global" });

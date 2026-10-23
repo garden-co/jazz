@@ -373,7 +373,7 @@ export class NativeForegroundDb {
     return this;
   }
 
-  beginTransaction(openTransactionId: string, kind: "mergeable" | "exclusive"): void {
+  beginTransaction(openTransactionId: string, kind: "mergeable" | "serializable"): void {
     this.assertOpen();
     if (this.transactions.has(openTransactionId)) {
       throw new Error(
@@ -744,7 +744,7 @@ export class NativeForegroundDb {
           attach: async (openTransactionId: string): Promise<void> => {
             if (consumed) throw new Error("staged streaming mutation is closed");
             const transaction = this.openTransaction(openTransactionId, "attach staged upload");
-            if (transaction.kind !== "exclusive")
+            if (transaction.kind !== "serializable")
               throw new Error("Staged streaming mutation requires an exclusive transaction");
             consumed = true;
             const attached = await this.completeMutationOperation(
@@ -888,7 +888,7 @@ export class NativeForegroundDb {
 
 type NativeForegroundTransaction = {
   handle: number;
-  kind: "mergeable" | "exclusive";
+  kind: "mergeable" | "serializable";
   closed: boolean;
 };
 

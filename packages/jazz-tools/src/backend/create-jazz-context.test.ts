@@ -701,17 +701,17 @@ describe("backend/create-jazz-context", () => {
       expect(mocks.clients[0]!.onMutationError).toHaveBeenCalledTimes(1);
       const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
       const event = (transactionId: string) => ({
-        code: "exclusive_conflict",
-        reason: "Exclusive transaction conflicted with another write",
+        code: "serialization_conflict",
+        reason: "Serializable transaction conflicted with another write",
         transaction: {
           transactionId,
-          kind: "exclusive",
+          kind: "serializable",
           sealed: true,
           latestSettlement: {
             kind: "rejected",
             transactionId,
-            code: "exclusive_conflict",
-            reason: "Exclusive transaction conflicted with another write",
+            code: "serialization_conflict",
+            reason: "Serializable transaction conflicted with another write",
           },
         },
       });
@@ -747,17 +747,17 @@ describe("backend/create-jazz-context", () => {
 
   function mutationErrorEvent(transactionId: string) {
     return {
-      code: "exclusive_conflict",
-      reason: "Exclusive transaction conflicted with another write",
+      code: "serialization_conflict",
+      reason: "Serializable transaction conflicted with another write",
       transaction: {
         transactionId,
-        kind: "exclusive",
+        kind: "serializable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
           transactionId,
-          code: "exclusive_conflict",
-          reason: "Exclusive transaction conflicted with another write",
+          code: "serialization_conflict",
+          reason: "Serializable transaction conflicted with another write",
         },
       },
     };

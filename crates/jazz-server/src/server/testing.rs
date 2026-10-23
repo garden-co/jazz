@@ -4,7 +4,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value as JsonValue, json};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -209,6 +209,7 @@ pub struct JazzServer {
     admin_secret: String,
     backend_secret: String,
     host: IpAddr,
+    client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     embedded_jwks_server: Option<TestJwtIssuer>,
     auth_clock: crate::middleware::auth::AuthClock,
 }
@@ -357,6 +358,7 @@ impl JazzServer {
             admin_secret,
             host,
             backend_secret,
+            client_data_dirs: Mutex::new(Vec::new()),
             embedded_jwks_server: None,
             auth_clock: crate::middleware::auth::AuthClock::default(),
         };
@@ -410,6 +412,34 @@ impl JazzServer {
             TestJwtOptions::default(),
             now,
         )
+    }
+
+    /// A client context for `user_id` with a JWT from the embedded issuer,
+    /// in-memory storage and a fresh data directory kept until the server
+    /// drops.
+    pub fn make_client_context_for_user(
+        &self,
+        schema: Schema,
+        user_id: impl AsRef<str>,
+    ) -> jazz::tools::AppContext {
+        let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
+        let data_dir = client_data_dir.path().to_path_buf();
+        self.client_data_dirs
+            .lock()
+            .expect("lock test client data dirs")
+            .push(client_data_dir);
+        jazz::tools::AppContext {
+            app_id: self.app_id,
+            client_id: None,
+            schema,
+            server_url: self.base_url(),
+            data_dir,
+            storage: jazz::tools::ClientStorage::Memory,
+            account_id: None,
+            jwt_token: Some(self.jwt_for_user(user_id)),
+            backend_secret: Some(self.backend_secret().to_string()),
+            admin_secret: None,
+        }
     }
 
     fn require_built_in_jwt_helpers(&self) {

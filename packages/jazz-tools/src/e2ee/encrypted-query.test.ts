@@ -24,7 +24,7 @@ it("rejects unindexed encrypted null predicates through reads, transactions and 
       if (boundary === "read") {
         await expect(db.all(query, { tier: "local-first" })).rejects.toThrow(message);
       } else if (boundary === "transaction") {
-        const tx = db.beginExclusiveTransaction();
+        const tx = db.beginSerializableTransaction();
         try {
           await expect(tx.all(query, { tier: "local-first" })).rejects.toThrow(message);
         } finally {
@@ -63,7 +63,7 @@ it("rejects ordering by encrypted values through reads, transactions and subscri
       if (boundary === "read") {
         await expect(db.all(query, { tier: "local-first" })).rejects.toThrow(message);
       } else if (boundary === "transaction") {
-        const tx = db.beginExclusiveTransaction();
+        const tx = db.beginSerializableTransaction();
         try {
           await expect(tx.all(query, { tier: "local-first" })).rejects.toThrow(message);
         } finally {
@@ -115,7 +115,7 @@ it("rejects unsupported encrypted predicates in includes through reads, transact
           "Unsupported encrypted query",
         );
       } else if (boundary === "transaction") {
-        const tx = db.beginExclusiveTransaction();
+        const tx = db.beginSerializableTransaction();
         try {
           await expect(tx.all(query, { tier: "local-first" })).rejects.toThrow(
             "Unsupported encrypted query",
