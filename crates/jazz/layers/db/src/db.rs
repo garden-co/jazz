@@ -2105,9 +2105,22 @@ impl Inner {
         key: &[u8],
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
+        self.holds_at(table, row, key, None, policy)
+    }
+
+    /// [`Inner::holds`] with the policy's other rows read as of `cut`; the
+    /// row under check is always its current version.
+    fn holds_at(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding);
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut);
         let condition = policy(&mut ctx)?;
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
@@ -2811,7 +2824,7 @@ impl Inner {
         self.changed
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
-        if let Who::Session(author) = who
+        if let Some(author) = self.checked(who)
             && !self.check(table, row, &key, author, Operation::Insert)?
         {
             return Err(denied(format_args!(
@@ -2823,6 +2836,18 @@ impl Inner {
 
     /// Read-for-write: a hidden row is indistinguishable from an absent one,
     /// and omitted cells must not be merged blind.
+    /// The session a write's operation policies (USING, WITH CHECK,
+    /// INSERT, DELETE) are checked as here: a trusted session's, at the
+    /// authority. A replica checks only that the session may read its
+    /// target ([`Who::Session`]) and leaves the rest to the authority on
+    /// upload: it may lack rows those policies read (hidden from it).
+    fn checked(&self, who: Who) -> Option<AuthorSubject> {
+        match who {
+            Who::Session(author) if self.client.is_none() => Some(author),
+            _ => None,
+        }
+    }
+
     fn authorize_patch(
         &self,
         table: &Table,
@@ -2831,23 +2856,25 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        if let Who::Session(author) = who {
-            if !self.check(table, row, key, *author, Operation::Select)? {
-                return Err(denied(format_args!(
-                    "read policy denied {verb}: the target requires read permission"
-                )));
-            }
-            if !self.check_clause(
+        if let Who::Session(author) = *who
+            && !self.check(table, row, key, author, Operation::Select)?
+        {
+            return Err(denied(format_args!(
+                "read policy denied {verb}: the target requires read permission"
+            )));
+        }
+        if let Some(author) = self.checked(*who)
+            && !self.check_clause(
                 table,
                 row,
                 key,
-                *author,
+                author,
                 table.policies.update.using.as_ref(),
-            )? {
-                return Err(denied(format_args!(
-                    "{verb} policy (USING) denied the target row"
-                )));
-            }
+            )?
+        {
+            return Err(denied(format_args!(
+                "{verb} policy (USING) denied the target row"
+            )));
         }
         Ok(())
     }
@@ -2942,14 +2969,23 @@ impl Inner {
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
         };
-        if let Who::Session(author) = who
-            && !self.check_clause(
-                table,
-                row,
-                &key,
-                author,
-                table.policies.update.with_check.as_ref(),
-            )?
+        // The new row is checked against the other rows as they were
+        // before this transaction, as a policy's subqueries see the
+        // statement's snapshot: a same-table EXISTS compares the new row
+        // with the old one, not with itself.
+        if let Some(author) = self.checked(who)
+            && !{
+                let session = self.session(author);
+                let before = Some(Cut::at(seq.saturating_sub(1)));
+                self.holds_at(table, row, &key, before, |ctx| {
+                    ctx.policy_clause(
+                        table.policies.update.with_check.as_ref(),
+                        table,
+                        "a",
+                        &session,
+                    )
+                })?
+            }
         {
             return Err(denied(format_args!(
                 "{verb} policy (WITH CHECK) denied the new row"
@@ -2993,17 +3029,20 @@ impl Inner {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
         let check = |inner: &Self, key: &[u8], fresh: bool| -> Result<(), Error> {
-            if let Who::Session(author) = who {
-                // Deleting a row this same commit inserted needs no read
-                // permission: nothing persisted is revealed.
-                if !fresh && !inner.check(table, row, key, author, Operation::Select)? {
-                    return Err(denied(
-                        "read policy denied DELETE: the target requires read permission",
-                    ));
-                }
-                if !inner.check(table, row, key, author, Operation::Delete)? {
-                    return Err(denied("DELETE policy denied the target row"));
-                }
+            // Deleting a row this same commit inserted needs no read
+            // permission: nothing persisted is revealed.
+            if let Who::Session(author) = who
+                && !fresh
+                && !inner.check(table, row, key, author, Operation::Select)?
+            {
+                return Err(denied(
+                    "read policy denied DELETE: the target requires read permission",
+                ));
+            }
+            if let Some(author) = inner.checked(who)
+                && !inner.check(table, row, key, author, Operation::Delete)?
+            {
+                return Err(denied("DELETE policy denied the target row"));
             }
             Ok(())
         };
@@ -3091,7 +3130,7 @@ impl Inner {
             Some(false),
             content.is_some(),
         )?;
-        if let Who::Session(author) = who
+        if let Some(author) = self.checked(who)
             && !self.check(table, row, &key, author, Operation::Insert)?
         {
             return Err(denied("RESTORE policy denied the restored row"));
@@ -3669,8 +3708,20 @@ impl StagedOp {
 
     /// Attribute the write to `author` (unchecked, as an uploaded write is
     /// re-applied locally).
-    pub(crate) fn attribute(&mut self, author: AuthorSubject) {
-        let identity = WriteIdentity::Attribution(author);
+    /// Whether the write is a trusted session's: its policies are checked
+    /// as that session at the authority.
+    pub(crate) fn is_session(&self) -> bool {
+        matches!(self.identity(), Some(WriteIdentity::Session(author)) if author != AuthorSubject::SYSTEM)
+    }
+
+    /// Attribute the write to `author`: as its session (`session`), whose
+    /// policies apply, or as provenance only.
+    pub(crate) fn attribute(&mut self, author: AuthorSubject, session: bool) {
+        let identity = if session {
+            WriteIdentity::Session(author)
+        } else {
+            WriteIdentity::Attribution(author)
+        };
         match self {
             StagedOp::Insert(.., o) => o.identity = identity,
             StagedOp::Update(.., o) => o.identity = identity,
