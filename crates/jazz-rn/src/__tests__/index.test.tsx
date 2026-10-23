@@ -293,6 +293,19 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
     Uint8Array.of(34),
   );
   expect(
+    relay.encodeNativeForegroundCommand({ type: "stageStreamingMutation", upload: 128 }),
+  ).toEqual(Uint8Array.of(35, 128, 1));
+  expect(
+    relay.encodeNativeForegroundCommand({
+      type: "attachStagedStreamingMutation",
+      staged: 128,
+      transaction: 300,
+    }),
+  ).toEqual(Uint8Array.of(36, 128, 1, 172, 2));
+  expect(
+    relay.encodeNativeForegroundCommand({ type: "abortStagedStreamingMutation", staged: 128 }),
+  ).toEqual(Uint8Array.of(37, 128, 1));
+  expect(
     relay.encodeNativeForegroundCommand({
       type: "all",
       query: Uint8Array.of(1, 2),

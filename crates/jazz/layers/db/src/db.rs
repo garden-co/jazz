@@ -15,7 +15,7 @@ use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
-use crate::tx::DurabilityTier;
+use crate::tx::{DurabilityTier, Fate, RejectionReason};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
@@ -35,7 +35,7 @@ pub use fanout::FanoutStats;
 mod large_ops;
 pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
-    LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
@@ -116,6 +116,32 @@ impl PreparedQuery {
 
 fn short(hash: blake3::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
+}
+
+/// Application-visible fate and durability for a local write transaction.
+/// Mirrors the existing binding contract; this is not a persisted encoding.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WriteState {
+    pub fate: Fate,
+    pub global_time: Option<jazz_types::time::GlobalTime>,
+    pub durability: DurabilityTier,
+}
+
+impl WriteState {
+    pub(crate) fn rejected(error: &Error, durability: DurabilityTier) -> Self {
+        let reason = match error.code {
+            ErrorCode::TransactionConflict => RejectionReason::SerializableConflict,
+            ErrorCode::WriteRejected if !error.is_apply_time_rejection() => {
+                RejectionReason::AuthorizationDenied
+            }
+            _ => RejectionReason::MalformedCommit(error.message.clone()),
+        };
+        Self {
+            fate: Fate::Rejected(reason),
+            global_time: None,
+            durability,
+        }
+    }
 }
 
 /// Result of a standalone write.
@@ -356,6 +382,9 @@ struct Inner {
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
+    /// Upload leases dropped by capabilities or completed/abandoned batches.
+    /// The queue is separate from the owner borrow, so Drop never re-enters it.
+    upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -886,6 +915,7 @@ impl Db {
                 pending_nodes: Vec::new(),
                 derived: Vec::new(),
                 staging: LargeValueStagingPolicy::default(),
+                upload_cleanup: Rc::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner,
@@ -1375,6 +1405,9 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        if matches!(op.identity(), Some(WriteIdentity::Attribution(_))) {
+            self.inner().require_attribution_backend()?;
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let handle = self.write(&table, |inner, seq| {
@@ -2534,6 +2567,7 @@ impl Inner {
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        self.release_dropped_uploads()?;
         self.conn
             .execute_batch("SAVEPOINT reclaim")
             .map_err(storage)?;
@@ -3810,7 +3844,11 @@ impl Db {
 /// view that staged them) and applied at commit; reads overlay them.
 struct Batch {
     kind: BatchKind,
+    identity: WriteIdentity,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// Hold staged ciphertext until the commit (including its upload record)
+    /// is durable, or the batch is abandoned. Maintenance cannot expire it.
+    uploads: Vec<Rc<large_ops::UploadLease>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -3821,6 +3859,15 @@ struct Batch {
 pub(crate) struct LargeEdits {
     pub(crate) derived: Vec<jazz_types::large_values::LargeValueRef>,
     pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
+}
+
+impl Batch {
+    fn reader(&self) -> Option<AuthorSubject> {
+        match who(self.identity) {
+            Who::Session(author) => Some(author),
+            Who::Local | Who::Attributed(_) => None,
+        }
+    }
 }
 
 enum BatchKind {
@@ -3975,6 +4022,17 @@ impl Inner {
         self.apply_as(op, who, seq)
     }
 
+    /// Attributed writes require a SYSTEM backend. On a replica the authority
+    /// additionally requires a trusted connection before accepting attribution.
+    fn require_attribution_backend(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
+            return Err(unsupported(
+                "backend-attributed writes outside a SYSTEM SQLite backend",
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
@@ -4112,6 +4170,34 @@ impl Db {
         self.begin(id, BatchKind::Mergeable)
     }
 
+    /// Open a mergeable batch whose reads and writes use an authenticated
+    /// session. Replica commits are checked by the authority under that session.
+    pub async fn begin_mergeable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_mergeable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Session(author);
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend mergeable batch with separate row provenance.
+    /// Replica attribution still requires a trusted connection to the authority.
+    /// Staged upload attachment continues to require a serializable batch.
+    pub async fn begin_mergeable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_mergeable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Attribution(author);
+        Ok(())
+    }
+
     /// A serializable transaction: snapshot reads, validated at commit.
     /// On a client the snapshot is the server seq the replica is known
     /// complete through.
@@ -4135,6 +4221,40 @@ impl Db {
         )
     }
 
+    /// Open a serializable batch for an authenticated session.
+    /// The identity governs its reads, every write and staged upload attachment.
+    /// A replica's authority checks the transport identity; only a trusted
+    /// backend link may submit a different session's writes and claims.
+    pub async fn begin_serializable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_serializable(id).await?;
+        self.inner
+            .borrow_mut()
+            .batches
+            .get_mut(&id)
+            .expect("opened")
+            .identity = WriteIdentity::Session(author);
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend batch with separate row provenance.
+    /// Upload capabilities must bind the same author. On a replica, attribution
+    /// is accepted only over a trusted backend connection to the authority.
+    pub async fn begin_serializable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_serializable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Attribution(author);
+        Ok(())
+    }
+
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.batches.contains_key(&id) {
@@ -4144,7 +4264,9 @@ impl Db {
             id,
             Batch {
                 kind,
+                identity: WriteIdentity::Database,
                 ops: Vec::new(),
+                uploads: Vec::new(),
                 edits: LargeEdits::default(),
             },
         );
@@ -4187,6 +4309,9 @@ impl Db {
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        if !matches!(batch.kind, BatchKind::Mergeable) {
+            return Err(rejected(format!("transaction {id:?} is not mergeable")));
+        }
         self.commit_ops(&batch, sync::Kind::Mergeable)
     }
 
@@ -4243,7 +4368,7 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, None, &spec)?;
+                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
@@ -4297,7 +4422,7 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
+                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -4321,7 +4446,7 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            let applied = inner.apply_with_edits(ops, &batch.edits, ops.len(), seq);
+            let applied = inner.apply_with_edits(ops, &batch.edits, 0, seq);
             if let Err(error) = applied {
                 inner.rollback_savepoint("commit_batch").map_err(storage)?;
                 inner.changed.borrow_mut().truncate(mark);
@@ -4389,6 +4514,23 @@ impl Db {
     }
 
     fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
+        {
+            let inner = self.inner.borrow();
+            let batch = inner
+                .batches
+                .get(&id)
+                .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+            let identity = op.identity().unwrap_or(WriteIdentity::Database);
+            if identity != WriteIdentity::Database && identity != batch.identity {
+                return Err(rejected("write identity differs from its transaction"));
+            }
+            if let WriteIdentity::Session(author) = batch.identity {
+                op.attribute(author, true);
+            } else if let WriteIdentity::Attribution(author) = batch.identity {
+                inner.require_attribution_backend()?;
+                op.attribute(author, false);
+            }
+        }
         // A counter write's change is from what the transaction sees.
         self.in_overlay(id, None, |inner, _| inner.counter_deltas(&mut op))?;
         // Validate against the overlay now, so errors surface at the call.
@@ -4442,10 +4584,12 @@ impl Db {
         include_deleted: bool,
     ) -> Result<(), Error> {
         let mut inner = self.inner();
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, own, .. },
-            ..
-        }) = inner.batches.get(&id)
+        let Some(
+            batch @ Batch {
+                kind: BatchKind::Serializable { snapshot, own, .. },
+                ..
+            },
+        ) = inner.batches.get(&id)
         else {
             return Ok(());
         };
@@ -4454,7 +4598,7 @@ impl Db {
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = inner.read_versions(prepared, None, &read)?;
+        let rows = inner.read_versions(prepared, batch.reader(), &read)?;
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, .. },
             ..
@@ -4626,16 +4770,17 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
+            let reader = inner.batches.get(&self.id).and_then(Batch::reader);
             let roots = inner.run(
                 prepared,
-                None,
+                reader,
                 &ReadSpec {
                     include_deleted,
                     cut,
                     ..ReadSpec::default()
                 },
             )?;
-            inner.nest_relations(prepared, None, roots)
+            inner.nest_relations(prepared, reader, roots)
         })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)

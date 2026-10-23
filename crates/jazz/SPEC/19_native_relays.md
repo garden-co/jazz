@@ -432,42 +432,45 @@ JS-owned memory before Rust frees its response allocation.
 
 **V1 foreground request registry.** Request ordinals and ordered fields are:
 
-| Ordinal | Request                  | Ordered fields                                                                                                   |
-| ------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| 0       | Probe                    | none                                                                                                             |
-| 1       | Tick                     | none                                                                                                             |
-| 2       | All                      | canonical Query byte vector, options_json string, transaction option u64                                         |
-| 3       | Subscribe                | canonical Query byte vector, options_json string                                                                 |
-| 4       | DrainSubscription        | subscription u64                                                                                                 |
-| 5       | Unsubscribe              | subscription u64                                                                                                 |
-| 6       | Close                    | none                                                                                                             |
-| 7       | Poll                     | operation u64                                                                                                    |
-| 8       | Cancel                   | operation u64                                                                                                    |
-| 9       | BeginTransaction         | kind enum                                                                                                        |
-| 10      | Insert                   | transaction u64, table string, cells byte vector, row_id option 16 raw bytes                                     |
-| 11      | Update                   | transaction u64, table string, row_id 16 raw bytes, patch byte vector                                            |
-| 12      | Upsert                   | transaction u64, table string, row_id 16 raw bytes, cells byte vector                                            |
-| 13      | Delete                   | transaction u64, table string, row_id 16 raw bytes                                                               |
-| 14      | CommitTransaction        | transaction u64                                                                                                  |
-| 15      | RollbackTransaction      | transaction u64                                                                                                  |
-| 16      | WaitForCoreTransaction   | tx_id 16 raw bytes                                                                                               |
-| 17      | WaitForTransaction       | tx_id 16 raw bytes, tier string                                                                                  |
-| 18      | StageMutation            | transaction u64, mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string |
-| 19      | DisconnectNativeUpstream | none                                                                                                             |
-| 20      | ReconnectNativeUpstream  | none                                                                                                             |
-| 21      | NativeConnectionStatus   | none                                                                                                             |
-| 22      | NativeSessionMetadata    | none                                                                                                             |
-| 23      | WriteState               | tx_id 16 raw bytes                                                                                               |
-| 24      | DrainMutationErrors      | none                                                                                                             |
-| 25      | BeginStreamingMutation   | mutation enum, table string, row_id 16 raw bytes, cells byte vector, column string, options_json string          |
-| 26      | PushStreamingMutation    | upload u64, chunk byte vector                                                                                    |
-| 27      | FinishStreamingMutation  | upload u64                                                                                                       |
-| 28      | AbortStreamingMutation   | upload u64                                                                                                       |
-| 29      | LocalCurrentRow          | table string, row_id 16 raw bytes                                                                                |
-| 30      | UpdateLargeValues        | table string, row_id 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option u64          |
-| 31      | DirectMutation           | mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string                  |
-| 32      | PermissionAdvice         | action enum                                                                                                      |
-| 33      | WaitForPendingWrites     | tier string                                                                                                      |
+| Ordinal | Request                       | Ordered fields                                                                                                   |
+| ------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 0       | Probe                         | none                                                                                                             |
+| 1       | Tick                          | none                                                                                                             |
+| 2       | All                           | canonical Query byte vector, options_json string, transaction option u64                                         |
+| 3       | Subscribe                     | canonical Query byte vector, options_json string                                                                 |
+| 4       | DrainSubscription             | subscription u64                                                                                                 |
+| 5       | Unsubscribe                   | subscription u64                                                                                                 |
+| 6       | Close                         | none                                                                                                             |
+| 7       | Poll                          | operation u64                                                                                                    |
+| 8       | Cancel                        | operation u64                                                                                                    |
+| 9       | BeginTransaction              | kind enum                                                                                                        |
+| 10      | Insert                        | transaction u64, table string, cells byte vector, row_id option 16 raw bytes                                     |
+| 11      | Update                        | transaction u64, table string, row_id 16 raw bytes, patch byte vector                                            |
+| 12      | Upsert                        | transaction u64, table string, row_id 16 raw bytes, cells byte vector                                            |
+| 13      | Delete                        | transaction u64, table string, row_id 16 raw bytes                                                               |
+| 14      | CommitTransaction             | transaction u64                                                                                                  |
+| 15      | RollbackTransaction           | transaction u64                                                                                                  |
+| 16      | WaitForCoreTransaction        | tx_id 16 raw bytes                                                                                               |
+| 17      | WaitForTransaction            | tx_id 16 raw bytes, tier string                                                                                  |
+| 18      | StageMutation                 | transaction u64, mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string |
+| 19      | DisconnectNativeUpstream      | none                                                                                                             |
+| 20      | ReconnectNativeUpstream       | none                                                                                                             |
+| 21      | NativeConnectionStatus        | none                                                                                                             |
+| 22      | NativeSessionMetadata         | none                                                                                                             |
+| 23      | WriteState                    | tx_id 16 raw bytes                                                                                               |
+| 24      | DrainMutationErrors           | none                                                                                                             |
+| 25      | BeginStreamingMutation        | mutation enum, table string, row_id 16 raw bytes, cells byte vector, column string, options_json string          |
+| 26      | PushStreamingMutation         | upload u64, chunk byte vector                                                                                    |
+| 27      | FinishStreamingMutation       | upload u64                                                                                                       |
+| 28      | AbortStreamingMutation        | upload u64                                                                                                       |
+| 29      | LocalCurrentRow               | table string, row_id 16 raw bytes                                                                                |
+| 30      | UpdateLargeValues             | table string, row_id 16 raw bytes, patch byte vector, descriptors_json string, updated_at_ms option u64          |
+| 31      | DirectMutation                | mutation enum, table string, row_id option 16 raw bytes, cells byte vector, options_json string                  |
+| 32      | PermissionAdvice              | action enum                                                                                                      |
+| 33      | WaitForPendingWrites          | tier string                                                                                                      |
+| 34      | StageStreamingMutation        | upload u64                                                                                                       |
+| 35      | AttachStagedStreamingMutation | staged u64, transaction u64                                                                                      |
+| 36      | AbortStagedStreamingMutation  | staged u64                                                                                                       |
 
 The command bytes are pinned by
 `foreground_transaction_postcard_layout_matches_the_handwritten_ts_codec`,
@@ -492,6 +495,22 @@ pending operations and uploads. Subscription event ordinal 3 is reserved for
 StructuredDelta: reset bool, settled bool, tier string, delta byte vector,
 terminal_operations_json string. Existing event ordinals 0–2 are unchanged;
 terminal operations use `binding_codec::terminal_operations_to_json`.
+
+Stage-only completion uses response 26 `StreamingMutationStaged` (staged u64),
+attachment uses response 27 `StagedStreamingMutationAttached` (no fields), and
+abort uses response 28 `StagedStreamingMutationAborted` (aborted bool).
+`foreground_staged_upload_v1_byte_contract` pins the Postcard 1 field order and
+varint bytes. These commands may suspend through the existing Pending/Poll
+envelope. Uploads and unattached stages share the foreground capacity bound.
+
+NAPI and WASM expose `upload.stage()` returning an opaque staged handle with
+`attach(openTransactionId)` and `abort()`. Direct bindings use the existing UUID
+string transaction identity; the foreground adapter translates it to its
+runtime-local u64 transaction handle. Attach consumes the capability even on
+rejection; abort after consumption returns false. No host can replace the
+fixed cells, trusted author, schema, or target, or obtain descriptor bytes.
+Core owns exclusive root-view attachment and pre-commit disposal (§19.4 of
+Large-value capabilities); foreground close retires all unattached stages.
 
 The mutation enum has fixed ordinals Insert=0, Update=1, Upsert=2, Delete=3,
 Restore=4. Response 17 is NativeConnectionStatus with three ordered booleans:

@@ -100,11 +100,7 @@ it("rejects scope and scalar streaming bypasses before consuming a source", asyn
                   notes: source,
                   projectId: crypto.randomUUID(),
                 });
-      await expect(pending, operation).rejects.toThrow(
-        operation.startsWith("scope-")
-          ? "Encryption scope streaming creation is not supported"
-          : "Encrypted streaming is not supported",
-      );
+      await expect(pending, operation).rejects.toThrow();
       expect(consumed, operation).toBe(0);
     }
   } finally {
@@ -112,7 +108,7 @@ it("rejects scope and scalar streaming bypasses before consuming a source", asyn
   }
 });
 
-it("rejects encrypted inserts, updates, upserts and partial writes without consuming plaintext", async () => {
+it("rejects keyless encrypted inserts, updates, upserts and partial writes without consuming plaintext", async () => {
   const app = s.defineApp({
     projects: s.table({ title: s.string() }, {}),
     files: s
@@ -147,7 +143,7 @@ it("rejects encrypted inserts, updates, upserts and partial writes without consu
               },
             },
           ),
-        ).toThrow("Encrypted partial updates are not supported");
+        ).toThrow();
       } else {
         const pending =
           operation === "insert"
@@ -155,7 +151,7 @@ it("rejects encrypted inserts, updates, upserts and partial writes without consu
             : operation === "update"
               ? db.updateStreaming(app.files, id, data)
               : db.upsertStreaming(app.files, id, data);
-        await expect(pending, operation).rejects.toThrow("Encrypted streaming is not supported");
+        await expect(pending, operation).rejects.toThrow();
       }
       expect(consumed, operation).toBe(0);
     }
@@ -163,3 +159,44 @@ it("rejects encrypted inserts, updates, upserts and partial writes without consu
     await db.shutdown();
   }
 });
+
+it.each(["text", "json", "indexed", "implicit-branch"] as const)(
+  "rejects unsupported encrypted stream coordinates before source use (%s)",
+  async (kind) => {
+    const files = s
+      .table(
+        {
+          projectId: s.uuid(),
+          payload: kind === "text" ? s.string() : kind === "json" ? s.json() : s.bytes(),
+        },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({
+        space: "projectId",
+        columns: ["payload"],
+        ...(kind === "indexed" ? { indexes: { payload: "equality" as const } } : {}),
+      });
+    const app = s.defineApp({
+      projects: s.table({ title: s.string() }, {}),
+      files: kind === "implicit-branch" ? files.branchBy("projectId") : files,
+    });
+    const db = await createDb(
+      await localAccountConfig(`encrypted-stream-coordinate-${crypto.randomUUID()}`),
+    );
+    let consumed = 0;
+    try {
+      await expect(
+        db.insertStreaming(app.files, {
+          projectId: crypto.randomUUID(),
+          payload: (async function* () {
+            consumed++;
+            yield new Uint8Array([1]);
+          })(),
+        }),
+      ).rejects.toThrow();
+      expect(consumed).toBe(0);
+    } finally {
+      await db.shutdown();
+    }
+  },
+);

@@ -37,7 +37,7 @@ use crate::db::{
     RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
     StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
     UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    WriteIdentity, WriteState, block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -587,6 +587,7 @@ struct WriteResultPayload {
 /// A committed write as a binding returns it.
 #[derive(Clone, Debug)]
 pub struct Write {
+    node: NodeUuid,
     /// postcard `{ row_id, tx_id }`.
     pub payload: Vec<u8>,
     /// The written row (zero for a transaction commit).
@@ -703,6 +704,7 @@ impl Binding {
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
         let tx_id = TxId::new(TxTime(seq), self.node);
         Ok(Write {
+            node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
                 .map_err(|error| HostError::Argument(error.to_string()))?,
             row_id,
@@ -802,8 +804,8 @@ impl Binding {
 
     // ---- transactions ----
 
-    /// Begin one owner-wide transaction. Transactions bound to another
-    /// identity are not supported yet.
+    /// Begin one owner-wide transaction, optionally bound to an authenticated
+    /// session or explicit backend provenance. Replica admission stays upstream.
     pub fn begin_transaction(
         &self,
         id: &str,
@@ -815,12 +817,32 @@ impl Binding {
         if author.is_some() && attribution.is_some() {
             return Err("transaction identity cannot contain both author and attribution".into());
         }
-        if author.is_some() || attribution.is_some() {
-            return Err(not_supported("transactions bound to another identity"));
-        }
-        match TransactionKind::parse(kind)? {
-            TransactionKind::Mergeable => block_on(self.db.begin_mergeable(id))?,
-            TransactionKind::Serializable => block_on(self.db.begin_serializable(id))?,
+        let identity = match (author, attribution) {
+            (Some(bytes), None) => WriteIdentity::Session(self::author(bytes)?),
+            (None, Some(bytes)) => {
+                self.checked(WriteIdentity::Attribution(self::author(bytes)?))?
+            }
+            _ => WriteIdentity::Database,
+        };
+        match (TransactionKind::parse(kind)?, identity) {
+            (TransactionKind::Mergeable, WriteIdentity::Database) => {
+                block_on(self.db.begin_mergeable(id))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_mergeable_for_identity(id, author))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_mergeable_for_attribution(id, author))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Database) => {
+                block_on(self.db.begin_serializable(id))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_serializable_for_identity(id, author))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_serializable_for_attribution(id, author))?
+            }
         }
         Ok(())
     }
@@ -881,6 +903,7 @@ impl Binding {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
         let mut options = insert_options(options)?;
+        options.identity = self.checked(options.identity)?;
         let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
         let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
         self.staged(id, staged)?;
@@ -899,7 +922,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let options = update_options(options)?;
+        let mut options = update_options(options)?;
+        options.identity = self.checked(options.identity)?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -920,7 +944,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let options = upsert_options(options)?;
+        let mut options = upsert_options(options)?;
+        options.identity = self.checked(options.identity)?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -939,7 +964,8 @@ impl Binding {
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let options = delete_options(options)?;
+        let mut options = delete_options(options)?;
+        options.identity = self.checked(options.identity)?;
         let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
         self.staged(id, staged)
     }
@@ -984,7 +1010,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let options = restore_options(options)?;
+        let mut options = restore_options(options)?;
+        options.identity = self.checked(options.identity)?;
         let staged = block_on(self.db.mergeable_tx_ref(id).restore(
             table,
             row,
@@ -1157,9 +1184,27 @@ impl Binding {
         })))
     }
 
+    /// Read a receipt only under its originating node. Schema views and a
+    /// reopened store retain that node; another node cannot reinterpret it.
+    pub fn write_state(&self, write: &Write) -> HostResult<WriteState> {
+        self.check_write_owner(write)?;
+        if let Some(error) = &write.rejected {
+            return Ok(WriteState::rejected(error, DurabilityTier::None));
+        }
+        Ok(self.db.write_state(write.seq)?)
+    }
+
+    fn check_write_owner(&self, write: &Write) -> HostResult<()> {
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
+        Ok(())
+    }
+
     /// Resolve once `write` reached `tier`; fail at once with its
     /// rejection, if it was rejected.
     pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        self.check_write_owner(write)?;
         if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
@@ -1497,6 +1542,27 @@ impl StreamingMutation {
         state.binding.write(write)
     }
 
+    /// Finish the upload without publishing; attach it to a serializable batch.
+    pub fn stage(&mut self) -> HostResult<StagedStreamingMutation> {
+        let state = *self.state.take().ok_or_else(closed)?;
+        let staged = block_on(state.binding.db.stage_streaming_value_upload(
+            state.upload,
+            state.mutation,
+            &state.table,
+            state.row,
+            state.cells,
+            &state.column,
+            state.identity,
+            state.updated_at_ms,
+            state.head,
+            state.base,
+        ))?;
+        Ok(StagedStreamingMutation {
+            binding: state.binding,
+            staged: Some(staged),
+        })
+    }
+
     /// Drop the upload; `false` when already closed.
     pub fn abort(&mut self) -> HostResult<bool> {
         let Some(state) = self.state.take() else {
@@ -1504,6 +1570,36 @@ impl StreamingMutation {
         };
         block_on(state.binding.db.abort_streaming_value_upload(state.upload))?;
         Ok(true)
+    }
+}
+
+/// Single-use staged upload owned by the binding that admitted it.
+pub struct StagedStreamingMutation {
+    binding: Binding,
+    staged: Option<crate::db::StagedStreamingValue>,
+}
+
+impl StagedStreamingMutation {
+    /// Consume the capability, including on invalid transaction identifiers.
+    pub fn attach(&mut self, transaction: &str) -> HostResult<()> {
+        let mut staged = self.staged.take().ok_or_else(closed)?;
+        let tx = open_transaction(transaction)?;
+        block_on(
+            self.binding
+                .db
+                .attach_staged_streaming_value(tx, &mut staged),
+        )?;
+        Ok(())
+    }
+
+    /// Release an unattached upload; false after attachment or abandonment.
+    pub fn abort(&mut self) -> HostResult<bool> {
+        let Some(mut staged) = self.staged.take() else {
+            return Ok(false);
+        };
+        Ok(block_on(
+            self.binding.db.abort_staged_streaming_value(&mut staged),
+        )?)
     }
 }
 
