@@ -151,6 +151,36 @@ async function settle(): Promise<void> {
 }
 
 describe("Db read tiers and connection controls", () => {
+  it("notifies encryption lifecycle on automatic transport recovery and stops on shutdown", async () => {
+    const client = makeClient("unavailable");
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "e2ee-reconnect",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const reconnected = vi.fn();
+    // Register before the first query creates the runtime client.
+    db.onE2eeReconnect(reconnected);
+    await db.all(query(), { tier: "local-first" });
+    client.setLink("connecting");
+    expect(reconnected).not.toHaveBeenCalled();
+    client.setLink("connected");
+    expect(reconnected).toHaveBeenCalledTimes(1);
+    client.setLink("connected");
+    expect(reconnected).toHaveBeenCalledTimes(1);
+    client.setLink("unavailable");
+    client.setLink("connected");
+    expect(reconnected).toHaveBeenCalledTimes(2);
+    await db.shutdown();
+    client.setLink("unavailable");
+    client.setLink("connected");
+    expect(reconnected).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps explicit local-first reads propagating whether connected or explicitly offline", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(

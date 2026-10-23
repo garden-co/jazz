@@ -9,6 +9,7 @@ import {
 
 /** Manages a Db whose runtime connects directly to the configured server. */
 export class DirectConnectionManager extends ConnectionManager {
+  override readonly requiresLocalObservationHydration: boolean = false;
   private isDisconnected = false;
   /** The server was not dialled because the context has no credential yet. */
   private awaitingCredential = false;

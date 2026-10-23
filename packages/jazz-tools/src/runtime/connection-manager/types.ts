@@ -78,11 +78,17 @@ export abstract class ConnectionManager {
   private clientSchema: WasmSchema | null = null;
   private disposeRuntimeTelemetry: (() => void) | null = null;
   private remoteLinkHintBinding: AbortController | null = null;
+  private readonly clientCreatedListeners = new Set<() => void>();
 
   /** Browser managers set this during their asynchronous bootstrap. */
   protected foregroundNodeLease: ForegroundNodeLease | undefined;
 
   protected constructor(protected readonly host: DbForConnection) {}
+
+  // A separate durable owner must hydrate the foreground before it can
+  // freeze an accepted-only local history snapshot. Unknown topologies keep
+  // this conservative default; directly hosted runtimes own their storage.
+  readonly requiresLocalObservationHydration: boolean = true;
 
   abstract start(): Promise<void>;
 
@@ -123,6 +129,7 @@ export abstract class ConnectionManager {
     this.clientSchema = runtimeSchema;
     this.bindRemoteLinkHint(client);
     this.onClientCreated({ schemaKey, schema: runtimeSchema, client });
+    for (const listener of [...this.clientCreatedListeners]) listener();
     return client;
   }
 
@@ -226,7 +233,24 @@ export abstract class ConnectionManager {
   }
 
   protected onTransportLinkStateChange(listener: () => void, signal: AbortSignal): void {
-    this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+    if (signal.aborted) return;
+    const bind = () => {
+      this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
+      listener();
+    };
+    if (this.getCurrentClient()) {
+      bind();
+      return;
+    }
+    // Lifecycle listeners can precede the first query's lazy runtime creation.
+    const cancel = () => this.clientCreatedListeners.delete(created);
+    const created = () => {
+      cancel();
+      signal.removeEventListener("abort", cancel);
+      if (!signal.aborted) bind();
+    };
+    this.clientCreatedListeners.add(created);
+    signal.addEventListener("abort", cancel, { once: true });
   }
 
   /**
