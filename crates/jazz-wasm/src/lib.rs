@@ -1081,16 +1081,16 @@ impl WasmDb {
     /// Open the durable store a browser worker owns. `storage` selects the
     /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string }`
     /// (IndexedDB when omitted; see [`browser`]). The default file is named
-    /// after `storage_owner`, the worker's admitted ownership marker.
+    /// after `database`, the physical database name the worker admitted.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openBrowser)]
     pub async fn open_browser(
         storage: JsValue,
         schema: Vec<u8>,
         config: Vec<u8>,
-        storage_owner: String,
+        database: String,
     ) -> Result<WasmDb, JsValue> {
-        Self::open_browser_as(storage, schema, config, storage_owner, OpenAs::Untrusted).await
+        Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1102,14 +1102,14 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
-        storage_owner: String,
+        database: String,
     ) -> Result<WasmDb, JsValue> {
         let how = OpenAs::SelfSigned {
             token: &token,
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Self::open_browser_as(storage, schema, config, storage_owner, how).await
+        Self::open_browser_as(storage, schema, config, database, how).await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1117,7 +1117,7 @@ impl WasmDb {
         storage: JsValue,
         schema: Vec<u8>,
         config: Vec<u8>,
-        storage_owner: String,
+        database: String,
         how: OpenAs<'_>,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
@@ -1127,7 +1127,7 @@ impl WasmDb {
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
         // Every SQLite store keeps full history, so `history_complete`
         // needs nothing extra.
-        let spec = browser::StoreSpec::from_js(&storage, &storage_owner)?;
+        let spec = browser::StoreSpec::from_js(&storage, &database)?;
         let (db, store) =
             browser::open(&spec, binding_host::db_config(schema, &config, identity)).await?;
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
@@ -1141,9 +1141,9 @@ impl WasmDb {
     #[wasm_bindgen(js_name = destroyBrowserStorage)]
     pub async fn destroy_browser_storage(
         storage: JsValue,
-        storage_owner: String,
+        database: String,
     ) -> Result<(), JsValue> {
-        let spec = browser::StoreSpec::from_js(&storage, &storage_owner)?;
+        let spec = browser::StoreSpec::from_js(&storage, &database)?;
         browser::destroy(&spec).await
     }
 
