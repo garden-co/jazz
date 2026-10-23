@@ -732,6 +732,14 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
 /// an aggregate its input rows (its filters and traversals, every column,
 /// no window), which the client aggregates as it would local rows.
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
+    // A window past an offset is only right over the rows before it too:
+    // the replica holds the whole prefix and applies the offset itself.
+    if query.aggregate.is_none() && query.offset > 0 {
+        let mut prefix = query.clone();
+        prefix.limit = query.limit.map(|limit| limit + query.offset);
+        prefix.offset = 0;
+        return std::borrow::Cow::Owned(prefix);
+    }
     if query.aggregate.is_none() {
         return std::borrow::Cow::Borrowed(query);
     }
