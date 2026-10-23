@@ -10,11 +10,11 @@
 //! and write fates that need the server wait, and they complete on a later
 //! tick or write; [`Progress`] is how those waits learn to poll again.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use jazz_model::model::transaction::{OpenTransactionId, TransactionId};
@@ -618,6 +618,13 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
+    /// Told of an upload the authority refused that no wait claimed.
+    pub rejected: RefCell<Option<Box<dyn Fn(&TransactionId, &Error)>>>,
+    /// Each uploaded write's claim, by commit seq: a wait sets it, and a
+    /// dropped receipt leaves no one to claim it.
+    claims: RefCell<BTreeMap<u64, Weak<Cell<bool>>>>,
+    /// The claim count after the last sweep of dropped receipts.
+    swept: Cell<usize>,
 }
 
 impl Hooks {
@@ -633,6 +640,50 @@ impl Hooks {
     pub fn after_write(&self) {
         self.progress.wake_all();
         self.schedule_tick();
+    }
+
+    /// Follow `write`'s fate: if the authority refuses it before a wait
+    /// sets `claimed`, [`Hooks::rejected`] is told.
+    pub fn track(&self, write: &Write, claimed: &Rc<Cell<bool>>) {
+        if write.rejected.is_some() {
+            return;
+        }
+        let mut claims = self.claims.borrow_mut();
+        claims.insert(write.seq, Rc::downgrade(claimed));
+        if claims.len() > 2 * self.swept.get().max(64) {
+            claims.retain(|_, claim| claim.strong_count() > 0);
+            self.swept.set(claims.len());
+        }
+    }
+
+    /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
+    fn report(&self, node: NodeUuid, rejections: Vec<(u64, Error)>) {
+        for (seq, error) in rejections {
+            let claim = self.claims.borrow_mut().remove(&seq);
+            if claim
+                .and_then(|claim| claim.upgrade())
+                .is_some_and(|claim| claim.get())
+            {
+                continue;
+            }
+            if let Some(rejected) = self.rejected.borrow().as_ref() {
+                let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), node));
+                rejected(&tx_id, &error);
+            }
+        }
+    }
+}
+
+/// The public code and reason of a mutation-error event for `error`; an
+/// `upstream` one is the authority's refusal of an upload.
+pub fn mutation_error_parts(error: &Error, upstream: bool) -> (&'static str, String) {
+    match (error.is_authorization_denied(), upstream) {
+        (true, true) => (
+            "permission_denied",
+            "Write rejected by server authorization".to_owned(),
+        ),
+        (true, false) => ("permission_denied", error.message.clone()),
+        (false, _) => (error.code.as_str(), error.message.clone()),
     }
 }
 
@@ -695,9 +746,7 @@ impl Binding {
         if !db.is_authority() {
             db.become_replica();
         }
-        if !trusted_backend {
-            db.keep_sessions_local();
-        }
+        db.track_upstream_rejections();
         Self {
             db: Rc::new(db),
             hooks: Rc::default(),
@@ -1313,6 +1362,8 @@ impl Binding {
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
+        self.hooks
+            .report(self.node, self.db.take_upstream_rejections());
         self.hooks.progress.wake_all();
         Ok(result?)
     }
