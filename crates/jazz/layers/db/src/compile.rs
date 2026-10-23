@@ -1684,7 +1684,12 @@ impl<'a> Ctx<'a> {
                     self.source(target)?
                 )
             }
-            PolicyExpr::ExistsRel { rel } => self.exists_rel(rel, table, alias, session)?,
+            // The relation's outer row is the row under check, also inside
+            // an EXISTS over another table (as `__jazz_outer_row` is).
+            PolicyExpr::ExistsRel { rel } => {
+                let (table, alias) = outer.unwrap_or((table, alias));
+                self.exists_rel(rel, table, alias, session)?
+            }
             PolicyExpr::Inherits {
                 operation,
                 via_column,
@@ -1846,7 +1851,20 @@ impl<'a> Ctx<'a> {
                     frontier: Some(format!("{g}.id")),
                     ..*scope
                 };
-                let step = self.relation(step, &step_scope)?;
+                let mut step = self.relation(step, &step_scope)?;
+                // A step reaches rows of the seed's table: when it projects
+                // no id, the reached row is the last such source (a hop
+                // joined after the edge it walks).
+                if step.id.is_none()
+                    && let Some(table) = seed.from.first().and_then(|src| src.table.as_ref())
+                    && let Some(reached) = step
+                        .from
+                        .iter()
+                        .rev()
+                        .find(|src| src.table.as_ref() == Some(table))
+                {
+                    step.id = Some(format!("{}.id", reached.alias));
+                }
                 let (max, guard) = match bound {
                     RecursionBound::MaxDepth(depth) => (*depth, false),
                     RecursionBound::Fixpoint => (FIXPOINT_GUARD, true),
