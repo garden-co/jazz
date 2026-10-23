@@ -23,7 +23,7 @@ pub struct CatalogueSchemaV1 {
     pub identities: PhysicalIdentityManifest,
 }
 impl CatalogueSchemaV1 {
-    fn validate(&self) -> Result<(), Error> {
+    pub(super) fn validate(&self) -> Result<(), Error> {
         if self.schema.id != self.schema.schema.version_id() {
             return Err(invalid("catalogue schema identity mismatch"));
         }
@@ -205,6 +205,7 @@ impl Inner {
             return Err(invalid("catalogue current schema has no accepted manifest"));
         }
         self.conn.execute("INSERT INTO _jazz_catalogue_head_v1(slot,value) VALUES(1,?1) ON CONFLICT(slot) DO UPDATE SET value=excluded.value",[encode(head)?]).map_err(storage)?;
+        self.catalogue_capture_pending.set(true);
         Ok(())
     }
     /// At most the current descriptor and the requested fixed descriptor;
