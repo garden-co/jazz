@@ -609,6 +609,19 @@ impl Error {
     }
 }
 
+/// An update of a row this replica does not hold: a missing observation,
+/// not a read-policy decision.
+fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error {
+    Error::new(
+        ErrorCode::NotObserved,
+        format!(
+            "{operation} on table {table} needs the current row, but row {} is not loaded \
+             locally; read or subscribe to the row before updating it",
+            row.0
+        ),
+    )
+}
+
 /// The reason a policy rejects a write, leading its message (the code
 /// stays `WriteRejected`): authority rejections are reported by it.
 pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
@@ -2897,10 +2910,11 @@ impl Inner {
                 cells.extend(branch);
                 return self.insert(table_name, cells, Some(row), &Target::Root, who, seq);
             }
-            // A replica may not hold the row (it may not even be allowed
-            // to read it): the write goes to the authority, which decides.
+            // An update stages against the row's current cells, so a
+            // replica must hold it. Saying so discloses nothing: the answer
+            // is the same whether or not the row exists elsewhere.
             Located::Absent { .. } if self.client.is_some() => {
-                return Ok(WriteHandle { row, seq });
+                return Err(update_target_not_loaded(verb, table_name, row));
             }
             Located::Absent { .. } if !upsert => {
                 return Err(rejected(format!(
