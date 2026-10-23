@@ -182,6 +182,19 @@ pub struct Image {
     pub cells: Vec<(String, Cell)>,
 }
 
+/// `jazz.sqlite.content-witness.v1`: the exact content version retained by a
+/// later deletion or content-free restore. Row state and content have distinct
+/// sequences. A partial replica must retain this link, never infer it from the
+/// newest history version it happens to have cached.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentWitnessRef {
+    pub table: String,
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub row_seq: u64,
+    pub content_seq: u64,
+}
+
 /// Which branch a replicated write addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireTarget {
@@ -454,10 +467,10 @@ pub enum SyncMessage {
         version: [u8; 16],
     },
     // server → client
-    /// The transactions behind the versions a history read ships, as
-    /// (seq, writer node, writer tx), sent ahead of their `Rows`: a
-    /// replica lists a history version only once it knows its
-    /// `$transactionId`.
+    /// `jazz.sqlite.sync.content-origins.v1`: the transactions behind
+    /// shipped content, as (seq, writer node, writer tx), ahead of `Rows`.
+    /// Ordinary reads carry these too. This identifies a version; only
+    /// a Global settlement/receipt establishes authority coverage.
     Origins {
         commits: Vec<(u64, [u8; 16], u64)>,
     },
@@ -472,6 +485,12 @@ pub enum SyncMessage {
         author: String,
         claims: BTreeMap<String, Value>,
         include_deleted: bool,
+    },
+    /// Append-only tag 20, `jazz.sqlite.sync.content-witness.v1`. Sent with
+    /// ordinary Rows/Origins; the receiver persists the exact retained-content
+    /// link. This is provenance, not a Global coverage or acceptance receipt.
+    ContentWitnessesV1 {
+        witnesses: Vec<ContentWitnessRef>,
     },
 }
 
@@ -1312,25 +1331,167 @@ impl Inner {
         Ok(images)
     }
 
-    /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_settled`
-    /// for uploads, this authority's node for its own commits.
+    /// Add the exact content witness behind each already-authorized image.
+    /// Local complete stores resolve it by (id, branch, seq); replicas may
+    /// forward only an explicit upstream link, because their history has gaps.
+    /// Missing links/content stay missing rather than becoming guessed evidence.
+    fn content_witnesses(
+        &self,
+        images: &mut Vec<Image>,
+        seqs: &mut BTreeSet<u64>,
+    ) -> Result<Vec<ContentWitnessRef>, Error> {
+        let mut seen = HashSet::new();
+        images.retain(|image| {
+            seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
+        });
+        let mut witnesses = Vec::new();
+        let mut refs = Vec::new();
+        for image in images.iter().filter(|image| image.seq < LOCAL_BASE) {
+            if image.content {
+                seqs.insert(image.seq);
+                continue;
+            }
+            let id = image.id.to_vec();
+            // A non-content image's content is earlier, hence in history.
+            let (filter, seq) = if self.client.is_none() {
+                (
+                    "id = ?1 AND _b = ?2 AND _seq < ?3 AND _c = 1 \
+                     ORDER BY _seq DESC LIMIT 1",
+                    image.seq,
+                )
+            } else if let Some(seq) =
+                self.content_witness_seq(&image.table, &image.id, &image.key, image.seq)?
+            {
+                ("id = ?1 AND _b = ?2 AND _seq = ?3 AND _c = 1", seq)
+            } else {
+                continue;
+            };
+            let witness = self
+                .images_where(
+                    &image.table,
+                    true,
+                    filter,
+                    &[&id, &image.key, &(seq as i64)],
+                )?
+                .pop();
+            if let Some(witness) = witness {
+                seqs.insert(witness.seq);
+                refs.push(ContentWitnessRef {
+                    table: image.table.clone(),
+                    id: image.id,
+                    key: image.key.clone(),
+                    row_seq: image.seq,
+                    content_seq: witness.seq,
+                });
+                if seen.insert((
+                    witness.table.clone(),
+                    witness.id,
+                    witness.key.clone(),
+                    witness.seq,
+                )) {
+                    witnesses.push(witness);
+                }
+            }
+        }
+        images.extend(witnesses);
+        Ok(refs)
+    }
+
+    /// Durable `jazz.sqlite.content-witness.v1`: postcard u64, with no trailing
+    /// bytes. The SQL primary key names the state whose content it identifies.
+    fn content_witness_seq(
+        &self,
+        table: &str,
+        id: &[u8; 16],
+        key: &[u8],
+        row_seq: u64,
+    ) -> Result<Option<u64>, Error> {
+        let bytes = self
+            .conn
+            .query_row(
+                "SELECT content FROM _jazz_content_witness_v1 \
+             WHERE t = ?1 AND id = ?2 AND k = ?3 AND seq = ?4",
+                rusqlite::params![table, id.as_slice(), key, row_seq as i64],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        bytes
+            .map(|bytes| {
+                let (seq, remaining) =
+                    postcard::take_from_bytes::<u64>(&bytes).map_err(|error| {
+                        Error::new(
+                            ErrorCode::Storage,
+                            format!("invalid content-witness-v1: {error}"),
+                        )
+                    })?;
+                if !remaining.is_empty() || seq == 0 || seq >= row_seq || row_seq >= LOCAL_BASE {
+                    return Err(Error::new(
+                        ErrorCode::Storage,
+                        "invalid content-witness-v1 sequence",
+                    ));
+                }
+                Ok(seq)
+            })
+            .transpose()
+    }
+
+    fn record_content_witness(&self, witness: &ContentWitnessRef) -> Result<(), Error> {
+        if witness.content_seq == 0
+            || witness.content_seq >= witness.row_seq
+            || witness.row_seq >= LOCAL_BASE
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "invalid content-witness-v1 sequence",
+            ));
+        }
+        if let Some(previous) =
+            self.content_witness_seq(&witness.table, &witness.id, &witness.key, witness.row_seq)?
+        {
+            if previous != witness.content_seq {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "conflicting content-witness-v1 reference",
+                ));
+            }
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO _jazz_content_witness_v1 (t, id, k, seq, content) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![&witness.table, witness.id.as_slice(), &witness.key, witness.row_seq as i64, encode(&witness.content_seq)],
+        ).map_err(storage)?;
+        Ok(())
+    }
+
+    /// Who wrote each accepted content sequence. A local store identifies its
+    /// own commits; a replica forwards only recorded upstream origins. Neither
+    /// an optimistic sequence nor a missing origin becomes relay provenance.
     fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
         let mut statement = self
             .conn
             .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1")
             .map_err(storage)?;
         let mut out = Vec::with_capacity(seqs.len());
-        for &seq in seqs {
+        for &seq in seqs.iter().filter(|&&seq| seq < LOCAL_BASE) {
             let recorded = statement
                 .query_row([seq as i64], |r| {
                     Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64))
                 })
                 .optional()
                 .map_err(storage)?;
-            out.push(match recorded {
-                Some((node, tx)) => (seq, node.try_into().unwrap_or([0; 16]), tx),
-                None => (seq, *self.identity.node.as_bytes(), seq),
-            });
+            match recorded {
+                Some((node, tx)) => {
+                    let node = node.try_into().map_err(|_| {
+                        Error::new(ErrorCode::Storage, "invalid stored content origin node")
+                    })?;
+                    out.push((seq, node, tx));
+                }
+                None if self.client.is_none() => {
+                    out.push((seq, *self.identity.node.as_bytes(), seq));
+                }
+                None => {}
+            }
         }
         Ok(out)
     }
@@ -2011,6 +2172,7 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
+    CREATE TABLE IF NOT EXISTS _jazz_content_witness_v1 (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, content BLOB NOT NULL, PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;\
     CREATE TABLE IF NOT EXISTS _jazz_revoked (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, PRIMARY KEY (t, id, k)) WITHOUT ROWID;";
 
 type RowKey = (String, RowUuid, Vec<u8>);
@@ -3454,6 +3616,17 @@ impl Db {
                             ));
                         }
                     }
+                    SyncMessage::ContentWitnessesV1 { witnesses } => {
+                        for mut witness in witnesses {
+                            let Ok(table) =
+                                inner.owner.stored_table(&witness.table).map(str::to_owned)
+                            else {
+                                continue;
+                            };
+                            witness.table = table;
+                            inner.record_content_witness(&witness)?;
+                        }
+                    }
                     SyncMessage::Origins { commits } => {
                         for (seq, node, tx) in commits {
                             inner.record_settled(node, tx, Some(seq))?;
@@ -4272,19 +4445,18 @@ impl Db {
                     )));
                 }
             }
+            let witnesses = inner.content_witnesses(&mut images, &mut history_seqs)?;
             let mut out = std::mem::take(&mut inner.sessions[index].stale);
-            if !history_seqs.is_empty() {
-                out.push(SyncMessage::Origins {
-                    commits: inner.origins(&history_seqs)?,
-                });
+            let origins = inner.origins(&history_seqs)?;
+            if !origins.is_empty() {
+                out.push(SyncMessage::Origins { commits: origins });
+            }
+            if !witnesses.is_empty() {
+                out.push(SyncMessage::ContentWitnessesV1 { witnesses });
             }
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
-            let mut seen = HashSet::new();
-            images.retain(|image| {
-                seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
-            });
             if !images.is_empty() {
                 out.push(SyncMessage::Rows { images });
             }
@@ -4392,6 +4564,7 @@ impl Db {
                 watch_key(&Sql::Blob(image.id.to_vec())),
             )));
         }
+        let witnesses = inner.content_witnesses(&mut images, &mut seqs)?;
         let origins = inner.origins(&seqs)?;
         let through = at.unwrap_or(inner.seq);
         let session = &mut inner.sessions[index];
@@ -4401,6 +4574,11 @@ impl Db {
             session
                 .outbox
                 .push(SyncMessage::Origins { commits: origins });
+        }
+        if !witnesses.is_empty() {
+            session
+                .outbox
+                .push(SyncMessage::ContentWitnessesV1 { witnesses });
         }
         if !images.is_empty() {
             session.outbox.push(SyncMessage::Rows { images });
@@ -5299,6 +5477,15 @@ fn message_out(schema: &Schema, message: SyncMessage) -> Option<SyncMessage> {
             images: images
                 .into_iter()
                 .filter_map(|image| image_out(schema, image))
+                .collect(),
+        },
+        SyncMessage::ContentWitnessesV1 { witnesses } => SyncMessage::ContentWitnessesV1 {
+            witnesses: witnesses
+                .into_iter()
+                .filter_map(|mut witness| {
+                    witness.table = schema.by_stored(&witness.table)?.name.clone();
+                    Some(witness)
+                })
                 .collect(),
         },
         SyncMessage::Evict { table, id, key } => SyncMessage::Evict {
