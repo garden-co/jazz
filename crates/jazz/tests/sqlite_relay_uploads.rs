@@ -1,0 +1,796 @@
+//! Durable relay units retain the original writer and the authority's fate.
+mod common;
+#[path = "common/duplex_transport.rs"]
+mod duplex_transport;
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RemoteLinkHint, block_on};
+use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::query::Query;
+use jazz::records::Value;
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tx::{DurabilityTier, Fate};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    path::Path,
+    pin::pin,
+    task::{Context, Poll, Waker},
+};
+fn alice() -> AuthorSubject {
+    AuthorSubject::authenticated("https://issuer.example", "alice").unwrap()
+}
+fn bob() -> AuthorSubject {
+    AuthorSubject::authenticated("https://issuer.example", "bob").unwrap()
+}
+fn config(node: u8, author: AuthorSubject) -> DbConfig {
+    let schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("text", ColumnType::Text)
+                    .column("allowed", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::eq_literal(
+                                "allowed",
+                                jazz::tools::Value::Boolean(true),
+                            ))
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )
+}
+fn open(node: u8, author: AuthorSubject, path: Option<&Path>) -> Db {
+    let config = config(node, author);
+    match path {
+        Some(path) => block_on(Db::open_at(config, path, Default::default())),
+        None => block_on(Db::open(config)),
+    }
+    .unwrap()
+}
+fn authority() -> Db {
+    let db = open(90, AuthorSubject::SYSTEM, None);
+    db.set_authority();
+    db
+}
+fn connect(client: &Db, server: &Db, identity: AuthorSubject) {
+    let (a, b) = duplex_transport::duplex();
+    block_on(client.connect_upstream(a));
+    server.accept_subscriber(b, identity);
+}
+fn turns(dbs: &[&Db]) {
+    for _ in 0..12 {
+        for db in dbs {
+            block_on(db.tick()).unwrap();
+        }
+    }
+}
+fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    for _ in 0..150 {
+        if let Poll::Ready(result) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            return result;
+        }
+        for db in dbs {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    panic!("write did not settle")
+}
+fn insert(db: &Db, text: &str, allowed: bool) -> u64 {
+    block_on(db.insert(
+        "notes",
+        BTreeMap::from([
+            ("text".into(), Value::String(text.into())),
+            ("allowed".into(), Value::Bool(allowed)),
+        ]),
+        Default::default(),
+    ))
+    .unwrap()
+    .mergeable_tx_id()
+}
+fn texts(db: &Db) -> Vec<String> {
+    let query = db.prepare_query(&Query::from("notes")).unwrap();
+    let mut values = block_on(db.all(&query, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            match row
+                .cells()
+                .find(|(name, _)| *name == "text")
+                .unwrap()
+                .1
+                .unwrap()
+            {
+                Value::String(text) => text.clone(),
+                other => panic!("{other:?}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    values.sort();
+    values
+}
+
+/// Alice and Bob use the same transaction number at different nodes. Alice's
+/// accepted write and Bob's rejected write must not consume each other's fate.
+#[test]
+fn equal_transaction_numbers_are_routed_by_original_node() {
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    let a = open(1, alice(), None);
+    let b = open(2, bob(), None);
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    connect(&a, &relay, alice());
+    connect(&b, &relay, bob());
+    let x = insert(&a, "alice", true);
+    let y = insert(&b, "bob", false);
+    assert_eq!(x, y);
+    let dbs = [&a, &b, &relay, &server, &relay, &a, &b];
+    drive(&dbs, a.wait_for_transaction(x, DurabilityTier::Global)).unwrap();
+    drive(&dbs, b.wait_for_transaction(y, DurabilityTier::Global)).unwrap_err();
+    assert_eq!(a.write_state(x).unwrap().fate, Fate::Accepted);
+    assert!(matches!(b.write_state(y).unwrap().fate, Fate::Rejected(_)));
+    assert_eq!(texts(&server), ["alice"]);
+    assert!(texts(&b).is_empty());
+}
+
+/// Alice's durable replica sends while Bob's relay is offline, then both
+/// restart their connection. The journal resumes without a second server row.
+#[test]
+fn an_offline_relay_replays_after_restart_without_a_connected_sender() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.sqlite");
+    let client = open(1, alice(), None);
+    let server = authority();
+    let tx = {
+        let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+        relay.set_remote_link_hint(RemoteLinkHint::Failed);
+        connect(&client, &relay, alice());
+        let tx = insert(&client, "restart", true);
+        turns(&[&client, &relay]);
+        let mut wait = pin!(client.wait_for_transaction(tx, DurabilityTier::Global));
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        tx
+    };
+    {
+        let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+        connect(&relay, &server, AuthorSubject::SYSTEM);
+        turns(&[&relay, &server]);
+        assert_eq!(texts(&server), ["restart"]);
+    }
+    let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    connect(&client, &relay, alice());
+    drive(
+        &[&client, &relay, &server, &relay, &client],
+        client.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(texts(&server), ["restart"]);
+    assert_eq!(texts(&client), ["restart"]);
+    assert_eq!(server.seq_high_water(), 1);
+}
+
+/// Alice's upload crosses two trusted relays while Bob's relay also submits
+/// an equal-numbered own write; both original origins settle independently.
+#[test]
+fn multi_hop_forwarding_keeps_local_and_relay_receipts_separate() {
+    let server = authority();
+    let near = open(50, AuthorSubject::SYSTEM, None);
+    let far = open(51, AuthorSubject::SYSTEM, None);
+    let client = open(1, alice(), None);
+    connect(&far, &server, AuthorSubject::SYSTEM);
+    connect(&near, &far, AuthorSubject::SYSTEM);
+    connect(&client, &near, alice());
+    let own = insert(&near, "relay-own", true);
+    let tx = insert(&client, "alice", true);
+    assert_eq!(own, tx);
+    let dbs = [&client, &near, &far, &server, &far, &near, &client];
+    drive(
+        &dbs,
+        client.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .unwrap();
+    drive(&dbs, near.wait_for_transaction(own, DurabilityTier::Global)).unwrap();
+    assert_eq!(texts(&server), ["alice", "relay-own"]);
+}
+
+/// Alice's large upload remains pinned in Bob's offline relay until forwarding;
+/// reopening sends the real chunk tree and the authority validates its value.
+#[test]
+fn large_upload_survives_offline_relay_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.sqlite");
+    let client = open(1, alice(), None);
+    let server = authority();
+    let text = "large-payload-".repeat(12000);
+    let tx = {
+        let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+        relay.set_remote_link_hint(RemoteLinkHint::Failed);
+        connect(&client, &relay, alice());
+        let tx = insert(&client, &text, true);
+        turns(&[&client, &relay]);
+        tx
+    };
+    let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    connect(&client, &relay, alice());
+    drive(
+        &[&client, &relay, &server, &relay, &client],
+        client.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(texts(&server), [text]);
+}
+
+fn captured_upload(node: u8, text: &str, allowed: bool) -> Vec<jazz::db::SyncMessage> {
+    let client = open(node, alice(), None);
+    let (client_link, mut recorder) = duplex_transport::duplex();
+    block_on(client.connect_upstream(client_link));
+    insert(&client, text, allowed);
+    block_on(client.tick()).unwrap();
+    std::iter::from_fn(|| recorder.try_recv())
+        .filter(|m| {
+            matches!(
+                m,
+                jazz::db::SyncMessage::Commit { .. } | jazz::db::SyncMessage::PushChunks { .. }
+            )
+        })
+        .collect()
+}
+fn send_upload(peer: &mut dyn jazz::db::Transport, messages: &[jazz::db::SyncMessage]) {
+    for message in messages {
+        peer.send(message.clone()).unwrap();
+    }
+}
+fn receipts(peer: &mut dyn jazz::db::Transport) -> Vec<Result<(), jazz::db::WireError>> {
+    std::iter::from_fn(|| peer.try_recv())
+        .filter_map(|message| match message {
+            jazz::db::SyncMessage::FateV1 { result, .. } => Some(result),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Mallory may not forge Alice's attribution through Bob's trusted relay;
+/// rejection must precede both durable queuing and any authority write.
+#[test]
+fn ordinary_connection_cannot_forge_another_author() {
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    let (mut mallory, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, bob());
+    let mut forged = captured_upload(1, "forged", true);
+    for message in &mut forged {
+        if let jazz::db::SyncMessage::Commit { author, .. } = message {
+            *author = Some(alice().canonical().to_owned());
+        }
+    }
+    send_upload(mallory.as_mut(), &forged);
+    turns(&[&relay, &server]);
+    let results = receipts(mallory.as_mut());
+    assert_eq!(results.len(), 1);
+    assert!(
+        matches!(&results[0], Err(jazz::db::WireError::Rejected(message)) if message.contains("trusted serving node")),
+        "{results:?}"
+    );
+    assert!(texts(&server).is_empty());
+    assert!(texts(&relay).is_empty());
+}
+
+/// Alice retries the same pending identity; Mallory and a changed Alice unit
+/// cannot overwrite it. After reconnect only Alice's original row is accepted.
+#[test]
+fn retries_cannot_replace_a_queued_sender_or_payload() {
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    relay.set_remote_link_hint(RemoteLinkHint::Failed);
+    let original = captured_upload(1, "original", true);
+    let changed = captured_upload(1, "replacement", true);
+    let (mut a, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, alice());
+    send_upload(a.as_mut(), &original);
+    turns(&[&relay]);
+    send_upload(a.as_mut(), &changed);
+    turns(&[&relay]);
+    assert!(matches!(receipts(a.as_mut()).as_slice(), [Err(_)]));
+    let (mut mallory, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, bob());
+    let mut stolen = original.clone();
+    for message in &mut stolen {
+        if let jazz::db::SyncMessage::Commit { author, .. } = message {
+            *author = Some(bob().canonical().to_owned());
+        }
+    }
+    send_upload(mallory.as_mut(), &stolen);
+    turns(&[&relay]);
+    assert!(matches!(receipts(mallory.as_mut()).as_slice(), [Err(_)]));
+    send_upload(a.as_mut(), &original);
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    turns(&[&relay, &server]);
+    assert!(matches!(receipts(a.as_mut()).as_slice(), [Ok(())]));
+    assert_eq!(texts(&server), ["original"]);
+    assert_eq!(server.seq_high_water(), 1);
+}
+
+/// Mallory cannot reuse Bob's relay node identity and settle its own pending
+/// write; only Bob's actual owner transaction reaches the authority.
+#[test]
+fn downstream_cannot_alias_the_relay_owner_node() {
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    relay.set_remote_link_hint(RemoteLinkHint::Failed);
+    let own = insert(&relay, "owner", true);
+    let (mut peer, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, alice());
+    send_upload(peer.as_mut(), &captured_upload(50, "forged", true));
+    turns(&[&relay]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Err(_)]));
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    drive(
+        &[&relay, &server],
+        relay.wait_for_transaction(own, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(texts(&server), ["owner"]);
+}
+
+/// Alice supplies forged provider claims; Bob's relay forwards only the claims
+/// from Alice's authenticated connection, and the authority enforces them.
+#[test]
+fn ordinary_connection_cannot_supply_delegated_claims() {
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    let (relay_link, mut upstream) = duplex_transport::duplex();
+    block_on(relay.connect_upstream(relay_link));
+    let (mut peer, link) = duplex_transport::duplex();
+    let key = jazz::query::provider_claim_key("role");
+    let actual = BTreeMap::from([(key.clone(), Value::String("reader".into()))]);
+    relay.accept_subscriber_with_claims(link, alice(), Some(actual.clone()));
+    let mut upload = captured_upload(1, "claims", false);
+    for message in &mut upload {
+        if let jazz::db::SyncMessage::Commit { session, .. } = message {
+            *session = Some(BTreeMap::from([(
+                key.clone(),
+                Value::String("admin".into()),
+            )]));
+        }
+    }
+    send_upload(peer.as_mut(), &upload);
+    turns(&[&relay]);
+    let forwarded = std::iter::from_fn(|| upstream.try_recv())
+        .find(|m| matches!(m, jazz::db::SyncMessage::Commit { .. }))
+        .unwrap();
+    if let jazz::db::SyncMessage::Commit {
+        author, session, ..
+    } = &forwarded
+    {
+        assert_eq!(author.as_deref(), Some(alice().canonical()));
+        assert_eq!(session.as_ref(), Some(&actual));
+    }
+    let (mut authority_peer, link) = duplex_transport::duplex();
+    server.accept_subscriber(link, AuthorSubject::SYSTEM);
+    authority_peer.send(forwarded).unwrap();
+    turns(&[&server]);
+    assert!(matches!(
+        receipts(authority_peer.as_mut()).as_slice(),
+        [Err(_)]
+    ));
+    assert!(texts(&server).is_empty());
+}
+
+/// Alice's rejected upload remains rejected after Bob's relay restarts, even
+/// when the rejection receipt never reached Alice's original connection.
+#[test]
+fn rejection_survives_a_lost_receipt_and_relay_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.sqlite");
+    let server = authority();
+    let upload = captured_upload(1, "denied", false);
+    {
+        let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+        connect(&relay, &server, AuthorSubject::SYSTEM);
+        let (mut lost, link) = duplex_transport::duplex();
+        relay.accept_subscriber(link, alice());
+        send_upload(lost.as_mut(), &upload);
+        turns(&[&relay, &server]);
+        // Drop the connection without reading its terminal receipt.
+    }
+    let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+    relay.set_remote_link_hint(RemoteLinkHint::Failed);
+    let (mut peer, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, alice());
+    send_upload(peer.as_mut(), &upload);
+    turns(&[&relay]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Err(_)]));
+    assert!(texts(&server).is_empty());
+    assert_eq!(server.seq_high_water(), 0);
+}
+
+/// Alice's read-only serializable unit crosses Bob's relay. A concurrent
+/// accepted write invalidates the stale read, while a fresh read-only unit settles.
+#[test]
+fn serializable_read_validation_stays_at_the_authority() {
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    let client = open(1, alice(), None);
+    let writer = open(2, bob(), None);
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    connect(&client, &relay, alice());
+    connect(&writer, &server, bob());
+    let dbs = [&client, &relay, &server, &writer];
+    let id = jazz::tools::OpenTransactionId([1; 16]);
+    block_on(client.begin_serializable(id)).unwrap();
+    let query = client.prepare_query(&Query::from("notes")).unwrap();
+    assert!(
+        drive(&dbs, client.serializable_tx_ref(id).all_prepared(&query))
+            .unwrap()
+            .is_empty()
+    );
+    let other = insert(&writer, "concurrent", true);
+    drive(
+        &dbs,
+        writer.wait_for_transaction(other, DurabilityTier::Global),
+    )
+    .unwrap();
+    let stale = block_on(client.commit_serializable_handle(id)).unwrap().0;
+    let error = drive(
+        &dbs,
+        client.wait_for_transaction(stale, DurabilityTier::Global),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::TransactionConflict);
+    let _watch =
+        block_on(client.subscribe(&query, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)))
+            .unwrap();
+    turns(&dbs);
+    let id = jazz::tools::OpenTransactionId([2; 16]);
+    block_on(client.begin_serializable_for_identity(id, alice())).unwrap();
+    assert_eq!(
+        drive(&dbs, client.serializable_tx_ref(id).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1
+    );
+    let fresh = block_on(client.commit_serializable_handle(id)).unwrap().0;
+    drive(
+        &dbs,
+        client.wait_for_transaction(fresh, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(client.write_state(fresh).unwrap().fate, Fate::Accepted);
+}
+
+/// Alice's upload bytes and the authority's origin-qualified receipts are pinned
+/// independently of serialization defaults. Raw SQL inspects the new durable
+/// envelope because the public API deliberately does not expose storage bytes.
+#[test]
+fn relay_journal_and_fates_have_frozen_versioned_bytes() {
+    use jazz::db::{SyncMessage, WireError};
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/sqlite_relay_upload_v1.json")).unwrap();
+    assert_eq!(fixture["journalRole"], "jazz.sqlite.relay-upload.v1");
+    assert_eq!(fixture["fateRole"], "jazz.sqlite.sync.origin-write-fate.v1");
+    assert_eq!(fixture["version"], 1);
+    for (name, result) in [
+        ("accepted", Ok(())),
+        ("conflict", Err(WireError::Conflict("stale".into()))),
+        ("rejected", Err(WireError::Rejected("denied".into()))),
+        ("other", Err(WireError::Other("oops".into()))),
+    ] {
+        let message = SyncMessage::FateV1 {
+            node: [17; 16],
+            tx: 127,
+            through: 128,
+            result,
+        };
+        let bytes = hex::decode(fixture["fates"][name].as_str().unwrap()).unwrap();
+        assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
+        let (decoded, rest): (SyncMessage, _) = postcard::take_from_bytes(&bytes).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(message).unwrap()
+        );
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.sqlite");
+    let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+    relay.set_remote_link_hint(RemoteLinkHint::Failed);
+    let (mut peer, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, alice());
+    let mut message = captured_upload(17, "fixture", true).pop().unwrap();
+    if let SyncMessage::Commit {
+        tx,
+        ops,
+        author,
+        session,
+        updated_at,
+        ..
+    } = &mut message
+    {
+        *tx = 127;
+        ops.clear();
+        *author = Some(alice().canonical().to_owned());
+        *session = None;
+        *updated_at = Some(300);
+    } else {
+        panic!("expected commit");
+    }
+    peer.send(message).unwrap();
+    turns(&[&relay]);
+    let sql = rusqlite::Connection::open(&path).unwrap();
+    type JournalColumns = (i64, Vec<u8>, i64, String, Vec<u8>, Vec<u8>, Vec<u8>, i64);
+    let (ordinal, node, tx, source, schema, request, normalized, pending): JournalColumns = sql.query_row("SELECT ordinal,node,tx,source,schema_id,request,commit_msg,pending FROM _jazz_relay_upload_v1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).unwrap();
+    assert_eq!((ordinal, tx, pending), (1, 127, 1));
+    assert_eq!(node, [17; 16]);
+    assert_eq!(source, alice().canonical());
+    assert_eq!(schema.len(), 16);
+    assert_eq!(hex::encode(request), fixture["request"]);
+    assert_eq!(hex::encode(normalized), fixture["normalized"]);
+}
+
+/// Alice's large upload outlives Bob's relay receipt TTL, then authority rejection
+/// releases its pins. Raw SQLite only expires the clock-based lease deterministically;
+/// public forwarding and rejection still drive the actual state transitions.
+#[test]
+fn journal_pins_outlive_receipt_expiry_and_release_after_rejection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.sqlite");
+    let server = authority();
+    let upload = captured_upload(1, &"denied-large".repeat(40000), false);
+    {
+        let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+        relay.set_remote_link_hint(RemoteLinkHint::Failed);
+        let (mut peer, link) = duplex_transport::duplex();
+        relay.accept_subscriber(link, alice());
+        send_upload(peer.as_mut(), &upload);
+        turns(&[&relay]);
+    }
+    let sql = rusqlite::Connection::open(&path).unwrap();
+    sql.execute("UPDATE _jazz_lv_receipt SET expires=0", [])
+        .unwrap();
+    let count = |table: &str| {
+        sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert!(count("_jazz_lv_node") > 1);
+    assert_eq!(count("_jazz_lv_relay_root_v1"), 1);
+    let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+    relay.set_remote_link_hint(RemoteLinkHint::Failed);
+    turns(&[&relay]);
+    block_on(relay.evict_expired_staged_large_values()).unwrap();
+    turns(&[&relay]);
+    assert_eq!(count("_jazz_lv_receipt"), 0);
+    assert!(count("_jazz_lv_node") > 1);
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    turns(&[&relay, &server]);
+    assert_eq!(count("_jazz_lv_relay_root_v1"), 0);
+    assert_eq!(count("_jazz_lv_node"), 0);
+    assert!(texts(&server).is_empty());
+}
+
+/// Alice's journal and large-value pin are one durable unit. A lower-level SQL
+/// trigger injects a pin failure; the public relay must reject without forwarding
+/// a half-journalled upload, and a later retry can succeed.
+#[test]
+fn pin_storage_failure_rolls_back_the_entire_journal_unit() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.sqlite");
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    let sql = rusqlite::Connection::open(&path).unwrap();
+    sql.execute_batch("CREATE TRIGGER fail_pin BEFORE INSERT ON _jazz_lv_relay_root_v1 BEGIN SELECT RAISE(ABORT,'injected pin failure'); END").unwrap();
+    let upload = captured_upload(1, &"large".repeat(30000), true);
+    let (mut peer, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, alice());
+    send_upload(peer.as_mut(), &upload);
+    turns(&[&relay, &server]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Err(_)]));
+    let count: i64 = sql
+        .query_row("SELECT count(*) FROM _jazz_relay_upload_v1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(texts(&server).is_empty());
+    sql.execute_batch("DROP TRIGGER fail_pin").unwrap();
+    send_upload(peer.as_mut(), &upload);
+    turns(&[&relay, &server]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Ok(())]));
+    assert_eq!(texts(&server), ["large".repeat(30000)]);
+}
+
+/// Bob's relay fails closed when Alice's pending journal contains an unknown
+/// version, trailing bytes, another transaction identity, or a changed scope.
+/// Raw SQL corruption is needed to reach states that public writes cannot create.
+#[test]
+fn corrupt_journal_cannot_be_forwarded_after_restart() {
+    for corruption in [
+        "UPDATE _jazz_relay_upload_v1 SET commit_msg=x'00'",
+        "UPDATE _jazz_relay_upload_v1 SET commit_msg=CAST(commit_msg || x'00' AS BLOB)",
+        "UPDATE _jazz_relay_upload_v1 SET tx=tx+1",
+        "UPDATE _jazz_relay_upload_v1 SET source='invalid'",
+        "UPDATE _jazz_relay_upload_v1 SET request=x'00'",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        {
+            let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+            relay.set_remote_link_hint(RemoteLinkHint::Failed);
+            let (mut peer, link) = duplex_transport::duplex();
+            relay.accept_subscriber(link, alice());
+            send_upload(peer.as_mut(), &captured_upload(1, "pending", true));
+            turns(&[&relay]);
+        }
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(corruption)
+            .unwrap();
+        let result = block_on(Db::open_at(
+            config(50, AuthorSubject::SYSTEM),
+            &path,
+            Default::default(),
+        ));
+        let error = result
+            .err()
+            .expect("corrupt relay journal must refuse recovery");
+        assert_eq!(
+            error.code,
+            jazz::db::ErrorCode::Storage,
+            "{corruption}: {error}"
+        );
+    }
+}
+
+/// Bob's relay cannot publish Alice's fate before the whole incoming SQLite tick
+/// commits. A SQL fault after fate insertion and a controlled upstream are needed
+/// to exercise rollback after the inner receipt savepoint has already released.
+#[test]
+fn failed_tick_does_not_publish_a_relay_fate_or_consume_its_retry() {
+    use jazz::db::{LOCAL_BASE, SyncMessage};
+    for (table, condition) in [("_jazz_meta", "WHEN NEW.k='known'"), ("_jazz_applied", "")] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("relay.sqlite");
+        let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+        relay.set_remote_link_hint(RemoteLinkHint::Failed);
+        let (mut peer, link) = duplex_transport::duplex();
+        relay.accept_subscriber(link, alice());
+        send_upload(peer.as_mut(), &captured_upload(1, "pending", true));
+        turns(&[&relay]);
+        let (link, mut authority) = duplex_transport::duplex();
+        block_on(relay.connect_upstream(link));
+        turns(&[&relay]);
+        while authority.try_recv().is_some() {}
+        let sql = rusqlite::Connection::open(&path).unwrap();
+        sql.execute_batch(&format!("CREATE TRIGGER fail_receipt BEFORE INSERT ON {table} {condition} BEGIN SELECT RAISE(ABORT,'injected receipt failure'); END")).unwrap();
+        let fate = SyncMessage::FateV1 {
+            node: [1; 16],
+            tx: LOCAL_BASE + 1,
+            through: 7,
+            result: Ok(()),
+        };
+        authority.send(fate.clone()).unwrap();
+        let error = block_on(relay.tick()).unwrap_err();
+        assert!(
+            error.message.contains("injected receipt failure"),
+            "{error}"
+        );
+        let pending: i64 = sql
+            .query_row("SELECT pending FROM _jazz_relay_upload_v1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pending, 1);
+        let recorded: i64 = sql
+            .query_row("SELECT count(*) FROM _jazz_applied", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 0);
+        assert!(receipts(peer.as_mut()).is_empty());
+        sql.execute_batch("DROP TRIGGER fail_receipt").unwrap();
+        turns(&[&relay]);
+        assert!(std::iter::from_fn(|| authority.try_recv()).any(
+            |m| matches!(m,SyncMessage::Commit { node,tx,.. } if node==[1;16] && tx==LOCAL_BASE+1)
+        ));
+        assert!(receipts(peer.as_mut()).is_empty());
+        authority.send(fate).unwrap();
+        turns(&[&relay]);
+        assert!(matches!(receipts(peer.as_mut()).as_slice(), [Ok(())]));
+    }
+}
+
+/// Alice queues an insert and an empty serializable commit that reads that own
+/// pending insert. Bob's relay preserves their order and original dependency IDs.
+#[test]
+fn own_pending_dependencies_keep_original_order_through_relay() {
+    let client = open(1, alice(), None);
+    client.set_remote_link_hint(RemoteLinkHint::Failed);
+    let parent = insert(&client, "own parent", true);
+    let id = jazz::tools::OpenTransactionId([3; 16]);
+    block_on(client.begin_serializable(id)).unwrap();
+    let query = client.prepare_query(&Query::from("notes")).unwrap();
+    assert_eq!(
+        block_on(client.serializable_tx_ref(id).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1
+    );
+    let child = block_on(client.commit_serializable_handle(id)).unwrap().0;
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    relay.set_remote_link_hint(RemoteLinkHint::Failed);
+    connect(&client, &relay, alice());
+    turns(&[&client, &relay]);
+    assert_eq!(client.write_state(child).unwrap().fate, Fate::Pending);
+    let server = authority();
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    drive(
+        &[&client, &relay, &server],
+        client.wait_for_transaction(child, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(client.write_state(parent).unwrap().fate, Fate::Accepted);
+    assert_eq!(texts(&server), ["own parent"]);
+}
+
+struct LimitedTransport {
+    inner: Box<dyn jazz::db::Transport>,
+}
+impl jazz::db::Transport for LimitedTransport {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::db::TransportError> {
+        if matches!(&message, jazz::db::SyncMessage::Commit { .. }) {
+            return Err(jazz::db::TransportError::Backpressure);
+        }
+        self.inner.send(message)
+    }
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+/// Bob's transport stops between Alice's large upload and its commit. A new
+/// connection retries the complete unit and settles it exactly once.
+#[test]
+fn reconnect_replays_a_partially_backpressured_upload() {
+    let server = authority();
+    let relay = open(50, AuthorSubject::SYSTEM, None);
+    relay.set_remote_link_hint(RemoteLinkHint::Failed);
+    let client = open(1, alice(), None);
+    connect(&client, &relay, alice());
+    let text = "backpressure".repeat(40000);
+    let tx = insert(&client, &text, true);
+    turns(&[&client, &relay]);
+    let (a, b) = duplex_transport::duplex();
+    block_on(relay.connect_upstream(Box::new(LimitedTransport { inner: a })));
+    server.accept_subscriber(b, AuthorSubject::SYSTEM);
+    // The transport accepts chunks, then backpressures the Commit.
+    turns(&[&relay, &server]);
+    assert_eq!(client.write_state(tx).unwrap().fate, Fate::Pending);
+    assert!(texts(&server).is_empty());
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    drive(
+        &[&client, &relay, &server],
+        client.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(texts(&server), [text]);
+    assert_eq!(server.seq_high_water(), 1);
+}
