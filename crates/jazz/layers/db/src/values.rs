@@ -604,6 +604,13 @@ impl Schema {
             indexes.extend(table.composite_indexes.iter().cloned());
             indexes.sort();
             indexes.dedup();
+            // An index that leads another serves no read the longer one
+            // cannot, and costs every write a second entry.
+            let all = indexes.clone();
+            indexes.retain(|index| {
+                !all.iter()
+                    .any(|other| other.len() > index.len() && other.starts_with(index))
+            });
             tables.insert(
                 table.name.clone(),
                 Table {

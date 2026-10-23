@@ -1425,13 +1425,21 @@ impl<'a> Ctx<'a> {
                 "(NOT COALESCE({}, 0))",
                 self.predicate(child, table, alias)?
             ),
-            Predicate::Eq(l, r) => self.cmp2(CmpOp::Eq, l, r, table, alias)?,
+            Predicate::Eq(l, r) => {
+                let sql = self.cmp2(CmpOp::Eq, l, r, table, alias)?;
+                if is_id(l) || is_id(r) {
+                    whole_key(table, alias, sql)
+                } else {
+                    sql
+                }
+            }
             Predicate::Ne(l, r) => self.cmp2(CmpOp::Ne, l, r, table, alias)?,
             Predicate::Lt(l, r) => self.cmp2(CmpOp::Lt, l, r, table, alias)?,
             Predicate::Lte(l, r) => self.cmp2(CmpOp::Le, l, r, table, alias)?,
             Predicate::Gt(l, r) => self.cmp2(CmpOp::Gt, l, r, table, alias)?,
             Predicate::Gte(l, r) => self.cmp2(CmpOp::Ge, l, r, table, alias)?,
             Predicate::In(left, options) => {
+                let id = is_id(left);
                 if let Operand::Column(column) = left {
                     for option in options {
                         check_candidate(table, column, option)?;
@@ -1442,7 +1450,12 @@ impl<'a> Ctx<'a> {
                     .iter()
                     .map(|option| self.operand(option, table, alias))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.in_list(left, options)?
+                let sql = self.in_list(left, options)?;
+                if id {
+                    whole_key(table, alias, sql)
+                } else {
+                    sql
+                }
             }
             Predicate::Contains(l, r) => {
                 if let Operand::Column(column) = l {
@@ -2954,6 +2967,22 @@ impl Ctx<'_> {
         keys.push(format!("{alias}.id ASC"));
         ranked.push(format!("{alias}.id ASC"));
         Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
+    }
+}
+
+fn is_id(operand: &Operand) -> bool {
+    matches!(operand, Operand::Column(column) if column == "id")
+}
+
+/// A row-id predicate on an unbranched table, with the branch key every
+/// such row has (`''`): together they are the whole `UNIQUE (id, _b)` key,
+/// so SQLite seeks the ids instead of preferring a declared index that
+/// also covers the order or another filter.
+fn whole_key(table: &Table, alias: &str, sql: String) -> String {
+    if table.branch_by.is_empty() {
+        format!("({sql} AND {alias}._b = X'')")
+    } else {
+        sql
     }
 }
 
