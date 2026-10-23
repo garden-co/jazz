@@ -55,6 +55,7 @@ use serde::{Deserialize, Serialize};
 use super::*;
 #[path = "sync/relay.rs"]
 mod relay;
+pub use relay::OwnerDurabilityBarrier;
 use relay::{RelayUpload, UploadId};
 pub(crate) const RELAY_DDL: &str = relay::DDL;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
@@ -557,6 +558,12 @@ pub enum SyncMessage {
         through: u64,
         result: Result<(), WireError>,
     },
+    /// Tag 28, jazz.sqlite.sync.owner-stored.v1. The immediate durable owner
+    /// has retained this complete original upload; this is not a terminal fate.
+    OwnerStoredV1 {
+        node: [u8; 16],
+        tx: u64,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -618,6 +625,7 @@ pub(crate) struct Client {
     initialization_recovery_error: Option<Error>,
     relay_uploads: BTreeMap<UploadId, RelayUpload>,
     relay_finished: BTreeSet<UploadId>,
+    owner_stored: BTreeSet<UploadId>,
     transport: Option<Box<dyn Transport>>,
     pub(crate) hint: Rc<StdCell<Link>>,
     next_id: u64,
@@ -848,6 +856,7 @@ pub(crate) struct Session {
     forwarded: BTreeMap<u64, ForwardedFetch>,
     forwarded_catalogue: BTreeMap<u64, ForwardedCatalogue>,
     relay_uploads: BTreeSet<UploadId>,
+    owner_acked: BTreeSet<UploadId>,
     catalogue_pending: bool,
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
@@ -886,6 +895,7 @@ impl Session {
             forwarded: BTreeMap::new(),
             forwarded_catalogue: BTreeMap::new(),
             relay_uploads: BTreeSet::new(),
+            owner_acked: BTreeSet::new(),
             catalogue_pending: false,
         }
     }
@@ -2357,7 +2367,16 @@ impl Inner {
         Ok(WriteState {
             fate: Fate::Pending,
             global_time: None,
-            durability: DurabilityTier::Local,
+            durability: if !self.non_durable
+                || self.client.as_ref().is_some_and(|client| {
+                    client
+                        .owner_stored
+                        .contains(&(*origin.node.as_bytes(), origin.time.0))
+                }) {
+                DurabilityTier::Local
+            } else {
+                DurabilityTier::None
+            },
         })
     }
 
@@ -2970,6 +2989,7 @@ impl Client {
             initialization_recovery_error: None,
             relay_uploads: BTreeMap::new(),
             relay_finished: BTreeSet::new(),
+            owner_stored: BTreeSet::new(),
             node,
             connection: 0,
             upstream_schema: None,
@@ -3620,11 +3640,11 @@ impl Db {
             if let Some(error) = inner.write_rejection(tx)? {
                 return Poll::Ready(Err(error));
             }
-            if tier < DurabilityTier::Global {
+            if tier == DurabilityTier::None {
                 return Poll::Ready(Ok(tx));
             }
             let state = inner.write_state(tx)?;
-            if matches!(state.fate, Fate::Accepted) && state.global_time.is_some() {
+            if state.durability >= tier {
                 return Poll::Ready(Ok(tx));
             }
             if inner
@@ -3656,7 +3676,7 @@ impl Db {
     /// ones included) reaches `tier`, failing with the first the server
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
-        if tier < DurabilityTier::Global || !self.is_client() {
+        if tier == DurabilityTier::None || !self.is_client() {
             return Ok(());
         }
         let pending: Vec<u64> = {
@@ -3942,6 +3962,16 @@ impl Db {
                     other => other,
                 };
                 match message {
+                    SyncMessage::OwnerStoredV1 { node, tx } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if client
+                            .pending
+                            .iter()
+                            .any(|pending| pending.node == node && pending.tx == tx)
+                        {
+                            client.owner_stored.insert((node, tx));
+                        }
+                    }
                     SyncMessage::Rows { images } => {
                         let names = inner.owner.clone();
                         for image in images {
@@ -4181,6 +4211,7 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         if own {
+                            client.owner_stored.remove(&id);
                             client
                                 .pending
                                 .retain(|pending| pending.node != node || pending.tx != tx);
@@ -4628,6 +4659,7 @@ impl Db {
         self.progress_scoped_fetches();
         self.progress_catalogue_fetches();
         self.progress_relay_uploads()?;
+        self.progress_owner_durability();
         self.notify();
         let mut inner = self.inner.borrow_mut();
         // A relay's optimistic sequence is not an authority cut. Even its
