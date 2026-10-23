@@ -21,7 +21,15 @@ import type {
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
-import { encryptedSchemas } from "../e2ee/encrypted-schema.js";
+import { encryptedSchemas, registerEncryptionPolicyTables } from "../e2ee/encrypted-schema.js";
+import {
+  currentGroupMembersTable,
+  currentSpaceMembersPrefix,
+  currentSpaceMembersTable,
+  permissionSpacesPrefix,
+  permissionSpacesTable,
+  permissionSpaceColumn,
+} from "../e2ee/current-membership-names.js";
 import { applyDeviceRequestPermissions } from "../e2ee/device-policy.js";
 import { applyGroupTopologyPermissions, groupTopologyTables } from "../e2ee/group-policy.js";
 import { groupSchema, spaceSchema } from "../e2ee/managed-schema.js";
@@ -295,6 +303,7 @@ export interface ReachableSeedBuilder {
     user_column: string,
     from: SessionRefValue,
     team_column: string,
+    seed_filters?: Record<string, unknown>,
   ): PermissionRelation;
 }
 
@@ -635,6 +644,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     user_column: string,
     from: SessionRefValue,
     team_column: string,
+    seed_filters: Record<string, unknown> = {},
   ): PermissionRelation {
     if (!isSessionRefValue(from)) {
       throw new Error(
@@ -645,6 +655,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     const seedScope = seed_table;
 
     const seedPredicates: RelPredicateExpr[] = [
+      ...whereObjectToRelationPredicates(seed_filters, seedScope),
       {
         Cmp: {
           left: { scope: seedScope, column: user_column },
@@ -853,6 +864,17 @@ interface TableRelationBuilder<WhereInput, Row> extends TableJoinTarget, Permiss
   select(columns: Record<string, string>): PermissionRelation;
 }
 
+/** Additional restrictions, always ANDed with current encryption-space membership. */
+export type EncryptionSpacePolicyOptions<WhereInput, Row> = {
+  [Operation in "read" | "insert" | "update" | "delete" | "write"]?: WhereInputOrCallback<
+    PermissionWhereInput<WhereInput>,
+    Row
+  >;
+};
+
+type EncryptionSpaceOperation = "read" | "insert" | "update" | "delete" | "write";
+type EncryptionSpaceConditions = Partial<Record<EncryptionSpaceOperation, Condition>>;
+
 interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<WhereInput, Row> {
   allowRead: ActionBuilder<WhereInput, Row>;
   allowReads: ActionBuilder<WhereInput, Row>;
@@ -863,6 +885,8 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
   managedByCreator(): void;
+  /** `write` restricts all writes; operation-specific predicates add further restrictions. */
+  fromEncryptionSpace(options?: EncryptionSpacePolicyOptions<WhereInput, Row>): void;
   exists: ExistsBuilder<WhereInput>;
   existsIncludingCreated: ExistsBuilder<WhereInput>;
 }
@@ -1033,6 +1057,8 @@ export function definePermissions<TApp extends AppLike>(
     if (transforms) columnTransformsByTable[table] = transforms;
   }
   const rules: RuleLike[] = [];
+  const encryptionPolicyTables = new Set<string>();
+  const encryptionPolicyConditions = new Map<string, EncryptionSpaceConditions>();
   const seenRules = new Set<RuleLike>();
   const collectRule = (ruleLike: RuleLike): void => {
     if (seenRules.has(ruleLike)) {
@@ -1048,6 +1074,39 @@ export function definePermissions<TApp extends AppLike>(
       tablesWithTypeColumn,
       collectRule,
       columnTransformsByTable,
+      (table, options) => {
+        if (encryptionPolicyTables.has(table))
+          throw new Error(`fromEncryptionSpace() was already specified for "${table}"`);
+        const schema = appSchema as WasmSchema | undefined;
+        const declaration = schema && encryptedSchemas.get(schema)?.tables.get(table);
+        if (!schema || !declaration)
+          throw new Error(`fromEncryptionSpace() requires an encrypted table: "${table}"`);
+        if (
+          !schema[currentSpaceMembersTable(declaration.scope)] ||
+          !schema[currentGroupMembersTable] ||
+          !schema[permissionSpacesTable(declaration.scope)]
+        )
+          throw new Error(
+            `fromEncryptionSpace() requires encryptionSpacePolicySchema("${declaration.scope}") in the application schema`,
+          );
+        const conditions: EncryptionSpaceConditions = {};
+        if (options !== undefined) {
+          if (!isPlainObject(options))
+            throw new Error("fromEncryptionSpace() options must be an object");
+          for (const [operation, input] of Object.entries(options)) {
+            if (!["read", "insert", "update", "delete", "write"].includes(operation))
+              throw new Error(`Unknown fromEncryptionSpace() operation: "${operation}"`);
+            if (input !== undefined)
+              conditions[operation as EncryptionSpaceOperation] = resolveWhereInput(
+                input,
+                tablesWithTypeColumn.has(table),
+                columnTransformsByTable[table],
+              );
+          }
+        }
+        encryptionPolicyConditions.set(table, conditions);
+        encryptionPolicyTables.add(table);
+      },
     ),
     anyOf,
     allOf,
@@ -1068,6 +1127,116 @@ export function definePermissions<TApp extends AppLike>(
   }
   factory(ctx);
   const application = compileRules(rules, fkReferencesByTable, relationsByTable);
+  const authenticatedFor = (table: string) =>
+    compileCondition(
+      resolveWhereInput(
+        ctx.session.where({
+          authMode: { in: ["local-first", "external"] },
+          "user.account": { isNull: false },
+        }),
+        false,
+      ),
+      table,
+      fkReferencesByTable,
+      relationsByTable,
+    )!;
+  for (const table of encryptionPolicyTables) {
+    if (application[table])
+      throw new Error(
+        `fromEncryptionSpace() cannot be combined with explicit policies for "${table}"`,
+      );
+    const declaration = encryptedSchemas.get(appSchema as WasmSchema)!.tables.get(table)!;
+    const condition: PolicyExpr = {
+      type: "And",
+      exprs: [
+        authenticatedFor(table),
+        { type: "Inherits", operation: "Update", via_column: permissionSpaceColumn },
+        permissionScopeBinding(declaration.scope, declaration.space, permissionSpaceColumn, false),
+      ],
+    };
+    const extensions = encryptionPolicyConditions.get(table)!;
+    const restrict = (operation: Exclude<EncryptionSpaceOperation, "write">): PolicyExpr => {
+      const inputs =
+        operation === "read" ? [extensions.read] : [extensions.write, extensions[operation]];
+      const extra = inputs
+        .filter((input): input is Condition => input !== undefined)
+        .map((input) => compileCondition(input, table, fkReferencesByTable, relationsByTable)!);
+      return extra.length === 0 ? condition : { type: "And", exprs: [condition, ...extra] };
+    };
+    const update = restrict("update");
+    application[table] = {
+      select: { using: restrict("read") },
+      insert: { with_check: restrict("insert") },
+      update: { using: update, with_check: update },
+      delete: { using: restrict("delete") },
+    };
+  }
+  for (const access of Object.keys(appSchema ?? {}).filter((name) =>
+    name.startsWith(permissionSpacesPrefix),
+  )) {
+    const scope = access.slice(permissionSpacesPrefix.length);
+    const members = currentSpaceMembersTable(scope);
+    const session = ctx.session.user.account;
+    const groups = createTableRelation(access, relationsByTable)
+      .reachable_via(
+        members,
+        "accessId",
+        "groupId",
+        session,
+        currentGroupMembersTable,
+        "childGroupId",
+        "groupId",
+      )
+      .seeded_by(currentGroupMembersTable, "recipientId", session, "groupId", {
+        accountId: { isNull: false },
+      });
+    const condition: PolicyExpr = {
+      type: "Or",
+      exprs: [
+        {
+          type: "Exists",
+          table: members,
+          condition: {
+            type: "And",
+            exprs: [
+              {
+                type: "Cmp",
+                column: "accessId",
+                op: "Eq",
+                value: { type: "SessionRef", path: [OUTER_ROW_SESSION_PREFIX, "id"] },
+              },
+              {
+                type: "Cmp",
+                column: "accountId",
+                op: "Eq",
+                value: { type: "SessionRef", path: session.path },
+              },
+            ],
+          },
+        },
+        compileCondition(
+          resolveWhereInput(ctx.policy.exists(groups), false),
+          access,
+          fkReferencesByTable,
+          relationsByTable,
+        )!,
+      ],
+    };
+    const authenticated = authenticatedFor(access);
+    const membership: PolicyExpr = { type: "And", exprs: [authenticated, condition] };
+    managed[access] = {
+      select: { using: authenticated },
+      insert: { with_check: permissionScopeBinding(scope, "scopeId", "id", true) },
+      update: {
+        using: membership,
+        with_check: {
+          type: "And",
+          exprs: [membership, permissionScopeBinding(scope, "scopeId", "id", false)],
+        },
+      },
+      delete: { using: { type: "False" } },
+    };
+  }
   for (const [table, policies] of Object.entries(application)) {
     for (const operation of [policies.select, policies.insert, policies.update, policies.delete]) {
       validateComputedPermissionReferences(operation?.using, table, columnTransformsByTable);
@@ -1116,7 +1285,65 @@ export function definePermissions<TApp extends AppLike>(
         application[table] = { ...application[table], select: topology[table]!.select };
     }
   }
+  if (encrypted) {
+    for (const table of Object.keys(appSchema ?? {}).filter(
+      (name) => name === currentGroupMembersTable || name.startsWith(currentSpaceMembersPrefix),
+    )) {
+      const denied: PolicyExpr = { type: "False" };
+      const select = { using: authenticatedFor(table) };
+      defaults[table] = {
+        select,
+        insert: { with_check: denied },
+        update: { using: denied, with_check: denied },
+        delete: { using: denied },
+      };
+      if (application[table]) {
+        const policies = application[table]!;
+        if (table.startsWith(currentSpaceMembersPrefix)) {
+          const scope = table.slice(currentSpaceMembersPrefix.length);
+          const bind = (condition: PolicyExpr | undefined, created: boolean): PolicyExpr => ({
+            type: "And",
+            exprs: [
+              condition ?? denied,
+              permissionScopeBinding(scope, "scopeId", "accessId", created),
+            ],
+          });
+          application[table] = {
+            ...policies,
+            select,
+            insert: { with_check: bind(policies.insert?.with_check, true) },
+            update: {
+              using: bind(policies.update?.using, false),
+              with_check: bind(policies.update?.with_check, false),
+            },
+          };
+        } else application[table] = { ...policies, select };
+      }
+    }
+    registerEncryptionPolicyTables(appSchema as WasmSchema, encryptionPolicyTables);
+  }
   return encrypted ? { [permissionDefaults]: defaults, ...managed, ...application } : application;
+}
+
+function permissionScopeBinding(
+  scope: string,
+  first: string,
+  second: string,
+  created: boolean,
+): PolicyExpr {
+  return {
+    type: created ? "ExistsIncludingCreated" : "Exists",
+    table: scope,
+    condition: {
+      type: "And",
+      exprs: [first, second].map((column) => ({
+        type: "Cmp",
+        column: "id",
+        op: "Eq",
+        value: { type: "SessionRef", path: [OUTER_ROW_SESSION_PREFIX, column] },
+      })),
+    },
+  };
 }
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
@@ -1182,6 +1409,7 @@ function buildPolicyContext(
   tablesWithTypeColumn: ReadonlySet<string>,
   collectRule: (ruleLike: RuleLike) => void,
   columnTransformsByTable: ColumnTransformRegistry,
+  fromEncryptionSpace?: (table: string, options: unknown) => void,
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const table of tableNames) {
@@ -1191,6 +1419,7 @@ function buildPolicyContext(
       tablesWithTypeColumn.has(table),
       collectRule,
       columnTransformsByTable,
+      fromEncryptionSpace,
     );
   }
   context.exists = (relation: PermissionRelation): ExistsRelationCondition =>
@@ -1209,6 +1438,7 @@ function buildTablePolicyBuilder(
   hasTypeColumn: boolean,
   collectRule: (ruleLike: RuleLike) => void,
   columnTransformsByTable: ColumnTransformRegistry,
+  fromEncryptionSpace?: (table: string, options: unknown) => void,
 ): Record<string, unknown> {
   const columnTransforms = columnTransformsByTable[table];
   const registerRule = (rule: Rule): Rule => {
@@ -1278,6 +1508,11 @@ function buildTablePolicyBuilder(
       return updateFactory();
     },
     managedByCreator,
+    fromEncryptionSpace: (options: unknown) => {
+      if (!fromEncryptionSpace)
+        throw new Error("fromEncryptionSpace() requires definePermissions(app, ...)");
+      fromEncryptionSpace(table, options);
+    },
     exists,
     existsIncludingCreated,
     where: (input: unknown) => relation().where(input),

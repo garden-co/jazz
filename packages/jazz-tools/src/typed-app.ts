@@ -34,6 +34,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { deviceRequestSchema, groupSchema, spaceSchema } from "./e2ee/managed-schema.js";
+import { permissionSpacesTable } from "./e2ee/current-membership-names.js";
 import {
   encryptedSchemas,
   encryptedTableToPhysical,
@@ -1864,9 +1865,15 @@ function compileAppSchema(definition: SchemaDefinition) {
   if (!encrypted.size) return { schema: logical, wasmSchema: schemaToWasm(logical) };
   const schema: SchemaAst = {
     ...logical,
-    tables: logical.tables.map((table) =>
-      encryptedTableToPhysical(table, encrypted.get(table.name)),
-    ),
+    tables: logical.tables.map((table) => {
+      const declaration = encrypted.get(table.name);
+      const access = declaration && permissionSpacesTable(declaration.scope);
+      return encryptedTableToPhysical(
+        table,
+        declaration,
+        access && Object.hasOwn(definition, access) ? access : undefined,
+      );
+    }),
   };
   const wasmSchema = schemaToWasm(schema);
   encryptedSchemas.set(wasmSchema, {

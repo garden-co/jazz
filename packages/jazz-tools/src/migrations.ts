@@ -34,6 +34,7 @@ import {
   definitionToSchema as compileSchemaDefinition,
 } from "./typed-app.js";
 import { encryptedTableToPhysical, equalityIndexColumn } from "./e2ee/encrypted-schema.js";
+import { permissionSpacesTable } from "./e2ee/current-membership-names.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -586,9 +587,16 @@ function definitionToSchema(definition: SchemaDefinition): SchemaAst {
   return {
     tables: logical.tables.map((table) => {
       const tableDefinition = normalizedDefinition[table.name];
+      const declaration =
+        tableDefinition instanceof DefinedTable ? tableDefinition.encryption : undefined;
+      const scope =
+        declaration &&
+        table.columns.find((column) => column.name === declaration.space)?.references;
+      const access = scope && permissionSpacesTable(scope);
       return encryptedTableToPhysical(
         table,
-        tableDefinition instanceof DefinedTable ? tableDefinition.encryption : undefined,
+        declaration,
+        access && Object.hasOwn(normalizedDefinition, access) ? access : undefined,
       );
     }),
   };
