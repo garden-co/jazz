@@ -210,3 +210,103 @@ it("admits, reopens and resets the physical root through the production SharedWo
   expect(reset.store.replicaNode).not.toEqual(node);
   expect(await count(reset.db)).toBe(0);
 });
+
+it("admits SDK foreground writes through the SharedWorker and recovers them after both runtimes close", async () => {
+  const { NativeRuntimeAdapter } =
+    await import("../../src/runtime/native-runtime/native-runtime-adapter.js");
+  const { MessagePortBrowserFollowerConnection } =
+    await import("../../src/runtime/native-runtime/browser-follower-connection.js");
+  const physical = name();
+  const workerName = `sqlite-owner-writes-${crypto.randomUUID()}`;
+  const author = new TextEncoder().encode('["https://issuer.example","alice"]');
+  async function tab() {
+    const worker = new SharedWorker(
+      new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url),
+      { type: "module", name: workerName },
+    );
+    const ready = new Promise<void>((resolve, reject) => {
+      const receive = (event: MessageEvent) => {
+        if (event.data?.type === "runtime-ready") {
+          worker.port.removeEventListener("message", receive);
+          resolve();
+        } else if (event.data?.type === "runtime-error") {
+          worker.port.removeEventListener("message", receive);
+          reject(new Error(event.data.error?.message ?? "worker open failed"));
+        }
+      };
+      worker.port.addEventListener("message", receive);
+    });
+    worker.port.start();
+    worker.port.postMessage({
+      type: "connect-runtime",
+      tabId: crypto.randomUUID(),
+      fingerprint: "sqlite-owner-writes",
+      options: {
+        schema,
+        dbName: physical,
+        storageOwner: "alice",
+        runtimeSources: sources,
+        author,
+        initialSyncFlushEvery: 1,
+        appId: "sqlite-owner-writes",
+        authSessionKey: "alice",
+        authJson: "{}",
+        sessionClaims: {},
+      },
+    });
+    await ready;
+    const wasm = await loadWasmModule(sources);
+    const node = crypto.getRandomValues(new Uint8Array(16));
+    const db = wasm.WasmDb.openMemory(encodeSchema(schema), openConfig(node, author, 1, false));
+    const runtime = NativeRuntimeAdapter.fromDb(db as never, schema, node, author, 1, false);
+    runtime.setNonDurableClient();
+    const errors: unknown[] = [];
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime,
+      worker.port,
+      {},
+      physical,
+      {
+        onAuthFailure() {},
+        onAuthRestored() {},
+        onFailure(error) {
+          errors.push(error);
+        },
+      },
+    );
+    await connection.ready();
+    return {
+      runtime,
+      errors,
+      async close() {
+        await connection.shutdown(true);
+        await runtime.close();
+      },
+    };
+  }
+  const first = await tab();
+  try {
+    const write = first.runtime.insert("notes", {
+      text: { type: "Text", value: "offline SDK write" },
+    });
+    expect(write.kind).toBe("committed");
+    if (write.kind !== "committed") throw new Error("write was not committed");
+    await first.runtime.waitForTransaction(await write.txId, "local");
+    expect(first.errors).toEqual([]);
+  } finally {
+    await first.close();
+  }
+  const second = await tab();
+  try {
+    const rows = await second.runtime.query(
+      JSON.stringify({ table: "notes" }),
+      null,
+      "local-first",
+    );
+    expect(rows).toHaveLength(1);
+    expect(JSON.stringify(rows)).toContain("offline SDK write");
+    expect(second.errors).toEqual([]);
+  } finally {
+    await second.close();
+  }
+});

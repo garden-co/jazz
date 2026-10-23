@@ -72,6 +72,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private pump: BrowserWorkerTransportPump | null = null;
   private readonly pendingFrames: Uint8Array[][] = [];
   private readonly readyPromise: Promise<void>;
+  private rejectReadiness?: (error: Error) => void;
+  private ownerAdmissionPending = true;
   private inspectorAttachmentPhysicalDbName: string | null = null;
   private peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
   private workerRealmId?: string;
@@ -171,8 +173,16 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           : undefined,
       );
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
+      await runtime.waitForStorageOwner();
+      this.ownerAdmissionPending = false;
+      if (!this.hasPendingWork()) this.clearWatchdog();
     })();
-    this.readyPromise = Promise.all([initialized, connected]).then(() => undefined);
+    const disposed = new Promise<never>((_, reject) => {
+      this.rejectReadiness = reject;
+    });
+    this.readyPromise = Promise.race([Promise.all([initialized, connected]), disposed]).then(() => {
+      this.rejectReadiness = undefined;
+    });
     void this.readyPromise.catch((error: unknown) => this.fail(toError(error)));
     runtime.setInitializationStatusOwner(async (ids) => {
       await this.ready();
@@ -410,7 +420,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   };
 
   private hasPendingWork(): boolean {
-    return this.pending.size > 0 || this.localSettlementsPending || this.resumeProbePending;
+    return (
+      this.ownerAdmissionPending ||
+      this.pending.size > 0 ||
+      this.localSettlementsPending ||
+      this.resumeProbePending
+    );
   }
 
   private readonly onVisibilityChange = (): void => {
@@ -551,6 +566,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private dispose(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.rejectReadiness?.(this.failed ?? new Error("Browser follower connection is closed"));
+    this.rejectReadiness = undefined;
     this.clearWatchdog();
     globalThis.removeEventListener?.("pageshow", this.onResume);
     globalThis.document?.removeEventListener("visibilitychange", this.onVisibilityChange);
