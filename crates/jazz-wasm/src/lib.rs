@@ -1099,16 +1099,32 @@ impl WasmDb {
         }
     }
 
-    fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
+    fn open_memory_as(
+        schema: &[u8],
+        config: &[u8],
+        how: OpenAs<'_>,
+        cached_catalogue: Option<&[u8]>,
+    ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
+        if cached_catalogue.is_some() && config.history_complete {
+            return Err(to_js_error(Error::new(
+                jazz::db::ErrorCode::Protocol,
+                "cached catalogue open cannot initialise a standalone authority",
+            )));
+        }
         let db = block_on(binding_host::open_memory(
             binding_host::db_config(schema, &config, identity),
             &config,
         ))
         .map_err(to_js_error)?;
+        if let Some(capture) = cached_catalogue {
+            // SAFETY: the host loads the opaque capture from its app-scoped
+            // authenticated cache, before sharing this new runtime owner.
+            unsafe { db.install_cached_catalogue(capture) }.map_err(to_js_error)?;
+        }
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
@@ -1118,13 +1134,12 @@ impl WasmDb {
         config: Vec<u8>,
         cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
-        if cached_catalogue.is_some() {
-            return Err(not_supported(
-                "E2EE authenticated catalogue cache on SQLite",
-            ));
-        }
-
-        Self::open_memory_as(&schema, &config, OpenAs::Untrusted)
+        Self::open_memory_as(
+            &schema,
+            &config,
+            OpenAs::Untrusted,
+            cached_catalogue.as_deref(),
+        )
     }
 
     /// Open a deliberate backend runtime. This remains a separate ABI from
@@ -1132,7 +1147,7 @@ impl WasmDb {
     /// privileged system author.
     #[wasm_bindgen(js_name = openMemoryAsBackend)]
     pub fn open_memory_as_backend(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
-        Self::open_memory_as(&schema, &config, OpenAs::Backend)
+        Self::open_memory_as(&schema, &config, OpenAs::Backend, None)
     }
 
     /// Open with a verified Jazz self-signed client identity. This deliberately
@@ -1147,12 +1162,6 @@ impl WasmDb {
         claimed_author: String,
         cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
-        if cached_catalogue.is_some() {
-            return Err(not_supported(
-                "E2EE authenticated catalogue cache on SQLite",
-            ));
-        }
-
         Self::open_memory_as(
             &schema,
             &config,
@@ -1161,6 +1170,7 @@ impl WasmDb {
                 app_id: &app_id,
                 claimed_author: &claimed_author,
             },
+            cached_catalogue.as_deref(),
         )
     }
 
@@ -1189,13 +1199,15 @@ impl WasmDb {
         storage_owner: String,
         cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
-        if cached_catalogue.is_some() {
-            return Err(not_supported(
-                "E2EE authenticated catalogue cache on SQLite",
-            ));
-        }
-
-        Self::open_browser_as(storage, schema, config, storage_owner, OpenAs::Untrusted).await
+        Self::open_browser_as(
+            storage,
+            schema,
+            config,
+            storage_owner,
+            OpenAs::Untrusted,
+            cached_catalogue,
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1212,18 +1224,20 @@ impl WasmDb {
         storage_owner: String,
         cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
-        if cached_catalogue.is_some() {
-            return Err(not_supported(
-                "E2EE authenticated catalogue cache on SQLite",
-            ));
-        }
-
         let how = OpenAs::SelfSigned {
             token: &token,
             app_id: &app_id,
             claimed_author: &claimed_author,
         };
-        Self::open_browser_as(storage, schema, config, storage_owner, how).await
+        Self::open_browser_as(
+            storage,
+            schema,
+            config,
+            storage_owner,
+            how,
+            cached_catalogue,
+        )
+        .await
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1233,6 +1247,7 @@ impl WasmDb {
         config: Vec<u8>,
         storage_owner: String,
         how: OpenAs<'_>,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) =
@@ -1244,6 +1259,11 @@ impl WasmDb {
         let spec = browser::StoreSpec::from_js(&storage, &storage_owner)?;
         let (db, store) =
             browser::open(&spec, binding_host::db_config(schema, &config, identity)).await?;
+        if let Some(capture) = cached_catalogue {
+            // SAFETY: the storage owner supplies only its exact app-scoped
+            // authenticated cache, before this runtime is exposed to callers.
+            unsafe { db.install_cached_catalogue(&capture) }.map_err(to_js_error)?;
+        }
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
         *owner.open_inner()?.host.store.borrow_mut() = Some(store);
         Ok(owner)

@@ -3589,6 +3589,7 @@ impl Db {
             .conn
             .execute_batch("SAVEPOINT sync_tick")
             .map_err(storage)?;
+        let capture_pending = self.inner.borrow().catalogue_capture_pending.get();
         let applied = self.client_apply();
         let inner = self.inner.borrow();
         if applied.is_ok() {
@@ -3598,6 +3599,7 @@ impl Db {
                 .map_err(storage)?;
         } else {
             inner.rollback_savepoint("sync_tick").map_err(storage)?;
+            inner.catalogue_capture_pending.set(capture_pending);
         }
         drop(inner);
         applied?;
