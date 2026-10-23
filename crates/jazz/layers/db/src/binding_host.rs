@@ -37,7 +37,7 @@ use crate::db::{
     RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
     StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
     UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    WriteIdentity, WriteState, block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -587,6 +587,7 @@ struct WriteResultPayload {
 /// A committed write as a binding returns it.
 #[derive(Clone, Debug)]
 pub struct Write {
+    node: NodeUuid,
     /// postcard `{ row_id, tx_id }`.
     pub payload: Vec<u8>,
     /// The written row (zero for a transaction commit).
@@ -703,6 +704,7 @@ impl Binding {
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
         let tx_id = TxId::new(TxTime(seq), self.node);
         Ok(Write {
+            node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
                 .map_err(|error| HostError::Argument(error.to_string()))?,
             row_id,
@@ -1182,9 +1184,27 @@ impl Binding {
         })))
     }
 
+    /// Read a receipt only under its originating node. Schema views and a
+    /// reopened store retain that node; another node cannot reinterpret it.
+    pub fn write_state(&self, write: &Write) -> HostResult<WriteState> {
+        self.check_write_owner(write)?;
+        if let Some(error) = &write.rejected {
+            return Ok(WriteState::rejected(error, DurabilityTier::None));
+        }
+        Ok(self.db.write_state(write.seq)?)
+    }
+
+    fn check_write_owner(&self, write: &Write) -> HostResult<()> {
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
+        Ok(())
+    }
+
     /// Resolve once `write` reached `tier`; fail at once with its
     /// rejection, if it was rejected.
     pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        self.check_write_owner(write)?;
         if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
