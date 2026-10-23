@@ -1969,7 +1969,7 @@ impl Link {
 
     /// Detach the link; `false` when already closed.
     pub fn close(&mut self) -> bool {
-        match &mut self.kind {
+        let detached = match &mut self.kind {
             LinkKind::Upstream(upstream) => upstream
                 .take()
                 .is_some_and(|upstream| self.binding.db.detach_connection(&upstream)),
@@ -1980,6 +1980,8 @@ impl Link {
                 }
                 None => false,
             },
-        }
+        };
+        self.binding.hooks.progress.wake_all();
+        detached
     }
 }

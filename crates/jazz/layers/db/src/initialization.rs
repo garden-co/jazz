@@ -81,7 +81,7 @@ impl Inner {
         let record: Option<(Vec<u8>, i64)> = self
             .conn
             .query_row(
-                "SELECT node,tx FROM _jazz_local_commits_v1 WHERE seq=?1",
+                "SELECT node,tx FROM _jazz_local_commits_v1 WHERE seq=?1 UNION ALL SELECT node,tx FROM _jazz_owner_positions_v1 WHERE seq=?1",
                 [seq as i64],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -119,7 +119,7 @@ impl Inner {
         let value: Option<i64> = self
             .conn
             .query_row(
-                "SELECT seq FROM _jazz_local_commits_v1 WHERE node=?1 AND tx=?2",
+                "SELECT seq FROM _jazz_local_commits_v1 WHERE node=?1 AND tx=?2 UNION ALL SELECT seq FROM _jazz_owner_positions_v1 WHERE node=?1 AND tx=?2",
                 rusqlite::params![origin.node.as_bytes().as_slice(), origin.time.0 as i64],
                 |row| row.get(0),
             )
