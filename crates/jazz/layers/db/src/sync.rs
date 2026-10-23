@@ -4796,7 +4796,7 @@ impl Db {
         opts: ReadOpts,
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
-        _author: Option<AuthorSubject>,
+        author: Option<AuthorSubject>,
         _require_coverage: bool,
         _coverage_expired: E,
         _release_coverage: F,
@@ -4841,21 +4841,25 @@ impl Db {
                 _ => None,
             };
             if let Some(deadline) = wait {
+                // Fetch currently carries the connection's identity, not a
+                // served request's identity/claims. Never hydrate a session
+                // request as SYSTEM and filter an unrestricted result locally.
+                if author.is_some_and(|author| {
+                    author != AuthorSubject::SYSTEM && author != self.inner().identity.author
+                }) || prepared.request_claims.is_some()
+                {
+                    return Err(unsupported(
+                        "remote one-shot reads with a served session or request-scoped claims",
+                    ));
+                }
                 Self::remote_shape(&prepared.query)?;
                 self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
                     .await?;
             }
         }
-        let roots = self
-            .all(
-                &prepared,
-                ReadOpts {
-                    first_load: FirstLoad::Deliver,
-                    ..opts
-                },
-            )
-            .await?;
-        Ok(result(self.nest_relations(&prepared, roots)?))
+        let inner = self.inner();
+        let roots = inner.run(&prepared, author, &ReadSpec::of(&opts, &inner)?)?;
+        Ok(result(inner.nest_relations(&prepared, author, roots)?))
     }
 }
 
