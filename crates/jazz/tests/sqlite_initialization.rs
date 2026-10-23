@@ -964,3 +964,44 @@ fn write_only_ack_preserves_exact_initialization_image() {
     assert_eq!(rows(&alice), vec![(row(1), "founder".into())]);
     assert_eq!(rows(&bob), vec![(row(1), "founder".into())]);
 }
+
+/// Closing Alice's shared host schema view preserves the root's capability;
+/// closing the root retires it across every surviving view.
+#[test]
+fn shared_host_view_close_preserves_owner_tokens() {
+    let db = open(1, "alice", None, false);
+    let binding = jazz::binding_host::Binding::new(
+        db,
+        jazz::db::DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: author("alice"),
+        },
+        false,
+    );
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("text", ColumnType::Text)
+                .policies(common::allow_all_policies()),
+        )
+        .build();
+    let view = binding
+        .register_schema(&serde_json::to_vec(&schema).unwrap())
+        .unwrap();
+    let seal = view
+        .seal_initialization_transaction(&stage(&view.db, 1).to_string())
+        .unwrap();
+    block_on(view.close()).unwrap();
+    binding
+        .publish_initialization_transaction(&seal.token)
+        .unwrap();
+    assert_eq!(rows(&binding.db).len(), 1);
+    let second = binding
+        .seal_initialization_transaction(&stage(&binding.db, 2).to_string())
+        .unwrap();
+    block_on(binding.close()).unwrap();
+    assert!(
+        view.publish_initialization_transaction(&second.token)
+            .is_err()
+    );
+}

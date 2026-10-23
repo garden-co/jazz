@@ -627,6 +627,7 @@ pub struct Binding {
     node: NodeUuid,
     author: AuthorSubject,
     trusted_backend: bool,
+    owns_runtime: bool,
     /// Open transactions a staged write was refused in for its row's
     /// state: the transaction's commit reports the first such refusal.
     refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
@@ -642,6 +643,7 @@ impl Binding {
             node: identity.node,
             author: identity.author,
             trusted_backend,
+            owns_runtime: true,
             refused: Rc::default(),
             initializations: Rc::default(),
         }
@@ -663,6 +665,7 @@ impl Binding {
         let view = block_on(self.db.register_schema_view(schema))?;
         Ok(Self {
             db: Rc::new(view),
+            owns_runtime: false,
             ..self.clone()
         })
     }
@@ -1611,7 +1614,9 @@ impl Binding {
 
     /// Close the database (a schema view leaves its owner open).
     pub async fn close(&self) -> HostResult<()> {
-        self.close_initializations();
+        if self.owns_runtime {
+            self.close_initializations();
+        }
         Ok(self.db.close().await?)
     }
 }
