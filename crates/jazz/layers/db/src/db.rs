@@ -294,12 +294,21 @@ impl SubscriptionStream {
                 return None;
             }
             let settled = gate.answered.get();
+            let global = settled && gate.global.get();
             self.gate = None;
             self.queue.borrow_mut().clear();
             let group = self.group.upgrade()?;
             let mut event = fanout::opening(&group.borrow().rows);
-            if let SubscriptionEvent::Delta { settled: flag, .. } = &mut event {
+            if let SubscriptionEvent::Delta {
+                settled: flag,
+                tier,
+                ..
+            } = &mut event
+            {
                 *flag = settled;
+                if global {
+                    *tier = DurabilityTier::Global;
+                }
             }
             return Some(event);
         }
@@ -385,6 +394,11 @@ struct Inner {
     publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
+    /// A replica whose store does not outlive it (a foreground over a
+    /// durable relay): its local reads wait for the upstream's view too.
+    non_durable: bool,
+    /// The global authority: what it settles is durable at `Global`.
+    authority: bool,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Rows written since the last server tick (only while serving).
@@ -894,6 +908,8 @@ impl Db {
                 tx: None,
                 publications: Vec::new(),
                 client: None,
+                non_durable: false,
+                authority: false,
                 sessions: Vec::new(),
                 since_tick: Vec::new(),
                 capture: Vec::new(),
@@ -926,9 +942,19 @@ impl Db {
         inner.seq = inner.seq.max(floor);
     }
 
-    /// Every SQLite store holds complete history.
+    /// Every SQLite store holds complete history; this one is also the
+    /// global authority (see [`Db::set_authority`]).
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
-        Self::open(config).await
+        let db = Self::open(config).await?;
+        db.set_authority();
+        Ok(db)
+    }
+
+    /// Serve as the global authority: subscriptions this store settles,
+    /// its own and its subscribers', report `DurabilityTier::Global`. A
+    /// store without the role (a relay with no upstream) settles at `Local`.
+    pub fn set_authority(&self) {
+        self.inner.borrow_mut().authority = true;
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -1148,14 +1174,17 @@ impl Db {
             None
         };
         let settled = match (&remote, client) {
-            (Some((answered, _)), _) => sync::SettledBy::Remote(answered.clone()),
+            (Some((answered, _, global)), _) => {
+                sync::SettledBy::Remote(answered.clone(), global.clone())
+            }
             (None, true) => sync::SettledBy::Never,
-            (None, false) => sync::SettledBy::Always,
+            (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
         let gate = match (&remote, self.link_hint()) {
-            (Some((answered, _)), Some(hint)) => {
+            (Some((answered, _, global)), Some(hint)) => {
                 let deadline = match (opts.tier, &opts.first_load) {
                     (ReadTier::Remote, _) => Some(None),
+                    _ if self.inner().non_durable => Some(None),
                     (_, FirstLoad::WaitForRemote { timeout_ms })
                         if *timeout_ms > 0 && sync::may_wait(hint.get()) =>
                     {
@@ -1169,6 +1198,7 @@ impl Db {
                 let live = hint.get().hint == RemoteLinkHint::Live;
                 deadline.map(|deadline| sync::Gate {
                     answered: answered.clone(),
+                    global: global.clone(),
                     hint,
                     live,
                     deadline,
@@ -1184,7 +1214,7 @@ impl Db {
             dropped: inner.fan.dropped.clone(),
             gate,
             group,
-            refused: remote.as_ref().map(|(_, refused)| refused.clone()),
+            refused: remote.as_ref().map(|(_, refused, _)| refused.clone()),
             remote: remote.map(|_| {
                 (
                     self.inner.clone(),

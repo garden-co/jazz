@@ -904,6 +904,7 @@ impl Owner {
             }
         };
         let db = db.map_err(|error| format!("open server store: {error}"))?;
+        db.set_authority();
         let mut owner = Self {
             db,
             sessions: HashMap::new(),

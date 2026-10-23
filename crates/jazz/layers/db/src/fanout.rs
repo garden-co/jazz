@@ -246,8 +246,9 @@ impl Fanout {
                 {
                     member.told.set(true);
                     let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
-                    if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+                    if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                         *settled = true;
+                        *tier = member.settled.tier();
                     }
                     queue.borrow_mut().push_back(event);
                 }
@@ -282,10 +283,15 @@ impl Inner {
             settled: settled.clone(),
             told: std::cell::Cell::new(now),
         };
+        let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
             let mut event = opening(rows);
-            if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+            if let SubscriptionEvent::Delta {
+                settled, tier: t, ..
+            } = &mut event
+            {
                 *settled = now;
+                *t = tier;
             }
             event
         };
@@ -1198,8 +1204,9 @@ impl Group {
         for member in &self.members {
             if let Some(queue) = member.queue.upgrade() {
                 let mut event = event.clone();
-                if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+                if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                     *settled = member.settled.get();
+                    *tier = member.settled.tier();
                     member.told.set(*settled);
                 }
                 queue.borrow_mut().push_back(event);

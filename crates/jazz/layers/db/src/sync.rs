@@ -406,11 +406,14 @@ pub enum SyncMessage {
         key: Vec<u8>,
     },
     /// A subscription's result is complete through server seq `through`;
-    /// `window` lists its rows when it is limited.
+    /// `window` lists its rows when it is limited. `global`: the result is
+    /// the global authority's (directly, or through relays that settle by
+    /// their upstream), not a relay's own store.
     Settled {
         id: u64,
         through: u64,
         window: Option<Vec<[u8; 16]>>,
+        global: bool,
     },
     Answer {
         id: u64,
@@ -485,6 +488,8 @@ pub(crate) struct Remote {
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
     pub(crate) answered: Rc<StdCell<bool>>,
+    /// Whether the last answer was the global authority's.
+    pub(crate) global: Rc<StdCell<bool>>,
     /// Why the server refused this query, once it has.
     pub(crate) refused: Rc<RefCell<Option<Error>>>,
     /// The server seq this query's result was last settled through.
@@ -563,6 +568,8 @@ pub(crate) fn may_wait(link: Link) -> bool {
 /// When a gated opening is released.
 pub(crate) struct Gate {
     pub(crate) answered: Rc<StdCell<bool>>,
+    /// Whether the answer is the global authority's.
+    pub(crate) global: Rc<StdCell<bool>>,
     pub(crate) hint: Rc<StdCell<Link>>,
     /// Held on a live link: leaving it (even for a new attempt) releases.
     pub(crate) live: bool,
@@ -598,22 +605,42 @@ impl Gate {
 /// How a subscription's deltas report `settled`.
 #[derive(Clone)]
 pub(crate) enum SettledBy {
-    Always,
+    /// By this store: `true` when it is the global authority.
+    Always(bool),
     Never,
-    Remote(Rc<StdCell<bool>>),
+    /// By the upstream's answer, and whether that answer is the global
+    /// authority's.
+    Remote(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
 }
 
 impl SettledBy {
     pub(crate) fn get(&self) -> bool {
         match self {
-            SettledBy::Always => true,
+            SettledBy::Always(_) => true,
             SettledBy::Never => false,
-            SettledBy::Remote(answered) => answered.get(),
+            SettledBy::Remote(answered, _) => answered.get(),
+        }
+    }
+
+    /// The durability a settled result has.
+    pub(crate) fn tier(&self) -> DurabilityTier {
+        let global = match self {
+            SettledBy::Always(authority) => *authority,
+            SettledBy::Never => false,
+            SettledBy::Remote(answered, global) => answered.get() && global.get(),
+        };
+        if global {
+            DurabilityTier::Global
+        } else {
+            DurabilityTier::Local
         }
     }
 }
 
 // ---- server state ---------------------------------------------------------
+
+/// An upstream subscription's identity: query, binding, include_deleted.
+type RemoteRead = (Query, BTreeMap<String, Value>, bool);
 
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
@@ -667,6 +694,10 @@ pub(crate) struct Session {
     backlog: VecDeque<SyncMessage>,
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
+    /// On a relay, the upstream subscription each of the client's
+    /// subscriptions holds (query, binding, include_deleted): its results
+    /// settle once the upstream answers, never from the relay's store.
+    relayed: BTreeMap<u64, RemoteRead>,
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
@@ -700,17 +731,23 @@ impl Session {
             backlog: VecDeque::new(),
             version: None,
             schema: None,
+            relayed: BTreeMap::new(),
         }
     }
 
     /// Release everything the session holds; its shared results are swept
     /// once no other member reads them.
-    fn close(&mut self, dropped: &std::cell::Cell<usize>) {
+    /// Returns the upstream subscriptions it relayed, for the caller to
+    /// release.
+    #[must_use]
+    fn close(&mut self, dropped: &std::cell::Cell<usize>) -> Vec<RemoteRead> {
         dropped.set(dropped.get() + self.subs.len());
+        let relayed = std::mem::take(&mut self.relayed);
         *self = Session {
             open: false,
             ..Session::new(Box::new(ClosedTransport), self.identity)
         };
+        relayed.into_values().collect()
     }
 
     /// Nothing to send this tick: no queued result events, no rows its
@@ -2619,19 +2656,28 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
-    ) -> Option<(Rc<StdCell<bool>>, Rc<RefCell<Option<Error>>>)> {
+    ) -> Option<(
+        Rc<StdCell<bool>>,
+        Rc<RefCell<Option<Error>>>,
+        Rc<StdCell<bool>>,
+    )> {
         let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
         let key = remote_key(&query, &prepared.binding, include_deleted);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
-            return Some((remote.answered.clone(), remote.refused.clone()));
+            return Some((
+                remote.answered.clone(),
+                remote.refused.clone(),
+                remote.global.clone(),
+            ));
         }
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
         let refused = Rc::new(RefCell::new(None));
+        let global = Rc::new(StdCell::new(false));
         client.outbox.push(SyncMessage::Subscribe {
             id,
             query: query.clone().into_owned(),
@@ -2649,12 +2695,13 @@ impl Db {
                 include_deleted,
                 answered: answered.clone(),
                 refused: refused.clone(),
+                global: global.clone(),
                 through: None,
                 resumed: false,
             },
         );
         client.remote_ids.insert(id, key);
-        Some((answered, refused))
+        Some((answered, refused, global))
     }
 
     pub(crate) fn detach_remote(
@@ -2663,8 +2710,26 @@ impl Db {
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
     ) {
-        let mut inner = self.inner.borrow_mut();
-        let Some(client) = inner.client.as_mut() else {
+        self.inner
+            .borrow_mut()
+            .release_remote(query, binding, include_deleted);
+    }
+
+    pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
+        self.inner.borrow().client.as_ref().map(|c| c.hint.clone())
+    }
+}
+
+impl Inner {
+    /// Drop one reference to an upstream subscription; the last one
+    /// unsubscribes.
+    pub(crate) fn release_remote(
+        &mut self,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
+        include_deleted: bool,
+    ) {
+        let Some(client) = self.client.as_mut() else {
             return;
         };
         let key = remote_key(&remote_query(query), binding, include_deleted);
@@ -2679,11 +2744,9 @@ impl Db {
             client.outbox.push(SyncMessage::Unsubscribe { id });
         }
     }
+}
 
-    pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
-        self.inner.borrow().client.as_ref().map(|c| c.hint.clone())
-    }
-
+impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
     /// answer is complete through, if it answered, or why it refused.
@@ -3073,6 +3136,7 @@ impl Db {
                         id,
                         through,
                         window,
+                        global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
@@ -3081,6 +3145,7 @@ impl Db {
                         };
                         let remote = client.remote.get_mut(&key).expect("remote");
                         remote.answered.set(true);
+                        remote.global.set(global);
                         remote.through = Some(through);
                         let resumed = std::mem::take(&mut remote.resumed);
                         // Cached rows the server's result lacks are stale;
@@ -3400,7 +3465,9 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let dropped = inner.fan.dropped.clone();
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
-            session.close(&dropped);
+            for (query, binding, include_deleted) in session.close(&dropped) {
+                inner.release_remote(&query, &binding, include_deleted);
+            }
         }
     }
 
@@ -3631,9 +3698,7 @@ impl Db {
                 .subs
                 .iter_mut()
                 .map(|(id, (q, g, windowed, opened))| {
-                    let list = *windowed || !*opened;
-                    *opened = true;
-                    (*id, q.clone(), g.clone(), list)
+                    (*id, q.clone(), g.clone(), *windowed || !*opened)
                 })
                 .collect();
             let mut images = Vec::new();
@@ -3644,6 +3709,13 @@ impl Db {
                 if events.is_empty() {
                     continue;
                 }
+                // A relay's result settles once its upstream answered.
+                let answered = events
+                    .iter()
+                    .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. }));
+                let global = events.iter().any(|event| {
+                    matches!(event, SubscriptionEvent::Delta { settled: true, tier, .. } if *tier == DurabilityTier::Global)
+                });
                 let first = images.len();
                 let since = inner.sessions[index].resume.remove(&id);
                 let support = inner.sessions[index]
@@ -3786,11 +3858,18 @@ impl Db {
                         .map(|row| *row.id.0.as_bytes())
                         .collect()
                 });
-                settled.push(SyncMessage::Settled {
-                    id,
-                    through,
-                    window,
-                });
+                if answered {
+                    settled.push(SyncMessage::Settled {
+                        id,
+                        through,
+                        window,
+                        global,
+                    });
+                    // The settled opening listed the result.
+                    if let Some((.., opened)) = inner.sessions[index].subs.get_mut(&id) {
+                        *opened = true;
+                    }
+                }
             }
             // Rows that left a result, and rows a commit wrote: the current
             // image if the client may read it, else an eviction.
@@ -3877,7 +3956,10 @@ impl Db {
                 // replica is coherent only with every message. It
                 // reconnects and resumes from its last settled seq.
                 if session.transport.send(message).is_err() {
-                    session.close(&dropped);
+                    let released = session.close(&dropped);
+                    for (query, binding, include_deleted) in released {
+                        inner.release_remote(&query, &binding, include_deleted);
+                    }
                     break;
                 }
             }
@@ -3950,17 +4032,45 @@ impl Db {
             } => {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = query.limit.is_some() || query.offset > 0;
+                // A relay serves what its upstream lists, settled once the
+                // upstream answers: its own store may be cold.
+                let relayed = db.attach_remote(&prepared, include_deleted);
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
-                let (queue, group) = inner.subscribe_member(
+                let authority = inner.authority;
+                let subscribed = inner.subscribe_member(
                     &prepared,
                     policy,
                     ReadSpec {
                         include_deleted,
+                        members_only: relayed.is_some(),
                         ..ReadSpec::default()
                     },
-                    SettledBy::Always,
-                )?;
+                    match &relayed {
+                        Some((answered, _, global)) => {
+                            SettledBy::Remote(answered.clone(), global.clone())
+                        }
+                        None => SettledBy::Always(authority),
+                    },
+                );
+                if relayed.is_some() {
+                    match &subscribed {
+                        Ok(_) => {
+                            let read = (
+                                prepared.query.clone(),
+                                prepared.binding.clone(),
+                                include_deleted,
+                            );
+                            inner.sessions[index].relayed.insert(id, read);
+                        }
+                        Err(_) => inner.release_remote(
+                            &prepared.query,
+                            &prepared.binding,
+                            include_deleted,
+                        ),
+                    }
+                }
+                let (queue, group) = subscribed?;
                 inner.sessions[index]
                     .subs
                     .insert(id, (queue, group, windowed, false));
@@ -4034,6 +4144,11 @@ impl Db {
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
+                if let Some((query, binding, include_deleted)) =
+                    inner.sessions[index].relayed.remove(&id)
+                {
+                    inner.release_remote(&query, &binding, include_deleted);
+                }
                 if let Some((_, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
                     dropped.set(dropped.get() + 1);
@@ -4699,11 +4814,12 @@ impl Db {
 }
 
 impl Db {
-    /// A non-durable foreground relaying through a durable owner is not
-    /// built: the relay tier (a Db that is both client and server for the
-    /// same rows, gating on the authority's answer) is designed only.
+    /// Mark this store as a non-durable foreground over a durable relay:
+    /// its own store starts empty each time, so a subscription's opening,
+    /// whatever its tier, waits for the upstream's answer (the relay's
+    /// stored view, or its upstream's once that answers).
     pub fn set_non_durable_client(&self) {
-        unimplemented!("non-durable foregrounds over a relay are not supported on SQLite yet")
+        self.inner.borrow_mut().non_durable = true;
     }
 
     pub fn query_coverage_attachment_counts_for_test(&self) -> (usize, usize) {
