@@ -570,6 +570,24 @@ pub(crate) struct Client {
     unavailable: BTreeSet<ChunkRequest>,
     /// Chunks arrived this tick: results waiting for them run again.
     arrived: bool,
+    /// As a relay: sessions' commits this store accepted and uploads as
+    /// its own, by upload tx. Each session gets its fate once the
+    /// upstream's arrives (`(session, session tx)`).
+    relayed_fates: HashMap<u64, Vec<(usize, u64)>>,
+    /// As a relay: sessions' one-shot reads asked of the upstream, served
+    /// from this store once it answers.
+    relayed_fetches: Vec<RelayedFetch>,
+    /// A relayed fate or read became ready: the serving half runs again.
+    relay_ready: bool,
+}
+
+/// A session's `Fetch` a relay asked its upstream for.
+struct RelayedFetch {
+    /// The relay's own fetch id upstream.
+    upstream: u64,
+    session: usize,
+    /// The session's `Fetch`, served locally once the upstream answered.
+    message: SyncMessage,
 }
 
 fn remote_key(query: &Query, binding: &BTreeMap<String, Value>, include_deleted: bool) -> String {
@@ -717,6 +735,8 @@ pub(crate) struct Session {
     backlog: VecDeque<SyncMessage>,
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
+    /// Fetches whose upstream answer arrived: served from this store.
+    fetched_upstream: BTreeSet<u64>,
     /// On a relay, the upstream subscription each of the client's
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
@@ -753,6 +773,7 @@ impl Session {
             ingress: (Instant::now(), 0),
             backlog: VecDeque::new(),
             version: None,
+            fetched_upstream: BTreeSet::new(),
             schema: None,
             relayed: BTreeMap::new(),
         }
@@ -2398,6 +2419,9 @@ impl Client {
             pushed: HashMap::new(),
             unavailable: BTreeSet::new(),
             arrived: false,
+            relayed_fates: HashMap::new(),
+            relayed_fetches: Vec::new(),
+            relay_ready: false,
         }
     }
 }
@@ -3216,10 +3240,14 @@ impl Db {
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Ok((through, rows)));
                         }
+                        client.relay_ready |=
+                            client.relayed_fetches.iter().any(|f| f.upstream == id);
                     }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
                         let error = Error::new(code, message);
+                        client.relay_ready |=
+                            client.relayed_fetches.iter().any(|f| f.upstream == id);
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if let Some(key) = client.remote_ids.get(&id)
@@ -3251,6 +3279,25 @@ impl Db {
                         inner.record_settled(node, tx, accepted.then_some(through))?;
                         inner.forget_pending(tx)?;
                         rebase = true;
+                        // Sessions whose commits this upload carried learn
+                        // their fate from the upstream's.
+                        let client = inner.client.as_mut().expect("client");
+                        if let Some(relayed) = client.relayed_fates.remove(&tx) {
+                            client.relay_ready = true;
+                            let fate = client.fates.get(&tx).cloned().unwrap_or(Ok(()));
+                            for (index, session_tx) in relayed {
+                                let Some(session) =
+                                    inner.sessions.get_mut(index).filter(|s| s.open)
+                                else {
+                                    continue;
+                                };
+                                session.outbox.push(SyncMessage::Fate {
+                                    tx: session_tx,
+                                    through,
+                                    result: fate.clone().map_err(|error| wire_error(&error)),
+                                });
+                            }
+                        }
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
                 }
@@ -3393,6 +3440,81 @@ impl Inner {
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
     /// schema (also for a version this store has not admitted).
+    /// Session `index` closed: what this relay owed it is dropped, so a
+    /// later session in its slot is not handed it.
+    fn forget_relayed(&mut self, index: usize) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        let answers = &mut client.answers;
+        client.relayed_fetches.retain(|fetch| {
+            let keep = fetch.session != index;
+            if !keep {
+                answers.remove(&fetch.upstream);
+            }
+            keep
+        });
+        for sessions in client.relayed_fates.values_mut() {
+            sessions.retain(|(session, _)| *session != index);
+        }
+        client
+            .relayed_fates
+            .retain(|_, sessions| !sessions.is_empty());
+    }
+
+    /// Session `index`'s relayed reads that are ready to serve from this
+    /// store: the upstream answered, or can no longer. A refusal goes to
+    /// the session as its own.
+    fn relayed_fetches_ready(&mut self, index: usize) -> Vec<SyncMessage> {
+        let Some(client) = self.client.as_mut() else {
+            return Vec::new();
+        };
+        let can_wait = may_wait(client.hint.get());
+        let mut ready = Vec::new();
+        let mut refused = Vec::new();
+        let mut kept = Vec::new();
+        for fetch in std::mem::take(&mut client.relayed_fetches) {
+            let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
+            if fetch.session != index || !answered && can_wait {
+                kept.push(fetch);
+                continue;
+            }
+            let answer = client.answers.remove(&fetch.upstream).flatten();
+            let SyncMessage::Fetch { id, .. } = &fetch.message else {
+                continue;
+            };
+            match answer {
+                Some(Err(error)) => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: error.code,
+                    message: error.message,
+                }),
+                _ => ready.push((*id, fetch.message)),
+            }
+        }
+        client.relayed_fetches = kept;
+        let session = &mut self.sessions[index];
+        session.outbox.extend(refused);
+        ready
+            .into_iter()
+            .map(|(id, message)| {
+                session.fetched_upstream.insert(id);
+                message
+            })
+            .collect()
+    }
+
+    /// The identity whose policies govern session `index`'s reads and
+    /// writes. `None` for a trusted link (the system), and for a replica's
+    /// own identity: its foregrounds (a browser worker's tabs) read and
+    /// write its store as it does itself, and the authority checks what it
+    /// uploads.
+    pub(crate) fn session_policy(&self, index: usize) -> Option<AuthorSubject> {
+        let identity = self.sessions[index].identity;
+        let own = self.client.is_some() && identity == self.identity.author;
+        (identity != AuthorSubject::SYSTEM && !own).then_some(identity)
+    }
+
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
@@ -3507,6 +3629,7 @@ impl Db {
             for (query, binding, include_deleted) in session.close(&dropped) {
                 inner.release_remote(&query, &binding, include_deleted);
             }
+            inner.forget_relayed(subscriber.0);
         }
     }
 
@@ -3560,6 +3683,12 @@ impl Db {
                 inbound.into()
             };
             let mut inbound: VecDeque<SyncMessage> = inbound.into();
+            // Relayed reads the upstream answered (or can no longer answer)
+            // are served from this store first, in the order they came.
+            let relayed = self.inner.borrow_mut().relayed_fetches_ready(index);
+            for message in relayed.into_iter().rev() {
+                inbound.push_front(message);
+            }
             // Writes held back by the ingress limit, in order. Reads and
             // other messages that change no rows overtake them, so a client
             // uploading a large value can still read.
@@ -3712,8 +3841,7 @@ impl Db {
             {
                 continue;
             }
-            let identity = inner.sessions[index].identity;
-            let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
+            let policy = inner.session_policy(index);
             let names = inner
                 .session_schema(index)
                 .unwrap_or_else(|| inner.owner.clone());
@@ -4010,6 +4138,7 @@ impl Db {
                     for (query, binding, include_deleted) in released {
                         inner.release_remote(&query, &binding, include_deleted);
                     }
+                    inner.forget_relayed(index);
                     break;
                 }
             }
@@ -4062,7 +4191,7 @@ impl Db {
             Some(claims) => prepared.with_identity_claims(identity, claims.clone()),
             None => prepared,
         };
-        let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
+        let policy = self.inner.borrow().session_policy(index);
         // Queries, writes and held rows name tables and columns as the
         // client's schema version does.
         let db = self.session_db(index);
@@ -4083,8 +4212,19 @@ impl Db {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = query.limit.is_some() || query.offset > 0;
                 // A relay serves what its upstream lists, settled once the
-                // upstream answers: its own store may be cold.
-                let relayed = db.attach_remote(&prepared, include_deleted);
+                // upstream answers: its own store may be cold. A relay
+                // whose upstream cannot answer (none, or its link failed)
+                // serves its own store instead, settled at once.
+                let upstream = db
+                    .inner()
+                    .client
+                    .as_ref()
+                    .is_some_and(|client| may_wait(client.hint.get()));
+                let relayed = if upstream {
+                    db.attach_remote(&prepared, include_deleted)
+                } else {
+                    None
+                };
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
@@ -4261,6 +4401,44 @@ impl Db {
                 at,
                 include_deleted,
             } => {
+                // A relay asks its upstream first, then serves the read from
+                // its store once the answer's rows are in it.
+                let relay = {
+                    let mut inner = self.inner.borrow_mut();
+                    let answered = inner.sessions[index].fetched_upstream.remove(&id);
+                    !answered
+                        && inner
+                            .client
+                            .as_ref()
+                            .is_some_and(|client| may_wait(client.hint.get()))
+                };
+                if relay {
+                    let prepared = db.prepare_query_bound(&query, binding.clone())?;
+                    let mut inner = self.inner.borrow_mut();
+                    let client = inner.client.as_mut().expect("client");
+                    let upstream = client.next_id;
+                    client.next_id += 1;
+                    client.answers.insert(upstream, None);
+                    client.outbox.push(SyncMessage::Fetch {
+                        id: upstream,
+                        query: remote_query(&prepared.query).into_owned(),
+                        binding: prepared.binding.clone(),
+                        at,
+                        include_deleted,
+                    });
+                    client.relayed_fetches.push(RelayedFetch {
+                        upstream,
+                        session: index,
+                        message: SyncMessage::Fetch {
+                            id,
+                            query,
+                            binding,
+                            at,
+                            include_deleted,
+                        },
+                    });
+                    return Ok(());
+                }
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let mut inner = db.inner();
                 // A history read ships versions of its source table.
@@ -4426,11 +4604,28 @@ impl Db {
                     );
                 }
                 session.touched.extend(rows);
-                session.outbox.push(SyncMessage::Fate {
-                    tx,
-                    through,
-                    result,
-                });
+                // A relay's accepted commit is final once its upstream
+                // accepts the upload carrying it: the session waits for that
+                // fate, not this store's.
+                let upload = result.is_ok()
+                    && inner
+                        .client
+                        .as_ref()
+                        .is_some_and(|client| client.pending.iter().any(|p| p.tx == through));
+                if upload {
+                    let client = inner.client.as_mut().expect("client");
+                    client
+                        .relayed_fates
+                        .entry(through)
+                        .or_default()
+                        .push((index, tx));
+                } else {
+                    inner.sessions[index].outbox.push(SyncMessage::Fate {
+                        tx,
+                        through,
+                        result,
+                    });
+                }
             }
             SyncMessage::ChunkRequests { requests } => {
                 let mut inner = self.inner.borrow_mut();
@@ -4508,6 +4703,19 @@ impl Db {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
+        // A relay uploads what its sessions commit as its own. Its
+        // sessions' snapshots and read seqs are in its numbering, which the
+        // upstream cannot check a serializable commit against.
+        let relay = self.is_client();
+        if relay && matches!(kind, WireKind::Serializable { .. }) {
+            return Err((
+                Error::new(
+                    ErrorCode::WriteRejected,
+                    "serializable transactions through a relay are not supported yet",
+                ),
+                Vec::new(),
+            ));
+        }
         if let Some(at) = updated_at {
             ops.iter_mut().for_each(|op| op.stamp_at(at));
         }
@@ -4631,6 +4839,9 @@ impl Db {
             inner.seq = seq;
             seq
         };
+        if relay {
+            self.record_upload(ops.clone(), seq, 0, Kind::Mergeable);
+        }
         self.notify();
         let inner = self.inner.borrow();
         Ok(inner.written_rows(&ops, seq).unwrap_or_default())
@@ -4639,7 +4850,18 @@ impl Db {
     /// One tick for both roles.
     pub(crate) fn sync_tick(&self) -> Result<(), Error> {
         self.server_tick()?;
-        self.client_tick()
+        self.client_tick()?;
+        // Relayed fates and reads the upstream just answered go out now.
+        let ready = self
+            .inner
+            .borrow_mut()
+            .client
+            .as_mut()
+            .is_some_and(|client| std::mem::take(&mut client.relay_ready));
+        if ready {
+            self.server_tick()?;
+        }
+        Ok(())
     }
 }
 

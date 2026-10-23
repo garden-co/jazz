@@ -607,3 +607,79 @@ fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
     .unwrap();
     assert_eq!(one.len(), 1);
 }
+
+/// A browser tab over its worker: the worker is a replica whose own
+/// identity the tab connects as.
+fn tab_over(worker: &Binding, tab: Binding) -> (Binding, Link, Link) {
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint("live").unwrap();
+    let up = tab.connect_upstream();
+    let down = worker.accept_subscriber(worker.author(), Default::default());
+    (tab, up, down)
+}
+
+/// The opening's rows of a fresh subscription on `binding`.
+fn opening_rows(links: &[(&Link, &Link)], binding: &Binding) -> usize {
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut stream = binding.subscribe(&query, &none(), None, None).unwrap();
+    let opening = binding_host::event_chunk(drive(links, binding.next_event(&mut stream))).unwrap();
+    let EventChunk::Delta {
+        delta, reset: true, ..
+    } = opening
+    else {
+        panic!("expected an opening, got {opening:?}");
+    };
+    let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+    added.iter().map(|batch| batch.rows.len()).sum()
+}
+
+#[test]
+fn a_worker_serves_its_own_tabs_as_it_reads_itself() {
+    // No permissions: a session would be denied everything, but the tabs
+    // are the worker's own foregrounds, not sessions it must police.
+    let bare = compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("notes").column("title", ColumnType::Text))
+            .build(),
+    );
+    let open = |node: u8| {
+        let identity = identity(node);
+        let db = block_on(Db::open(DbConfig::new(bare.clone(), identity))).unwrap();
+        Binding::new(db, identity, false)
+    };
+    let worker = open(0xb0);
+    let (tab, up, down) = tab_over(&worker, open(0xb1));
+    let links = [(&up, &down)];
+    tab.insert("notes", &title("local"), &none()).unwrap();
+    assert_eq!(opening_rows(&links, &tab), 1);
+    assert_eq!(titles(&worker), ["local"]);
+}
+
+#[test]
+fn a_tab_reads_and_writes_through_its_worker_to_the_server() {
+    let server = authority();
+    let worker = open(0xc0);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xc1));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+
+    // A global wait resolves once the server, not the worker, has the row.
+    let write = tab.insert("notes", &title("from tab"), &none()).unwrap();
+    drive(&links, tab.wait_for(write.seq, "global").unwrap()).unwrap();
+    assert_eq!(titles(&server), ["from tab"]);
+
+    // A Remote read asks the server through the worker, so it sees a row
+    // the worker does not hold yet.
+    server
+        .insert("notes", &title("from server"), &none())
+        .unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let read = tab
+        .all(query, &json!({ "tier": "remote" }), None, None, None)
+        .unwrap();
+    let rows = jazz::binding_codec::decode_rows(&drive(&links, read).unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 2);
+    assert_eq!(opening_rows(&links, &tab), 2);
+}
