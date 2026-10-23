@@ -2389,17 +2389,18 @@ where
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
-        // Relation terminals and tree collectors own their public fields in
-        // the app-row descriptor. Those fields are not necessarily columns of
-        // the root table, so normalizing such output against that table would
-        // silently discard aliases or recursive payload before the client can
-        // read it. Flat rows still need this boundary to remove
-        // materializer-only physical fields.
-        if query.relation.is_none()
+        // Aggregate rows already have their public bindings and logical types
+        // from aggregate_current_row_from_record. A stored-row projection would
+        // add a presence wrapper and turn a NULL group key into a missing cell.
+        // Relation terminals and tree collectors also own their public fields;
+        // projecting against the root table would discard aliases or payloads.
+        // Only flat stored rows need this boundary to remove physical metadata.
+        if query.aggregate.is_none()
+            && query.relation.is_none()
             && query.flat_join.is_none()
             && query.array_subqueries.is_empty()
         {
-            normalize_public_current_rows(query, table_schema, &mut rows)?;
+            normalize_public_current_rows(table_schema, &mut rows)?;
         }
         Ok(rows)
     }
@@ -5174,7 +5175,6 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
 /// may retain physical schema/provenance fields while resolving a row, whereas
 /// subscriptions are emitted from the public app-row terminal directly.
 fn normalize_public_current_rows(
-    query: &crate::query::Query,
     table: &TableSchema,
     rows: &mut [CurrentRow],
 ) -> Result<(), Error> {
@@ -5207,46 +5207,7 @@ fn normalize_public_current_rows(
         )
         .collect::<Vec<_>>();
     for row in rows {
-        *row = if let Some(aggregate) = &query.aggregate {
-            // A grouped source and an aggregate result may share a public name.
-            // Select each synthetic table column through its declared role before
-            // projecting; a public-name lookup alone loses that distinction.
-            let mut bindings = BTreeMap::new();
-            if let Some(group) = &aggregate.group_by {
-                let index = row
-                    .publication_fields
-                    .iter()
-                    .position(|field| {
-                        matches!(field, CurrentRowPublicationField::StoredColumn { .. })
-                            && field.application_name() == Some(group)
-                    })
-                    .ok_or(Error::InvalidStoredValue(
-                        "aggregate group has no source publication binding",
-                    ))?;
-                bindings.insert(group.clone(), index);
-            }
-            for output in &aggregate.aggregates {
-                let index = row
-                    .publication_fields
-                    .iter()
-                    .position(|field| {
-                        matches!(
-                            field,
-                            CurrentRowPublicationField::ResultField {
-                                visibility: CurrentRowResultVisibility::ApplicationCell,
-                                ..
-                            }
-                        ) && field.application_name() == Some(output.alias.as_str())
-                    })
-                    .ok_or(Error::InvalidStoredValue(
-                        "aggregate output has no result publication binding",
-                    ))?;
-                bindings.insert(aggregate_output_column(&output.alias), index);
-            }
-            row.project_with_column_binding(table, &columns, |name| bindings.get(name).copied())?
-        } else {
-            row.project(table, &columns)?
-        };
+        *row = row.project(table, &columns)?;
     }
     Ok(())
 }

@@ -16,6 +16,8 @@
 #[cfg(feature = "runtime")]
 #[path = "../account_author.rs"]
 mod account_author;
+#[path = "../aggregate_nullable_keys.rs"]
+mod aggregate_nullable_keys;
 #[path = "../aggregate_ordering.rs"]
 mod aggregate_ordering;
 #[cfg(feature = "testing")]
