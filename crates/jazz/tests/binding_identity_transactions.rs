@@ -36,6 +36,10 @@ fn open(node: u8, backend: bool, path: Option<&Path>) -> Binding {
         "owner",
         vec!["user".into(), "identity".into(), "subject".into()],
     );
+    open_with_policy(node, backend, path, policy)
+}
+
+fn open_with_policy(node: u8, backend: bool, path: Option<&Path>, policy: PolicyExpr) -> Binding {
     let schema = common::compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -711,4 +715,477 @@ fn session_transaction_relations_keep_the_bound_reader() {
         }
         .unwrap();
     }
+}
+
+fn decode_read(bytes: &[u8], relation: bool) -> Vec<jazz::binding_codec::DecodedRow> {
+    let batches = if relation {
+        jazz::binding_codec::decode_relation_snapshot(bytes)
+            .unwrap()
+            .1
+    } else {
+        jazz::binding_codec::decode_rows(bytes).unwrap()
+    };
+    batches.into_iter().flat_map(|batch| batch.rows).collect()
+}
+
+/// A backend serving Alice must filter one-shot root and nested reads as Alice,
+/// including rows already cached by a backend replica. Served remote reads reject
+/// until the wire protocol can carry their identity and claims.
+#[test]
+fn one_shot_binding_reads_keep_the_requested_session() {
+    for replica in [false, true] {
+        let authority = open(20, true, None);
+        for (id, owner) in [(1, "alice"), (2, "bob")] {
+            authority
+                .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
+                .unwrap();
+        }
+        for (id, owner) in [(3, "alice"), (4, "bob")] {
+            let descriptor =
+                RecordDescriptor::new([("owner", ValueType::String), ("parent", ValueType::Uuid)]);
+            let row = descriptor
+                .create(&[
+                    Value::String(owner.into()),
+                    Value::Uuid(RowUuid::from_bytes([1; 16]).0),
+                ])
+                .unwrap();
+            let cells = jazz::binding_codec::encode_named_cells(&OwnedRecord::new(row, descriptor))
+                .unwrap();
+            authority
+                .insert("files", &cells, &json!({"rowId": vec![id; 16]}))
+                .unwrap();
+        }
+        let backend = open(21, true, None);
+        let links = replica.then(|| {
+            (
+                backend.connect_upstream(),
+                authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new()),
+            )
+        });
+        let db = if replica { &backend } else { &authority };
+        let alice = author("alice").canonical().to_owned();
+        let bob = author("bob").canonical().to_owned();
+        if let Some((up, down)) = &links {
+            let read = db
+                .all(
+                    postcard::to_allocvec(&Query::from("files")).unwrap(),
+                    &json!({"tier": "remote"}),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(decode_read(&drive(up, down, read).unwrap(), false).len(), 4);
+            let read = db
+                .all(
+                    postcard::to_allocvec(&Query::from("files")).unwrap(),
+                    &json!({"tier": "remote"}),
+                    None,
+                    Some(alice.as_bytes()),
+                    None,
+                )
+                .unwrap();
+            let error = core_error(drive(up, down, read).unwrap_err());
+            assert_eq!(error.code, ErrorCode::Query);
+            assert!(error.message.contains("served session"));
+        }
+
+        for (identity, expected) in [
+            (None, 4),
+            (Some(alice.as_bytes()), 2),
+            (Some(bob.as_bytes()), 2),
+            (Some(alice.as_bytes()), 2),
+        ] {
+            let read = db
+                .all(
+                    postcard::to_allocvec(&Query::from("files")).unwrap(),
+                    &json!({"tier": "local-only"}),
+                    None,
+                    identity,
+                    None,
+                )
+                .unwrap();
+            let bytes = match &links {
+                Some((up, down)) => drive(up, down, read),
+                None => block_on(read),
+            }
+            .unwrap();
+            assert_eq!(decode_read(&bytes, false).len(), expected);
+        }
+        let query = Query::from("files")
+            .filter(eq(
+                col("id"),
+                lit(Value::Uuid(RowUuid::from_bytes([1; 16]).0)),
+            ))
+            .array_subquery(ArraySubquery::new("children", "files", "parent", "id"));
+        let read = db
+            .all(
+                postcard::to_allocvec(&query).unwrap(),
+                &json!({"tier": "local-only"}),
+                None,
+                Some(alice.as_bytes()),
+                None,
+            )
+            .unwrap();
+        let bytes = match &links {
+            Some((up, down)) => drive(up, down, read),
+            None => block_on(read),
+        }
+        .unwrap();
+        let rows = decode_read(&bytes, true);
+        assert_eq!(rows.len(), 1);
+        let Value::Array(children) = &rows[0].cells["children"] else {
+            panic!("children must be an array")
+        };
+        assert_eq!(children.len(), 1, "Alice must not see Bob's nested child");
+    }
+}
+
+/// Alice's mergeable batch inherits her session for reads and all writes. A
+/// denied companion leaves storage untouched, rollback discards earlier staged
+/// writes, and successful rows share one commit.
+#[test]
+fn mergeable_session_batches_are_atomic_and_policy_checked() {
+    let backend = open(22, true, None);
+    backend
+        .insert("files", &cells("bob"), &json!({"rowId": vec![9; 16]}))
+        .unwrap();
+    let alice = author("alice").canonical().to_owned();
+    for forbidden in [false, true] {
+        let tx = OpenTransactionId::new().to_string();
+        backend
+            .begin_transaction(&tx, "mergeable", Some(alice.as_bytes()), None)
+            .unwrap();
+        companion(&backend, &tx, if forbidden { 3 } else { 1 });
+        let read = block_on(
+            backend
+                .all(
+                    postcard::to_allocvec(&Query::from("files")).unwrap(),
+                    &json!({}),
+                    Some(&tx),
+                    None,
+                    None,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let visible = decode_read(&read, false);
+        assert!(
+            visible
+                .iter()
+                .all(|row| row.cells["owner"] == Value::String("alice".into()))
+        );
+        let staged = backend.insert_in_transaction(
+            &tx,
+            "files",
+            &cells(if forbidden { "bob" } else { "alice" }),
+            &json!({"rowId": vec![if forbidden { 4 } else { 2 }; 16]}),
+        );
+        assert_eq!(rows(&backend).len(), if forbidden { 3 } else { 1 });
+        if forbidden {
+            assert_eq!(
+                core_error(staged.unwrap_err()).code,
+                ErrorCode::WriteRejected
+            );
+            backend.rollback_transaction(&tx).unwrap();
+        } else {
+            staged.unwrap();
+            let write = backend.commit_transaction(&tx, Some("mergeable")).unwrap();
+            block_on(backend.wait_for_write(&write, "global").unwrap()).unwrap();
+        }
+        let committed = rows(&backend);
+        assert_eq!(committed.len(), 3);
+        let written: Vec<_> = committed
+            .iter()
+            .filter(|row| row.row_uuid() != RowUuid::from_bytes([9; 16]))
+            .collect();
+        assert_eq!(written[0].seq(), written[1].seq());
+        for row in written {
+            assert_eq!(subject(row, "$createdBy.identity.subject"), "alice");
+        }
+    }
+}
+
+/// Bob's mergeable backend provenance is inherited and durable, while reads
+/// retain SYSTEM authority. A different author or upload cannot enter the batch;
+/// upload capabilities still require a serializable transaction.
+#[test]
+fn attributed_mergeable_batches_keep_backend_authority_and_capability_boundaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mergeable.sqlite");
+    let backend = open(23, true, Some(&path));
+    backend
+        .insert("files", &cells("alice"), &json!({"rowId": vec![9; 16]}))
+        .unwrap();
+    let bob = author("bob").canonical().to_owned();
+    let alice = author("alice").canonical().to_owned();
+    let tx = OpenTransactionId::new().to_string();
+    backend
+        .begin_transaction(&tx, "mergeable", None, Some(bob.as_bytes()))
+        .unwrap();
+    let read = block_on(
+        backend
+            .all(
+                postcard::to_allocvec(&Query::from("files")).unwrap(),
+                &json!({}),
+                Some(&tx),
+                None,
+                None,
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        decode_read(&read, false).len(),
+        1,
+        "attribution does not narrow backend reads"
+    );
+    assert!(
+        backend
+            .insert_in_transaction(
+                &tx,
+                "files",
+                &cells("alice"),
+                &json!({"attribution": alice.as_bytes()})
+            )
+            .is_err()
+    );
+    companion(&backend, &tx, 1);
+    companion(&backend, &tx, 2);
+    backend.commit_transaction(&tx, Some("mergeable")).unwrap();
+    let tx = OpenTransactionId::new().to_string();
+    backend
+        .begin_transaction(&tx, "mergeable", None, Some(bob.as_bytes()))
+        .unwrap();
+    let mut upload = stage(&backend, 3, None, Some(bob.as_bytes()));
+    assert!(upload.attach(&tx).is_err());
+    assert!(
+        !upload.abort().unwrap(),
+        "failed attachment consumes its capability"
+    );
+    companion(&backend, &tx, 4);
+    backend.rollback_transaction(&tx).unwrap();
+    drop(backend);
+    let reopened = open(23, true, Some(&path));
+    let committed = rows(&reopened);
+    assert_eq!(committed.len(), 3);
+    let written: Vec<_> = committed
+        .iter()
+        .filter(|row| row.row_uuid() != RowUuid::from_bytes([9; 16]))
+        .collect();
+    assert_eq!(written[0].seq(), written[1].seq());
+    for row in written {
+        assert_eq!(subject(row, "$createdBy.identity.subject"), "bob");
+    }
+    let ordinary = open(24, false, None);
+    assert!(
+        ordinary
+            .begin_transaction(&tx, "mergeable", None, Some(bob.as_bytes()))
+            .is_err()
+    );
+    assert!(
+        block_on(
+            ordinary
+                .db
+                .begin_mergeable_for_attribution(OpenTransactionId::new(), author("bob"))
+        )
+        .is_err()
+    );
+    // An incorrectly flagged host still cannot turn a non-SYSTEM core into a backend.
+    let id = identity(30, author("alice"));
+    let core = block_on(Db::open(DbConfig::new(
+        common::compile_schema(&SchemaBuilder::new().build()),
+        id,
+    )))
+    .unwrap();
+    let misconfigured = Binding::new(core, id, true);
+    assert!(
+        misconfigured
+            .begin_transaction(&tx, "mergeable", None, Some(bob.as_bytes()))
+            .is_err()
+    );
+}
+
+/// Trusted replica links preserve Bob's mergeable attribution or enforce Alice's
+/// session policy. Ordinary Alice links reject Bob's forged attribution/session.
+/// backend -> atomic two-row commit -> trusted or Alice link -> authority verdict
+#[test]
+fn mergeable_replica_identity_batches_enforce_link_and_session_boundaries() {
+    for (trusted, session, name, accepted) in [
+        (true, false, "bob", true),
+        (true, true, "alice", true),
+        (true, true, "mallory", false),
+        (false, false, "bob", false),
+        (false, true, "bob", false),
+    ] {
+        let backend = open(25, true, None);
+        let authority = open(26, true, None);
+        let up = backend.connect_upstream();
+        let down = authority.accept_subscriber(
+            if trusted {
+                AuthorSubject::SYSTEM
+            } else {
+                author("alice")
+            },
+            BTreeMap::new(),
+        );
+        let identity = author(name).canonical().to_owned();
+        let tx = OpenTransactionId::new().to_string();
+        backend
+            .begin_transaction(
+                &tx,
+                "mergeable",
+                session.then_some(identity.as_bytes()),
+                (!session).then_some(identity.as_bytes()),
+            )
+            .unwrap();
+        companion(&backend, &tx, 1);
+        companion(&backend, &tx, 2);
+        let write = backend.commit_transaction(&tx, Some("mergeable")).unwrap();
+        assert_eq!(rows(&backend).len(), 2);
+        let result = drive(
+            &up,
+            &down,
+            backend.wait_for_write(&write, "global").unwrap(),
+        );
+        if accepted {
+            result.unwrap();
+            let committed = rows(&authority);
+            assert_eq!(committed.len(), 2);
+            assert_eq!(committed[0].seq(), committed[1].seq());
+            for row in committed {
+                assert_eq!(subject(&row, "$createdBy.identity.subject"), name);
+            }
+        } else {
+            let error = core_error(result.unwrap_err());
+            assert_eq!(error.code, ErrorCode::WriteRejected);
+            if !trusted {
+                assert!(error.message.contains("trusted serving node"), "{error:?}");
+            }
+            assert!(rows(&authority).is_empty());
+            assert!(rows(&backend).is_empty());
+        }
+    }
+}
+
+/// Concurrent served reads for Alice use their own claims without overwriting
+/// cached identity claims. Omitting an owner claim cannot reuse a previous one.
+#[test]
+fn one_shot_request_claims_are_isolated_and_do_not_change_cached_claims() {
+    let backend = open_with_policy(
+        27,
+        true,
+        None,
+        PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]),
+    );
+    for (id, owner) in [(1, "alice"), (2, "bob")] {
+        backend
+            .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
+            .unwrap();
+    }
+    let alice = author("alice").canonical().to_owned();
+    backend
+        .set_identity_claims(alice.as_bytes(), json!({"owner": "bob"}))
+        .unwrap();
+    let query = postcard::to_allocvec(&Query::from("files")).unwrap();
+    let alice_read = backend
+        .all(
+            query.clone(),
+            &json!({}),
+            None,
+            Some(alice.as_bytes()),
+            Some(json!({"owner": "alice"})),
+        )
+        .unwrap();
+    let bob_read = backend
+        .all(
+            query.clone(),
+            &json!({}),
+            None,
+            Some(alice.as_bytes()),
+            Some(json!({"owner": "bob"})),
+        )
+        .unwrap();
+    for (read, owner) in [(bob_read, "bob"), (alice_read, "alice")] {
+        let rows = decode_read(&block_on(read).unwrap(), false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cells["owner"], Value::String(owner.into()));
+    }
+    let no_claim = block_on(
+        backend
+            .all(query, &json!({}), None, Some(alice.as_bytes()), None)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(decode_read(&no_claim, false).is_empty());
+    let prepared = backend.db.prepare_query(&Query::from("files")).unwrap();
+    let cached = block_on(backend.db.all_for_identity(
+        &prepared,
+        ReadOpts::default(),
+        author("alice"),
+    ))
+    .unwrap();
+    assert_eq!(cached.len(), 1);
+    assert_eq!(subject(&cached[0], "owner"), "bob");
+}
+
+/// Alice's mergeable replica commit persists its admitted claims across restart.
+/// A trusted authority checks those claims for this commit and restores its own
+/// cached claims afterward, so another request cannot inherit Alice's grant.
+#[test]
+fn pending_mergeable_session_claims_survive_restart_without_leaking() {
+    let policy = || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.sqlite");
+    let backend = open_with_policy(28, true, Some(&path), policy());
+    let up = backend.connect_upstream();
+    let alice = author("alice").canonical().to_owned();
+    backend
+        .set_identity_claims(alice.as_bytes(), json!({"owner": "alice"}))
+        .unwrap();
+    let tx = OpenTransactionId::new().to_string();
+    backend
+        .begin_transaction(&tx, "mergeable", Some(alice.as_bytes()), None)
+        .unwrap();
+    companion(&backend, &tx, 1);
+    companion(&backend, &tx, 2);
+    let write = backend.commit_transaction(&tx, Some("mergeable")).unwrap();
+    drop(up);
+    drop(backend);
+    let backend = open_with_policy(28, true, Some(&path), policy());
+    let authority = open_with_policy(29, true, None, policy());
+    authority
+        .set_identity_claims(alice.as_bytes(), json!({"owner": "bob"}))
+        .unwrap();
+    authority
+        .insert("files", &cells("bob"), &json!({"rowId": vec![9; 16]}))
+        .unwrap();
+    let up = backend.connect_upstream();
+    let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    drive(
+        &up,
+        &down,
+        backend.wait_for_write(&write, "global").unwrap(),
+    )
+    .unwrap();
+    let committed = rows(&authority);
+    assert_eq!(committed.len(), 3);
+    let written: Vec<_> = committed
+        .iter()
+        .filter(|row| row.row_uuid() != RowUuid::from_bytes([9; 16]))
+        .collect();
+    assert_eq!(written.len(), 2);
+    assert_eq!(written[0].seq(), written[1].seq());
+    for row in written {
+        assert_eq!(subject(row, "$createdBy.identity.subject"), "alice");
+    }
+    let prepared = authority.db.prepare_query(&Query::from("files")).unwrap();
+    let cached = block_on(authority.db.all_for_identity(
+        &prepared,
+        ReadOpts::default(),
+        author("alice"),
+    ))
+    .unwrap();
+    assert_eq!(cached.len(), 1);
+    assert_eq!(subject(&cached[0], "owner"), "bob");
 }
