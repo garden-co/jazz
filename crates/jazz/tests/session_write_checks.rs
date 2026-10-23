@@ -200,3 +200,64 @@ fn a_trusted_links_session_write_is_checked_as_that_session_at_the_authority() {
     pump();
     assert_eq!(cell(&server, "protected", "data"), text("alice"));
 }
+
+/// A session link cannot vouch for the sessions its runtime writes as: the
+/// authority checks those writes as the link's own identity, whatever
+/// session they name. Bob's link fails as Bob even writing as Alice, an
+/// admin; Alice's link passes as Alice even writing as Bob.
+#[test]
+fn a_session_links_session_write_is_checked_as_the_link() {
+    let server = open(0);
+    seed(&server, "admins", id(2, 1), &[("user_id", text("alice"))]);
+    seed(&server, "protected", id(3, 1), &[("data", text("initial"))]);
+    let link_as = |n: u8, sub: &str| {
+        let author = user(&server, n, sub);
+        let client = open(n);
+        let (client_side, server_side) = duplex();
+        let upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber_with_claims(
+            server_side,
+            author,
+            Some(BTreeMap::from([(
+                jazz::query::provider_claim_key("sub"),
+                text(sub),
+            )])),
+        );
+        let prepared = client.prepare_query(&Query::from("protected")).unwrap();
+        let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+        (client, (upstream, stream))
+    };
+    let pump = |client: &Db| {
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(client.tick()).unwrap();
+    };
+
+    let (bob_client, _bob_link) = link_as(2, "bob");
+    pump(&bob_client);
+    let alice_on_bobs = user(&bob_client, 1, "alice");
+    block_on(bob_client.update(
+        "protected",
+        id(3, 1),
+        BTreeMap::from([("data".to_owned(), text("bob as alice"))]),
+        as_session(alice_on_bobs),
+    ))
+    .expect("the replica stages the session write");
+    pump(&bob_client);
+    assert_eq!(cell(&server, "protected", "data"), text("initial"));
+
+    let (alice_client, _alice_link) = link_as(1, "alice");
+    pump(&alice_client);
+    let bob_on_alices = user(&alice_client, 2, "bob");
+    block_on(alice_client.update(
+        "protected",
+        id(3, 1),
+        BTreeMap::from([("data".to_owned(), text("alice as bob"))]),
+        as_session(bob_on_alices),
+    ))
+    .unwrap();
+    pump(&alice_client);
+    assert_eq!(cell(&server, "protected", "data"), text("alice as bob"));
+}

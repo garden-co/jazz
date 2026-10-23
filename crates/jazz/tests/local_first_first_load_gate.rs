@@ -1129,3 +1129,48 @@ fn remote_answer_coverage_preserves_local_first_pending_writes() {
     block_on(local_first.close()).expect("close local-first remote answer");
     block_on(remote.close()).expect("close remote read");
 }
+
+/// A foreground over a storage owner that has no server (a browser app
+/// without `serverUrl`): its own write opens its subscription, and a
+/// second foreground over the same owner sees it too.
+#[test]
+fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
+    // A binding's store is a replica from the start, server or not.
+    let worker = fresh_client(0x80);
+    worker.become_replica();
+    let foreground = foreground_over(0x81, worker);
+    block_on(foreground.tab.insert(
+        "items",
+        BTreeMap::from([("label".to_owned(), Value::String("local".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(30)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert through the foreground");
+    let mut stream = subscribe(&foreground.tab, &items(), ReadOpts::default());
+    let (_, rows, _) = opening(foreground.first_event(&mut stream, None));
+    assert_eq!(rows, vec![row(30)]);
+
+    let other = fresh_client(0x82);
+    other.set_non_durable_client();
+    let (tab_transport, worker_transport) = duplex();
+    let _upstream = block_on(other.connect_upstream(tab_transport));
+    let _foreground = foreground
+        .worker
+        .accept_subscriber(worker_transport, AuthorSubject::for_test_bytes([0x82; 16]));
+    let mut stream = subscribe(&other, &items(), ReadOpts::default());
+    let rows = (0..MAX_TURNS)
+        .find_map(|_| {
+            let event = stream.try_next_event();
+            if event.is_none() {
+                block_on(other.tick()).expect("tick second tab");
+                foreground.turn(None);
+                block_on(other.tick()).expect("tick second tab after worker");
+            }
+            event
+        })
+        .map(|event| opening(event).1)
+        .expect("the second tab's opening");
+    assert_eq!(rows, vec![row(30)], "the second tab reads the owner's rows");
+}

@@ -2970,14 +2970,14 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
-   * A session supplies the subject for a trusted-serving host; it never turns
-   * an ordinary client mutation into a policy-enforcing local admission.
+   * A write with a session is that session's: the authority checks it as the
+   * session over a backend link, or as the link's own identity otherwise. A
+   * trusted-serving host writes as its peer when no session is given.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
-    if (this.trustedBackend && !session) return undefined;
-    return this.readAuthorizationHost === "trusted-serving"
-      ? (session?.identity ?? this.peerIdentity)
-      : undefined;
+    if (session) return session.identity;
+    if (this.trustedBackend) return undefined;
+    return this.readAuthorizationHost === "trusted-serving" ? this.peerIdentity : undefined;
   }
 
   /** External provenance is accepted only by the explicit backend runtime;

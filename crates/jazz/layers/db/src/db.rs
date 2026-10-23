@@ -399,9 +399,9 @@ struct Inner {
     non_durable: bool,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
-    /// Sessions this store writes as are its own, not vouched for upstream
-    /// (see [`Db::keep_sessions_local`]).
-    local_sessions: bool,
+    /// Uploads the authority refused, by commit seq, kept for a host that
+    /// reports them (see [`Db::track_upstream_rejections`]).
+    upstream_rejections: Option<Vec<(u64, Error)>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Rows written since the last server tick (only while serving).
@@ -913,7 +913,7 @@ impl Db {
                 client: None,
                 non_durable: false,
                 authority: false,
-                local_sessions: false,
+                upstream_rejections: None,
                 sessions: Vec::new(),
                 since_tick: Vec::new(),
                 capture: Vec::new(),
@@ -954,6 +954,24 @@ impl Db {
         Ok(db)
     }
 
+    /// Keep the uploads the authority refuses, for a host that tells its
+    /// caller of the ones no wait claimed.
+    pub fn track_upstream_rejections(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.upstream_rejections.get_or_insert_with(Vec::new);
+    }
+
+    /// The uploads the authority refused since the last call, by commit
+    /// seq (empty unless [`Db::track_upstream_rejections`] was called).
+    pub fn take_upstream_rejections(&self) -> Vec<(u64, Error)> {
+        self.inner
+            .borrow_mut()
+            .upstream_rejections
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
     /// Serve as the global authority: subscriptions this store settles,
     /// its own and its subscribers', report `DurabilityTier::Global`. A
     /// store without the role (a relay with no upstream) settles at `Local`.
@@ -964,13 +982,6 @@ impl Db {
     /// Whether this store is the global authority.
     pub fn is_authority(&self) -> bool {
         self.inner.borrow().authority
-    }
-
-    /// Check session writes here as their session, but upload them as this
-    /// store's own: an untrusted runtime cannot vouch for the sessions it
-    /// is handed, so the authority checks them as the runtime itself.
-    pub fn keep_sessions_local(&self) {
-        self.inner.borrow_mut().local_sessions = true;
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -4624,7 +4635,7 @@ impl TxRef<'_> {
             Db::remote_shape(&prepared.query)?;
             let through = self
                 .db
-                .fetch(prepared, at, include_deleted, None, &|| false)
+                .fetch(prepared, at, include_deleted, None, None)
                 .await?;
             if let Some(Batch {
                 kind:

@@ -484,6 +484,14 @@ pub enum SyncMessage {
     Origins {
         commits: Vec<(u64, [u8; 16], u64)>,
     },
+    /// Whether the server has admitted the schema version the session
+    /// declared, sent when that changes. Until it is admitted the server
+    /// holds the session's messages (a draft awaiting its lens), so a
+    /// read that must be covered by the server fails with the reason
+    /// rather than waiting out its budget.
+    SchemaAdmission {
+        admitted: bool,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -579,6 +587,8 @@ pub(crate) struct Client {
     relayed_fetches: Vec<RelayedFetch>,
     /// A relayed fate or read became ready: the serving half runs again.
     relay_ready: bool,
+    /// The server said it has not admitted this client's schema version.
+    unadmitted: bool,
 }
 
 /// A session's `Fetch` a relay asked its upstream for.
@@ -737,6 +747,8 @@ pub(crate) struct Session {
     version: Option<crate::ids::SchemaVersionId>,
     /// Fetches whose upstream answer arrived: served from this store.
     fetched_upstream: BTreeSet<u64>,
+    /// The client was told its declared version is not admitted.
+    told_unadmitted: bool,
     /// On a relay, the upstream subscription each of the client's
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
@@ -774,6 +786,7 @@ impl Session {
             backlog: VecDeque::new(),
             version: None,
             fetched_upstream: BTreeSet::new(),
+            told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
         }
@@ -2422,6 +2435,7 @@ impl Client {
             relayed_fates: HashMap::new(),
             relayed_fetches: Vec::new(),
             relay_ready: false,
+            unadmitted: false,
         }
     }
 }
@@ -2516,6 +2530,7 @@ impl Db {
         }
         let asked = std::mem::take(&mut client.requested);
         client.wanted.extend(asked);
+        client.unadmitted = false;
         client.connection += 1;
         Upstream(client.connection)
     }
@@ -2594,12 +2609,9 @@ impl Db {
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
         let session = ops.iter().any(StagedOp::is_session);
-        let author = if session && inner.local_sessions {
-            Some(inner.identity.author)
-        } else {
-            ops.iter().find_map(StagedOp::author)
-        }
-        .or_else(|| (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author()));
+        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
+            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+        });
         // A session's writes carry its claims, for the authority's check.
         let session_claims = author
             .filter(|_| session)
@@ -2802,16 +2814,18 @@ impl Inner {
 impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
-    /// answer is complete through, if it answered, or why it refused. Once
-    /// `expired` says the caller's coverage budget is spent, the read fails
-    /// with `NotObserved` instead.
+    /// answer is complete through, if it answered, or why it refused.
+    /// `coverage`: the read must be covered by the server. It fails once
+    /// the check says the caller's budget is spent (`NotObserved`), or as
+    /// soon as the server says it has not admitted this client's schema
+    /// version.
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
         deadline: Option<Instant>,
-        expired: &dyn Fn() -> bool,
+        coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<Option<u64>, Error> {
         let id = {
             let mut inner = self.inner.borrow_mut();
@@ -2844,12 +2858,22 @@ impl Db {
                 client.answers.remove(&id);
                 return Poll::Ready(Ok(None));
             }
-            if expired() {
-                client.answers.remove(&id);
-                return Poll::Ready(Err(Error::new(
-                    ErrorCode::NotObserved,
-                    "Timed out waiting for query coverage",
-                )));
+            if let Some(expired) = coverage {
+                if client.unadmitted {
+                    client.answers.remove(&id);
+                    return Poll::Ready(Err(Error::new(
+                        ErrorCode::Schema,
+                        "schema version is awaiting published catalogue admission; \
+                         deploy it to the server",
+                    )));
+                }
+                if expired() {
+                    client.answers.remove(&id);
+                    return Poll::Ready(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "Timed out waiting for query coverage",
+                    )));
+                }
             }
             Poll::Pending
         })
@@ -3243,6 +3267,9 @@ impl Db {
                         client.relay_ready |=
                             client.relayed_fetches.iter().any(|f| f.upstream == id);
                     }
+                    SyncMessage::SchemaAdmission { admitted } => {
+                        inner.client.as_mut().expect("client").unadmitted = !admitted;
+                    }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
                         let error = Error::new(code, message);
@@ -3271,7 +3298,17 @@ impl Db {
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
-                        client.fates.insert(tx, result.map_err(from_wire_error));
+                        let result = result.map_err(from_wire_error);
+                        // A relayed session's refusal is that session's to
+                        // report, not this store's.
+                        let relayed = client.relayed_fates.contains_key(&tx);
+                        if let (Err(error), Some(rejections), false) =
+                            (&result, inner.upstream_rejections.as_mut(), relayed)
+                        {
+                            rejections.push((tx, error.clone()));
+                        }
+                        let client = inner.client.as_mut().expect("client");
+                        client.fates.insert(tx, result);
                         let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &locators)?;
@@ -3753,8 +3790,18 @@ impl Db {
                     (Err(error), None) => return Err(error),
                 }
             }
+            let mut inner = self.inner.borrow_mut();
             if !held.is_empty() {
-                self.inner.borrow_mut().sessions[index].backlog = held;
+                inner.sessions[index].backlog = held;
+            }
+            // Tell the client when its declared version's admission changes.
+            let unadmitted = inner.session_unadmitted(index);
+            let session = &mut inner.sessions[index];
+            if session.open && session.told_unadmitted != unadmitted {
+                session.told_unadmitted = unadmitted;
+                session.outbox.push(SyncMessage::SchemaAdmission {
+                    admitted: !unadmitted,
+                });
             }
         }
         self.notify();
@@ -4866,9 +4913,10 @@ impl Db {
 }
 
 /// Who an uploaded commit is applied as. A session link writes under its
-/// own identity and may not name another author; a trusted link (no policy
-/// identity) writes as the session it names (checked as it), or unchecked,
-/// attributed to the author it names.
+/// own identity (a session it names is checked as the link) and may not
+/// attribute to another author; a trusted link (no policy identity) writes
+/// as the session it names (impersonation: checked as it), or unchecked,
+/// attributed to the author it names or as itself.
 fn commit_who(
     policy: Option<AuthorSubject>,
     author: Option<&str>,
@@ -4882,6 +4930,9 @@ fn commit_who(
         // A node's own writes (it names itself as the system at that node)
         // over a session link are that session's: the link decides.
         (Some(session), Some(AuthorSubject::SystemAt(_))) => Ok(Who::Session(session)),
+        // A session link cannot vouch for the sessions it writes as: their
+        // writes are checked as the link's own.
+        (Some(link), Some(_)) if session => Ok(Who::Session(link)),
         (Some(session), Some(author)) if author != session => Err(Error::new(
             ErrorCode::WriteRejected,
             "attribution requires a trusted serving node",
@@ -5104,18 +5155,16 @@ impl Db {
             if let Some(deadline) = wait {
                 Self::remote_shape(&prepared.query)?;
                 // A read that must be covered by the server fails once
-                // the caller's budget is spent; others fall back to local.
-                let expired: &dyn Fn() -> bool = if require_coverage {
-                    &coverage_expired
-                } else {
-                    &|| false
-                };
+                // the caller's budget is spent or the server cannot serve
+                // its schema version; others fall back to local.
+                let coverage: Option<&dyn Fn() -> bool> =
+                    require_coverage.then_some(&coverage_expired);
                 self.fetch(
                     &prepared,
                     None,
                     opts.read_view.include_deleted,
                     deadline,
-                    expired,
+                    coverage,
                 )
                 .await?;
             }
