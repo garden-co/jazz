@@ -2654,6 +2654,9 @@ impl Db {
             reported: true,
             ..link
         });
+        drop(inner);
+        self.schedule_read_deadlines();
+        self.schedule_pending_tick();
     }
 
     pub(crate) fn is_client(&self) -> bool {
@@ -5536,11 +5539,20 @@ impl Db {
                 };
                 if *deadline > now {
                     next = Some(next.map_or(*deadline, |at: Instant| at.min(*deadline)));
-                    true
-                } else {
-                    false
                 }
+                // Keep live guards even after their original wake expires:
+                // the host may restart a connection attempt while they wait.
+                true
             });
+            if !inner.read_deadlines.is_empty()
+                && let Some(client) = &inner.client
+            {
+                let link = client.hint.get();
+                let at = link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+                if link.hint == RemoteLinkHint::Attempting && at > now {
+                    next = Some(next.map_or(at, |pending| pending.min(at)));
+                }
+            }
             (inner.scheduler.clone(), next)
         };
         if let (Some(scheduler), Some(next)) = (scheduler, next) {
