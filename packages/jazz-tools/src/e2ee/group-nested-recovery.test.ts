@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { createBrowserKeyEnvelope, createBrowserDeviceSigner } from "./browser.js";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -39,20 +40,69 @@ it("protects every inherited path and restores both groups without ordinary deli
       schema: app,
       permissions: withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies }),
     });
-    const open = async (account: Awaited<ReturnType<typeof localAccountConfig>>) => {
+    const keys = await createBrowserKeyEnvelope();
+    const signer = await createBrowserDeviceSigner();
+    let afterDeniedDelivery: (() => Promise<void>) | undefined;
+    let signedDelivery = false;
+    const openedDuringRemoval: Uint8Array[] = [];
+    const open = async (
+      account: Awaited<ReturnType<typeof localAccountConfig>>,
+      observeDenial = false,
+    ) => {
       let saved: string | null = null;
+      const store = {
+        async read() {
+          return saved;
+        },
+        async update(transform: (current: string | null) => string) {
+          saved = transform(saved);
+        },
+      };
       const db = await createDb({
         ...account,
         e2ee: {
           app,
-          store: {
-            async read() {
-              return saved;
-            },
-            async update(transform) {
-              saved = transform(saved);
-            },
-          },
+          store,
+          crypto: observeDenial
+            ? {
+                deviceSigner: {
+                  ...signer,
+                  async sign(privateKey, bytes) {
+                    const signature = await signer.sign(privateKey, bytes);
+                    if (
+                      afterDeniedDelivery &&
+                      new TextDecoder().decode(bytes).includes('["delivery",')
+                    )
+                      signedDelivery = true;
+                    return signature;
+                  },
+                },
+                keyEnvelope: {
+                  ...keys,
+                  async unwrap(secret, context, envelope) {
+                    const plaintext = await keys.unwrap(secret, context, envelope);
+                    try {
+                      const coordinate = new TextDecoder().decode(context);
+                      if (
+                        signedDelivery &&
+                        afterDeniedDelivery &&
+                        coordinate.includes("jazz.e2ee.group.v1") &&
+                        coordinate.includes("verification")
+                      ) {
+                        const action = afterDeniedDelivery;
+                        afterDeniedDelivery = undefined;
+                        openedDuringRemoval.push(secret);
+                        await action();
+                      }
+                      return plaintext;
+                    } catch (error) {
+                      plaintext.fill(0);
+                      throw error;
+                    }
+                  },
+                },
+              }
+            : undefined,
         },
       });
       clients.push(db);
@@ -104,9 +154,10 @@ it("protects every inherited path and restores both groups without ordinary deli
     );
     await alice.shutdown();
     await bob.shutdown();
-    await admin.shutdown();
+    // Both key holders are closed. The unrelated administrator remains for
+    // the removal race below; it cannot supply keys or approve Bob's device.
     // A fresh device has no old local store and no other live group key holder.
-    const recovered = await open(bobAccount);
+    const recovered = await open(bobAccount, true);
     const pending = (await recovered.e2ee.devices.list()).find(
       (device) => device.state === "pending",
     )!;
@@ -126,6 +177,27 @@ it("protects every inherited path and restores both groups without ordinary deli
           { tier: "remote" },
         ),
       ).toEqual([]);
+    // The non-member administrator removes access while denied-delivery
+    // fallback is confirming the recovered key. Readiness still needs current authority.
+    const query = app.__e2ee_group_deliveries.where({ groupId: child.id });
+    const before = await admin.all(query, { tier: "remote" });
+    let removals = 0;
+    afterDeniedDelivery = async () => {
+      await admin.e2ee.groups
+        .remove(child.id, { kind: "account", id: bobAccount.account.id })
+        .wait();
+      removals++;
+    };
+    await expect(recovered.e2ee.explain({ groupId: child.id })).rejects.toMatchObject({
+      code: "exclusive_conflict",
+    });
+    expect(signedDelivery).toBe(true);
+    expect(removals).toBe(1);
+    expect(afterDeniedDelivery).toBeUndefined();
+    expect(openedDuringRemoval).toHaveLength(1);
+    expect(openedDuringRemoval[0]!.every((byte) => byte === 0)).toBe(true);
+    expect(await admin.all(query, { tier: "remote" })).toEqual(before);
+    expect(await recovered.e2ee.explain({ groupId: child.id })).toMatchObject({ state: "refused" });
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

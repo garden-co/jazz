@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
+import { PersistedWriteRejectedError, type TxId } from "../runtime/client.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -83,6 +84,7 @@ it.each([
       let beforeSeal: (() => Promise<void>) | undefined;
       let beforeOpen: (() => Promise<void>) | undefined;
       let beforeGroupOpen: (() => Promise<void>) | undefined;
+      const openedDuringRevocation: Uint8Array[] = [];
       const openCreator = () =>
         createDb({
           ...account,
@@ -95,9 +97,18 @@ it.each([
                 ...keys,
                 async open(device, context, envelope) {
                   await beforeOpen?.();
-                  if (new TextDecoder().decode(context).includes("jazz.e2ee.group.v1"))
-                    await beforeGroupOpen?.();
-                  return keys.open(device, context, envelope);
+                  const groupKey = new TextDecoder().decode(context).includes("jazz.e2ee.group.v1");
+                  const opened = await keys.open(device, context, envelope);
+                  try {
+                    if (groupKey && beforeGroupOpen) {
+                      openedDuringRevocation.push(opened);
+                      await beforeGroupOpen();
+                    }
+                    return opened;
+                  } catch (error) {
+                    opened.fill(0);
+                    throw error;
+                  }
                 },
                 async seal(publicKey, context, key) {
                   const action = beforeSeal;
@@ -338,6 +349,23 @@ it.each([
             await expectUnpublished();
             await retained.update(() => saved);
             badEnvelope = false;
+            // A denied later recipient must discard earlier prepared envelopes.
+            // The staged key remains usable, but no partial delivery may commit.
+            let sealsBeforeDenial = 0;
+            const denySecond = async () => {
+              if (++sealsBeforeDenial === 2)
+                throw new PersistedWriteRejectedError(
+                  "provider-delivery" as TxId,
+                  "permission_denied",
+                  "Synthetic delivery denial",
+                );
+              beforeSeal = denySecond;
+            };
+            beforeSeal = denySecond;
+            expect(await reopened.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
+            expect(sealsBeforeDenial).toBe(2);
+            expect(beforeSeal).toBeUndefined();
+            await expectUnpublished();
           }
           expect(await reopened.e2ee.explain({ groupId: group.id })).toMatchObject({
             state: "ready",
@@ -422,8 +450,8 @@ it.each([
       }
       if (variant === "delivery-candidates") {
         // Reuse the live creator and independent approved device. Revocation
-        // lands after explain's accepted snapshot, while it opens a group key.
-        // That snapshot can deduplicate envelopes, but cannot authorise delivery.
+        // lands during key opening. Publication and even no-op readiness must
+        // still accept authority that covers this device's membership.
         const query = app.__e2ee_group_deliveries.where({ groupId: lastGroupId! });
         const before = await second!.all(query, { tier: "remote" });
         let revocations = 0;
@@ -434,6 +462,8 @@ it.each([
         };
         await expect(first.e2ee.explain({ groupId: lastGroupId! })).rejects.toThrow();
         expect(revocations).toBe(1);
+        expect(openedDuringRevocation.length).toBeGreaterThan(0);
+        expect(openedDuringRevocation.every((key) => key.every((byte) => byte === 0))).toBe(true);
         expect(await second!.all(query, { tier: "remote" })).toEqual(before);
         expect(await first.e2ee.explain({ groupId: lastGroupId! })).toMatchObject({
           state: "refused",

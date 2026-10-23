@@ -98,13 +98,34 @@ export async function readAccountMembership(
   return replayAccountMembership(await read.wait({ tier: "global" }), application, signer);
 }
 
+// Track query preparation only, never records, authority, keys or replay results.
+const preparedMembershipAccounts = new WeakMap<Db, WeakMap<DeviceTables, Set<string>>>();
+
 /** Fetch candidate references without treating them as accepted recipients. */
 export async function prefetchPublicMembershipHistory(
   db: Db,
   accountId: string,
   tables: DeviceTables = app,
 ): Promise<void> {
+  let schemas = preparedMembershipAccounts.get(db);
+  if (!schemas) {
+    schemas = new WeakMap();
+    preparedMembershipAccounts.set(db, schemas);
+    db.onShutdown(() => preparedMembershipAccounts.delete(db));
+  }
+  let prepared = schemas.get(tables);
+  if (!prepared) {
+    prepared = new Set();
+    schemas.set(tables, prepared);
+  }
   const rootsQuery = tables.__e2ee_account_roots.where({ accountId });
+  if (prepared.has(accountId)) {
+    // A Global root read orders the already prepared public queries. Callers still
+    // collect every record and settlement in a fresh covered transaction snapshot.
+    await db.all(rootsQuery, { tier: "remote" });
+    return;
+  }
+
   const keysQuery = tables.__e2ee_device_keys.where({ "$createdBy.account": accountId });
   const approvalsQuery = tables.__e2ee_public_device_approvals.where({ accountId });
   const successorsQuery = tables.__e2ee_public_account_successors.where({ accountId });
@@ -116,6 +137,7 @@ export async function prefetchPublicMembershipHistory(
     db.all(successorsQuery, { tier: "remote" }),
     db.all(recoveryQuery, { tier: "remote" }),
   ]);
+  prepared.add(accountId);
 }
 
 /** Strict authority cutoff: a grant cannot authorise another grant in the same transaction. */
