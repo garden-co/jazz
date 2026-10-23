@@ -38,7 +38,7 @@ For a quick check:
 BENCH_ROUNDS=1 BENCH_FILTER='[10000]' pnpm --filter text-editor bench
 ```
 
-Three rounds per case run by default. `BENCH_FILTER` selects names by substring.
+Six rounds per case run by default, after one untimed warmup round (the first page load of a case runs on a cold browser and dev server). `BENCH_FILTER` selects names by substring.
 The runner starts and stops its own Vite/Jazz server and browser, and writes benchmark results to `.generated/results.json`. The benchmark-only Vite transform exposes
 an existing app database and a read-only editor accessor; it does not replace the
 editor, provider, schema, permissions or initialization code.

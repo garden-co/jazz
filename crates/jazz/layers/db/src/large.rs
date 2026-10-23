@@ -925,6 +925,7 @@ pub(crate) fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<
 
 /// Store one node, caching it pinned when `cache` is given. A new branch
 /// records an edge to each child, whether or not the child is stored yet.
+/// The caller verified `chunk` against its hash (or produced it).
 fn store_chunk(
     conn: &Connection,
     cache: Option<&Chunks>,
@@ -957,8 +958,7 @@ fn store_chunk(
     if inserted == 0 {
         return Ok(());
     }
-    let node = lv::decode_node_untyped_authenticated(chunk.node_ref.object_hash, &chunk.encoded)
-        .map_err(corrupt)?;
+    let node = lv::decode_node_untyped_verified(&chunk.encoded).map_err(corrupt)?;
     if let ChunkNode::Branch { children, .. } = node {
         let mut edge = conn
             .prepare_cached("INSERT OR IGNORE INTO _jazz_lv_edge (child, parent) VALUES (?1, ?2)")
@@ -1129,8 +1129,10 @@ fn walk(
         if !descend(&request, bytes)? {
             continue;
         }
+        // Stored nodes were verified on the way in.
         if let Some(bytes) = bytes
-            && let ChunkNode::Branch { children, .. } = authenticate(&request, bytes)?
+            && let ChunkNode::Branch { children, .. } =
+                lv::decode_node_untyped_verified(bytes).map_err(corrupt)?
         {
             stack.extend(children.iter().map(|child| request_of(&child.node_ref)));
         }

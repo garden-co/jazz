@@ -51,7 +51,9 @@ const server = await createServer({
 let browser;
 const contexts = new Set();
 const errors = [];
-const rounds = Number(process.env.BENCH_ROUNDS || 3);
+// Each sample is one page load whose Yjs replay alone spans about 1-2 s
+// between samples, so three samples moved the mean by tens of percent.
+const rounds = Number(process.env.BENCH_ROUNDS || 6);
 assert.ok(Number.isInteger(rounds) && rounds > 0);
 const filter = process.env.BENCH_FILTER || "";
 const editor = (page) => page.getByRole("textbox", { name: "Document" });
@@ -137,7 +139,9 @@ for (const scenario of scenarios) {
     {
       iterations: rounds,
       time: 0,
-      warmupIterations: 0,
+      // The first sample of a case runs on a cold browser and dev server
+      // (about 1.5x the others): it warms up untimed.
+      warmupIterations: 1,
       warmupTime: 0,
       setup(task) {
         // Vitest passes options to Bench, so install per-sample hooks on its Task.
