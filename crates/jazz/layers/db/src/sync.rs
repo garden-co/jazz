@@ -492,6 +492,29 @@ pub enum SyncMessage {
     ContentWitnessesV1 {
         witnesses: Vec<ContentWitnessRef>,
     },
+    /// Append-only tag 21: authority-qualified row evidence, separate from
+    /// ordinary Origins and from query-completeness answers.
+    AcceptedRowsV1 {
+        rows: Vec<AcceptedRow>,
+    },
+    /// Tag 22, `jazz.sqlite.sync.accepted-fetch.v1`: require a complete
+    /// authority answer at one cut. Scope must match the authenticated session,
+    /// unless a trusted backend link vouches for a delegated request.
+    AcceptedFetchV1 {
+        id: u64,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        at: Option<u64>,
+        include_deleted: bool,
+        scope: Option<(String, BTreeMap<String, Value>)>,
+    },
+    /// Tag 23: exact root ids at the authority cut requested above. Ordinary
+    /// cache answers cannot satisfy this request, even on an otherwise live link.
+    AcceptedAnswerV1 {
+        id: u64,
+        through: u64,
+        rows: Vec<[u8; 16]>,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -568,6 +591,7 @@ pub(crate) struct Client {
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
+    accepted_answers: HashSet<u64>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// Large-value nodes asked for and not yet answered.
@@ -697,6 +721,9 @@ struct ForwardedFetch {
     prepared: PreparedQuery,
     identity: AuthorSubject,
     include_deleted: bool,
+    accepted: bool,
+    // Retain the timer so missing content cannot leave a relay request open forever.
+    deadline: Option<Rc<Instant>>,
 }
 
 struct ReleasedReads {
@@ -1467,7 +1494,7 @@ impl Inner {
     /// Who wrote each accepted content sequence. A local store identifies its
     /// own commits; a replica forwards only recorded upstream origins. Neither
     /// an optimistic sequence nor a missing origin becomes relay provenance.
-    fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
+    pub(super) fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
         let mut statement = self
             .conn
             .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1")
@@ -1785,7 +1812,7 @@ impl Inner {
     }
 
     /// Row images selected from `table` (or its history) by `filter`.
-    fn images_where(
+    pub(super) fn images_where(
         &self,
         table: &str,
         history: bool,
@@ -2688,10 +2715,12 @@ impl Inner {
 impl Client {
     fn cancel_fetch(&mut self, id: u64) {
         self.answers.remove(&id);
+        self.accepted_answers.remove(&id);
         self.outbox.retain(|message| {
             !matches!(message,
                 SyncMessage::Fetch { id: request, .. }
                     | SyncMessage::ScopedFetchV1 { id: request, .. }
+                    | SyncMessage::AcceptedFetchV1 { id: request, .. }
                     if *request == id)
         });
     }
@@ -2720,6 +2749,7 @@ impl Client {
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
+            accepted_answers: HashSet::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
             wanted: BTreeSet::new(),
@@ -2785,6 +2815,7 @@ impl Db {
                     | SyncMessage::ChunkRequests { .. }
                     | SyncMessage::Fetch { .. }
                     | SyncMessage::ScopedFetchV1 { .. }
+                    | SyncMessage::AcceptedFetchV1 { .. }
             )
         });
         let version = inner.owner.jazz.version_id();
@@ -3149,18 +3180,19 @@ impl Db {
         include_deleted: bool,
         deadline: Option<Instant>,
     ) -> Result<Option<u64>, Error> {
-        self.fetch_answer(prepared, at, include_deleted, deadline, None)
+        self.fetch_answer(prepared, at, include_deleted, deadline, None, false)
             .await
             .map(|answer| answer.map(|(through, _)| through))
     }
 
-    async fn fetch_answer(
+    pub(super) async fn fetch_answer(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
         deadline: Option<Instant>,
         scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        accepted: bool,
     ) -> Result<Option<(u64, Vec<[u8; 16]>)>, Error> {
         let (id, connection) = {
             let mut inner = self.inner.borrow_mut();
@@ -3173,34 +3205,52 @@ impl Db {
             let id = client.next_id;
             client.next_id += 1;
             client.answers.insert(id, None);
-            // Scoped answers carry the exact authority window. Ordinary
-            // fetches retain the existing prefix/aggregate hydration contract.
-            let query = if scope.is_some() {
+            if accepted {
+                client.accepted_answers.insert(id);
+            }
+            // A paired read hydrates the prefix so local re-evaluation of its
+            // original offset/window has the same predecessors as the authority.
+            // Scoped ordinary answers retain their exact-window contract.
+            let query = if !accepted && scope.is_some() {
                 prepared.query.clone()
             } else {
                 remote_query(&prepared.query).into_owned()
             };
             let binding = prepared.binding.clone();
-            let message = match scope {
-                Some((author, claims)) => SyncMessage::ScopedFetchV1 {
-                    id,
-                    query,
-                    binding,
-                    author: author.canonical().to_owned(),
-                    claims,
-                    include_deleted,
-                },
-                None => SyncMessage::Fetch {
+            let message = if accepted {
+                SyncMessage::AcceptedFetchV1 {
                     id,
                     query,
                     binding,
                     at,
                     include_deleted,
-                },
+                    scope: scope.map(|(author, claims)| (author.canonical().to_owned(), claims)),
+                }
+            } else {
+                match scope {
+                    Some((author, claims)) => SyncMessage::ScopedFetchV1 {
+                        id,
+                        query,
+                        binding,
+                        author: author.canonical().to_owned(),
+                        claims,
+                        include_deleted,
+                    },
+                    None => SyncMessage::Fetch {
+                        id,
+                        query,
+                        binding,
+                        at,
+                        include_deleted,
+                    },
+                }
             };
             client.outbox.push(message);
             (id, client.connection)
         };
+        if accepted {
+            self.schedule_pending_tick();
+        }
         let _deadline = self.read_deadline(deadline);
         let _attempt_deadline = self.read_attempt_deadline();
         let _request = FetchRequest {
@@ -3616,6 +3666,16 @@ impl Db {
                             ));
                         }
                     }
+                    SyncMessage::AcceptedRowsV1 { rows } => {
+                        for mut row in rows {
+                            let Ok(table) = inner.owner.stored_table(&row.table).map(str::to_owned)
+                            else {
+                                continue;
+                            };
+                            row.table = table;
+                            inner.record_accepted_row(&row)?;
+                        }
+                    }
                     SyncMessage::ContentWitnessesV1 { witnesses } => {
                         for mut witness in witnesses {
                             let Ok(table) =
@@ -3639,8 +3699,32 @@ impl Db {
                             *slot = Some(advice);
                         }
                     }
+                    SyncMessage::AcceptedAnswerV1 { id, through, rows } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if through >= LOCAL_BASE {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "accepted answer has an optimistic cut",
+                            ));
+                        }
+                        if client.accepted_answers.contains(&id) {
+                            client.known = client.known.max(through);
+                            if let Some(slot) = client.answers.get_mut(&id) {
+                                *slot = Some(Ok((through, rows)));
+                            }
+                        }
+                    }
                     SyncMessage::Answer { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
+                        if client.accepted_answers.contains(&id) {
+                            if let Some(slot) = client.answers.get_mut(&id) {
+                                *slot = Some(Err(Error::new(
+                                    ErrorCode::NotObserved,
+                                    "ordinary cache answer cannot cover an accepted read",
+                                )));
+                            }
+                            continue;
+                        }
                         client.known = client.known.max(through);
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Ok((through, rows)));
@@ -4068,7 +4152,8 @@ impl Db {
                 let read = match &message {
                     SyncMessage::Subscribe { id, .. }
                     | SyncMessage::Fetch { id, .. }
-                    | SyncMessage::ScopedFetchV1 { id, .. } => Some(*id),
+                    | SyncMessage::ScopedFetchV1 { id, .. }
+                    | SyncMessage::AcceptedFetchV1 { id, .. } => Some(*id),
                     _ => None,
                 };
                 match (self.serve(index, message), read) {
@@ -4446,6 +4531,7 @@ impl Db {
                 }
             }
             let witnesses = inner.content_witnesses(&mut images, &mut history_seqs)?;
+            let accepted_rows = inner.accepted_images(&images)?;
             let mut out = std::mem::take(&mut inner.sessions[index].stale);
             let origins = inner.origins(&history_seqs)?;
             if !origins.is_empty() {
@@ -4453,6 +4539,11 @@ impl Db {
             }
             if !witnesses.is_empty() {
                 out.push(SyncMessage::ContentWitnessesV1 { witnesses });
+            }
+            if !accepted_rows.is_empty() {
+                out.push(SyncMessage::AcceptedRowsV1 {
+                    rows: accepted_rows,
+                });
             }
             let session = &mut inner.sessions[index];
             session.watch = watch;
@@ -4491,6 +4582,8 @@ impl Db {
         policy: Option<AuthorSubject>,
         at: Option<u64>,
         include_deleted: bool,
+        accepted: bool,
+        expected: Option<&[[u8; 16]]>,
     ) -> Result<(), Error> {
         let mut inner = self.inner();
         // A history read ships versions of its source table.
@@ -4505,6 +4598,15 @@ impl Db {
             ..ReadSpec::default()
         };
         let rows = inner.run(prepared, policy, &read)?;
+        if let Some(expected) = expected {
+            let actual: Vec<_> = rows.iter().map(|row| *row.id.0.as_bytes()).collect();
+            if actual != expected {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "relay lacks the exact accepted query result",
+                ));
+            }
+        }
         let mut images = Vec::new();
         // Seqs of shipped history versions, for their origins.
         let mut seqs = BTreeSet::new();
@@ -4565,6 +4667,7 @@ impl Db {
             )));
         }
         let witnesses = inner.content_witnesses(&mut images, &mut seqs)?;
+        let accepted_rows = inner.accepted_images(&images)?;
         let origins = inner.origins(&seqs)?;
         let through = at.unwrap_or(inner.seq);
         let session = &mut inner.sessions[index];
@@ -4580,17 +4683,24 @@ impl Db {
                 .outbox
                 .push(SyncMessage::ContentWitnessesV1 { witnesses });
         }
+        if !accepted_rows.is_empty() {
+            session.outbox.push(SyncMessage::AcceptedRowsV1 {
+                rows: accepted_rows,
+            });
+        }
         if !images.is_empty() {
             session.outbox.push(SyncMessage::Rows { images });
         }
-        session.outbox.push(SyncMessage::Answer {
-            id,
-            through,
-            rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
+        let rows = rows.iter().map(|r| *r.id.0.as_bytes()).collect();
+        session.outbox.push(if accepted {
+            SyncMessage::AcceptedAnswerV1 { id, through, rows }
+        } else {
+            SyncMessage::Answer { id, through, rows }
         });
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn forward_scoped_fetch(
         &self,
         index: usize,
@@ -4598,7 +4708,11 @@ impl Db {
         prepared: PreparedQuery,
         identity: AuthorSubject,
         include_deleted: bool,
+        at: Option<u64>,
+        accepted: bool,
     ) -> Result<(), Error> {
+        let deadline = self
+            .read_deadline(accepted.then(|| Instant::now() + std::time::Duration::from_secs(15)));
         let mut inner = self.inner();
         let owner = inner.owner.clone();
         let downstream_version = inner.sessions[index].version;
@@ -4632,14 +4746,29 @@ impl Db {
             .1
             .clone();
         client.answers.insert(upstream, None);
-        client.outbox.push(SyncMessage::ScopedFetchV1 {
-            id: upstream,
-            query: prepared.query.clone(),
-            binding: prepared.binding.clone(),
-            author: identity.canonical().to_owned(),
-            claims,
-            include_deleted,
-        });
+        if accepted {
+            client.accepted_answers.insert(upstream);
+        }
+        let message = if accepted {
+            SyncMessage::AcceptedFetchV1 {
+                id: upstream,
+                query: prepared.query.clone(),
+                binding: prepared.binding.clone(),
+                at,
+                include_deleted,
+                scope: Some((identity.canonical().to_owned(), claims)),
+            }
+        } else {
+            SyncMessage::ScopedFetchV1 {
+                id: upstream,
+                query: prepared.query.clone(),
+                binding: prepared.binding.clone(),
+                author: identity.canonical().to_owned(),
+                claims,
+                include_deleted,
+            }
+        };
+        client.outbox.push(message);
         inner.sessions[index].forwarded.insert(
             id,
             ForwardedFetch {
@@ -4650,6 +4779,8 @@ impl Db {
                 prepared,
                 identity,
                 include_deleted,
+                accepted,
+                deadline,
             },
         );
         Ok(())
@@ -4664,7 +4795,16 @@ impl Db {
             for index in 0..inner.sessions.len() {
                 let mut completed = Vec::new();
                 for (&id, request) in &inner.sessions[index].forwarded {
-                    let error = if !Rc::ptr_eq(&request.owner, &inner.owner)
+                    let error = if request
+                        .deadline
+                        .as_ref()
+                        .is_some_and(|at| Instant::now() >= **at)
+                    {
+                        Some(Error::new(
+                            ErrorCode::NotObserved,
+                            "accepted relay read timed out",
+                        ))
+                    } else if !Rc::ptr_eq(&request.owner, &inner.owner)
                         || request.downstream_version != inner.sessions[index].version
                     {
                         Some(Error::new(
@@ -4702,6 +4842,25 @@ impl Db {
                             })
                     });
                     if let Some(answer) = answer {
+                        if request.accepted
+                            && let Ok((through, rows)) = &answer
+                        {
+                            // Rows can precede their chunks. Keep the request alive while
+                            // normal chunk demand hydrates this exact authority result.
+                            let exact = scoped_result_query(&request.prepared, rows.clone());
+                            let read = ReadSpec {
+                                cut: Some(Cut::at(*through)),
+                                include_deleted: request.include_deleted,
+                                ..ReadSpec::default()
+                            };
+                            if let Err(error) = inner.run(&exact, Some(request.identity), &read) {
+                                if crate::large::is_missing(&error) {
+                                    continue;
+                                }
+                                completed.push((id, Err(error)));
+                                continue;
+                            }
+                        }
                         completed.push((id, answer));
                     }
                 }
@@ -4720,6 +4879,7 @@ impl Db {
         };
         for (index, id, request, answer) in ready {
             let result = answer.and_then(|(through, rows)| {
+                let expected = request.accepted.then_some(rows.clone());
                 let exact = scoped_result_query(&request.prepared, rows);
                 self.session_db(index).serve_fetch(
                     index,
@@ -4729,6 +4889,8 @@ impl Db {
                     Some(request.identity),
                     Some(through),
                     request.include_deleted,
+                    request.accepted,
+                    expected.as_deref(),
                 )
             });
             if let Err(error) = result {
@@ -4785,7 +4947,53 @@ impl Db {
         let connection_identity = self.inner.borrow().sessions[index].identity;
         // Delegation changes only this request, never the connection identity
         // or the authority's cached claims for another request.
+        let accepted = matches!(&message, SyncMessage::AcceptedFetchV1 { .. });
         let (message, identity, claims, scoped) = match message {
+            SyncMessage::AcceptedFetchV1 {
+                id,
+                query,
+                binding,
+                at,
+                include_deleted,
+                scope,
+            } => {
+                let scoped = scope.is_some();
+                let (identity, claims) = match scope {
+                    Some((author, requested_claims)) => {
+                        let author = AuthorSubject::from_canonical(&author)
+                            .map_err(|e| Error::new(ErrorCode::Query, e.to_string()))?;
+                        if connection_identity != AuthorSubject::SYSTEM {
+                            let authenticated = claims.clone().unwrap_or_else(|| {
+                                self.inner()
+                                    .claims
+                                    .get(&connection_identity)
+                                    .cloned()
+                                    .unwrap_or_default()
+                            });
+                            if author != connection_identity || requested_claims != authenticated {
+                                return Err(Error::new(
+                                    ErrorCode::WriteRejected,
+                                    "accepted read scope differs from its authenticated connection",
+                                ));
+                            }
+                        }
+                        (author, Some(requested_claims))
+                    }
+                    None => (connection_identity, claims),
+                };
+                (
+                    SyncMessage::Fetch {
+                        id,
+                        query,
+                        binding,
+                        at,
+                        include_deleted,
+                    },
+                    identity,
+                    claims,
+                    scoped,
+                )
+            }
             SyncMessage::ScopedFetchV1 {
                 id,
                 query,
@@ -5022,13 +5230,56 @@ impl Db {
                 include_deleted,
             } => {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
-                if scoped {
+                if accepted {
+                    db.check_accepted_query(&prepared)?;
+                } else if scoped {
                     db.check_scoped_fetch(&prepared)?;
                 }
-                if scoped && self.is_client() {
-                    db.forward_scoped_fetch(index, id, prepared, identity, include_deleted)?;
+                if (scoped || accepted) && self.is_client() {
+                    let claims = prepared
+                        .request_claims
+                        .as_ref()
+                        .map(|(_, claims)| claims.clone())
+                        .unwrap_or_else(|| {
+                            db.inner()
+                                .claims
+                                .get(&identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                    let prepared = prepared.with_identity_claims(identity, claims);
+                    db.forward_scoped_fetch(
+                        index,
+                        id,
+                        prepared,
+                        identity,
+                        include_deleted,
+                        at,
+                        accepted,
+                    )?;
                 } else {
-                    db.serve_fetch(index, id, &query, &prepared, policy, at, include_deleted)?;
+                    if accepted {
+                        let inner = db.inner();
+                        if !inner.authority
+                            || at.is_some_and(|cut| cut > inner.seq || cut >= LOCAL_BASE)
+                        {
+                            return Err(Error::new(
+                                ErrorCode::NotObserved,
+                                "accepted read requires an available authority snapshot",
+                            ));
+                        }
+                    }
+                    db.serve_fetch(
+                        index,
+                        id,
+                        &query,
+                        &prepared,
+                        policy,
+                        at,
+                        include_deleted,
+                        accepted,
+                        None,
+                    )?;
                 }
             }
             SyncMessage::Commit {
@@ -5424,6 +5675,7 @@ fn overtakes_writes(message: &SyncMessage) -> bool {
             | SyncMessage::Unsubscribe { .. }
             | SyncMessage::Fetch { .. }
             | SyncMessage::ScopedFetchV1 { .. }
+            | SyncMessage::AcceptedFetchV1 { .. }
             | SyncMessage::Advise { .. }
     )
 }
@@ -5477,6 +5729,15 @@ fn message_out(schema: &Schema, message: SyncMessage) -> Option<SyncMessage> {
             images: images
                 .into_iter()
                 .filter_map(|image| image_out(schema, image))
+                .collect(),
+        },
+        SyncMessage::AcceptedRowsV1 { rows } => SyncMessage::AcceptedRowsV1 {
+            rows: rows
+                .into_iter()
+                .filter_map(|mut row| {
+                    row.table = schema.by_stored(&row.table)?.name.clone();
+                    Some(row)
+                })
                 .collect(),
         },
         SyncMessage::ContentWitnessesV1 { witnesses } => SyncMessage::ContentWitnessesV1 {
@@ -5721,6 +5982,7 @@ impl Db {
                             opts.read_view.include_deleted,
                             deadline,
                             Some((identity, claims)),
+                            false,
                         )
                         .await?;
                     if let Some((through, rows)) = answer {
