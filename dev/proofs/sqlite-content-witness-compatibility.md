@@ -5,12 +5,12 @@ transaction identity for the content they ship. Deletes and restores without
 new content retain the preceding content transaction. A state change's sequence
 must not stand in for that content transaction.
 
-This is the transport and persistence prerequisite for paired E2EE reads. It
-**does not enable `allSettlementMetadata`**, establish a shared accepted-at-begin
-snapshot, prove query completeness, or qualify a transaction as globally
-accepted. Those checks remain explicit runtime boundaries. Origins from a local
-store without an upstream identify its own commits; only the separate Global
-settlement/receipt contract proves authority coverage or acceptance.
+This is the transport and persistence prerequisite for paired E2EE reads.
+Origins identify a writer; they do not themselves establish authority acceptance,
+a shared accepted-at-begin snapshot, query completeness or a Global transaction
+receipt. The separate [paired-read contract](sqlite-paired-reads-compatibility.md)
+adds those read-time checks and exposes `allSettlementMetadata`. Global commit
+acceptance remains a separate receipt wait.
 
 ## Encodings
 
