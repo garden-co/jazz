@@ -230,7 +230,15 @@ impl Net {
                 .insert("members", code(c), Default::default()),
         )
         .unwrap();
-        let receipt = self.drive(db.commit_serializable_handle(open)).unwrap();
+        // A change the replica already holds conflicts at once; otherwise
+        // the authority decides.
+        let receipt = match self.drive(db.commit_serializable_handle(open)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+                return Redeem::Conflict;
+            }
+        };
         match self.settle(i, receipt.0) {
             Ok(_) => Redeem::Joined,
             Err(error) => {
@@ -593,12 +601,12 @@ fn a_serializable_read_sees_the_replicas_own_unsettled_writes() {
         Default::default(),
     ))
     .unwrap();
-    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
-    net.go_online(OWNER);
-    // The second insert settles before the commit too, but the read
-    // result changed: the authority rejects it.
+    // The second insert changed the read's result, which the replica
+    // already holds: the commit conflicts without asking the authority.
     assert_eq!(
-        net.settle(OWNER, receipt.0).unwrap_err().code,
+        block_on(db.commit_serializable_handle(open))
+            .unwrap_err()
+            .code,
         ErrorCode::TransactionConflict
     );
 }

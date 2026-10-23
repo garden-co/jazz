@@ -11,12 +11,14 @@ mod duplex_transport;
 use std::collections::BTreeMap;
 
 use duplex_transport::duplex;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SubscriptionEvent, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ErrorCode, ReadOpts, ReadTier, SubscriptionEvent, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{ArraySubquery, Query};
+use jazz::query::{ArraySubquery, ArraySubqueryRequirement, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -229,4 +231,94 @@ fn a_synced_forward_array_relation_ships_the_rows_it_lists() {
         })
         .collect();
     assert_eq!(ids, [id(2, 2), id(2, 1)], "in the array's order");
+}
+
+fn images_of(row: &jazz::db::CurrentRow, category: usize) -> Vec<Value> {
+    let Value::Array(categories) = cell(row, "categories") else {
+        panic!("categories are an array");
+    };
+    let Value::Record(record) = &categories[category] else {
+        panic!("a category is a record");
+    };
+    match record.to_values().unwrap().last() {
+        Some(Value::Array(images)) => images.clone(),
+        other => panic!("images are an array: {other:?}"),
+    }
+}
+
+/// A transaction's relation read nests inside its overlay, so it sees the
+/// rows the transaction staged.
+#[test]
+fn a_relation_read_in_a_transaction_sees_staged_children() {
+    let db = open(1);
+    menu(&db);
+    let tx = OpenTransactionId::new();
+    block_on(db.begin_mergeable(tx)).unwrap();
+    block_on(db.serializable_tx_ref(tx).insert(
+        "images",
+        BTreeMap::from([
+            ("category_id".to_owned(), Value::Uuid(id(2, 1).0)),
+            ("url".to_owned(), text("staged")),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    let prepared = db.prepare_query(&categories_with_images()).unwrap();
+    let rows = block_on(db.serializable_tx_ref(tx).all_prepared(&prepared)).unwrap();
+    assert_eq!(
+        images_of(&rows[0], 0).len(),
+        1,
+        "the staged image is nested"
+    );
+    db.abandon_transaction_handle(tx).unwrap();
+}
+
+/// A serializable relation read holds its related rows too: a change to one
+/// before the commit is a conflict.
+#[test]
+fn a_change_to_a_related_row_conflicts_with_a_serializable_relation_read() {
+    let db = open(1);
+    menu(&db);
+    let tx = OpenTransactionId::new();
+    block_on(db.begin_serializable(tx)).unwrap();
+    let prepared = db.prepare_query(&categories_with_images()).unwrap();
+    block_on(db.serializable_tx_ref(tx).all_prepared(&prepared)).unwrap();
+    block_on(db.update(
+        "images",
+        id(3, 1),
+        BTreeMap::from([("url".to_owned(), text("moved"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(db.serializable_tx_ref(tx).update(
+        "menus",
+        id(1, 1),
+        BTreeMap::from([("name".to_owned(), text("renamed"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let error = block_on(db.commit_serializable_handle(tx)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+}
+
+/// A required relation nested under another leaves out the child rows it
+/// finds nothing for, as it would its root rows.
+#[test]
+fn a_nested_required_relation_drops_children_without_rows() {
+    let db = open(1);
+    menu(&db);
+    let query = Query::from("menus").array_subquery(
+        ArraySubquery::new("categories", "categories", "menu_id", "id").nested(
+            ArraySubquery::new("images", "images", "category_id", "id")
+                .requirement(ArraySubqueryRequirement::AtLeastOne),
+        ),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let roots = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let rows = db.nest_relations(&prepared, roots).unwrap();
+    let Value::Array(categories) = cell(&rows[0], "categories") else {
+        panic!("categories are an array");
+    };
+    assert_eq!(categories.len(), 1, "category 1 has no images");
+    assert_eq!(images_of(&rows[0], 0).len(), 2);
 }

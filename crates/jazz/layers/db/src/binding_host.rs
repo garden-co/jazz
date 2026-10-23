@@ -836,7 +836,15 @@ impl Binding {
         let receipt = match kind {
             TransactionKind::Mergeable => block_on(self.db.commit_mergeable_handle(id)),
             TransactionKind::Serializable => block_on(self.db.commit_serializable_handle(id)),
-        }?;
+        };
+        // A conflict is the commit's outcome, reported through its receipt
+        // as the authority's verdict on a replica's commit is.
+        let receipt = match receipt {
+            Err(error) if error.code == ErrorCode::TransactionConflict => {
+                return self.rejected(error);
+            }
+            receipt => receipt?,
+        };
         self.hooks.after_write();
         self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)
     }

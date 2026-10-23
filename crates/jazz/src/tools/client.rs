@@ -871,7 +871,6 @@ impl JazzClient {
                         .all_prepared(&prepared),
                 )
                 .await?
-                .and_then(|roots| db.nest_relations(&prepared, roots))
                 .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
             || matches!(opts.first_load, FirstLoad::WaitForRemote { timeout_ms } if timeout_ms > 0)

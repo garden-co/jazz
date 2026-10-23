@@ -4347,11 +4347,12 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                let now = inner
-                    .run(&prepared, identity, &spec)
-                    .map_err(|e| (e, Vec::new()))?;
-                let now: Vec<([u8; 16], u64)> =
-                    now.iter().map(|r| (*r.id.0.as_bytes(), r.seq)).collect();
+                let now: Vec<([u8; 16], u64)> = inner
+                    .read_versions(&prepared, identity, &spec)
+                    .map_err(|e| (e, Vec::new()))?
+                    .iter()
+                    .map(|(row, seq)| (*row.0.as_bytes(), *seq))
+                    .collect();
                 // A row the sender read at an own commit's local seq is
                 // compared where that commit settled.
                 let then: Vec<([u8; 16], u64)> = read
@@ -4618,11 +4619,11 @@ impl Db {
             }
         };
         if let Some(tx) = open_tx {
-            let roots = self
+            let rows = self
                 .serializable_tx_ref(tx)
                 .all_prepared_with(&prepared, opts.read_view.include_deleted)
                 .await?;
-            return Ok(result(self.nest_relations(&prepared, roots)?));
+            return Ok(result(rows));
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
         if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {

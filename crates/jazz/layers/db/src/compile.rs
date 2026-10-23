@@ -720,49 +720,8 @@ impl<'a> Ctx<'a> {
         }
         for array in &query.array_subqueries {
             self.validate_array(array)?;
-            if array.requirement == ArraySubqueryRequirement::Optional {
-                continue;
-            }
-            let child = self.table(&array.table)?;
-            let c = self.alias("c");
-            let outer = column_sql(table, alias, &array.outer_column)?;
-            let mut conds = vec![format!("{c}._del = 0")];
-            for filter in &array.filters {
-                conds.push(self.predicate(filter, child, &c)?);
-            }
-            let source = self.source(child)?;
-            if is_array(table, &array.outer_column) {
-                // A forward array relation: one child per element, in the
-                // array's order and with its duplicates.
-                let r = self.alias("r");
-                conds.push(format!(
-                    "{} = {}",
-                    column_sql(child, &c, &array.inner_column)?,
-                    array_element_id(&r)
-                ));
-                let matched = format!(
-                    "SELECT 1 FROM json_each({outer}) AS {r} JOIN {source} AS {c} ON {}",
-                    conds.join(" AND ")
-                );
-                wheres.push(match array.requirement {
-                    ArraySubqueryRequirement::AtLeastOne => format!("EXISTS ({matched})"),
-                    _ => {
-                        format!("((SELECT count(*) FROM ({matched})) = json_array_length({outer}))")
-                    }
-                });
-                continue;
-            }
-            if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
-                return Err(unsupported(
-                    "cardinality-matching requirements on scalar relations on SQLite",
-                ));
-            }
-            conds.push(correlate(child, &c, &array.inner_column, &outer)?);
-            wheres.push(format!(
-                "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
-                conds.join(" AND ")
-            ));
         }
+        self.array_requirements(table, alias, &query.array_subqueries, &mut wheres)?;
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(table, alias, session)?);
         }
@@ -1097,6 +1056,63 @@ impl<'a> Ctx<'a> {
         ))
     }
 
+    /// The conditions a row of `table` (as `alias`) meets for its required
+    /// array relations: a parent whose required relation is missing rows is
+    /// left out, at the root or nested.
+    fn array_requirements(
+        &mut self,
+        table: &'a Table,
+        alias: &str,
+        arrays: &[ArraySubquery],
+        wheres: &mut Vec<String>,
+    ) -> Result<(), Error> {
+        for array in arrays {
+            if array.requirement == ArraySubqueryRequirement::Optional {
+                continue;
+            }
+            let child = self.table(&array.table)?;
+            let c = self.alias("c");
+            let outer = column_sql(table, alias, &array.outer_column)?;
+            let mut conds = vec![format!("{c}._del = 0")];
+            for filter in &array.filters {
+                conds.push(self.predicate(filter, child, &c)?);
+            }
+            let source = self.source(child)?;
+            if is_array(table, &array.outer_column) {
+                // A forward array relation: one child per element, in the
+                // array's order and with its duplicates.
+                let r = self.alias("r");
+                conds.push(format!(
+                    "{} = {}",
+                    column_sql(child, &c, &array.inner_column)?,
+                    array_element_id(&r)
+                ));
+                let matched = format!(
+                    "SELECT 1 FROM json_each({outer}) AS {r} JOIN {source} AS {c} ON {}",
+                    conds.join(" AND ")
+                );
+                wheres.push(match array.requirement {
+                    ArraySubqueryRequirement::AtLeastOne => format!("EXISTS ({matched})"),
+                    _ => {
+                        format!("((SELECT count(*) FROM ({matched})) = json_array_length({outer}))")
+                    }
+                });
+                continue;
+            }
+            if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
+                return Err(unsupported(
+                    "cardinality-matching requirements on scalar relations on SQLite",
+                ));
+            }
+            conds.push(correlate(child, &c, &array.inner_column, &outer)?);
+            wheres.push(format!(
+                "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
+                conds.join(" AND ")
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_array(&mut self, array: &ArraySubquery) -> Result<(), Error> {
         let child = self.table(&array.table)?;
         column_sql(child, "c", &array.inner_column)?;
@@ -1138,6 +1154,7 @@ impl<'a> Ctx<'a> {
         for filter in &array.filters {
             wheres.push(self.predicate(filter, child, alias)?);
         }
+        self.array_requirements(child, alias, &array.nested_arrays, &mut wheres)?;
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(child, alias, session)?);
         }
