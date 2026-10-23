@@ -28,7 +28,7 @@
 
 use crate::values::CachedRow;
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -925,6 +925,7 @@ pub(crate) fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<
 
 /// Store one node, caching it pinned when `cache` is given. A new branch
 /// records an edge to each child, whether or not the child is stored yet.
+/// The caller verified `chunk` against its hash (or produced it).
 fn store_chunk(
     conn: &Connection,
     cache: Option<&Chunks>,
@@ -957,8 +958,7 @@ fn store_chunk(
     if inserted == 0 {
         return Ok(());
     }
-    let node = lv::decode_node_untyped_authenticated(chunk.node_ref.object_hash, &chunk.encoded)
-        .map_err(corrupt)?;
+    let node = lv::decode_node_untyped_verified(&chunk.encoded).map_err(corrupt)?;
     if let ChunkNode::Branch { children, .. } = node {
         let mut edge = conn
             .prepare_cached("INSERT OR IGNORE INTO _jazz_lv_edge (child, parent) VALUES (?1, ?2)")
@@ -1129,13 +1129,46 @@ fn walk(
         if !descend(&request, bytes)? {
             continue;
         }
+        // Stored nodes were verified on the way in.
         if let Some(bytes) = bytes
-            && let ChunkNode::Branch { children, .. } = authenticate(&request, bytes)?
+            && let ChunkNode::Branch { children, .. } =
+                lv::decode_node_untyped_verified(bytes).map_err(corrupt)?
         {
             stack.extend(children.iter().map(|child| request_of(&child.node_ref)));
         }
     }
     Ok(())
+}
+
+/// The stored nodes of a chunked `cell` a foreground lacks, to ship along
+/// with its row: none for an inline cell or a value above
+/// `max_bytes` (those stay pulled on demand). `sent` holds the nodes the
+/// foreground has already been sent; the walk stops at each, since its
+/// subtree went with it.
+pub(crate) fn nodes_to_inline(
+    conn: &Connection,
+    cell: &[u8],
+    max_bytes: u64,
+    sent: &mut HashSet<lv::Locator>,
+) -> Result<Vec<(ChunkRequest, Vec<u8>)>, Error> {
+    let Logical::Chunked(value) = logical(cell)? else {
+        return Ok(Vec::new());
+    };
+    if value.byte_length > max_bytes {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    walk(conn, &value, |request, bytes| {
+        let Some(bytes) = bytes else {
+            return Ok(false);
+        };
+        if !sent.insert(request.locator) {
+            return Ok(false);
+        }
+        out.push((request.clone(), bytes.to_vec()));
+        Ok(true)
+    })?;
+    Ok(out)
 }
 
 /// The nodes of `value` this replica wrote and has not pushed upstream.

@@ -3552,6 +3552,16 @@ pub fn decode_node_untyped_authenticated(
     preflight_node_format(encoded)?.decode_node(encoded)
 }
 
+/// Canonically decode an immutable-node envelope whose bytes already passed
+/// object-hash verification (a node read back from the store that verified
+/// it on the way in), without hashing them again.
+pub fn decode_node_untyped_verified(encoded: &[u8]) -> Result<ChunkNode, Error> {
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
+    }
+    preflight_node_format(encoded)?.decode_node(encoded)
+}
+
 /// Encode a chunk node using Groove's ordinary canonical enum/record algebra.
 pub fn encode_node(node: &ChunkNode) -> Result<Vec<u8>, Error> {
     LargeValueFormat::from_version(node_format(node))?.encode_node(node)
