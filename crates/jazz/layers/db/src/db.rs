@@ -953,6 +953,7 @@ impl Db {
         {
             let mut inner = db.inner.borrow_mut();
             inner.seq = seq;
+            inner.restore_issued_seq()?;
             inner.load_client()?;
             if inner.client.is_some() {
                 inner.seq = inner.seq.max(LOCAL_BASE);
@@ -1439,7 +1440,7 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
-            self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
+            self.record_upload(vec![op], handle.seq, None, sync::Kind::Mergeable);
             Ok(handle)
         })
     }
@@ -1490,7 +1491,13 @@ impl Db {
             };
             inner.conn.execute_batch("SAVEPOINT w").map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            match apply(&mut inner, seq) {
+            let applied = apply(&mut inner, seq).and_then(|handle| {
+                if standalone && handle.seq == seq {
+                    inner.record_issued_seq(seq)?;
+                }
+                Ok(handle)
+            });
+            match applied {
                 Ok(handle) => {
                     inner.conn.execute_batch("RELEASE w").map_err(storage)?;
                     if handle.seq == seq {
@@ -1535,6 +1542,11 @@ impl Db {
     ) -> Result<(T, TxReceipt), Error> {
         {
             let mut inner = self.inner();
+            if inner.non_durable {
+                return Err(unsupported(
+                    "commits from a non-durable foreground through its storage owner",
+                ));
+            }
             if inner.tx.is_some() {
                 return Err(unsupported("nested transactions"));
             }
@@ -1555,9 +1567,12 @@ impl Db {
             captured = std::mem::take(&mut inner.capture);
             match &result {
                 Ok(_) => {
-                    if !tables.is_empty() {
-                        inner.seq = seq;
+                    if let Err(error) = inner.record_issued_seq(seq) {
+                        inner.rollback_savepoint("tx").map_err(storage)?;
+                        inner.changed.borrow_mut().clear();
+                        return Err(error);
                     }
+                    inner.seq = seq;
                     Some((seq, tables))
                 }
                 Err(_) => {
@@ -1570,7 +1585,14 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        self.record_upload(captured, seq, 0, sync::Kind::Mergeable);
+        let identity = captured
+            .is_empty()
+            .then_some(if author == AuthorSubject::SYSTEM {
+                WriteIdentity::Database
+            } else {
+                WriteIdentity::Session(author)
+            });
+        self.record_upload(captured, seq, identity, sync::Kind::Mergeable);
         self.inner
             .borrow()
             .conn
@@ -4463,6 +4485,11 @@ impl Db {
     }
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        if self.inner().non_durable {
+            return Err(unsupported(
+                "commits from a non-durable foreground through its storage owner",
+            ));
+        }
         let ops = &batch.ops;
         let seq = {
             let mut inner = self.inner();
@@ -4472,7 +4499,9 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            let applied = inner.apply_with_edits(ops, &batch.edits, 0, seq);
+            let applied = inner
+                .apply_with_edits(ops, &batch.edits, 0, seq)
+                .and_then(|()| inner.record_issued_seq(seq));
             if let Err(error) = applied {
                 inner.rollback_savepoint("commit_batch").map_err(storage)?;
                 inner.changed.borrow_mut().truncate(mark);
@@ -4482,12 +4511,15 @@ impl Db {
                 .conn
                 .execute_batch("RELEASE commit_batch")
                 .map_err(storage)?;
-            if !ops.is_empty() {
-                inner.seq = seq;
-            }
+            inner.seq = seq;
             seq
         };
-        self.record_upload(ops.iter().map(|(_, op)| op.clone()).collect(), seq, 0, kind);
+        self.record_upload(
+            ops.iter().map(|(_, op)| op.clone()).collect(),
+            seq,
+            Some(batch.identity),
+            kind,
+        );
         self.notify();
         Ok(TxReceipt(seq))
     }

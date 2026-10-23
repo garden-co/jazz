@@ -2204,6 +2204,70 @@ impl Inner {
         Ok(())
     }
 
+    /// Durable allocator floor, including transactions that publish no rows.
+    /// Named encoding jazz.sqlite.issued-sequence.v1: one exact postcard u64.
+    pub(crate) fn record_issued_seq(&self, seq: u64) -> Result<(), Error> {
+        if seq >= i64::MAX as u64 {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "issued-sequence-v1 range exhausted",
+            ));
+        }
+        self.persist_meta("issued-seq-v1", seq)
+    }
+
+    /// Rows alone cannot recover ids consumed by empty, rejected, or rebased
+    /// transactions. The floor joins each commit's existing SQLite savepoint.
+    pub(crate) fn restore_issued_seq(&mut self) -> Result<(), Error> {
+        let stored: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT v FROM _jazz_meta WHERE k = 'issued-seq-v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if let Some(bytes) = stored {
+            let (seq, rest): (u64, _) = postcard::take_from_bytes(&bytes).map_err(|e| {
+                Error::new(
+                    ErrorCode::Storage,
+                    format!("invalid issued-sequence-v1: {e}"),
+                )
+            })?;
+            if !rest.is_empty() || seq >= i64::MAX as u64 {
+                return Err(Error::new(
+                    ErrorCode::Storage,
+                    "invalid issued-sequence-v1 range or trailing bytes",
+                ));
+            }
+            self.seq = self.seq.max(seq);
+        }
+        // Recover transaction evidence already present in an older SQLite
+        // file too; never mistake another replica's local ids for ours.
+        let known: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(v) FROM (SELECT MAX(tx) AS v FROM _jazz_pending \
+             UNION ALL SELECT MAX(tx) FROM _jazz_applied WHERE node = ?1 \
+             UNION ALL SELECT MAX(tx) FROM _jazz_settled WHERE node = ?1 \
+             UNION ALL SELECT MAX(seq) FROM _jazz_settled WHERE seq < ?2)",
+                rusqlite::params![self.identity.node.as_bytes().to_vec(), LOCAL_BASE as i64],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if let Some(known) = known {
+            if known < 0 {
+                return Err(Error::new(
+                    ErrorCode::Storage,
+                    "negative persisted transaction sequence",
+                ));
+            }
+            self.seq = self.seq.max(known as u64);
+        }
+        Ok(())
+    }
+
     fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
         self.exec(
             "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
@@ -2665,7 +2729,13 @@ impl Db {
 
     /// Record a local commit for upload (client only). Inside an open
     /// transaction the ops join it.
-    pub(crate) fn record_upload(&self, ops: Vec<StagedOp>, seq: u64, _mark: usize, kind: Kind) {
+    pub(crate) fn record_upload(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        identity: Option<WriteIdentity>,
+        kind: Kind,
+    ) {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return;
@@ -2674,18 +2744,28 @@ impl Db {
             inner.capture.extend(ops);
             return;
         }
-        if ops.is_empty() || seq != inner.seq {
+        if seq != inner.seq {
             return;
         }
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
-        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
-            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
-        });
+        // A read-only batch has no operation from which to infer its session.
+        // Carry its bound identity through the same trusted-link checks as writes.
+        let author = match identity {
+            Some(WriteIdentity::Session(author) | WriteIdentity::Attribution(author)) => {
+                Some(author)
+            }
+            _ => ops.iter().find_map(StagedOp::author).or_else(|| {
+                (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+            }),
+        };
         // A session's writes carry its claims, for the authority's check.
         let session_claims = author
-            .filter(|_| ops.iter().any(StagedOp::is_session))
+            .filter(|_| {
+                matches!(identity, Some(WriteIdentity::Session(_)))
+                    || ops.iter().any(StagedOp::is_session)
+            })
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq).unwrap_or_default();
         let mut shadows = Vec::new();
@@ -5047,10 +5127,17 @@ impl Db {
                 let rows = mentioned(&inner);
                 return Err((error, rows));
             }
-            inner
+            if let Err(error) = inner
                 .record_fate(origin.0, origin.1, &Ok(()))
                 .and_then(|()| inner.record_settled(origin.0, origin.1, Some(seq)))
-                .map_err(|e| (e, Vec::new()))?;
+                .and_then(|()| inner.record_issued_seq(seq))
+            {
+                inner
+                    .rollback_savepoint("upload")
+                    .map_err(|e| (storage(e), Vec::new()))?;
+                inner.changed.borrow_mut().truncate(mark);
+                return Err((error, Vec::new()));
+            }
             inner
                 .conn
                 .execute_batch("RELEASE upload")
