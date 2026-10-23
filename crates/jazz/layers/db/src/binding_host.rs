@@ -441,6 +441,10 @@ pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
     Ok(jazz_model::model::public_schema_convert::decode_public_schema_json(schema)?)
 }
 
+/// How long a Remote one-shot read waits for the server to cover it
+/// before failing with `NotObserved`.
+pub const REMOTE_READ_COVERAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// How a host opens: the caller-controlled author, the backend's SYSTEM
 /// author, or a verified self-signed author.
 pub enum OpenAs<'a> {
@@ -1149,6 +1153,18 @@ impl Binding {
         };
         let open_tx = open_transaction_id.map(open_transaction).transpose()?;
         let db = self.db.clone();
+        // A Remote read must be covered by the server; its budget runs
+        // from its first wait.
+        let require_coverage = opts.tier == crate::db::ReadTier::Remote;
+        let started = std::cell::Cell::new(None::<web_time::Instant>);
+        let expired = move || {
+            let first = started.get().unwrap_or_else(|| {
+                let now = web_time::Instant::now();
+                started.set(Some(now));
+                now
+            });
+            first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
+        };
         Ok(Box::pin(self.hooks.progress.parked(async move {
             let result = db
                 .all_serialized_query(
@@ -1157,8 +1173,8 @@ impl Binding {
                     open_tx,
                     admission,
                     author,
-                    false,
-                    || false,
+                    require_coverage,
+                    expired,
                     |_| {},
                 )
                 .await?;

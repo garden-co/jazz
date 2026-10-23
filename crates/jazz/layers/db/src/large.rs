@@ -137,68 +137,93 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 
 /// The triggers that count every chunked cell of `table`'s large-capable
 /// columns, in the current and history tables, against its root, and a
-/// partial index of the rows holding one. Plain SQL: the root sits at a
-/// fixed offset in a chunked cell.
-pub(crate) fn triggers(table: &Table, columns: &[&Column]) -> String {
+/// partial index per column of the rows holding one. Plain SQL: the root
+/// sits at a fixed offset in a chunked cell.
+///
+/// One trigger per event and table covers every column: each schema
+/// object costs SQLite a scan of `sqlite_schema` when it is created, so a
+/// trigger per column made opening a wide schema quadratic. A store that
+/// gains large-capable columns later adds a set for them, named after the
+/// first (`set`), beside the table's earlier ones.
+pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) -> String {
     let mut sql = String::new();
+    if columns.is_empty() {
+        return sql;
+    }
+    let names: Vec<String> = columns.iter().map(|c| quote(&c.stored)).collect();
+    let any = |test: &dyn Fn(&str) -> String| {
+        names
+            .iter()
+            .map(|name| test(name))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    };
+    // Each statement acts only on a chunked cell: a NULL root matches no
+    // row and inserts none.
+    let retain = |cell: &str, unless: Option<&str>| {
+        let unless = unless.map_or(String::new(), |old| {
+            format!(" AND r IS NOT {}", root_sql(old))
+        });
+        format!(
+            "INSERT INTO _jazz_lv_root (root, durable) SELECT r, 1 FROM \
+             (SELECT {} AS r) WHERE r IS NOT NULL{unless} \
+             ON CONFLICT (root) DO UPDATE SET durable = durable + 1;",
+            root_sql(cell)
+        )
+    };
+    let release = |cell: &str, unless: Option<&str>| {
+        let unless = unless.map_or(String::new(), |new| {
+            format!(" AND {} IS NOT {}", root_sql(cell), root_sql(new))
+        });
+        format!(
+            "UPDATE _jazz_lv_root SET durable = durable - 1 WHERE root = {}{unless};",
+            root_sql(cell)
+        )
+    };
     for target in [table.stored.clone(), format!("{}__h", table.stored)] {
-        for column in columns {
-            let name = quote(&column.stored);
-            let trigger = |what: &str| quote(&format!("{target}__lv_{what}_{}", column.stored));
-            let add = |cell: &str| {
-                format!(
-                    "INSERT INTO _jazz_lv_root (root, durable) VALUES ({}, 1) \
-                     ON CONFLICT (root) DO UPDATE SET durable = durable + 1;",
-                    root_sql(cell)
-                )
-            };
-            let sub = |cell: &str| {
-                format!(
-                    "UPDATE _jazz_lv_root SET durable = durable - 1 WHERE root = {};",
-                    root_sql(cell)
-                )
-            };
-            let (new, old) = (format!("NEW.{name}"), format!("OLD.{name}"));
-            let on = quote(&target);
-            // Each update statement acts only on a chunked side: a NULL
-            // root matches no row and inserts none.
-            let release = format!(
-                "UPDATE _jazz_lv_root SET durable = durable - 1 WHERE root = {};",
-                root_sql(&old)
-            );
-            let retain = format!(
-                "INSERT INTO _jazz_lv_root (root, durable) SELECT r, 1 FROM \
-                 (SELECT {} AS r) WHERE r IS NOT NULL \
-                 ON CONFLICT (root) DO UPDATE SET durable = durable + 1;",
-                root_sql(&new)
-            );
+        let on = quote(&target);
+        let trigger = |what: &str| match set {
+            None => quote(&format!("{target}__lv_{what}")),
+            Some(set) => quote(&format!("{target}__lv_{what}_{set}")),
+        };
+        for (column, name) in columns.iter().zip(&names) {
             // Only chunked rows: what a prep scans, near-empty otherwise.
             sql.push_str(&format!(
                 "CREATE INDEX IF NOT EXISTS {} ON {on} (id) WHERE {};\n",
                 quote(&format!("{target}__lv_{}", column.stored)),
-                chunked_sql(&name)
-            ));
-            sql.push_str(&format!(
-                "CREATE TRIGGER IF NOT EXISTS {} AFTER INSERT ON {on} \
-                 WHEN {} BEGIN {} END;\n\
-                 CREATE TRIGGER IF NOT EXISTS {} AFTER DELETE ON {on} \
-                 WHEN {} BEGIN {} END;\n\
-                 CREATE TRIGGER IF NOT EXISTS {} AFTER UPDATE OF {name} ON {on} \
-                 WHEN {} IS NOT {} BEGIN \
-                 {} {} END;\n",
-                trigger("ins"),
-                chunked_sql(&new),
-                add(&new),
-                trigger("del"),
-                chunked_sql(&old),
-                sub(&old),
-                trigger("upd"),
-                root_sql(&old),
-                root_sql(&new),
-                release,
-                retain,
+                chunked_sql(name)
             ));
         }
+        let each = |statement: &dyn Fn(&str) -> String| -> String {
+            names
+                .iter()
+                .map(|name| statement(name))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        sql.push_str(&format!(
+            "CREATE TRIGGER IF NOT EXISTS {ins} AFTER INSERT ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER IF NOT EXISTS {del} AFTER DELETE ON {on} WHEN {} BEGIN {} END;\n\
+             CREATE TRIGGER IF NOT EXISTS {upd} AFTER UPDATE OF {} ON {on} WHEN {} BEGIN {} END;\n",
+            any(&|name| chunked_sql(&format!("NEW.{name}"))),
+            each(&|name| retain(&format!("NEW.{name}"), None)),
+            any(&|name| chunked_sql(&format!("OLD.{name}"))),
+            each(&|name| release(&format!("OLD.{name}"), None)),
+            names.join(", "),
+            any(&|name| format!(
+                "{} IS NOT {}",
+                root_sql(&format!("OLD.{name}")),
+                root_sql(&format!("NEW.{name}"))
+            )),
+            each(&|name| format!(
+                "{} {}",
+                release(&format!("OLD.{name}"), Some(&format!("NEW.{name}"))),
+                retain(&format!("NEW.{name}"), Some(&format!("OLD.{name}")))
+            )),
+            ins = trigger("ins"),
+            del = trigger("del"),
+            upd = trigger("upd"),
+        ));
     }
     sql
 }
@@ -1552,7 +1577,8 @@ mod tests {
             json: false,
             merge: Default::default(),
         };
-        conn.execute_batch(&triggers(&table, &[&column])).unwrap();
+        conn.execute_batch(&triggers(&table, &[&column], None))
+            .unwrap();
         let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
         // Cells are TEXT, as the engine binds them.
         let text_cell = |cell: Vec<u8>| crate::values::Sql::Text(cell);
@@ -1590,6 +1616,93 @@ mod tests {
         while reclaim(&conn, &chunks, 3).unwrap() > 0 {}
         assert_eq!(count("SELECT count(*) FROM _jazz_lv_node"), 0);
         assert_eq!(count("SELECT count(*) FROM _jazz_lv_reclaim"), 0);
+    }
+
+    #[test]
+    fn one_trigger_set_counts_every_column_and_later_sets_add_columns() {
+        let (conn, chunks) = chunks();
+        conn.execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, a, b);
+             CREATE TABLE t__h (id INTEGER, a, b);",
+        )
+        .unwrap();
+        let table = Table {
+            name: "t".to_owned(),
+            stored: "t".to_owned(),
+            columns: Vec::new(),
+            references: Default::default(),
+            policies: Default::default(),
+            indexes: Vec::new(),
+            branch_by: Vec::new(),
+            provenance: Vec::new(),
+            stored_provenance: Vec::new(),
+        };
+        let column = |name: &str| Column {
+            name: name.to_owned(),
+            stored: name.to_owned(),
+            ty: crate::records::ValueType::String,
+            default: None,
+            json: false,
+            merge: Default::default(),
+        };
+        let (a, b, c) = (column("a"), column("b"), column("c"));
+        conn.execute_batch(&triggers(&table, &[&a, &b], None))
+            .unwrap();
+        let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        // One insert, delete and update trigger per table and history table.
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN ('t', 't__h')"
+            ),
+            6
+        );
+        let cell = |seed| {
+            crate::values::Sql::Text(chunked(
+                &conn,
+                &chunks,
+                LargeValueKind::String,
+                &text(seed, 300_000),
+            ))
+        };
+        let (one, two, three) = (cell(7), cell(8), cell(9));
+        let durable = |cell: &crate::values::Sql| {
+            let crate::values::Sql::Text(bytes) = cell else {
+                unreachable!()
+            };
+            conn.query_row(
+                &format!(
+                    "SELECT coalesce(sum(durable), 0) FROM _jazz_lv_root WHERE root = {}",
+                    root_sql("?1")
+                ),
+                [bytes],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        conn.execute("INSERT INTO t (id, a, b) VALUES (1, ?1, ?2)", [&one, &two])
+            .unwrap();
+        assert_eq!((durable(&one), durable(&two)), (1, 1));
+        // Swapping one column's tree releases the old and retains the new;
+        // an unchanged column keeps its count.
+        conn.execute("UPDATE t SET a = ?1, b = b WHERE id = 1", [&three])
+            .unwrap();
+        assert_eq!((durable(&one), durable(&two), durable(&three)), (0, 1, 1));
+        // A column added later gets its own set beside the first.
+        conn.execute_batch("ALTER TABLE t ADD COLUMN c; ALTER TABLE t__h ADD COLUMN c;")
+            .unwrap();
+        conn.execute_batch(&triggers(&table, &[&c], Some("c")))
+            .unwrap();
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name IN ('t', 't__h')"
+            ),
+            12
+        );
+        conn.execute("UPDATE t SET c = ?1 WHERE id = 1", [&one])
+            .unwrap();
+        assert_eq!((durable(&one), durable(&two), durable(&three)), (1, 1, 1));
+        conn.execute("DELETE FROM t WHERE id = 1", []).unwrap();
+        assert_eq!((durable(&one), durable(&two), durable(&three)), (0, 0, 0));
     }
 
     #[test]
