@@ -15,7 +15,7 @@ use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
-use crate::tx::DurabilityTier;
+use crate::tx::{DurabilityTier, Fate, RejectionReason};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
@@ -116,6 +116,32 @@ impl PreparedQuery {
 
 fn short(hash: blake3::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
+}
+
+/// Application-visible fate and durability for a local write transaction.
+/// Mirrors the existing binding contract; this is not a persisted encoding.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WriteState {
+    pub fate: Fate,
+    pub global_time: Option<jazz_types::time::GlobalTime>,
+    pub durability: DurabilityTier,
+}
+
+impl WriteState {
+    pub(crate) fn rejected(error: &Error, durability: DurabilityTier) -> Self {
+        let reason = match error.code {
+            ErrorCode::TransactionConflict => RejectionReason::SerializableConflict,
+            ErrorCode::WriteRejected if !error.is_apply_time_rejection() => {
+                RejectionReason::AuthorizationDenied
+            }
+            _ => RejectionReason::MalformedCommit(error.message.clone()),
+        };
+        Self {
+            fate: Fate::Rejected(reason),
+            global_time: None,
+            durability,
+        }
+    }
 }
 
 /// Result of a standalone write.

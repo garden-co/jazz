@@ -98,6 +98,10 @@ pub(crate) enum Store {
 }
 
 impl Store {
+    pub(crate) fn needs_flush(&self) -> bool {
+        matches!(self, Self::IndexedDb(_))
+    }
+
     /// Resolves once every commit so far is in the backing storage.
     pub(crate) async fn flush(&self) -> Result<(), JsValue> {
         match self {

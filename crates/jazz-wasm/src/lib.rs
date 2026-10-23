@@ -400,6 +400,7 @@ fn not_supported(what: &str) -> JsValue {
 /// The browser's half of the hooks: callbacks and the durable store.
 #[derive(Default)]
 struct Host {
+    flushed_through: std::cell::Cell<u64>,
     tick_scheduler: RefCell<Option<js_sys::Function>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
@@ -410,7 +411,7 @@ struct Host {
 impl Host {
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (a no-op without one).
-    async fn flush(&self) -> Result<(), JsValue> {
+    async fn flush(&self, through: u64) -> Result<(), JsValue> {
         #[cfg(target_arch = "wasm32")]
         {
             let store = self.store.borrow().clone();
@@ -418,7 +419,23 @@ impl Host {
                 store.flush().await?;
             }
         }
+        self.flushed_through
+            .set(self.flushed_through.get().max(through));
         Ok(())
+    }
+
+    fn needs_local_flush(&self, seq: u64) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        if self
+            .store
+            .borrow()
+            .as_ref()
+            .is_some_and(browser::Store::needs_flush)
+        {
+            return seq > self.flushed_through.get();
+        }
+        let _ = seq;
+        false
     }
 }
 
@@ -684,7 +701,15 @@ impl WasmWrite {
 
     #[wasm_bindgen(js_name = writeState)]
     pub fn write_state(&self) -> Result<JsValue, JsValue> {
-        Err(not_supported("write state snapshots"))
+        let db = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("write state is unavailable"))?;
+        let mut state = db.binding.write_state(&self.write).map_err(host_error)?;
+        if state.durability == DurabilityTier::Local && db.host.needs_local_flush(self.write.seq) {
+            state.durability = DurabilityTier::None;
+        }
+        serde_wasm_bindgen::to_value(&state).map_err(to_js_error)
     }
 
     /// Resolve once the write reached `tier`: at once for `none` and
@@ -706,7 +731,18 @@ impl WasmWrite {
         if !observe_only.unwrap_or(false) {
             self.claimed.set(true);
         }
-        Ok(host_promise(fate, |()| JsValue::UNDEFINED))
+        let db = db.clone();
+        let local = durability_tier_from_str(&tier)? == DurabilityTier::Local;
+        // The receipt supplies the boundary without borrowing the runtime in
+        // a potentially re-entrant host callback. Flushing may cover more.
+        let through = self.write.seq;
+        Ok(future_to_promise(async move {
+            fate.await.map_err(host_error)?;
+            if local {
+                db.host.flush(through).await?;
+            }
+            Ok(JsValue::UNDEFINED)
+        }))
     }
 
     #[wasm_bindgen]
@@ -1162,7 +1198,7 @@ impl WasmDb {
             Err(error) => return js_sys::Promise::reject(&error),
         };
         future_to_promise(async move {
-            inner.host.flush().await?;
+            inner.host.flush(inner.binding.db.seq_high_water()).await?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -1414,7 +1450,9 @@ impl WasmDb {
         future_to_promise(async move {
             match durability_tier_from_str(&tier)? {
                 DurabilityTier::None => {}
-                DurabilityTier::Local => inner.host.flush().await?,
+                DurabilityTier::Local => {
+                    inner.host.flush(inner.binding.db.seq_high_water()).await?
+                }
                 DurabilityTier::Global => inner
                     .binding
                     .wait_for_pending_writes_global()
@@ -1632,7 +1670,7 @@ impl WasmDb {
         future_to_promise(async move {
             if owns_runtime {
                 inner.binding.close().await.map_err(host_error)?;
-                inner.host.flush().await?;
+                inner.host.flush(inner.binding.db.seq_high_water()).await?;
                 #[cfg(target_arch = "wasm32")]
                 inner.host.store.borrow_mut().take();
             }
