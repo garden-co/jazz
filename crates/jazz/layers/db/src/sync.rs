@@ -484,6 +484,14 @@ pub enum SyncMessage {
     Origins {
         commits: Vec<(u64, [u8; 16], u64)>,
     },
+    /// Whether the server has admitted the schema version the session
+    /// declared, sent when that changes. Until it is admitted the server
+    /// holds the session's messages (a draft awaiting its lens), so a
+    /// read that must be covered by the server fails with the reason
+    /// rather than waiting out its budget.
+    SchemaAdmission {
+        admitted: bool,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -570,6 +578,8 @@ pub(crate) struct Client {
     unavailable: BTreeSet<ChunkRequest>,
     /// Chunks arrived this tick: results waiting for them run again.
     arrived: bool,
+    /// The server said it has not admitted this client's schema version.
+    unadmitted: bool,
 }
 
 fn remote_key(query: &Query, binding: &BTreeMap<String, Value>, include_deleted: bool) -> String {
@@ -717,6 +727,8 @@ pub(crate) struct Session {
     backlog: VecDeque<SyncMessage>,
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
+    /// The client was told its declared version is not admitted.
+    told_unadmitted: bool,
     /// On a relay, the upstream subscription each of the client's
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
@@ -753,6 +765,7 @@ impl Session {
             ingress: (Instant::now(), 0),
             backlog: VecDeque::new(),
             version: None,
+            told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
         }
@@ -2398,6 +2411,7 @@ impl Client {
             pushed: HashMap::new(),
             unavailable: BTreeSet::new(),
             arrived: false,
+            unadmitted: false,
         }
     }
 }
@@ -2492,6 +2506,7 @@ impl Db {
         }
         let asked = std::mem::take(&mut client.requested);
         client.wanted.extend(asked);
+        client.unadmitted = false;
         client.connection += 1;
         Upstream(client.connection)
     }
@@ -2775,16 +2790,18 @@ impl Inner {
 impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
-    /// answer is complete through, if it answered, or why it refused. Once
-    /// `expired` says the caller's coverage budget is spent, the read fails
-    /// with `NotObserved` instead.
+    /// answer is complete through, if it answered, or why it refused.
+    /// `coverage`: the read must be covered by the server. It fails once
+    /// the check says the caller's budget is spent (`NotObserved`), or as
+    /// soon as the server says it has not admitted this client's schema
+    /// version.
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
         deadline: Option<Instant>,
-        expired: &dyn Fn() -> bool,
+        coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<Option<u64>, Error> {
         let id = {
             let mut inner = self.inner.borrow_mut();
@@ -2817,12 +2834,22 @@ impl Db {
                 client.answers.remove(&id);
                 return Poll::Ready(Ok(None));
             }
-            if expired() {
-                client.answers.remove(&id);
-                return Poll::Ready(Err(Error::new(
-                    ErrorCode::NotObserved,
-                    "Timed out waiting for query coverage",
-                )));
+            if let Some(expired) = coverage {
+                if client.unadmitted {
+                    client.answers.remove(&id);
+                    return Poll::Ready(Err(Error::new(
+                        ErrorCode::Schema,
+                        "schema version is awaiting published catalogue admission; \
+                         deploy it to the server",
+                    )));
+                }
+                if expired() {
+                    client.answers.remove(&id);
+                    return Poll::Ready(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "Timed out waiting for query coverage",
+                    )));
+                }
             }
             Poll::Pending
         })
@@ -3213,6 +3240,9 @@ impl Db {
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Ok((through, rows)));
                         }
+                    }
+                    SyncMessage::SchemaAdmission { admitted } => {
+                        inner.client.as_mut().expect("client").unadmitted = !admitted;
                     }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
@@ -3628,8 +3658,18 @@ impl Db {
                     (Err(error), None) => return Err(error),
                 }
             }
+            let mut inner = self.inner.borrow_mut();
             if !held.is_empty() {
-                self.inner.borrow_mut().sessions[index].backlog = held;
+                inner.sessions[index].backlog = held;
+            }
+            // Tell the client when its declared version's admission changes.
+            let unadmitted = inner.session_unadmitted(index);
+            let session = &mut inner.sessions[index];
+            if session.open && session.told_unadmitted != unadmitted {
+                session.told_unadmitted = unadmitted;
+                session.outbox.push(SyncMessage::SchemaAdmission {
+                    admitted: !unadmitted,
+                });
             }
         }
         self.notify();
@@ -4890,18 +4930,16 @@ impl Db {
             if let Some(deadline) = wait {
                 Self::remote_shape(&prepared.query)?;
                 // A read that must be covered by the server fails once
-                // the caller's budget is spent; others fall back to local.
-                let expired: &dyn Fn() -> bool = if require_coverage {
-                    &coverage_expired
-                } else {
-                    &|| false
-                };
+                // the caller's budget is spent or the server cannot serve
+                // its schema version; others fall back to local.
+                let coverage: Option<&dyn Fn() -> bool> =
+                    require_coverage.then_some(&coverage_expired);
                 self.fetch(
                     &prepared,
                     None,
                     opts.read_view.include_deleted,
                     deadline,
-                    expired,
+                    coverage,
                 )
                 .await?;
             }
