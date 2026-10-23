@@ -1779,6 +1779,9 @@ impl WasmDb {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
         };
         let owns_runtime = self.owns_runtime;
+        if owns_runtime {
+            inner.binding.close_initializations();
+        }
         future_to_promise(async move {
             if owns_runtime {
                 inner.binding.close().await.map_err(host_error)?;
