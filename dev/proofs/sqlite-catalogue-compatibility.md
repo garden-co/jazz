@@ -105,7 +105,8 @@ Existing authorities import their own persisted manifests; existing replicas
 obtain them by normal metadata sync. No retired Groove or unreleased E2EE
 backwards-compatibility guarantee is introduced.
 
-This port does not implement catalogue identity policy intrinsics, authenticated
-catalogue cache seals, offline journals, browser-worker storage admission or
-NAPI. Those remain separate prerequisites for the full E2EE SDK runtime. These
-scoped tests do not qualify the end-to-end encrypted application path.
+E14's `sqlite-catalogue-cache-compatibility.md` covers authenticated capture,
+cache restoration and requested-schema readiness. Catalogue identity policy
+intrinsics, initialization transaction seals, offline journals, browser-worker
+storage admission and NAPI remain separate prerequisites for the full E2EE SDK
+runtime. These scoped tests do not qualify the encrypted application path.
