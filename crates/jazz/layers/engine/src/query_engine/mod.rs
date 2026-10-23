@@ -29,6 +29,7 @@ use crate::model::transaction::OpenTransactionId;
 use crate::protocol::{BindingViewKey, BranchKey, SnapshotRef};
 use crate::query::{BindingId, RecursionBound, ShapeId};
 use crate::schema::TableSchema;
+pub use crate::schema::magic::{AuthorField, MagicColumn, ProvenanceEvent, ProvenanceValue};
 use crate::time::GlobalTime;
 use crate::tx::{DurabilityTier, Snapshot, TxId};
 

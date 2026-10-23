@@ -29,6 +29,11 @@ use crate::query::{claim, col, eq};
 
 pub use crate::model::public_schema_convert::SchemaConversionError;
 
+/// Query-only descriptors for virtual history relations.
+pub mod history;
+/// Query-only public computed columns.
+pub mod magic;
+
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");
@@ -1302,6 +1307,7 @@ fn storage_enum(name: &str, variants: &[&str]) -> GrooveColumnType {
 }
 
 fn tx_kind_column() -> GrooveColumnType {
+    // The stored case keeps the pre-rename spelling for format compatibility.
     storage_enum("jazz_tx_kind", &["mergeable", "exclusive"])
 }
 
@@ -1414,7 +1420,7 @@ fn nodes_table() -> GrooveTableSchema {
 /// (SPEC 2 §2.8):
 ///
 /// - fields needed only until the transaction has a seq or a rejection
-///   (`permission_subject` and the exclusive read evidence) in
+///   (`permission_subject` and the serializable read evidence) in
 ///   `jazz_pending_transactions`, deleted by the batch that settles it;
 /// - calculated-merge and branch-write provenance, which grows with the number
 ///   of writes, in `jazz_tx_provenance`, so status reads never copy it;
@@ -1465,7 +1471,7 @@ fn transactions_table() -> GrooveTableSchema {
 /// seq or a rejection, keyed `(time, node_id)` like its `jazz_transactions`
 /// record. A record exists only for an unsettled transaction that has
 /// something to keep here; the batch that stores its seq or rejection deletes
-/// it. Slots 2 to 5 hold its exclusive read evidence
+/// it. Slots 2 to 5 hold its serializable read evidence
 /// (`jazz.exclusive-read-evidence.v1`) while its fate is pending.
 fn pending_transactions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(

@@ -1,3 +1,4 @@
+import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
@@ -2015,7 +2016,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const session = sessionFromWriteContext(sessionJson);
     this.applySessionClaims(session);
-    // The native core binds an exclusive transaction's identity at begin. Keep
+    // The native core binds a serializable transaction's identity at begin. Keep
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
     const identity = this.trustedWriteIdentity(session);
@@ -2185,14 +2186,11 @@ export class NativeRuntimeAdapter implements Runtime {
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
     this.noteFirstLoadWait(optionsJson);
-    if (queryIncludesDeleted(queryJson)) {
-      throw new Error("Native runtime does not support include_deleted subscriptions yet");
-    }
     const session = readSession(sessionJson);
     const readContext = this.nativeReadContext(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const handle = this.nextSubscriptionId++;
-    const opts = readOptions(tier, false, optionsJson);
+    const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
     this.subscriptions.set(handle, {
       openingAbort: new AbortController(),
       reading: false,
@@ -2564,7 +2562,7 @@ export class NativeRuntimeAdapter implements Runtime {
   nativeUpstreamConfigured(): boolean {
     if (this !== this.ownerRuntime) return this.ownerRuntime.nativeUpstreamConfigured();
     // Configured authority remains configured during explicit disconnect;
-    // exclusive confirmation must wait for it rather than settle locally.
+    // serializable confirmation must wait for it rather than settle locally.
     return this.db.nativeConnectionStatus?.().configured === true;
   }
 
@@ -3229,9 +3227,9 @@ export class NativeRuntimeAdapter implements Runtime {
     pending: PendingTx,
     identity: Uint8Array | undefined,
   ): void {
-    if (pending.kind === "exclusive") {
+    if (pending.kind === "serializable") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
-        throw new Error("Native runtime exclusive transaction cannot mix write identities");
+        throw new Error("Native runtime serializable transaction cannot mix write identities");
       }
       return;
     }
@@ -4882,7 +4880,7 @@ function outputColumnsForTable(
   arraySubqueries: readonly QueryArraySubquery[],
   rootTerminal = true,
 ): ColumnDescriptor[] {
-  const tableSchema = schema[table];
+  const tableSchema = resolveQueryTable(schema, table);
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
   const wildcard = select === undefined;
   const selected = select ?? tableSchema.columns.map((column) => column.name);
@@ -4895,7 +4893,7 @@ function outputColumnsForTable(
         ? ({
             name: columnName,
             column_type: magicType,
-            nullable: false,
+            nullable: columnName === "$deletedAt" || columnName.startsWith("$deletedBy"),
           } satisfies ColumnDescriptor)
         : undefined;
     })
@@ -4972,11 +4970,11 @@ function rejectedWaitError(
 }
 
 /**
- * A queued exclusive commit that fails its local serializability check settles
+ * A queued serializable commit that fails its local serializability check settles
  * its reserved transaction with core `TransactionConflict`. Surface it as the
  * same structured rejection an authority rejection produces, keeping the
  * `transaction_conflict` code so callers can tell a local conflict from an
- * authority `exclusive_conflict`.
+ * authority `serialization_conflict`.
  */
 function transactionConflictRejection(
   transactionId: TxId,
@@ -5084,7 +5082,7 @@ function contextualError(context: string, error: unknown): Error {
 
 function rejectionCode(message: string): string {
   if (message.includes("AuthorizationDenied")) return "permission_denied";
-  if (message.includes("ExclusiveConflict")) return "exclusive_conflict";
+  if (message.includes("SerializationConflict")) return "serialization_conflict";
   if (message.includes("CausalityViolation")) return "causality_violation";
   if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
   if (message.includes("Cascade")) return "cascade_rejected";
@@ -5099,7 +5097,7 @@ function rejectionCode(message: string): string {
  */
 const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
   permission_denied: "Write rejected by server authorization",
-  exclusive_conflict: "Exclusive transaction conflicted with another write",
+  serialization_conflict: "Serializable transaction conflicted with another write",
   causality_violation: "Transaction violated causal ordering",
   client_clock_too_far_ahead: "Client clock is too far ahead",
   cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",
@@ -5198,11 +5196,62 @@ function coerceQueryPredicate(
   if (filter.op === "Not") {
     return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
   }
+  if (isHistoryTable(table) && "column" in filter) {
+    if (filter.column === "$transactionId") {
+      throw new Error("History $transactionId predicates do not accept user-provided values");
+    }
+    if (filter.column === "$acceptedAt") {
+      if (filter.op === "In") {
+        return {
+          op: "Any",
+          predicates: filter.values.map((value) =>
+            coerceQueryPredicate(table, { column: filter.column, op: "Eq", value }, schema),
+          ),
+        };
+      }
+      if (isQueryPredicateCmp(filter)) {
+        const value = coerceQueryLiteral(table, filter.column, filter.value, schema);
+        if (value.type !== "Timestamp" || !Number.isSafeInteger(value.value)) {
+          throw new Error(
+            "History $acceptedAt predicates require a valid Date or integer milliseconds",
+          );
+        }
+        const lower = BigInt(value.value) << 18n;
+        const upper = lower + (1n << 18n) - 1n;
+        const bound = (op: "Gt" | "Gte" | "Lt" | "Lte", boundary: bigint): QueryPredicate => {
+          if (boundary < 0n || boundary > (1n << 64n) - 1n) {
+            const matches =
+              boundary < 0n ? op === "Gt" || op === "Gte" : op === "Lt" || op === "Lte";
+            return { op: matches ? "All" : "Any", predicates: [] };
+          }
+          return { column: filter.column, op, value: { type: "U64", value: boundary } };
+        };
+        switch (filter.op) {
+          case "Eq":
+            return { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] };
+          case "Ne":
+            return {
+              op: "Not",
+              predicate: { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] },
+            };
+          case "Gt":
+            return bound("Gt", upper);
+          case "Gte":
+            return bound("Gte", lower);
+          case "Lt":
+            return bound("Lt", lower);
+          case "Lte":
+            return bound("Lte", upper);
+        }
+      }
+    }
+  }
   if (filter.op === "In") {
     const columnType =
       filter.column === "id"
         ? ({ type: "Uuid" } as const)
-        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === filter.column)
+            ?.column_type;
     if (columnType?.type === "Array") {
       return {
         op: "Any",
@@ -5230,7 +5279,8 @@ function coerceQueryPredicate(
     const columnType =
       filter.column === "id"
         ? ({ type: "Uuid" } as const)
-        : schema[table]?.columns.find((entry) => entry.name === filter.column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === filter.column)
+            ?.column_type;
     return {
       ...filter,
       value:
@@ -5240,7 +5290,7 @@ function coerceQueryPredicate(
     };
   }
   if (filter.op === "EnumMatch") {
-    const columnType = schema[table]?.columns.find(
+    const columnType = resolveQueryTable(schema, table)?.columns.find(
       (entry) => entry.name === filter.column,
     )?.column_type;
     if (columnType?.type !== "EnumPayload") {
@@ -5525,7 +5575,8 @@ function coerceQueryLiteral(
     column === "id"
       ? ({ type: "Uuid" } as const)
       : (magicColumnType(column) ??
-        schema[table]?.columns.find((entry) => entry.name === column)?.column_type);
+        resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
+          ?.column_type);
   if (columnType?.type === "Bytea" && value.type === "Array") {
     return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
   }
@@ -5533,7 +5584,8 @@ function coerceQueryLiteral(
     const elementType =
       column === "id"
         ? { type: "Uuid" as const }
-        : schema[table]?.columns.find((entry) => entry.name === column)?.column_type;
+        : resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
+            ?.column_type;
     const elementColumnType = elementType?.type === "Array" ? elementType.element : elementType;
     return {
       type: "Array",
@@ -6064,7 +6116,7 @@ function nativeRowFieldPlans(
   const cached = projectedColumns ? undefined : cache.get(cacheKey);
   if (cached) return cached;
 
-  const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
+  const columns = projectedColumns ?? resolveQueryTable(schema, batch.table)?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const projectedNames = projectedColumns
     ? new Set(projectedColumns.map((column) => column.name))
@@ -6121,7 +6173,9 @@ const RELATION_SNAPSHOT_METADATA_FIELDS = new Set([
 function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): RowState[] {
   return rows.map((row) => {
     if (!row.valuesByColumn) return row;
-    const schemaColumns = new Set((schema[row.table]?.columns ?? []).map((column) => column.name));
+    const schemaColumns = new Set(
+      (resolveQueryTable(schema, row.table)?.columns ?? []).map((column) => column.name),
+    );
     const valuesByColumn = new Map(row.valuesByColumn);
     const metadataValues = new Set<Value>();
     for (const field of RELATION_SNAPSHOT_METADATA_FIELDS) {
@@ -6231,7 +6285,13 @@ function decodeBytes(
     case "Integer":
       return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
-      return { type: "BigInt", value: view.getBigInt64(0, true) };
+      return {
+        type: "BigInt",
+        value:
+          nonNullableStorageType(storageType)?.tag === 3
+            ? view.getBigUint64(0, true)
+            : view.getBigInt64(0, true),
+      };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":

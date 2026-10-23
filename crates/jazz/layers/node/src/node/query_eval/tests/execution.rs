@@ -822,7 +822,7 @@ fn aggregate_count_over_empty_query_returns_identity_row() {
     }
 }
 #[test]
-fn aggregate_read_frontiers_and_exclusive_validation() {
+fn aggregate_read_frontiers_and_serializable_validation() {
     let metric_schema = signed_metric_schema();
     let (_empty_dir, mut empty_node) =
         open_node_with_uuid(NodeUuid::from_bytes([0xa1; 16]), metric_schema.clone());
@@ -832,7 +832,7 @@ fn aggregate_read_frontiers_and_exclusive_validation() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let empty_tx = OpenTransactionId::new();
-    empty_node.open_exclusive(empty_tx).unwrap();
+    empty_node.open_serializable(empty_tx).unwrap();
     let empty_snapshot = empty_node.open_transaction_snapshot(empty_tx).unwrap();
     let empty_snapshot_rows = empty_node
         .query_rows_at_snapshot(&shape, &binding, &empty_snapshot)
@@ -849,7 +849,7 @@ fn aggregate_read_frontiers_and_exclusive_validation() {
         Value::U64(0)
     );
     empty_node
-        .commit_exclusive_settled(empty_tx, AuthorSubject::SYSTEM, 1)
+        .commit_serializable_settled(empty_tx, AuthorSubject::SYSTEM, 1)
         .unwrap();
 
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa2; 16]), metric_schema);
@@ -869,7 +869,7 @@ fn aggregate_read_frontiers_and_exclusive_validation() {
         .unwrap();
     let historical_rows = node.query_rows_at(&shape, &binding, GlobalTime(1)).unwrap();
     let tx = OpenTransactionId::new();
-    node.open_exclusive(tx).unwrap();
+    node.open_serializable(tx).unwrap();
     let snapshot = node.open_transaction_snapshot(tx).unwrap();
     let snapshot_rows = node
         .query_rows_at_snapshot(&shape, &binding, &snapshot)
@@ -885,11 +885,11 @@ fn aggregate_read_frontiers_and_exclusive_validation() {
         assert_eq!(rows[0].row_uuid(), expected_uuid);
         assert_eq!(rows[0].test_cells_by_descriptor(), expected_cells);
     }
-    node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 2)
+    node.commit_serializable_settled(tx, AuthorSubject::SYSTEM, 2)
         .unwrap();
 
     let conflicting_tx = OpenTransactionId::new();
-    node.open_exclusive(conflicting_tx).unwrap();
+    node.open_serializable(conflicting_tx).unwrap();
     let _ = node.tx_query(conflicting_tx, &shape, &binding).unwrap();
     commit_global_cells(
         &mut node,
@@ -903,13 +903,13 @@ fn aggregate_read_frontiers_and_exclusive_validation() {
         2,
     );
     assert!(matches!(
-        node.commit_exclusive_settled(conflicting_tx, AuthorSubject::SYSTEM, 3),
+        node.commit_serializable_settled(conflicting_tx, AuthorSubject::SYSTEM, 3),
         Err(Error::TransactionConflict)
     ));
 }
 
 /// The direct snapshot assertion is needed because aggregate snapshot
-/// materialization is an internal frontier used by exclusive validation.
+/// materialization is an internal frontier used by serializable validation.
 #[test]
 fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
     let schema = signed_metric_schema();
@@ -939,7 +939,7 @@ fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
         .unwrap();
     let historical_rows = node.query_rows_at(&shape, &binding, GlobalTime(3)).unwrap();
     let tx = OpenTransactionId::new();
-    node.open_exclusive(tx).unwrap();
+    node.open_serializable(tx).unwrap();
     let snapshot = node.open_transaction_snapshot(tx).unwrap();
     let snapshot_rows = node
         .query_rows_at_snapshot(&shape, &binding, &snapshot)
@@ -968,11 +968,11 @@ fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
     assert_eq!(signature(&snapshot_rows), expected_signature);
     assert_eq!(signature(&tx_rows), expected_signature);
 
-    node.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 5)
+    node.commit_serializable_settled(tx, AuthorSubject::SYSTEM, 5)
         .unwrap();
 
     let locally_interfered_tx = OpenTransactionId::new();
-    node.open_exclusive(locally_interfered_tx).unwrap();
+    node.open_serializable(locally_interfered_tx).unwrap();
     assert_eq!(
         node.tx_query(locally_interfered_tx, &shape, &binding)
             .unwrap()
@@ -997,7 +997,7 @@ fn grouped_aggregate_frontiers_preserve_identity_and_validate_payloads() {
     // The rewrite leaves every group's payload unchanged, so the aggregate
     // the transaction observed still holds and the commit is serializable
     // (garden-co/jazz#3768).
-    node.commit_exclusive_settled(locally_interfered_tx, AuthorSubject::SYSTEM, 5)
+    node.commit_serializable_settled(locally_interfered_tx, AuthorSubject::SYSTEM, 5)
         .unwrap();
 }
 
@@ -1074,7 +1074,7 @@ fn grouped_aggregate_authority_validation_compares_results() {
     assert_eq!(expected_signature.len(), 2);
 
     let unchanged_tx = OpenTransactionId::new();
-    writer.open_exclusive(unchanged_tx).unwrap();
+    writer.open_serializable(unchanged_tx).unwrap();
     assert_eq!(
         writer
             .tx_query(unchanged_tx, &shape, &binding)
@@ -1083,7 +1083,7 @@ fn grouped_aggregate_authority_validation_compares_results() {
         2
     );
     let (_tx_id, unchanged_unit) = writer
-        .commit_exclusive_settled(unchanged_tx, AuthorSubject::SYSTEM, 1_005)
+        .commit_serializable_settled(unchanged_tx, AuthorSubject::SYSTEM, 1_005)
         .unwrap();
     let [unchanged_fate] = authority
         .apply_sync_message_settled(unchanged_unit)
@@ -1102,7 +1102,7 @@ fn grouped_aggregate_authority_validation_compares_results() {
     );
 
     let changed_tx = OpenTransactionId::new();
-    writer.open_exclusive(changed_tx).unwrap();
+    writer.open_serializable(changed_tx).unwrap();
     assert_eq!(
         writer.tx_query(changed_tx, &shape, &binding).unwrap().len(),
         2
@@ -1111,7 +1111,7 @@ fn grouped_aggregate_authority_validation_compares_results() {
     // conflict: the aggregate is validated by the result it observed.
     commit_metric_global_to_authority(&mut other, &mut authority, row(2), "a", 2, 1_006);
     let (_tx_id, changed_unit) = writer
-        .commit_exclusive_settled(changed_tx, AuthorSubject::SYSTEM, 1_007)
+        .commit_serializable_settled(changed_tx, AuthorSubject::SYSTEM, 1_007)
         .unwrap();
     let [changed_fate] = authority
         .apply_sync_message_settled(changed_unit)
@@ -1394,7 +1394,7 @@ fn tx_query_snapshot_is_stable_after_concurrent_arrival() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let tx = OpenTransactionId::new();
-    node.open_exclusive(tx).unwrap();
+    node.open_serializable(tx).unwrap();
     assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
     commit_issue(&mut node, 2, "open", author(1));
     assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
@@ -1468,20 +1468,20 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
     let binding = shape
         .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
         .unwrap();
-    // An exclusive transaction cannot record a recursive traversal as a
+    // A serializable transaction cannot record a recursive traversal as a
     // narrowed read, so it rejects the read rather than recording whole
     // tables (garden-co/jazz#3694). A mergeable transaction reads the same
     // snapshot sources.
-    let exclusive = OpenTransactionId::new();
-    node.open_exclusive(exclusive).unwrap();
+    let serializable = OpenTransactionId::new();
+    node.open_serializable(serializable).unwrap();
     assert_eq!(
-        node.tx_query(exclusive, &shape, &binding)
+        node.tx_query(serializable, &shape, &binding)
             .unwrap_err()
             .to_string(),
         "Reading `resources` through a recursive traversal of `teamTeamMemberships` is not \
-         supported in exclusive transactions yet"
+         supported in serializable transactions yet"
     );
-    node.abandon_tx(exclusive).unwrap();
+    node.abandon_tx(serializable).unwrap();
 
     let tx = OpenTransactionId::new();
     node.open_mergeable(tx, AuthorSubject::SYSTEM, None)
@@ -1514,4 +1514,145 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
         .collect::<BTreeSet<_>>();
     assert_eq!(rows, BTreeSet::from([resource1]));
     node.abandon_tx(tx).unwrap();
+}
+
+/// Alice queries three retained versions with equal projected values. Every
+/// version keeps its transaction identity through collection and pagination.
+/// This lower-layer test pins collector keys and hidden payload layouts before
+/// public materialization; end-to-end behavior is covered by jazz-testkit.
+#[test]
+fn history_query_collector_preserves_version_keys_and_windows() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("tasks")
+                .column("title", PublicColumnType::Text)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf3; 16]), schema.clone());
+    let target = row(7);
+    let cells = || BTreeMap::from([("title".to_owned(), Value::String("same".to_owned()))]);
+    let transactions = (1..=3)
+        .map(|index| commit_global_cells(&mut node, "tasks", target, cells(), 1000 + index, index))
+        .collect::<Vec<_>>();
+    let base = Query::from("history.tasks")
+        .filter(eq(col("id"), lit(Value::Uuid(target.0))))
+        .select(["title"]);
+    let expected = |index: usize| {
+        let tx = transactions[index];
+        OutputOccurrenceId::history(ObjectId::from_uuid(target.0), tx.time, tx.node)
+    };
+    for (query, indexes) in [
+        (
+            base.clone()
+                .order_by("$acceptedAt", OrderDirection::Asc)
+                .offset(1)
+                .limit(1),
+            vec![1],
+        ),
+        (
+            base.clone()
+                .order_by("$acceptedAt", OrderDirection::Desc)
+                .limit(2),
+            vec![2, 1],
+        ),
+        (base.clone().offset(1).limit(1), vec![1]),
+        (base.clone(), vec![0, 1, 2]),
+    ] {
+        let shape = query.validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let program = node
+            .compile_current_query_program(
+                &shape,
+                &binding,
+                DurabilityTier::Global,
+                AuthorSubject::SYSTEM,
+                CurrentQueryProgramOutput::AppRows,
+            )
+            .unwrap();
+        let schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
+        let tables = program.lowered.maintained_terminal_tables.clone();
+        let binding_source = program
+            .request
+            .input
+            .binding
+            .source_shape
+            .clone()
+            .unwrap_or_else(|| {
+                query_binding_source_shape_for_parts(&BTreeMap::new(), &BTreeMap::new())
+            });
+        let mut subscription = node
+            .subscribe_lowered_program(
+                program,
+                &binding,
+                binding_source,
+                PreparedClaimBindingMode::Strict,
+                None,
+            )
+            .unwrap();
+        node.drive_ready_query_runtime_with_waker(None).unwrap();
+        let mut maintained = MaintainedSubscriptionView::default();
+        while let Ok(delta) = subscription.try_recv() {
+            maintained
+                .apply_multisink_deltas(delta, &schemas, &tables, &node.node_aliases, &node.authors)
+                .unwrap();
+        }
+        let rows = maintained.structured_app_rows_by_terminal_key().unwrap();
+        let identities = rows
+            .iter()
+            .map(|(key, _)| {
+                crate::node::terminal_root::terminal_root_occurrence_id_with_root_union(key, false)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            indexes.into_iter().map(expected).collect::<Vec<_>>()
+        );
+        for (_, record) in &rows {
+            let names = record
+                .descriptor()
+                .fields()
+                .iter()
+                .filter_map(|field| field.name.as_deref())
+                .collect::<Vec<_>>();
+            assert!(!names.iter().any(|name| name.contains("transactionId")));
+            if query.order_by.is_empty() {
+                assert!(!names.iter().any(|name| name.contains("seq")));
+            }
+        }
+        if rows.len() == 3 {
+            assert_eq!(rows[0].1, rows[1].1);
+            assert_eq!(rows[1].1, rows[2].1);
+            let added = commit_global_cells(&mut node, "tasks", target, cells(), 1004, 4);
+            node.drive_ready_query_runtime_with_waker(None).unwrap();
+            while let Ok(delta) = subscription.try_recv() {
+                maintained
+                    .apply_multisink_deltas(
+                        delta,
+                        &schemas,
+                        &tables,
+                        &node.node_aliases,
+                        &node.authors,
+                    )
+                    .unwrap();
+            }
+            let updated = maintained.structured_app_rows_by_terminal_key().unwrap();
+            assert_eq!(updated.len(), 4);
+            assert_eq!(
+                &updated[..3],
+                rows.as_slice(),
+                "new version must not replace old keys or payloads"
+            );
+            assert_eq!(
+                crate::node::terminal_root::terminal_root_occurrence_id_with_root_union(
+                    &updated[3].0,
+                    false
+                )
+                .unwrap(),
+                OutputOccurrenceId::history(ObjectId::from_uuid(target.0), added.time, added.node),
+            );
+        }
+        assert!(node.unsubscribe_groove_subscription(subscription.id()));
+    }
 }

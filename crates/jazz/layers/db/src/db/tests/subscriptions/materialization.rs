@@ -452,10 +452,10 @@ fn deferred_mergeable_commit_refreshes_projected_current_view_once() {
     );
 }
 
-/// Exclusive transaction publication takes the same deferred-local admission
+/// Serializable transaction publication takes the same deferred-local admission
 /// path as a direct write, including projection-only current views.
 #[test]
-fn deferred_exclusive_commit_refreshes_projected_current_view_once() {
+fn deferred_serializable_commit_refreshes_projected_current_view_once() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc4; 16]);
     let db = open_db(0xc4, author, &schema);
@@ -472,31 +472,31 @@ fn deferred_exclusive_commit_refreshes_projected_current_view_once() {
     assert!(added.is_empty());
 
     let inserted = row(0x75);
-    let tx = db.exclusive_tx().expect("open exclusive transaction");
+    let tx = db.serializable_tx().expect("open serializable transaction");
     tx.insert(
         "todos",
-        cells("exclusive after opening", false, author),
+        cells("serializable after opening", false, author),
         crate::db::InsertOptions {
             row_id: Some(inserted),
             ..Default::default()
         },
     )
-    .expect("stage deferred exclusive insert");
+    .expect("stage deferred serializable insert");
     tx.commit()
-        .expect("admit deferred exclusive publication and refresh subscription");
+        .expect("admit deferred serializable publication and refresh subscription");
 
     let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
-        panic!("expected projected delta after deferred exclusive commit");
+        panic!("expected projected delta after deferred serializable commit");
     };
     assert_eq!(
         added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         [inserted]
     );
     db.tick()
-        .expect("quiet owner tick after projected exclusive publication");
+        .expect("quiet owner tick after projected serializable publication");
     assert!(
         subscription.try_next_event().is_none(),
-        "the exclusive settlement refresh publishes the queued local write once"
+        "the serializable settlement refresh publishes the queued local write once"
     );
 }
 
@@ -990,7 +990,6 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members() {
     };
     let local_opts = ReadOpts {
         tier: crate::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     };
     assert_eq!(

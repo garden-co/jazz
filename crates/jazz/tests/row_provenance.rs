@@ -143,7 +143,10 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
     let rows = jazz::block_on(db.all(
         &prepared,
         ReadOpts {
-            include_deleted: true,
+            read_view: jazz::protocol::ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
             ..ReadOpts::default()
         },
     ))

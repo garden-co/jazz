@@ -40,7 +40,8 @@ pub(super) fn collect_layout(
     available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<CollectLayout> {
     let explicit_root_projection = matches!(projection.fields, FieldProjection::Fields(_));
-    let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
+    let mut selected_root =
+        BTreeSet::from([root_source.row_shape.occurrence_key.row_field().clone()]);
     match &projection.fields {
         // Shape-default app rows are `CurrentRow`s, not a user-column-only
         // projection. Retain the same canonical magic provenance and current
@@ -64,7 +65,7 @@ pub(super) fn collect_layout(
         .filter_map(|field| {
             field.name.as_ref().map(|name| CollectFlatField {
                 input: format!("__collect_root_{name}"),
-                output: if name == &root_source.row_shape.row_uuid_field {
+                output: if name == root_source.row_shape.occurrence_key.row_field() {
                     name.clone()
                 } else {
                     collect_projection_output_field(name)
@@ -79,17 +80,22 @@ pub(super) fn collect_layout(
                 source_public_name: crate::query_engine::descriptor_public_name(field)
                     .map(str::to_owned),
                 origin: CollectFieldOrigin::SourceRow,
-                is_row_id: name == &root_source.row_shape.row_uuid_field,
+                is_row_id: name == root_source.row_shape.occurrence_key.row_field(),
                 is_presence: false,
                 is_output: selected_root.contains(name),
             })
         })
         .collect::<Vec<_>>();
-    let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources, request)?
+    let root_occurrence_inputs = root_occurrence_fields(plan, resolved_sources, request)?
         .into_iter()
         .filter(|(name, _)| available_fields.contains(name))
         .map(|(name, value_type)| {
             let input = format!("__collect_root_{name}");
+            // Version identity is already a source field, potentially also
+            // selected as application metadata. Keep one physical input slot.
+            if root_fields.iter().any(|field| field.input == input) {
+                return input;
+            }
             root_fields.push(CollectFlatField {
                 input: input.clone(),
                 output: name.clone(),
@@ -154,7 +160,7 @@ pub(super) fn collect_unwrapped_output_type(
     source_field: &str,
     fallback: &ValueType,
 ) -> ValueType {
-    if source_field == source.row_shape.row_uuid_field {
+    if source_field == *source.row_shape.occurrence_key.row_field() {
         return fallback.clone();
     }
     let logical = resolved_source_public_name(source, source_field)
@@ -211,7 +217,7 @@ fn collect_slot_layouts(
             let slot_id = *next_slot;
             *next_slot += 1;
             let prefix = format!("__collect_path_{slot_id}");
-            let mut selected = BTreeSet::from([source.row_shape.row_uuid_field.clone()]);
+            let mut selected = BTreeSet::from([source.row_shape.occurrence_key.row_field().clone()]);
             match &path.fields {
                 FieldProjection::All => selected.extend(
                     source
@@ -245,7 +251,7 @@ fn collect_slot_layouts(
                             source.row_shape.source
                         ))
                     })?;
-                    let is_row_id = source_field == source.row_shape.row_uuid_field;
+                    let is_row_id = source_field == *source.row_shape.occurrence_key.row_field();
                     let output_value_type =
                         collect_unwrapped_output_type(source, &source_field, &source_value_type);
                     let value_type = if is_row_id {

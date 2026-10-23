@@ -739,18 +739,8 @@ pub(super) fn event_settled(event: &SubscriptionEvent) -> bool {
 pub(super) fn global_subscribe_opts() -> ReadOpts {
     ReadOpts {
         tier: crate::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
-}
-
-pub(super) fn assert_unsupported_subscription_include_deleted(error: Error) {
-    assert_eq!(error.code, ErrorCode::Query);
-    assert!(
-        error.message.contains("include_deleted"),
-        "unexpected error message: {}",
-        error.message
-    );
 }
 
 pub(super) fn assert_subscribe_rejected_unsupported_shape_capability_detail(
@@ -2302,15 +2292,15 @@ impl CoreDb {
         block_on(self.server.tick()).map(|_| ())
     }
 
-    pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
+    pub(super) fn serializable_tx(&self) -> Result<CoreSerializableTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
         block_on(
             self.server
                 .node()
                 .borrow_mut()
-                .open_exclusive_for_identity(tx_id, self.author),
+                .open_serializable_for_identity(tx_id, self.author),
         )?;
-        Ok(CoreExclusiveTx {
+        Ok(CoreSerializableTx {
             core: self,
             tx_id,
             has_reads: Cell::new(false),
@@ -2358,13 +2348,13 @@ impl CoreDb {
     }
 }
 
-pub(super) struct CoreExclusiveTx<'a> {
+pub(super) struct CoreSerializableTx<'a> {
     core: &'a CoreDb,
     tx_id: OpenTransactionId,
     has_reads: Cell<bool>,
 }
 
-impl CoreExclusiveTx<'_> {
+impl CoreSerializableTx<'_> {
     pub(super) fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.has_reads.set(true);
         block_on(
@@ -2401,14 +2391,14 @@ impl CoreExclusiveTx<'_> {
 
     pub(super) fn commit(self) -> Result<TxId, Error> {
         let node = self.core.server.node();
-        if self.has_reads.get() && node.borrow().open_exclusive_snapshot_moved(self.tx_id)? {
+        if self.has_reads.get() && node.borrow().open_serializable_snapshot_moved(self.tx_id)? {
             node.borrow_mut().abandon_tx(self.tx_id)?;
             return Err(write_rejected(
                 self.tx_id,
-                RejectionReason::ExclusiveConflict,
+                RejectionReason::SerializationConflict,
             ));
         }
-        let (published, unit) = block_on(node.borrow_mut().commit_exclusive(
+        let (published, unit) = block_on(node.borrow_mut().commit_serializable(
             self.tx_id,
             self.core.author,
             self.core.next_now_ms(),
@@ -2417,12 +2407,12 @@ impl CoreExclusiveTx<'_> {
         let SyncMessage::CommitUnit { tx, versions } = unit else {
             return Err(Error::new(
                 ErrorCode::Protocol,
-                "commit_exclusive must yield a CommitUnit",
+                "commit_serializable must yield a CommitUnit",
             ));
         };
         let outcome = block_on(
             node.borrow_mut()
-                .finalize_local_exclusive_commit(tx, versions),
+                .finalize_local_serializable_commit(tx, versions),
         )?;
         let fate = block_on(node.borrow_mut().persist_and_settle_outcome(outcome))?;
         if let Fate::Rejected(reason) = fate {

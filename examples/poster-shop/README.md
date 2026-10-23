@@ -51,7 +51,7 @@ the server invite route.
 An invite link looks like `/dashboard#invite/<canvasId>/<token>`. The token
 lives in the URL fragment, so it never reaches server logs, CDN logs or
 `Referer` headers; the client posts it to `/api/join` in the request body.
-The route follows the invite-links recipe: one exclusive transaction checks
+The route follows the invite-links recipe: one serializable transaction checks
 for an existing membership (so reopening a link is idempotent and never
 changes an existing role), reads the private invite, inserts the membership
 and deletes a single-use invite, so two people cannot both redeem one.
@@ -76,7 +76,7 @@ the live poster is a follow-up.
 
 `/api/bootstrap` verifies the caller with `client.forRequest(request)` and
 writes through `client.withAttributionForRequest(request)`, so it keeps
-backend authority while stamping the verified user as author. One exclusive
+backend authority while stamping the verified user as author. One serializable
 transaction checks for an existing membership and otherwise creates the
 canvas, the admin membership and a deterministic demo poster (see
 `src/lib/demo-poster.ts`) with a "First draft" checkpoint. Conflicting

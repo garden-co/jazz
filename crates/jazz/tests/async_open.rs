@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, ReadOpts, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SerializableTxOps, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -243,7 +243,7 @@ fn reproduces_sync_query_preparation_reentering_a_cold_read() {
 /// relation reads. A cold storage operation must suspend the caller rather
 /// than falling back to a synchronous owner view.
 #[test]
-fn exclusive_transaction_relation_snapshot_suspends_on_cold_storage() {
+fn serializable_transaction_relation_snapshot_suspends_on_cold_storage() {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -261,7 +261,7 @@ fn exclusive_transaction_relation_snapshot_suspends_on_cold_storage() {
     let prepared = db
         .prepare_query(&db.table("todos"))
         .expect("prepare todos query");
-    let tx = block_on(db.exclusive_tx()).expect("open exclusive transaction");
+    let tx = block_on(db.serializable_tx()).expect("open serializable transaction");
 
     storage.evict_all();
     control.pause();

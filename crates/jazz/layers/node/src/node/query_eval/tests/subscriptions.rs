@@ -188,6 +188,7 @@ fn maintained_snapshot_view_compiles_remote_delivery_witnesses() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let read_view = ReadViewSpec {
+        include_deleted: false,
         source: ReadViewSourceSpec::Snapshot {
             snapshot: SnapshotRef {
                 owner: node.node_uuid,
@@ -210,7 +211,7 @@ fn maintained_snapshot_view_compiles_remote_delivery_witnesses() {
 }
 
 #[test]
-fn exclusive_snapshot_applies_same_cut_to_policy_relation_sources() {
+fn serializable_snapshot_applies_same_cut_to_policy_relation_sources() {
     let schema = public_query_eval_schema(
         PublicSchemaBuilder::new()
             .table(
@@ -237,7 +238,7 @@ fn exclusive_snapshot_applies_same_cut_to_policy_relation_sources() {
     commit_global_issue(&mut node, 0, "open", reader, 1);
     node.record_authoritative_settled_through(GlobalTime(1));
     let tx_id = OpenTransactionId::new();
-    node.open_exclusive_for_identity(tx_id, reader).unwrap();
+    node.open_serializable_for_identity(tx_id, reader).unwrap();
 
     commit_global_cells(
         &mut node,
@@ -1123,8 +1124,8 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
     );
     let same_tx_open = OpenTransactionId::new();
     server
-        .open_exclusive(same_tx_open)
-        .expect("open exclusive transaction for paired content and restoration");
+        .open_serializable(same_tx_open)
+        .expect("open serializable transaction for paired content and restoration");
     server
         .tx_write(
             same_tx_open,
@@ -1147,7 +1148,7 @@ fn storage_backed_maintained_delivery_keeps_implicit_reference_witnesses_and_reh
         )
         .expect("stage restoration register sibling in paired transaction");
     let (same_tx_restore, _) = server
-        .commit_exclusive_settled(same_tx_open, AuthorSubject::SYSTEM, 6)
+        .commit_serializable_settled(same_tx_open, AuthorSubject::SYSTEM, 6)
         .expect("commit content and restoration together");
     server
         .apply_fate_update(
@@ -1620,7 +1621,7 @@ fn maintained_policy_point_subscription_uses_point_source_and_keeps_witnesses() 
             node.current_query_primary_key_access_paths(&shape, &binding)
                 .unwrap()
                 .get(&root_source_id("issues")),
-            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(target.0)]
+            Some(SourceAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(target.0)]
         ),
         "a policy-scoped maintained id lookup narrows its content source to the one row"
     );
@@ -1711,14 +1712,14 @@ fn policy_root_retains_reachable_point_access_paths() {
     assert!(
         matches!(
             paths.get(&reachable_access_source_id(reachable, "reachable:0")),
-            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(access.0)]
+            Some(SourceAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(access.0)]
         ),
         "the literal access edge remains independently safe to point-scan"
     );
     assert!(
         matches!(
             paths.get(&reachable_edge_source_id(reachable, "reachable:0")),
-            Some(CurrentAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(edge.0)]
+            Some(SourceAccessPath::PrimaryKey(values)) if values == &[Value::Uuid(edge.0)]
         ),
         "the literal recursive edge remains independently safe to point-scan"
     );

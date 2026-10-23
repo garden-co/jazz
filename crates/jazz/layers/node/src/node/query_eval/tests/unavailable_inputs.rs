@@ -536,6 +536,7 @@ fn local_unavailable_inputs_do_not_reinterpret_historical_snapshots() {
     let shape = Query::from("parents").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let read_view = ReadViewSpec {
+        include_deleted: false,
         source: crate::protocol::ReadViewSourceSpec::Snapshot {
             snapshot: crate::protocol::SnapshotRef {
                 owner: node.node_uuid,
@@ -656,6 +657,7 @@ fn local_unavailable_inputs_follow_cold_current_global_receivers() {
                     &current,
                     alias,
                     &BranchKey::default(),
+                    true,
                 )
                 .unwrap(),
             ],

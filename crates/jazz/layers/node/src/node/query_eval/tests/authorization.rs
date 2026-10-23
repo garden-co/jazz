@@ -411,6 +411,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             program.request.input.binding.source_shape.clone(),
             program.request.input.binding.extra_user_params.clone(),
             program.request.input.binding.claim_params.clone(),
+            RowVisibility::Visible,
         )
         .expect("compile nested chat-members policy against the invite binding");
     node.policy_authorization_row_id_graph(members_policy.clone())
@@ -487,6 +488,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             program.request.input.binding.source_shape.clone(),
             program.request.input.binding.extra_user_params.clone(),
             program.request.input.binding.claim_params.clone(),
+            RowVisibility::Visible,
         )
         .expect("System nested policy compilation must not retain session claim slots");
     assert!(

@@ -398,7 +398,9 @@ fn column_type_for_operand(
     }
     match column {
         "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
-        "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
+        "$createdAt" | "$updatedAt" | "$deletedAt" => {
+            Some(TypedLiteralTarget::Core(GrooveColumnType::U64))
+        }
         _ => column_target(column_types, table, column).cloned(),
     }
 }
@@ -518,6 +520,12 @@ fn convert_table(
     name: &TableName,
     table: &TableSchema,
 ) -> Result<CoreTableSchema, SchemaConversionError> {
+    if crate::schema::history::is_history_table(&name.as_str()) {
+        return Err(err(
+            format!("$.{}", name.as_str()),
+            "table names starting with \"history.\" are reserved for virtual history relations",
+        ));
+    }
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();

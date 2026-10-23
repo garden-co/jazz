@@ -132,11 +132,11 @@ impl CoreDb {
         Ok(tx_id)
     }
 
-    fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
+    fn serializable_tx(&self) -> Result<CoreSerializableTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
         let node = self.server.node();
-        block_on(async { node.lock().await.open_exclusive(tx_id).await })?;
-        Ok(CoreExclusiveTx {
+        block_on(async { node.lock().await.open_serializable(tx_id).await })?;
+        Ok(CoreSerializableTx {
             core: self,
             tx_id,
             has_reads: Cell::new(false),
@@ -144,13 +144,13 @@ impl CoreDb {
     }
 }
 
-struct CoreExclusiveTx<'a> {
+struct CoreSerializableTx<'a> {
     core: &'a CoreDb,
     tx_id: OpenTransactionId,
     has_reads: Cell<bool>,
 }
 
-impl CoreExclusiveTx<'_> {
+impl CoreSerializableTx<'_> {
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.has_reads.set(true);
         let node = self.core.server.node();
@@ -181,33 +181,33 @@ impl CoreExclusiveTx<'_> {
             let mut node = node.lock().await;
             if self.has_reads.get()
                 && node
-                    .open_exclusive_snapshot_moved(self.tx_id)
-                    .expect("exclusive snapshot check succeeds")
+                    .open_serializable_snapshot_moved(self.tx_id)
+                    .expect("serializable snapshot check succeeds")
             {
                 node.abandon_tx(self.tx_id)
                     .expect("abandoning conflicting transaction succeeds");
-                return Err(write_rejected(RejectionReason::ExclusiveConflict));
+                return Err(write_rejected(RejectionReason::SerializationConflict));
             }
 
             let (published, unit) = node
-                .commit_exclusive(self.tx_id, self.core.author, self.core.next_now_ms())
+                .commit_serializable(self.tx_id, self.core.author, self.core.next_now_ms())
                 .await
-                .expect("core exclusive commit succeeds");
+                .expect("core serializable commit succeeds");
             let tx_id = node
                 .persist_and_settle_transaction(published)
                 .await
-                .expect("core exclusive persistence succeeds");
+                .expect("core serializable persistence succeeds");
             let SyncMessage::CommitUnit { tx, versions } = unit else {
-                panic!("commit_exclusive must yield a CommitUnit");
+                panic!("commit_serializable must yield a CommitUnit");
             };
             let outcome = node
-                .finalize_local_exclusive_commit(tx, versions)
+                .finalize_local_serializable_commit(tx, versions)
                 .await
-                .expect("core exclusive finalize succeeds");
+                .expect("core serializable finalize succeeds");
             let fate = node
                 .persist_and_settle_outcome(outcome)
                 .await
-                .expect("core exclusive finalization persistence succeeds");
+                .expect("core serializable finalization persistence succeeds");
             if let Fate::Rejected(reason) = fate {
                 return Err(write_rejected(reason));
             }
@@ -246,8 +246,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let row = RowUuid::from_bytes([0x22; 16]);
     core.insert_with_id("todos", row, todo_cells("base title", false))?;
 
-    let first_tx = core.exclusive_tx()?;
-    let second_tx = core.exclusive_tx()?;
+    let first_tx = core.serializable_tx()?;
+    let second_tx = core.serializable_tx()?;
     let read = second_tx.read("todos", row)?.expect("row is visible");
     assert_eq!(
         read.get("title"),
@@ -259,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     second_tx.update("todos", row, title_patch("stale writer"))?;
     let rejected = second_tx.commit().expect_err("stale read must conflict");
-    assert_eq!(rejected, RejectionReason::ExclusiveConflict);
+    assert_eq!(rejected, RejectionReason::SerializationConflict);
 
     let current = core
         .one(&core.table("todos"))?
@@ -268,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         current.cell(&core.schema.tables()[0], "title"),
         Some(Value::String("first writer".to_owned()))
     );
-    println!("exclusive_tx committed {accepted:?} and rejected a stale writer");
+    println!("serializable_tx committed {accepted:?} and rejected a stale writer");
 
     Ok(())
 }

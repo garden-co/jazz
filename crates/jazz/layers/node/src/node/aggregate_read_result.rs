@@ -1,7 +1,7 @@
-//! `jazz.aggregate-read-result.v1`: the result an exclusive aggregate read
+//! `jazz.aggregate-read-result.v1`: the result a serializable aggregate read
 //! observed, carried on its [`PredicateRead`] (garden-co/jazz#3768).
 //!
-//! An exclusive transaction that reads an aggregate observes only the
+//! A serializable transaction that reads an aggregate observes only the
 //! aggregate's output, so it records that output instead of the rows the
 //! aggregate consumed. The authority re-runs the aggregate as the
 //! transaction's permission subject and conflicts iff the canonical bytes
@@ -305,12 +305,12 @@ pub(super) fn aggregate_read_malformation(read: &PredicateRead) -> Option<String
         (None, None) => return None,
         (None, Some(_)) => {
             return Some(
-                "exclusive predicate read carries an aggregate result but reads no aggregate"
+                "serializable predicate read carries an aggregate result but reads no aggregate"
                     .to_owned(),
             );
         }
         (Some(_), None) => {
-            return Some("exclusive aggregate read carries no aggregate result".to_owned());
+            return Some("serializable aggregate read carries no aggregate result".to_owned());
         }
         (Some(_), Some(result)) => result,
     };
@@ -319,7 +319,7 @@ pub(super) fn aggregate_read_malformation(read: &PredicateRead) -> Option<String
         Ok(groups) => groups,
         Err(error) => {
             return Some(format!(
-                "exclusive aggregate read result is malformed: {error}"
+                "serializable aggregate read result is malformed: {error}"
             ));
         }
     };
@@ -330,7 +330,7 @@ pub(super) fn aggregate_read_malformation(read: &PredicateRead) -> Option<String
         .is_some_and(|aggregate| aggregate.group_by.is_some());
     if !grouped && groups.len() != 1 {
         return Some(
-            "exclusive ungrouped aggregate read result must have exactly one group".to_owned(),
+            "serializable ungrouped aggregate read result must have exactly one group".to_owned(),
         );
     }
     for group in &groups {
@@ -340,7 +340,7 @@ pub(super) fn aggregate_read_malformation(read: &PredicateRead) -> Option<String
             .collect::<BTreeSet<_>>();
         if names != expected {
             return Some(
-                "exclusive aggregate read result columns differ from its shape".to_owned(),
+                "serializable aggregate read result columns differ from its shape".to_owned(),
             );
         }
     }
@@ -358,7 +358,7 @@ pub(super) fn transaction_aggregate_read_malformation(tx: &Transaction) -> Optio
 /// Byte-level fixtures for `jazz.aggregate-read-result.v1`. These sit below
 /// the public API on purpose: the contract is the durable bytes themselves,
 /// which no public call exposes. Conflict behaviour is covered end to end in
-/// the exclusive transaction tests.
+/// the serializable transaction tests.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -113,7 +113,6 @@ fn reset_batch_schema() -> JazzSchema {
 fn global_read_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::Remote,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

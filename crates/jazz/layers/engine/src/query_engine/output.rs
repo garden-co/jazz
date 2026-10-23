@@ -108,8 +108,8 @@ pub enum ProgramFactKey {
         /// Requested durability tier.
         tier: DurabilityTier,
     },
-    /// View-complete exclusive transaction coverage for one result or scope.
-    ViewCompleteExclusiveCoverage {
+    /// View-complete serializable transaction coverage for one result or scope.
+    ViewCompleteSerializableCoverage {
         /// View/source scope.
         view: CoverageScope,
         /// Result whose contributing members define completeness, if result-scoped.
@@ -130,9 +130,9 @@ pub enum ProgramFactKey {
     PolicyWitnesses,
     /// Internal contributing member/batch provenance for derived outputs.
     ContributingMembers,
-    /// Predicate-read facts for exclusive transaction validation.
+    /// Predicate-read facts for serializable transaction validation.
     PredicateReads,
-    /// Concrete predicate output set used by exclusive validation.
+    /// Concrete predicate output set used by serializable validation.
     PredicateOutputSet {
         /// Which side of the validation comparison this terminal emits.
         role: PredicateOutputSetRole,

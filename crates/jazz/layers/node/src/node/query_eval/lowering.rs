@@ -303,15 +303,12 @@ pub(super) fn fact_public_fields(
             let mut fields = vec![schema.table_field.clone(), schema.row_field.clone()];
             fields.extend(
                 schema
-                    .occurrence_id_fields
+                    .occurrence_keys
                     .iter()
-                    .filter(|field| **field != schema.row_field)
+                    .flat_map(|key| key.fields().into_iter().map(|(name, _)| name))
+                    .filter(|name| **name != schema.row_field)
                     .cloned(),
             );
-            // A union arm is part of a result occurrence address, just like
-            // its paired joined-row id. Retaining only the id causes prepared
-            // maintained subscriptions to publish a descriptor that cannot be
-            // decoded against the membership schema.
             fields.extend(schema.occurrence_union_arm_fields.values().cloned());
             fields.extend(schema.branch_or_prefix_field.clone());
             fields.extend(result_membership_version_fields(&schema.version));
@@ -376,7 +373,7 @@ pub(super) fn fact_public_fields(
             ProgramFactSchema::CompleteTxPayloadCoverage(_) => {
                 "complete transaction coverage facts are not prepared yet"
             }
-            ProgramFactSchema::ViewCompleteExclusiveCoverage(_) => {
+            ProgramFactSchema::ViewCompleteSerializableCoverage(_) => {
                 "view-complete coverage facts are not prepared yet"
             }
             ProgramFactSchema::PolicyDecision(_) => "policy decision facts are not prepared yet",
@@ -407,13 +404,13 @@ pub struct PolicyAuthorizationGraph {
     /// Physical source narrowing derived while compiling this policy program.
     /// This is only an optimization hint: the policy graph remains the sole
     /// authorization decision.
-    pub(super) access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+    pub(super) access_paths: BTreeMap<SourceId, SourceAccessPath>,
 }
 
 #[derive(Clone, Debug, Default)]
-struct PolicyDependencyFootprint {
-    tables: BTreeSet<String>,
-    uncertain: bool,
+pub(super) struct PolicyDependencyFootprint {
+    pub(super) tables: BTreeSet<String>,
+    pub(super) uncertain: bool,
 }
 
 impl PolicyDependencyFootprint {
@@ -577,7 +574,7 @@ pub struct SupportedQueryProgram {
 
 fn admission_program_key(
     request: &QueryProgramRequest,
-    access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+    access_paths: &BTreeMap<SourceId, SourceAccessPath>,
 ) -> Option<[u8; 32]> {
     (matches!(
         request.authorization_mode,
@@ -623,7 +620,7 @@ fn query_program_sources_cache_safe(request: &QueryProgramRequest) -> bool {
 
 fn query_program_cache_key(
     request: &QueryProgramRequest,
-    access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+    access_paths: &BTreeMap<SourceId, SourceAccessPath>,
 ) -> String {
     format!("request={request:?};access_paths={access_paths:?}")
 }
@@ -639,7 +636,7 @@ where
     pub(super) async fn ensure_query_program_request_supported(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<(), Error> {
         // Branches, overlays, inline snapshots and covered inputs
         // likewise stay on the ordinary path. No data-sensitive source is
@@ -736,7 +733,7 @@ where
     pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<QueryProgram, Error> {
         let key = admission_program_key(&request, &access_paths);
         if let Some(key) = key
@@ -799,7 +796,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_access_paths_and_covered_inputs(
             request,
@@ -824,7 +821,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
     ) -> Result<QueryProgram, Error> {
@@ -848,7 +845,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         transaction_overlay: TransactionWriteOverlay,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
@@ -867,7 +864,7 @@ where
     pub(super) async fn compile_query_program_request_with_shared_access_paths(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         bounded_deletion_register: Option<(SourceId, GraphBuilder)>,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_inline_sources_and_access_paths_inner(
@@ -886,7 +883,7 @@ where
     pub(super) async fn compile_query_program_request_with_bounded_deletion_register(
         &mut self,
         request: QueryProgramRequest,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         bounded_deletion_register: (SourceId, GraphBuilder),
     ) -> Result<QueryProgram, Error> {
         // The inline register is bound to this snapshot. A cached program
@@ -913,7 +910,7 @@ where
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
-        access_paths: BTreeMap<SourceId, CurrentAccessPath>,
+        access_paths: BTreeMap<SourceId, SourceAccessPath>,
         covered_input_sources: BTreeMap<SourceId, GraphBuilder>,
         covered_input_descriptors: BTreeMap<SourceId, RecordDescriptor>,
         count_access_path_metrics: bool,
@@ -990,6 +987,7 @@ where
             bounded_deletion_register,
             count_access_path_metrics,
             current_projection_targets: BTreeMap::new(),
+            nested_program_dependencies: Default::default(),
             policy_subplan: matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }),
             transaction_overlay,
         };
@@ -1007,7 +1005,12 @@ where
                 explain,
                 |graph| resolver.node.database.describe_template_input(graph),
             ),
-            Err(error) => Err(error),
+            Err(error) => {
+                resolver
+                    .node
+                    .restore_scoped_policy_authorization_graphs(&policy_replacement_lease);
+                return Err(error);
+            }
         };
         if let Ok(program) = result.as_mut() {
             resolver.node.scope_program_binding_source(program);
@@ -1015,7 +1018,12 @@ where
                 .lowered
                 .targeted_refresh_tables
                 .extend(policy_dependency_footprint.tables);
-            program.lowered.targeted_refresh_uncertain |= policy_dependency_footprint.uncertain;
+            program
+                .lowered
+                .targeted_refresh_tables
+                .extend(resolver.nested_program_dependencies.tables);
+            program.lowered.targeted_refresh_uncertain |= policy_dependency_footprint.uncertain
+                || resolver.nested_program_dependencies.uncertain;
         }
         resolver
             .node
@@ -1035,7 +1043,7 @@ where
         &mut self,
         request: &QueryProgramRequest,
         source_requests: &[SourceRequest],
-        outer_access_paths: &BTreeMap<SourceId, CurrentAccessPath>,
+        outer_access_paths: &BTreeMap<SourceId, SourceAccessPath>,
         bounded_deletion_register: Option<&(SourceId, GraphBuilder)>,
         lease: &std::rc::Rc<()>,
     ) -> Result<PolicyDependencyFootprint, Error> {
@@ -1066,6 +1074,7 @@ where
                 bounded_deletion_register: None,
                 count_access_path_metrics: true,
                 current_projection_targets: BTreeMap::new(),
+                nested_program_dependencies: Default::default(),
                 policy_subplan: false,
                 transaction_overlay: TransactionWriteOverlay::default(),
             };
@@ -1685,7 +1694,10 @@ mod tests {
             ResultMembershipSchema {
                 table_field: "table_name".to_owned(),
                 row_field: "row_uuid".to_owned(),
-                occurrence_id_fields: vec!["row_uuid".to_owned(), "__root_join_row_0".to_owned()],
+                occurrence_keys: vec!["row_uuid".to_owned(), "__root_join_row_0".to_owned()]
+                    .into_iter()
+                    .map(crate::node::query_engine::SourceOccurrenceKey::current)
+                    .collect(),
                 occurrence_union_arm_fields: BTreeMap::from([(0, "__root_join_arm_0".to_owned())]),
                 payload_fields: Vec::new(),
                 payload_publication_fields: BTreeMap::new(),

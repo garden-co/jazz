@@ -379,6 +379,7 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
                 Some(source_shape.clone()),
                 BTreeMap::new(),
                 outer_claims.clone(),
+                RowVisibility::Visible,
             )
             .unwrap();
         let program = node.compile_query_program_request(request).unwrap();

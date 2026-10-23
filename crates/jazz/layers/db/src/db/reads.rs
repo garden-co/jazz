@@ -522,6 +522,17 @@ where
         }
         let decoded: Query = crate::wire::decode_postcard_exact(query)
             .map_err(|error| Error::new(ErrorCode::Query, format!("decode query: {error}")))?;
+        if decoded.uses_history()
+            && matches!(
+                &opts.read_view.source,
+                ReadViewSourceSpec::BranchView { base: Some(_), .. }
+            )
+        {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "unsupported relation query: Reading history with a branch base is not supported in history queries yet",
+            ));
+        }
         let is_relation = decoded.relation.is_some();
         if open_tx.is_some() && is_relation {
             return Err(Error::new(
@@ -564,8 +575,8 @@ where
             && author.is_none()
             && prepared.shape().query().array_subqueries.is_empty()
             && coverage_tier >= DurabilityTier::Global
-            && opts.read_view.is_default()
-            && !opts.include_deleted;
+            && (opts.read_view.is_default() || prepared.shape().query().uses_history())
+            && !opts.read_view.include_deleted;
         if require_coverage && (is_relation || strict_client_one_shot) {
             let local_coverage = if coverage_tier == DurabilityTier::Local {
                 Some(attach_coverage(&prepared, coverage_tier, None).await?)
@@ -648,9 +659,9 @@ where
                 (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             };
         }
-        // A partial node holds no node-wide history below its exclusive
+        // A partial node holds no node-wide history below its serializable
         // snapshot's `global_base`: that cut advances with any authority
-        // receipt. Its exclusive reads therefore hydrate through the
+        // receipt. Its serializable reads therefore hydrate through the
         // authority at the frozen snapshot and wait for that binding's receipt
         // (INV-TX-13), whatever tier the caller asked for. Otherwise a missing
         // or already-deleted row is read from whatever the replica happens to
@@ -661,9 +672,9 @@ where
         // reads fresh: the authority validates the rows the read actually
         // returned (its row proofs), so a stale offline read conflicts at
         // commit instead of being accepted.
-        let exclusive_snapshot_read = match open_tx {
+        let serializable_snapshot_read = match open_tx {
             Some(open_tx) if self.node.receives_commits_as_local() => {
-                self.transaction_is_exclusive(open_tx).await? && opts.tier != ReadTier::LocalOnly
+                self.transaction_is_serializable(open_tx).await? && opts.tier != ReadTier::LocalOnly
             }
             _ => false,
         };
@@ -673,14 +684,18 @@ where
         // the read conflict. A source with no narrowed read fails the read
         // here, before anything is hydrated.
         let source_queries = match open_tx {
-            Some(open_tx) if exclusive_snapshot_read => {
-                self.exclusive_source_hydration_queries(open_tx, &prepared, opts.include_deleted)
-                    .await?
+            Some(open_tx) if serializable_snapshot_read => {
+                self.serializable_source_hydration_queries(
+                    open_tx,
+                    &prepared,
+                    opts.read_view.include_deleted,
+                )
+                .await?
             }
             _ => Vec::new(),
         };
         let mut coverage = None;
-        let hydrate = exclusive_snapshot_read && coverage_tier < DurabilityTier::Global;
+        let hydrate = serializable_snapshot_read && coverage_tier < DurabilityTier::Global;
         if hydrate && let Some(epoch) = self.node.remote_link.arm_until_loss() {
             let hydration = attach_coverage(&prepared, DurabilityTier::Global, open_tx).await?;
             let covered = self.wait_for_serialized_read_coverage(&hydration, coverage_expired);
@@ -701,7 +716,7 @@ where
             coverage = Some(required);
         }
         let mut table_coverage = Vec::new();
-        if exclusive_snapshot_read
+        if serializable_snapshot_read
             && coverage.is_some()
             && let Some(open_tx) = open_tx
         {
@@ -962,7 +977,6 @@ where
     ///
     /// let opts = ReadOpts {
     ///     tier: jazz::db::ReadTier::LocalOnly,
-    ///     include_deleted: false,
     ///     ..ReadOpts::default()
     /// };
     /// let todos = db.prepare_query(&db.table("todos"))?;
@@ -1030,10 +1044,26 @@ where
         let mut node = prepared.scoped_node(&mut node, author)?;
         if !matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
             ensure_supported_read_view(&opts)?;
-            if opts.include_deleted {
+            if prepared.shape.query().uses_history() {
+                return node
+                    .query_rows_with_options_for_identity(
+                        &prepared.shape,
+                        &prepared.binding,
+                        tier,
+                        None,
+                        author,
+                        opts.read_view.include_deleted,
+                        authorization_mode,
+                        &opts.read_view,
+                        None,
+                    )
+                    .await
+                    .map_err(Into::into);
+            }
+            if opts.read_view.include_deleted {
                 return Err(Error::new(
                     ErrorCode::Query,
-                    "branch views do not support include_deleted yet",
+                    "branch views and snapshots do not support include_deleted yet",
                 ));
             }
             let snapshot = match authorization_mode {
@@ -1064,7 +1094,7 @@ where
                 .take(snapshot.root_count)
                 .collect());
         }
-        match (opts.include_deleted, authorization_mode) {
+        match (opts.read_view.include_deleted, authorization_mode) {
             (true, mode) => {
                 node.query_rows_including_deleted_in_authorization_mode(
                     &prepared.shape,
@@ -1245,7 +1275,7 @@ where
     ) -> Result<RelationSnapshot, Error> {
         self.await_open_schema_for_coverage(coverage_tier).await?;
         ensure_supported_read_view(opts)?;
-        if opts.include_deleted {
+        if opts.read_view.include_deleted {
             return Err(Error::new(
                 ErrorCode::Query,
                 "relation snapshots do not support include_deleted yet",
@@ -1300,7 +1330,7 @@ where
     ) -> Result<RelationSnapshot, Error> {
         self.await_open_schema_for_coverage(read_coverage_tier(&opts))
             .await?;
-        ensure_default_read_view(&opts)?;
+        ensure_current_read_source(&opts)?;
         let prepared = self.prepare_relation_query_async(query).await?;
         // The relation terminal already emits the requested aliases and row
         // identity. Re-projecting those rows against the physical source

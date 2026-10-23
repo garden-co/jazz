@@ -324,7 +324,7 @@ where
                 // already been checked against its server-issued one-binding
                 // capability; a multiplexed relay has passed the corresponding
                 // transport admission check for this request.
-                // Both transaction kinds need this authorization. Exclusive
+                // Both transaction kinds need this authorization. Serializable
                 // writes also validate their read sets at terminal ingest, but
                 // that cannot replace authorization under the delegated session.
                 let permission_subject = match ingest_context.trust {
@@ -3874,6 +3874,7 @@ where
                             }
                             if let Err(error) = ensure_supported_register_shape_options(
                                 &opts,
+                                ast.query().is_some_and(|query| query.uses_history()),
                                 *local_receiver,
                                 peer.role(),
                                 delegated_session_capability(*ingest_context, peer.role()),
@@ -4191,6 +4192,7 @@ where
                             };
                             if ensure_supported_register_shape_options(
                                 &opts,
+                                shape.query().uses_history(),
                                 *local_receiver,
                                 peer.role(),
                                 delegated_session_capability(*ingest_context, peer.role()),
@@ -4817,7 +4819,12 @@ where
                             )
                             .await?;
                             stats.subscription_events += changed;
-                            needs_subscription_refresh |= published;
+                            // Eager ingress may already have applied a write
+                            // without returning a deferred publication receipt.
+                            // Its local streams still need to drain the graph.
+                            needs_subscription_refresh |= published
+                                || local_upload.is_some()
+                                || write_state_tx_id.is_some();
                             if let Some(tx_id) = write_state_tx_id {
                                 handle_write_state_update(
                                     &self.node,

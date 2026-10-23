@@ -1665,15 +1665,15 @@ pub struct LocalTransactionRecord {
 pub enum TransactionKind {
     /// CRDT-style mergeable transaction.
     Mergeable,
-    /// Authority-validated exclusive transaction.
-    Exclusive,
+    /// Authority-validated serializable transaction.
+    Serializable,
 }
 
 impl From<TxKind> for TransactionKind {
     fn from(kind: TxKind) -> Self {
         match kind {
             TxKind::Mergeable => Self::Mergeable,
-            TxKind::Exclusive => Self::Exclusive,
+            TxKind::Serializable => Self::Serializable,
         }
     }
 }
@@ -2533,7 +2533,7 @@ where
     }
     for (tx_id, unit) in uploads {
         if outbox_units.insert(tx_id) {
-            // Durable recovery omits exclusive snapshot/read evidence. A live
+            // Durable recovery omits serializable snapshot/read evidence. A live
             // sibling may already retain the exact authored unit; never
             // replace that unit with its redacted history replay.
             queue_pending_upload_in(outbox, tx_id, Some(unit));
@@ -3371,8 +3371,6 @@ pub enum ReadTier {
 pub struct ReadOpts {
     /// Read semantics; execution resolves coverage durability separately.
     pub tier: ReadTier,
-    /// Include current rows whose deletion winner is `Deleted`.
-    pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an empty, unsettled opening. Host read-option state
@@ -3385,7 +3383,6 @@ impl Default for ReadOpts {
     fn default() -> Self {
         Self {
             tier: ReadTier::LocalFirst,
-            include_deleted: false,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
         }
@@ -3403,7 +3400,7 @@ impl ReadOpts {
 
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
-        self.read_view = ReadViewSpec::branch_view(head, base);
+        self.read_view.source = ReadViewSourceSpec::BranchView { head, base };
         self
     }
 }
@@ -3537,8 +3534,8 @@ fn remote_subscription_tier(
     tier.max(upstream_durability_floor)
 }
 
-fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.read_view.is_default() {
+fn ensure_current_read_source(opts: &ReadOpts) -> Result<(), Error> {
+    if matches!(opts.read_view.source, ReadViewSourceSpec::Current) {
         return Ok(());
     }
     Err(Error::new(
@@ -3562,31 +3559,54 @@ fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
     ))
 }
 
-fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
-    if opts.include_deleted {
+/// Include-deleted subscriptions support the current source, any snapshot
+/// (transaction reads register as snapshot subscriptions), or any source of a
+/// history query. Branch views of current tables reject the flag until they are
+/// specified and tested (SPEC 6 §6.6). Plain one-shot reads are narrower: they
+/// reject every non-current source of a current-table query with the flag.
+fn ensure_supported_include_deleted_read_view(
+    read_view: &ReadViewSpec,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    if read_view.include_deleted
+        && !query_uses_history
+        && matches!(read_view.source, ReadViewSourceSpec::BranchView { .. })
+    {
         return Err(Error::new(
             ErrorCode::Query,
-            "live subscriptions do not support include_deleted yet",
+            "branch views do not support include_deleted yet",
         ));
     }
-    ensure_supported_read_view(opts)
+    Ok(())
 }
 
-fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
+fn ensure_supported_subscription_read_opts(
+    opts: &ReadOpts,
+    query_uses_history: bool,
+) -> Result<(), Error> {
+    ensure_supported_read_view(opts)?;
+    ensure_supported_include_deleted_read_view(&opts.read_view, query_uses_history)
+}
+
+fn ensure_supported_register_shape_read_view(
+    opts: &RegisterShapeOptions,
+    query_uses_history: bool,
+) -> Result<(), Error> {
     let read_opts = ReadOpts {
         read_view: opts.read_view.clone(),
         ..ReadOpts::default()
     };
-    ensure_supported_read_view(&read_opts)
+    ensure_supported_subscription_read_opts(&read_opts, query_uses_history)
 }
 
 fn ensure_supported_register_shape_options(
     opts: &RegisterShapeOptions,
+    query_uses_history: bool,
     local_receiver: bool,
     peer_role: PeerRole,
     delegated_session_capability: bool,
 ) -> Result<(), Error> {
-    ensure_supported_register_shape_read_view(opts)?;
+    ensure_supported_register_shape_read_view(opts, query_uses_history)?;
     if opts.binding_source == BindingSource::RelayAuthoritySession && !delegated_session_capability
     {
         return Err(Error::new(
@@ -3949,21 +3969,21 @@ fn ensure_transaction_identity(identity: WriteIdentity) -> Result<(), Error> {
     ))
 }
 
-fn ensure_exclusive_target(target: &ExactWriteTarget) -> Result<(), Error> {
+fn ensure_serializable_target(target: &ExactWriteTarget) -> Result<(), Error> {
     if *target != ExactWriteTarget::Root {
         return Err(Error::new(
             ErrorCode::Schema,
-            "exclusive transactions do not support branch writes",
+            "serializable transactions do not support branch writes",
         ));
     }
     Ok(())
 }
 
-fn ensure_exclusive_view_target(target: &WriteTarget) -> Result<(), Error> {
+fn ensure_serializable_view_target(target: &WriteTarget) -> Result<(), Error> {
     if *target != WriteTarget::Root {
         return Err(Error::new(
             ErrorCode::Schema,
-            "exclusive transactions do not support branch writes",
+            "serializable transactions do not support branch writes",
         ));
     }
     Ok(())
@@ -4397,12 +4417,12 @@ where
     }
 }
 
-/// CRUD and read operations for an open exclusive transaction.
+/// CRUD and read operations for an open serializable transaction.
 ///
-/// [`ExclusiveTx`] and [`ExclusiveTxRef`] implement this trait, so exclusive
+/// [`SerializableTx`] and [`SerializableTxRef`] implement this trait, so serializable
 /// operations have one definition regardless of who owns the transaction
 /// lifetime. Import this trait to call its methods.
-pub trait ExclusiveTxOps<S = BoxedStorage>
+pub trait SerializableTxOps<S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4412,19 +4432,19 @@ where
     /// The id of the already-open transaction.
     fn tx_id(&self) -> OpenTransactionId;
 
-    /// Read one row inside the exclusive transaction.
+    /// Read one row inside the serializable transaction.
     async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.db().transaction_read(self.tx_id(), table, row).await
     }
 
-    /// Read all current rows in a table inside the exclusive transaction.
+    /// Read all current rows in a table inside the serializable transaction.
     async fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_current_rows(self.tx_id(), table)
             .await
     }
 
-    /// Read a prepared query inside the exclusive transaction.
+    /// Read a prepared query inside the serializable transaction.
     async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_with_opts(prepared, ReadOpts::default())
             .await
@@ -4441,7 +4461,7 @@ where
             .await
     }
 
-    /// Read a prepared query inside the exclusive transaction as `author`.
+    /// Read a prepared query inside the serializable transaction as `author`.
     async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
@@ -4494,12 +4514,12 @@ where
         options: InsertOptions,
     ) -> Result<RowUuid, Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_target(&options.target)?;
+        ensure_serializable_target(&options.target)?;
         let row = options
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
         self.db()
-            .stage_exclusive_insert(
+            .stage_serializable_insert(
                 self.tx_id(),
                 table,
                 row,
@@ -4520,9 +4540,9 @@ where
         options: UpdateOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_view_target(&options.target)?;
+        ensure_serializable_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_update(self.tx_id(), table, row, patch, options.updated_at_ms)
+            .stage_serializable_update(self.tx_id(), table, row, patch, options.updated_at_ms)
             .await
     }
 
@@ -4535,9 +4555,9 @@ where
         options: UpsertOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_view_target(&options.target)?;
+        ensure_serializable_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_upsert(
+            .stage_serializable_upsert(
                 self.tx_id(),
                 table,
                 row,
@@ -4551,9 +4571,9 @@ where
     /// Stage a soft delete.
     async fn delete(&self, table: &str, row: RowUuid, options: DeleteOptions) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_view_target(&options.target)?;
+        ensure_serializable_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_delete(self.tx_id(), table, row, options.updated_at_ms)
+            .stage_serializable_delete(self.tx_id(), table, row, options.updated_at_ms)
             .await
     }
 
@@ -4566,25 +4586,25 @@ where
         options: RestoreOptions,
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
-        ensure_exclusive_target(&options.target)?;
+        ensure_serializable_target(&options.target)?;
         let cells = cells.ok_or_else(|| {
             Error::new(
                 ErrorCode::Schema,
-                "exclusive transaction restores require replacement cells",
+                "serializable transaction restores require replacement cells",
             )
         })?;
         self.db()
-            .stage_exclusive_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
+            .stage_serializable_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 }
 
-/// Owning, Rust-facing handle for an exclusive transaction over a stable snapshot.
+/// Owning, Rust-facing handle for a serializable transaction over a stable snapshot.
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
-/// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
+/// transaction on drop. Use [`SerializableTxRef`] when a caller retains an
 /// [`OpenTransactionId`] between calls and must not close the transaction on return.
-pub struct ExclusiveTx<'a, S = BoxedStorage>
+pub struct SerializableTx<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4593,17 +4613,17 @@ where
     committed: bool,
 }
 
-impl<S> ExclusiveTx<'_, S>
+impl<S> SerializableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    /// Commit the exclusive transaction.
+    /// Commit the serializable transaction.
     ///
     /// Once the commit succeeds, dropping this handle does not abandon the
     /// already-committed transaction. If it fails, dropping the handle attempts
     /// to abandon any transaction that remains open.
     pub async fn commit(mut self) -> Result<TxId, Error> {
-        let result = self.db.commit_exclusive_handle(self.tx_id).await;
+        let result = self.db.commit_serializable_handle(self.tx_id).await;
         if result.is_ok() {
             self.committed = true;
         }
@@ -4611,7 +4631,7 @@ where
     }
 }
 
-impl<S> ExclusiveTxOps<S> for ExclusiveTx<'_, S>
+impl<S> SerializableTxOps<S> for SerializableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4624,7 +4644,7 @@ where
     }
 }
 
-impl<S> Drop for ExclusiveTx<'_, S>
+impl<S> Drop for SerializableTx<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4636,11 +4656,11 @@ where
     }
 }
 
-/// Non-owning operations handle for an already-open exclusive transaction.
+/// Non-owning operations handle for an already-open serializable transaction.
 ///
-/// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
+/// Construct this with [`Db::serializable_tx_ref`] when another layer owns the
 /// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
-pub struct ExclusiveTxRef<'a, S = BoxedStorage>
+pub struct SerializableTxRef<'a, S = BoxedStorage>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -4648,7 +4668,7 @@ where
     tx_id: OpenTransactionId,
 }
 
-impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
+impl<S> SerializableTxOps<S> for SerializableTxRef<'_, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
@@ -6326,7 +6346,9 @@ fn apply_maintained_update_to_snapshot(
                 let candidates = snapshot_index
                     .roots
                     .keys_unordered()
-                    .filter(|candidate| candidate.canonical_bytes().get(..16) == root_bytes)
+                    .filter(|candidate| {
+                        Some(candidate.root_source().uuid().as_bytes().as_slice()) == root_bytes
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 match candidates.as_slice() {
@@ -6918,7 +6940,7 @@ fn terminal_subscription_output_row(
             format!("invalid terminal root key: {error}"),
         )
     })?;
-    if occurrence_id.canonical_bytes().get(..16) != Some(row_uuid.as_bytes()) {
+    if occurrence_id.root_source().uuid() != &row_uuid {
         return Err(Error::new(
             ErrorCode::Protocol,
             "terminal root payload key does not match its addressed result",
@@ -6999,7 +7021,7 @@ where
     else {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     };
-    if shape.query().flat_join.is_none() {
+    if shape.query().flat_join.is_none() && !shape.query().uses_history() {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     }
     let materialized = crate::local_executor::block_on(
@@ -7071,16 +7093,22 @@ where
 
 #[doc(hidden)]
 pub fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    let root = ObjectId::from_uuid(row.row_uuid().0);
+    use crate::node::query_engine::SourceOccurrenceKey;
+    let root = row
+        .raw_field(&SourceOccurrenceKey::joined_field(0))
+        .map(|value| SourceOccurrenceKey::decode_value(value).expect("valid root occurrence"))
+        .unwrap_or_else(|| {
+            crate::object::SourceOccurrenceId::current(ObjectId::from_uuid(row.row_uuid().0))
+        });
     let mut joined = Vec::new();
     for position in 1.. {
-        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
-        else {
+        let Some(value) = row.raw_field(&SourceOccurrenceKey::joined_field(position)) else {
             break;
         };
-        joined.push(ObjectId::from_uuid(row_id));
+        joined.push(SourceOccurrenceKey::decode_value(value).expect("valid joined occurrence"));
     }
-    OutputOccurrenceId::new(root, joined)
+    OutputOccurrenceId::from_source_occurrences(root, joined, [])
+        .expect("source occurrences without union arms")
 }
 
 fn subscription_outputs_with_occurrence_sidecar(
@@ -7101,8 +7129,7 @@ fn subscription_outputs_with_occurrence_sidecar(
         .zip(occurrence_ids)
         .enumerate()
         .map(|(index, (row, occurrence_id))| {
-            let bytes = occurrence_id.canonical_bytes();
-            if bytes.get(..16) != Some(row.row_uuid().0.as_bytes()) {
+            if occurrence_id.root_source().uuid() != &row.row_uuid().0 {
                 return Err(Error::new(
                     ErrorCode::Protocol,
                     "maintained root occurrence sidecar root does not match row",

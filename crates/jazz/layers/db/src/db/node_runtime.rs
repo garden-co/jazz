@@ -5951,7 +5951,7 @@ where
                 )
             }
         };
-        let (previous, previous_source, has_maintained_flat_tuple_subscription) = {
+        let (previous, previous_source, has_maintained_occurrence_subscription) = {
             let state = state.borrow();
             (
                 materialized_subscription_snapshot(&state.snapshot, &state.snapshot_index)?,
@@ -5962,16 +5962,16 @@ where
                         shape,
                         maintained_subscription: Some(_),
                         ..
-                    } if shape.query().flat_join.is_some()
+                    } if shape.query().flat_join.is_some() || shape.query().uses_history()
                 ),
             )
         };
-        // A link snapshot is a relation facade without the terminal's flat
-        // tuple occurrence sidecar. Once a maintained terminal owns this
+        // A link snapshot is a relation facade without the terminal's joined
+        // or historical occurrence sidecar. Once a maintained terminal owns this
         // stream, replace it from the terminal rather than installing an
         // unaddressable facade snapshot.
         if !force_reset_event
-            && has_maintained_flat_tuple_subscription
+            && has_maintained_occurrence_subscription
             && previous_source == SubscriptionSnapshotSource::LocalMaintained
             && snapshot_source == SubscriptionSnapshotSource::LinkSnapshot
         {

@@ -1575,11 +1575,11 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     )
     .unwrap();
     let parent_tx = OpenTransactionId::new();
-    core.open_exclusive(parent_tx).unwrap();
+    core.open_serializable(parent_tx).unwrap();
     core.tx_write(parent_tx, "todos", row(1), title_cells("parent"), None)
         .unwrap();
     let (parent, _unit) = core
-        .commit_exclusive_settled(parent_tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(parent_tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     let child = core
         .commit_mergeable_settled(
@@ -1807,25 +1807,25 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     );
 
     let tx_id = OpenTransactionId::new();
-    core.open_exclusive(tx_id).unwrap();
+    core.open_serializable(tx_id).unwrap();
     core.tx_read(tx_id, "todos", row).unwrap();
-    core.tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
+    core.tx_write(tx_id, "todos", row, title_cells("serializable"), None)
         .unwrap();
-    let (exclusive, _unit) = core
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 30)
+    let (serializable, _unit) = core
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 30)
         .unwrap();
-    let exclusive_global_time = core.allocate_global_time_for_test();
+    let serializable_global_time = core.allocate_global_time_for_test();
     core.apply_fate_update(
-        exclusive,
+        serializable,
         Fate::Accepted,
-        Some(exclusive_global_time),
+        Some(serializable_global_time),
         Some(DurabilityTier::Global),
     )
     .unwrap();
 
     sync_current_rows_to(&mut core, &mut writer_b, 43);
     let rejected_tx = OpenTransactionId::new();
-    writer_b.open_exclusive(rejected_tx).unwrap();
+    writer_b.open_serializable(rejected_tx).unwrap();
     writer_b.tx_read(rejected_tx, "todos", row).unwrap();
     commit_mergeable_global(
         &mut writer_a,
@@ -1839,7 +1839,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
         .tx_write(rejected_tx, "todos", row, title_cells("rejected"), None)
         .unwrap();
     let (rejected, unit) = writer_b
-        .commit_exclusive_settled(rejected_tx, AuthorSubject::SYSTEM, 41)
+        .commit_serializable_settled(rejected_tx, AuthorSubject::SYSTEM, 41)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -1850,7 +1850,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
         fate,
         SyncMessage::FateUpdate {
             tx_id: rejected,
-            fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
+            fate: Fate::Rejected(RejectionReason::SerializationConflict),
             global_time: None,
             durability: None,
         }
@@ -1886,15 +1886,15 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
         entry.is_globally_current() && entry.deletion() == Some(DeletionEvent::Restored)
     }));
     assert!(history.iter().any(|entry| {
-        entry.tx_id() == exclusive
-            && entry.kind() == TxKind::Exclusive
+        entry.tx_id() == serializable
+            && entry.kind() == TxKind::Serializable
             && entry.made_by() == AuthorSubject::system_at(node(9))
-            && entry.cell(&schema().tables[0], "title") == Some(v("exclusive"))
+            && entry.cell(&schema().tables[0], "title") == Some(v("serializable"))
     }));
     assert!(!history.iter().any(|entry| entry.tx_id() == rejected));
     assert_eq!(
         core.transaction_record(rejected).unwrap().fate,
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
+        Fate::Rejected(RejectionReason::SerializationConflict)
     );
 
     drop(core);
@@ -1902,7 +1902,7 @@ fn row_history_reports_versions_flags_and_audit_records_across_restart() {
     assert_eq!(reopened.row_history("todos", row).unwrap(), history);
     assert_eq!(
         reopened.transaction_record(rejected).unwrap().fate,
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
+        Fate::Rejected(RejectionReason::SerializationConflict)
     );
 }
 #[test]
@@ -1918,15 +1918,15 @@ fn transaction_metadata_round_trips_through_recovery() {
         .unwrap();
 
     let tx_id = OpenTransactionId::new();
-    local_node.open_exclusive(tx_id).unwrap();
+    local_node.open_serializable(tx_id).unwrap();
     local_node
-        .tx_set_metadata(tx_id, r#"{"source":"exclusive"}"#.to_owned())
+        .tx_set_metadata(tx_id, r#"{"source":"serializable"}"#.to_owned())
         .unwrap();
     local_node
-        .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
+        .tx_write(tx_id, "todos", row, title_cells("serializable"), None)
         .unwrap();
-    let (exclusive, _) = local_node
-        .commit_exclusive_settled(tx_id, AuthorSubject::SYSTEM, 11)
+    let (serializable, _) = local_node
+        .commit_serializable_settled(tx_id, AuthorSubject::SYSTEM, 11)
         .unwrap();
 
     assert_eq!(
@@ -1938,10 +1938,10 @@ fn transaction_metadata_round_trips_through_recovery() {
     );
     assert_eq!(
         local_node
-            .transaction_record(exclusive)
+            .transaction_record(serializable)
             .unwrap()
             .user_metadata_json,
-        Some(r#"{"source":"exclusive"}"#.to_owned())
+        Some(r#"{"source":"serializable"}"#.to_owned())
     );
 
     drop(local_node);
@@ -1955,10 +1955,10 @@ fn transaction_metadata_round_trips_through_recovery() {
     );
     assert_eq!(
         reopened
-            .transaction_record(exclusive)
+            .transaction_record(serializable)
             .unwrap()
             .user_metadata_json,
-        Some(r#"{"source":"exclusive"}"#.to_owned())
+        Some(r#"{"source":"serializable"}"#.to_owned())
     );
 }
 
@@ -2177,7 +2177,7 @@ fn transaction_status_projects_state_without_decoding_payloads() {
         Fate::Accepted,
         Fate::Rejected(RejectionReason::AuthorizationDenied),
         Fate::Rejected(RejectionReason::ClientClockTooFarAhead),
-        Fate::Rejected(RejectionReason::ExclusiveConflict),
+        Fate::Rejected(RejectionReason::SerializationConflict),
         Fate::Rejected(RejectionReason::CausalityViolation),
         Fate::Rejected(RejectionReason::Cascade { root: tx_id }),
         Fate::Rejected(RejectionReason::MalformedCommit("detail".to_owned())),

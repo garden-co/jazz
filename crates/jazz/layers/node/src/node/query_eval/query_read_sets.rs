@@ -115,6 +115,56 @@ pub(super) fn tx_query_read_set(
     })
 }
 
+/// Move a branched program's policy-evidence sources into its branch.
+///
+/// `head_values` are the branch-column values of the enclosing request's
+/// table-projected heads. Each branched source table is projected onto them,
+/// as an ordinary branch read projects its selector (`INV-BVIEW-8`), so every
+/// branched table the program reads observes the same branch head. Sources
+/// over unbranched tables keep their current expression. A branched table
+/// whose branch columns the heads do not name cannot be placed in that
+/// branch; it is refused rather than read from another branch.
+pub(super) fn branch_read_view_from_heads(
+    read_view: &mut ReadView<RequestedSourceStage>,
+    schema: &JazzSchema,
+    head_values: &BTreeMap<String, crate::protocol::BranchColumnValue>,
+    tier: DurabilityTier,
+) -> Result<(), Error> {
+    let projection = canonical_projection(read_view.read_schema);
+    for (source, expr) in &mut read_view.sources {
+        let table_name =
+            crate::schema::history::history_source_table(&source.table).unwrap_or(&source.table);
+        let table = schema
+            .tables
+            .iter()
+            .find(|table| table.name == table_name)
+            .ok_or(Error::InvalidStoredValue(
+                "branch view source table missing",
+            ))?;
+        if table.branch_by.is_empty() {
+            continue;
+        }
+        let values = table
+            .branch_by
+            .iter()
+            .map(|column| Some((column.clone(), head_values.get(column)?.clone())))
+            .collect::<Option<BTreeMap<_, _>>>()
+            .ok_or_else(|| {
+                history::unsupported("a branch read policy over tables with other branch columns")
+            })?;
+        let (head, _) = schema
+            .project_branch_selector(table, &BranchSelector { values })
+            .map_err(Error::InvalidBranchKey)?;
+        *expr = SourceExpr::BranchView {
+            projection: projection.clone(),
+            head,
+            base: None,
+            tier,
+        };
+    }
+    Ok(())
+}
+
 pub(super) fn query_read_set_for_read_view(
     shape: &NormalizedRowSetShape,
     read_schema: SchemaVersionId,
@@ -125,6 +175,13 @@ pub(super) fn query_read_set_for_read_view(
     settled_authority_result_key: Option<crate::protocol::AuthorityResultKey>,
     schema: &JazzSchema,
 ) -> Result<RequestedReadSet, Error> {
+    if matches!(
+        &read_view.source,
+        ReadViewSourceSpec::BranchView { base: Some(_), .. }
+    ) && all_sources(shape).any(|source| crate::schema::history::is_history_table(&source.table))
+    {
+        return Err(history::unsupported("history with a branch base"));
+    }
     // All receiver programs, including aggregates, consume the authority's
     // exact source closure. Aggregate results are computed by the ordinary
     // local graph; they are not a separate authority-provided result payload.
@@ -170,7 +227,11 @@ pub(super) fn query_read_set_for_read_view(
                     let table = schema
                         .tables
                         .iter()
-                        .find(|table| table.name == source.table)
+                        .find(|table| {
+                            table.name
+                                == crate::schema::history::history_source_table(&source.table)
+                                    .unwrap_or(&source.table)
+                        })
                         .ok_or(Error::InvalidStoredValue(
                             "branch view source table missing",
                         ))?;

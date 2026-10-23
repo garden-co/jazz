@@ -3790,14 +3790,14 @@ fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::relay();
     peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
-    peer.set_ship_complete_exclusive_payloads(true);
+    peer.set_ship_complete_serializable_payloads(true);
     remember_supporting_snapshot(
         &mut expected_snapshots,
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap(),
     );
 
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(tx, "todos", first, title_cells("other"), None)
         .unwrap();
     core.tx_write(tx, "todos", second, title_cells("other"), None)
@@ -3812,7 +3812,7 @@ fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
     )
     .unwrap();
     let (replacement_tx, _unit) = core
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_002)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_002)
         .unwrap();
     accept_global(&mut core, replacement_tx, 3);
 
@@ -3826,7 +3826,7 @@ fn maintained_storage_fallback_batches_multi_row_replacement_removals() {
     let bundles = version_bundles_for_update(&update);
     // Retractions name former CoveredInputs. No successor row is in the
     // closure, so a replacement transaction body is neither needed nor safe
-    // to ship merely because it shared an exclusive transaction.
+    // to ship merely because it shared a serializable transaction.
     assert!(bundles.is_empty());
 }
 
@@ -4279,7 +4279,7 @@ fn maintained_subscription_view_null_predicates_stay_maintained() {
 }
 
 #[test]
-fn maintained_subscription_view_exclusive_delta_stays_maintained() {
+fn maintained_subscription_view_serializable_delta_stays_maintained() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let (_dir, mut core) = open_node_with_uuid(node(0x96));
     let (shape, binding) = title_shape_binding("match");
@@ -4290,11 +4290,11 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap(),
     );
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
         .unwrap();
     let (tx_id, _unit) = core
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_000)
         .unwrap();
     accept_global(&mut core, tx_id, 1);
 
@@ -4308,12 +4308,12 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
     );
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
-    assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+    assert_eq!(version_bundles[0].tx.kind, TxKind::Serializable);
     assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
 }
 
 #[test]
-fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle() {
+fn maintained_subscription_view_serializable_delta_ships_view_scoped_partial_bundle() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let (_dir, mut core) = open_node_with_uuid(node(0x97));
     let (shape, binding) = title_shape_binding("match");
@@ -4324,13 +4324,13 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap(),
     );
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
     let (tx_id, _unit) = core
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_000)
         .unwrap();
     accept_global(&mut core, tx_id, 1);
 
@@ -4356,10 +4356,10 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
     assert!(complete_tx_payload_refs.is_empty());
     // The exact residual source closure contains only the matching input. An
     // unrelated predicate candidate does not cross merely because it shared
-    // an exclusive transaction.
+    // a serializable transaction.
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
-    assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+    assert_eq!(version_bundles[0].tx.kind, TxKind::Serializable);
     assert_eq!(
         version_bundles[0].scope,
         crate::protocol::VersionBundleScope::ViewScoped
@@ -4378,7 +4378,7 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
 }
 
 #[test]
-fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_peer() {
+fn maintained_subscription_view_can_ship_complete_serializable_payload_for_writer_peer() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let (_core_dir, mut core) = open_node_with_uuid(node(0x98));
     let (_reader_dir, mut reader) = open_node_with_uuid(node(0x99));
@@ -4386,23 +4386,23 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
     let subscription = subscription_key(&shape, &binding);
     let mut peer = PeerState::relay();
     peer.set_subscription_policy_binding(subscription, (AuthorSubject::SYSTEM, BTreeMap::new()));
-    peer.set_ship_complete_exclusive_payloads(true);
+    peer.set_ship_complete_serializable_payloads(true);
 
     // The following incremental source closure is only meaningful relative to
     // this exact reset receipt. Register and ingest it before advancing the
     // authority: a receiver must not infer a predecessor from the payload
-    // bodies of a later exclusive transaction.
+    // bodies of a later serializable transaction.
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
     reader.apply_sync_message_settled(initial).unwrap();
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
     let (tx_id, _unit) = core
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_000)
         .unwrap();
     accept_global(&mut core, tx_id, 1);
 
@@ -4428,7 +4428,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
     assert!(complete_tx_payload_refs.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
-    assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+    assert_eq!(version_bundles[0].tx.kind, TxKind::Serializable);
     assert_eq!(version_bundles[0].versions.len(), 2);
     assert_eq!(
         version_bundles[0]
@@ -4450,7 +4450,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
         ]
     );
     let open = OpenTransactionId::new();
-    reader.open_exclusive(open).unwrap();
+    reader.open_serializable(open).unwrap();
     assert_eq!(
         reader.tx_read(open, "todos", row(0x72)).unwrap(),
         Some(title_cells("other"))
@@ -4529,7 +4529,7 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
 }
 
 #[test]
-fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scoped_partial_bundle() {
+fn maintained_subscription_view_policy_view_serializable_delta_ships_identity_scoped_partial_bundle() {
     let schema = access_policy_schema();
     let (_dir, mut core) = open_node_with_schema(node(0x98), schema);
     let user_a = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -4539,13 +4539,13 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     let project = row(0x83);
 
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(tx, "docs", doc_a, doc_cells("a", project), None)
         .unwrap();
     core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
         .unwrap();
     let (docs_tx, _unit) = core
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     accept_global(&mut core, docs_tx, 1);
     let grant_a = core
@@ -4569,7 +4569,7 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
             Value::Uuid(user_a.test_uuid()),
         )]),
     );
-    peer.set_ship_complete_exclusive_payloads(true);
+    peer.set_ship_complete_serializable_payloads(true);
     core.reset_query_engine_read_metrics();
     let update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&update);
@@ -4587,7 +4587,7 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     assert!(complete_tx_payload_refs.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
-    assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+    assert_eq!(version_bundles[0].tx.kind, TxKind::Serializable);
     assert_eq!(
         version_bundles[0].scope,
         crate::protocol::VersionBundleScope::ViewScoped
@@ -5218,7 +5218,7 @@ fn same_row_policy_revoke_and_delete_do_not_leak_a_tombstone() {
 }
 
 #[test]
-fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_grant() {
+fn grant_later_serializable_tx_extends_view_scoped_partial_bundle_after_policy_grant() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let schema = access_policy_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
@@ -5230,7 +5230,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     let project = row(9);
 
     let tx = OpenTransactionId::new();
-    writer.open_exclusive(tx).unwrap();
+    writer.open_serializable(tx).unwrap();
     writer
         .tx_write(tx, "docs", doc_one, doc_cells("one", project), None)
         .unwrap();
@@ -5238,7 +5238,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
         .tx_write(tx, "docs", doc_two, doc_cells("two", project), None)
         .unwrap();
     let (docs_tx, unit) = writer
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     let [fate] = core
         .apply_sync_message_settled(unit)
@@ -5290,7 +5290,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     assert!(complete_tx_payload_refs.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
-    assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+    assert_eq!(version_bundles[0].tx.kind, TxKind::Serializable);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_one);
     assert!(peer.shipped_complete_tx_payloads().is_empty());
@@ -5335,7 +5335,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     assert!(complete_tx_payload_refs.is_empty());
     assert_eq!(version_bundles.len(), 1);
     assert_eq!(version_bundles[0].tx.tx_id, docs_tx);
-    assert_eq!(version_bundles[0].tx.kind, TxKind::Exclusive);
+    assert_eq!(version_bundles[0].tx.kind, TxKind::Serializable);
     assert_eq!(version_bundles[0].versions.len(), 1);
     assert_eq!(version_bundles[0].versions[0].row_uuid(), doc_two);
 
@@ -5355,7 +5355,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
 }
 
 #[test]
-fn all_exclusive_never_gated_stays_incremental() {
+fn all_serializable_never_gated_stays_incremental() {
     let mut expected_snapshots = ExpectedSupportingSnapshots::new();
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row_one = row(1);
@@ -5368,13 +5368,13 @@ fn all_exclusive_never_gated_stays_incremental() {
     assert!(version_bundles.is_empty());
 
     let tx = OpenTransactionId::new();
-    core.open_exclusive(tx).unwrap();
+    core.open_serializable(tx).unwrap();
     core.tx_write(tx, "todos", row_one, title_cells("one"), None)
         .unwrap();
     core.tx_write(tx, "todos", row_two, title_cells("two"), None)
         .unwrap();
     let (tx_id, _unit) = core
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 10)
         .unwrap();
     accept_global(&mut core, tx_id, 1);
 

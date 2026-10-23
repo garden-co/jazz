@@ -232,7 +232,7 @@ impl RemoteLinkTracker {
     /// Arm a wait bounded only by the remote's reachability (no deadline), if
     /// the remote could answer now, returning its loss epoch. For internal
     /// reads that must see the authority whenever it is reachable, such as
-    /// exclusive-read hydration; first loads use [`Self::arm`].
+    /// serializable-read hydration; first loads use [`Self::arm`].
     pub(super) fn arm_until_loss(&self) -> Option<u64> {
         let epoch = self.loss_epoch.get();
         if !self.may_wait(epoch, None) {

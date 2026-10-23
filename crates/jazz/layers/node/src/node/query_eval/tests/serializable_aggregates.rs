@@ -1,4 +1,4 @@
-//! Exclusive aggregate reads are recorded and validated by their result
+//! Serializable aggregate reads are recorded and validated by their result
 //! (garden-co/jazz#3768).
 
 use super::execution::commit_metric_global_to_authority;
@@ -56,7 +56,7 @@ fn count_in(bucket: &str) -> (ValidatedQuery, Binding) {
     )
 }
 
-/// Alice reads `shape` in an exclusive transaction, inserts `row(new_row)`
+/// Alice reads `shape` in a serializable transaction, inserts `row(new_row)`
 /// into bucket `a`, and commits. Returns the commit unit she would send.
 fn alice_reads_then_inserts(
     alice: &mut NodeState,
@@ -66,7 +66,7 @@ fn alice_reads_then_inserts(
     now_ms: u64,
 ) -> SyncMessage {
     let tx = OpenTransactionId::new();
-    alice.open_exclusive(tx).unwrap();
+    alice.open_serializable(tx).unwrap();
     alice.tx_query(tx, shape, binding).unwrap();
     alice
         .tx_write(
@@ -81,7 +81,7 @@ fn alice_reads_then_inserts(
         )
         .unwrap();
     alice
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, now_ms)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, now_ms)
         .unwrap()
         .1
 }
@@ -115,7 +115,7 @@ fn commit_unit_tx(unit: &SyncMessage) -> &Transaction {
 /// bob   ────────────rewrite counted row (still bucket a)──► authority
 /// ```
 #[test]
-fn exclusive_count_accepts_a_rewrite_that_keeps_the_count() {
+fn serializable_count_accepts_a_rewrite_that_keeps_the_count() {
     let Peers {
         mut alice,
         mut bob,
@@ -125,7 +125,7 @@ fn exclusive_count_accepts_a_rewrite_that_keeps_the_count() {
     } = peers(&[(1, "a", 1), (2, "a", 2), (3, "b", 10)]);
     let (shape, binding) = count_in("a");
     let tx = OpenTransactionId::new();
-    alice.open_exclusive(tx).unwrap();
+    alice.open_serializable(tx).unwrap();
     let observed = alice.tx_query(tx, &shape, &binding).unwrap();
     assert_eq!(
         observed[0].test_cells_by_descriptor()["count"],
@@ -145,7 +145,7 @@ fn exclusive_count_accepts_a_rewrite_that_keeps_the_count() {
         )
         .unwrap();
     let (_tx_id, unit) = alice
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_011)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_011)
         .unwrap();
     assert_eq!(authority_fate(&mut authority, unit), Fate::Accepted);
 }
@@ -154,11 +154,11 @@ fn exclusive_count_accepts_a_rewrite_that_keeps_the_count() {
 /// bucket Alice counted, so her count of 2 is 3 at commit.
 ///
 /// ```text
-/// alice ──count(bucket a) = 2──insert──commit──► authority ✗ ExclusiveConflict
+/// alice ──count(bucket a) = 2──insert──commit──► authority ✗ SerializationConflict
 /// bob   ────────insert into bucket a──────────► authority
 /// ```
 #[test]
-fn exclusive_count_conflicts_when_another_writer_adds_a_counted_row() {
+fn serializable_count_conflicts_when_another_writer_adds_a_counted_row() {
     let Peers {
         mut alice,
         mut bob,
@@ -168,29 +168,29 @@ fn exclusive_count_conflicts_when_another_writer_adds_a_counted_row() {
     } = peers(&[(1, "a", 1), (2, "a", 2), (3, "b", 10)]);
     let (shape, binding) = count_in("a");
     let tx = OpenTransactionId::new();
-    alice.open_exclusive(tx).unwrap();
+    alice.open_serializable(tx).unwrap();
     alice.tx_query(tx, &shape, &binding).unwrap();
     commit_metric_global_to_authority(&mut bob, &mut authority, row(5), "a", 7, 1_010);
     let (_tx_id, unit) = alice
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_011)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_011)
         .unwrap();
     assert_eq!(
         authority_fate(&mut authority, unit),
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
+        Fate::Rejected(RejectionReason::SerializationConflict)
     );
 
     // A row moving into another bucket changes the count too.
     let (shape, binding) = count_in("b");
     let tx = OpenTransactionId::new();
-    alice.open_exclusive(tx).unwrap();
+    alice.open_serializable(tx).unwrap();
     alice.tx_query(tx, &shape, &binding).unwrap();
     commit_metric_global_to_authority(&mut bob, &mut authority, row(3), "c", 10, 1_012);
     let (_tx_id, unit) = alice
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_013)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_013)
         .unwrap();
     assert_eq!(
         authority_fate(&mut authority, unit),
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
+        Fate::Rejected(RejectionReason::SerializationConflict)
     );
 }
 
@@ -206,7 +206,7 @@ fn exclusive_count_conflicts_when_another_writer_adds_a_counted_row() {
 /// bob   ──raise max of bucket a────────────────► authority
 /// ```
 #[test]
-fn exclusive_grouped_sum_min_max_conflict_only_when_a_value_changes() {
+fn serializable_grouped_sum_min_max_conflict_only_when_a_value_changes() {
     let Peers {
         mut alice,
         mut bob,
@@ -225,28 +225,28 @@ fn exclusive_grouped_sum_min_max_conflict_only_when_a_value_changes() {
     );
 
     let tx = OpenTransactionId::new();
-    alice.open_exclusive(tx).unwrap();
+    alice.open_serializable(tx).unwrap();
     assert_eq!(alice.tx_query(tx, &shape, &binding).unwrap().len(), 2);
     commit_metric_global_to_authority(&mut bob, &mut authority, row(2), "a", 3, 1_010);
     commit_metric_global_to_authority(&mut bob, &mut authority, row(3), "a", 2, 1_011);
     let (_tx_id, unit) = alice
-        .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_012)
+        .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_012)
         .unwrap();
     assert_eq!(authority_fate(&mut authority, unit), Fate::Accepted);
 
     let unit = {
         let tx = OpenTransactionId::new();
-        alice.open_exclusive(tx).unwrap();
+        alice.open_serializable(tx).unwrap();
         alice.tx_query(tx, &shape, &binding).unwrap();
         commit_metric_global_to_authority(&mut bob, &mut authority, row(1), "a", 9, 1_013);
         alice
-            .commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_014)
+            .commit_serializable_settled(tx, AuthorSubject::SYSTEM, 1_014)
             .unwrap()
             .1
     };
     assert_eq!(
         authority_fate(&mut authority, unit),
-        Fate::Rejected(RejectionReason::ExclusiveConflict)
+        Fate::Rejected(RejectionReason::SerializationConflict)
     );
 }
 
@@ -255,7 +255,7 @@ fn exclusive_grouped_sum_min_max_conflict_only_when_a_value_changes() {
 /// no per-row reads. This inspects the commit unit Alice sends, because the
 /// payload's contents are the contract and no public read exposes them.
 #[test]
-fn exclusive_count_commit_payload_is_independent_of_the_counted_rows() {
+fn serializable_count_commit_payload_is_independent_of_the_counted_rows() {
     let encoded_read_sets = |rows: usize| {
         let seed = (1..=rows)
             .map(|idx| (idx, "a", idx as i64))
@@ -291,13 +291,13 @@ fn exclusive_count_commit_payload_is_independent_of_the_counted_rows() {
     assert_eq!(encoded_read_sets(3), encoded_read_sets(60));
 }
 
-/// An authority rejects an exclusive aggregate read whose result is missing
+/// An authority rejects a serializable aggregate read whose result is missing
 /// or garbled as a malformed commit, not as a conflict and never as a
 /// silent accept. Mallory strips or corrupts the result of a count before
 /// sending; this tampers with the commit unit directly because no public
 /// client API can produce such a payload.
 #[test]
-fn exclusive_aggregate_read_without_a_well_formed_result_is_malformed() {
+fn serializable_aggregate_read_without_a_well_formed_result_is_malformed() {
     let tampered = |tamper: fn(&mut Option<AggregateReadResult>)| {
         let Peers {
             alice: mut mallory,
@@ -328,19 +328,19 @@ fn exclusive_aggregate_read_without_a_well_formed_result_is_malformed() {
     malformed(tampered(|result| result.as_mut().unwrap().0[0] = 2));
 }
 
-/// Alice cannot read an aggregate after writing in the same exclusive
+/// Alice cannot read an aggregate after writing in the same serializable
 /// transaction: the authority validates the aggregate over committed state,
 /// which her staged write is not part of, so such a result cannot be
 /// checked soundly. The read fails with a typed error naming the pattern;
 /// the same aggregate read before the write is accepted.
 #[test]
-fn exclusive_aggregate_read_after_a_write_is_unsupported() {
+fn serializable_aggregate_read_after_a_write_is_unsupported() {
     let Peers {
         mut alice, _dirs, ..
     } = peers(&[(1, "a", 1)]);
     let (shape, binding) = count_in("a");
     let tx = OpenTransactionId::new();
-    alice.open_exclusive(tx).unwrap();
+    alice.open_serializable(tx).unwrap();
     alice
         .tx_write(
             tx,
@@ -355,7 +355,7 @@ fn exclusive_aggregate_read_after_a_write_is_unsupported() {
         .unwrap();
     let error = alice.tx_query(tx, &shape, &binding).unwrap_err();
     assert!(
-        matches!(&error, Error::UnsupportedExclusiveRead(pattern) if pattern.contains("after a write")),
+        matches!(&error, Error::UnsupportedSerializableRead(pattern) if pattern.contains("after a write")),
         "unexpected error {error:?}"
     );
 }

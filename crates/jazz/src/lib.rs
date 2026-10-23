@@ -91,7 +91,7 @@
 //! block_on(writer.apply_sync_message(fate)).unwrap();
 //!
 //! let tx_id = jazz::tools::OpenTransactionId::new();
-//! block_on(core.open_exclusive(tx_id)).unwrap();
+//! block_on(core.open_serializable(tx_id)).unwrap();
 //! block_on(core.tx_read(tx_id, "todos", row)).unwrap();
 //! block_on(core.tx_write(
 //!     tx_id,
@@ -104,7 +104,7 @@
 //!     None::<DeletionEvent>,
 //! ))
 //! .unwrap();
-//! let (_exclusive, _unit) = block_on(core.commit_exclusive(tx_id, owner, 1_001)).unwrap();
+//! let (_serializable, _unit) = block_on(core.commit_serializable(tx_id, owner, 1_001)).unwrap();
 //! assert!(!block_on(core.row_history("todos", row)).unwrap().is_empty());
 //! ```
 

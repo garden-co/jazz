@@ -190,7 +190,7 @@ impl SyncBench {
 
     fn next_unit(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         if step % 17 == 9 {
-            return self.next_exclusive(step);
+            return self.next_serializable(step);
         }
         if step % 101 == 77 {
             return self.next_skewed_mergeable(step);
@@ -265,26 +265,26 @@ impl SyncBench {
         (tx_id, unit, u64::MAX - SKEW_TOLERANCE_MS)
     }
 
-    fn next_exclusive(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
+    fn next_serializable(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(120 + (step % 12) as u8);
         let tx_id = OpenTransactionId::new();
         self.ui
-            .open_exclusive_for_test(tx_id, self.ui_author)
-            .expect("open exclusive");
+            .open_serializable_for_test(tx_id, self.ui_author)
+            .expect("open serializable");
         let _ = self.ui.tx_read(tx_id, TABLE, row_uuid).expect("read");
         self.ui
             .tx_write(
                 tx_id,
                 TABLE,
                 row_uuid,
-                cells(format!("exclusive-{step}"), self.ui_owner),
+                cells(format!("serializable-{step}"), self.ui_owner),
                 None,
             )
             .expect("write");
         let (publication, unit) = self
             .ui
-            .commit_exclusive(tx_id, self.ui_author, 3_000 + step as u64)
-            .expect("exclusive");
+            .commit_serializable(tx_id, self.ui_author, 3_000 + step as u64)
+            .expect("serializable");
         let tx_id = support::settle_transaction(&mut self.ui, publication);
         (tx_id, unit, u64::MAX - SKEW_TOLERANCE_MS)
     }
@@ -414,8 +414,8 @@ impl SyncBench {
             serde_json::json!(self.metrics.rejected.authorization_denied),
         );
         fields.insert(
-            "reject_exclusive_conflict".to_owned(),
-            serde_json::json!(self.metrics.rejected.exclusive_conflict),
+            "reject_serialization_conflict".to_owned(),
+            serde_json::json!(self.metrics.rejected.serialization_conflict),
         );
         fields.insert(
             "reject_cascade".to_owned(),
@@ -594,7 +594,7 @@ impl Default for Metrics {
 struct RejectCounts {
     client_clock_too_far_ahead: u64,
     authorization_denied: u64,
-    exclusive_conflict: u64,
+    serialization_conflict: u64,
     cascade: u64,
     malformed: u64,
     causality_violation: u64,
@@ -605,7 +605,7 @@ impl RejectCounts {
         match reason {
             RejectionReason::ClientClockTooFarAhead => self.client_clock_too_far_ahead += 1,
             RejectionReason::AuthorizationDenied => self.authorization_denied += 1,
-            RejectionReason::ExclusiveConflict => self.exclusive_conflict += 1,
+            RejectionReason::SerializationConflict => self.serialization_conflict += 1,
             RejectionReason::Cascade { .. } => self.cascade += 1,
             RejectionReason::MalformedCommit(_) => self.malformed += 1,
             RejectionReason::CausalityViolation => self.causality_violation += 1,
@@ -615,7 +615,7 @@ impl RejectCounts {
     fn total(&self) -> u64 {
         self.client_clock_too_far_ahead
             + self.authorization_denied
-            + self.exclusive_conflict
+            + self.serialization_conflict
             + self.cascade
             + self.malformed
             + self.causality_violation

@@ -1802,6 +1802,7 @@ fn bulky_view_update(rows: u16, title_bytes: usize) -> crate::protocol::ViewUpda
         let tx_id = TxId::new(TxTime(1_000 + u64::from(index)), node);
         let row = row_id(index);
         supporting.push(SupportingRow {
+            is_current: true,
             physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([0x71; 16])),
             version_table: "todos".to_owned().into(),
             row,

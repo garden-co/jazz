@@ -64,7 +64,7 @@ the predicate-read slot gains each aggregate read's recorded result
 rows they consumed. The other three slots keep their v1 bytes.
 
 Byte pins: `node::codec::transaction_record_tests`,
-`aggregate_read_result::tests`, `exclusive_read_evidence::tests` and
+`aggregate_read_result::tests`, `serializable_read_evidence::tests` and
 `jazz-protocol` `wire::tests::predicate_read_aggregate_result_wire_bytes_are_pinned`.
 
 ## Wire
@@ -163,7 +163,7 @@ or compaction story are follow-up work.
   keep the winning transactions' records, so the horizon record and its
   refusal are all this release needs.
 - **An exclusive aggregate read after a write in the same transaction is
-  refused** with `UnsupportedExclusiveRead` (#3768). The authority re-runs the
+  refused** with `UnsupportedSerializableRead` (#3768). The authority re-runs the
   aggregate over committed state, which does not include the transaction's
   own writes, so such a result cannot be compared soundly. Anselm accepted
   this restriction for alpha.60 (2026-10-13).

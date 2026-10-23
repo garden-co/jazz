@@ -296,12 +296,12 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
 }
 
 /// INV-RLS-24 moves read-for-write authorization only for mergeable staging.
-/// Exclusive transactions retain their existing snapshot/read-set contract;
+/// Serializable transactions retain their existing snapshot/read-set contract;
 /// the shared write-policy admission helper must not silently add the new
 /// mergeable prior-row read check to them.
 ///
 /// This stays internal because the regression is the transaction-kind gate on
-/// the common authority helper, before exclusive conflict validation runs.
+/// the common authority helper, before serializable conflict validation runs.
 #[test]
 fn authority_read_for_write_check_is_mergeable_only() {
     let schema = build_public_test_schema(
@@ -338,11 +338,11 @@ fn authority_read_for_write_check_is_mergeable_only() {
     let SyncMessage::CommitUnit { mut tx, versions } = unit else {
         panic!("commit helper must emit one commit unit");
     };
-    tx.kind = TxKind::Exclusive;
+    tx.kind = TxKind::Serializable;
     assert!(
         crate::local_executor::block_on(core.commit_unit_satisfies_write_policies(&tx, &versions, None))
             .unwrap(),
-        "exclusive admission keeps its pre-existing write-policy-only helper semantics"
+        "serializable admission keeps its pre-existing write-policy-only helper semantics"
     );
 }
 

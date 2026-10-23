@@ -165,7 +165,7 @@ harness = false
 required-features = ["testing"]
 
 [[bench]]
-name = "exclusive_join_narrowing"
+name = "serializable_join_narrowing"
 harness = false
 required-features = ["testing"]
 
