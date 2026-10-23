@@ -282,12 +282,13 @@ fn restoring_a_live_row_is_rejected_through_its_receipt() {
 }
 
 #[test]
-fn a_row_changed_after_an_exclusive_read_rejects_the_commit() {
+fn a_row_changed_after_a_serializable_read_rejects_the_commit() {
     let db = open(0xa4);
     let read = db.insert("notes", &title("read"), &none()).unwrap();
     let other = db.insert("notes", &title("other"), &none()).unwrap();
     let tx = &OpenTransactionId::new().to_string();
-    db.begin_transaction(tx, "exclusive", None, None).unwrap();
+    db.begin_transaction(tx, "serializable", None, None)
+        .unwrap();
     let query = postcard::to_allocvec(&Query::from("notes").filter(jazz::query::eq(
         jazz::query::col("id"),
         jazz::query::lit(Value::Uuid(read.row_id.0)),
@@ -304,7 +305,7 @@ fn a_row_changed_after_an_exclusive_read_rejects_the_commit() {
         &none(),
     )
     .unwrap();
-    let commit = db.commit_transaction(tx, Some("exclusive")).unwrap();
+    let commit = db.commit_transaction(tx, Some("serializable")).unwrap();
     let conflict = commit.rejected.expect("the commit is rejected");
     assert_eq!(
         conflict.code,

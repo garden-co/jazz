@@ -19,7 +19,7 @@ export const scenarioPlan: readonly ScenarioResult[] = [
   ],
   [
     "foreground-write-transaction",
-    "JSI foreground commits and rolls back native mergeable/exclusive transactions",
+    "JSI foreground commits and rolls back native mergeable/serializable transactions",
   ],
   [
     "local-write-subscription",

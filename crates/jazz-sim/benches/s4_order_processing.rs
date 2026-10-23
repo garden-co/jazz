@@ -7,7 +7,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, SerializableTxOps, Transport};
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
@@ -811,7 +811,7 @@ async fn apply_jazz_op(
     now_ms: u64,
     relay_acceptance: &mut Histogram<u64>,
 ) -> Result<bool, jazz::db::Error> {
-    let tx = client.db.exclusive_tx().await?;
+    let tx = client.db.serializable_tx().await?;
     match op {
         Op::NewOrder {
             warehouse,
@@ -1090,7 +1090,7 @@ async fn apply_jazz_op(
         .outbound
         .borrow_mut()
         .pop_front()
-        .expect("db exclusive commit should upload a commit unit");
+        .expect("db serializable commit should upload a commit unit");
     if let SyncMessage::CommitUnit { tx, versions } = unit.clone() {
         let relay_start = Instant::now();
         let _ = now_ms;
@@ -1160,10 +1160,12 @@ fn open_clients(
                 inbound,
                 _upstream: upstream,
             };
-            client.relay_peer.set_ship_complete_exclusive_payloads(true);
+            client
+                .relay_peer
+                .set_ship_complete_serializable_payloads(true);
             client
                 .client_peer
-                .set_ship_complete_exclusive_payloads(true);
+                .set_ship_complete_serializable_payloads(true);
             for table in TABLES {
                 let prepared = client.db.prepare_query(&Query::from(table)).unwrap();
                 client

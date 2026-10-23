@@ -5,7 +5,7 @@
 One protocol carries everything between nodes. This chapter defines that peer
 protocol: how writes travel up as commit units, how fates and query-driven view
 updates travel down, how payloads are deduplicated and rehydrated, and how
-mergeable vs exclusive transactions are delivered. It ties together transactions
+mergeable vs serializable transactions are delivered. It ties together transactions
 (ch. 3), history (ch. 4), queries (ch. 6), and authorization (ch. 7); the
 deployment roles are chapter 9.
 
@@ -20,7 +20,7 @@ Invariant digest:
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
 - `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, or complete tx payload refs.
 - `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
-- `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
+- `INV-SYNC-15`: Serializable transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
 - `INV-SYNC-17`: A supporting set and its native payloads MUST include enough authorized deletion-register evidence to reconstruct the row’s visible presence or absence.
 - `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, branch key, row, transaction, and schema, and receivers MUST resolve the sender's record through their own stable physical mapping.
@@ -40,7 +40,7 @@ Invariant digest:
 - `INV-SYNC-34`: A subscription is settled only after its complete supporting set and exact native witnesses are validated for the selected authority usage. Reconnect, repair and recovery MUST re-establish that evidence before reporting settlement.
 - `INV-SYNC-35`: A receiver MUST finish installation of the complete supporting set and local IVM update before publication. Persisted fast-known-state evidence MUST NOT claim partial or non-durable native input installation.
 - `INV-SYNC-36`: Peer sync carries an exact authorized input closure, never authority-produced application terminal rows or ordered terminal operations. The receiver reconciles admitted authority inputs with tier-eligible local inputs and derives the only application terminal by running its local copy of the identified maintained Groove program.
-- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
+- `INV-TX-2`: Committing a serializable transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
 - `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
@@ -819,10 +819,10 @@ sets but never redacts an already-delivered local copy (`INV-SYNC-14`).
 
 Downstream delivery preserves view visibility, not transport completeness. A
 mergeable transaction may be delivered and applied **partially**: each visible
-mergeable version contributes independently (`INV-SYNC-16`). Exclusive payloads
+mergeable version contributes independently (`INV-SYNC-16`). Serializable payloads
 may also be partial at the transaction level and may be stored immediately, but
-each maintained subscription view exposes exclusive result members only when the
-payload required by that view is complete. This is a **view-complete exclusive
+each maintained subscription view exposes serializable result members only when the
+payload required by that view is complete. This is a **view-complete serializable
 payload**, not necessarily a complete transaction payload. Otherwise the payload
 remains stored but invisible for that view (`INV-SYNC-15`, ch. 3, ch. 7).
 

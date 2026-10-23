@@ -101,13 +101,13 @@ Invariant digest:
 - `INV-QUERY-10`: Include missing-target semantics MUST be local view/API behavior: `JoinMode::Inner` drops parents with unresolvable include targets, `JoinMode::Holes` keeps them, and `require_includes` tightens holes mode by requiring include matches without broadening payload material; sync MUST NOT drop readable parents solely because included targets are absent.
 - `INV-QUERY-11`: Local/unsettled query reads MUST return rows complete only relative to node-local visible-current knowledge.
 - `INV-QUERY-12`: Settled query reads on a subscriber MUST be answerable from the subscription's settled subscription result set; unresolvable result-set entries are an invariant violation rather than a degraded answer.
-- `INV-QUERY-13`: `tx_query` inside an open exclusive transaction MUST record a binding-sensitive `PredicateRead { shape_id, shape, binding_id, binding_values }`.
-- `INV-QUERY-14`: Exclusive predicate validation MUST reject an exclusive transaction when the shape/binding output set changed between `base_snapshot.global_base` and validation time, and MUST ignore irrelevant changes outside the shape.
+- `INV-QUERY-13`: `tx_query` inside an open serializable transaction MUST record a binding-sensitive `PredicateRead { shape_id, shape, binding_id, binding_values }`.
+- `INV-QUERY-14`: Serializable predicate validation MUST reject a serializable transaction when the shape/binding output set changed between `base_snapshot.global_base` and validation time, and MUST ignore irrelevant changes outside the shape.
 - `INV-QUERY-15`: Incremental query result-set updates MUST converge to the same typed result-member and program-fact state as a full rehydrate over the same committed state.
 - `INV-QUERY-16`: Same-drain result churn MUST be folded by net output-row outcome: enter-then-leave sends no stale add, leave-then-reenter replaces the old entry, and same-tx retract/assert churn sends no update.
 - `INV-QUERY-17`: When a row remains in a query result but its visible content version changes, result-set entries MUST track the new `TxId` even if projected cell values are identical.
-- `INV-QUERY-19`: Exclusive transaction view shipping MUST be view-atomic, not transport-atomic: a visible exclusive result for a maintained subscription view MUST include every exclusive version required by that view, but the `VersionBundle` MAY omit transaction versions outside that view.
-- `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or exclusive bundles, MUST NOT establish complete-transaction payload coverage.
+- `INV-QUERY-19`: Serializable transaction view shipping MUST be view-atomic, not transport-atomic: a visible serializable result for a maintained subscription view MUST include every serializable version required by that view, but the `VersionBundle` MAY omit transaction versions outside that view.
+- `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or serializable bundles, MUST NOT establish complete-transaction payload coverage.
 - `INV-QUERY-21`: Array subqueries are distinct from forward `Include` paths and are assembled by Groove's sole public output terminal into recursive root values. Public one-shot, subscription, and sync carriers MUST contain terminal roots or root-addressed structural edits, never a parallel relation-edge/row-batch representation. Child clauses affect only their slot unless an explicit requirement filters root membership.
 - `INV-QUERY-22`: Structured query output MUST be constructed only by the output terminal as an ordered tree. Initial hydration and resets carry complete roots; maintained changes carry stable-keyed root/path insert, update, remove, and move edits without a higher-level assembler.
 - `INV-QUERY-23`: A flat joined output occurrence MUST be identified by its ordered contributing source-row ids, not by its root row id; maintained delivery MUST address additions, removals, and replacements by that composite occurrence identity.
@@ -953,12 +953,12 @@ state as a reset `ViewUpdate` over the same committed history (`INV-QUERY-15`).
 Reset `ViewUpdate`s retain
 per-peer complete payload coverage (`INV-QUERY-7`). Payload dedup is per peer for
 complete transaction payloads: a complete payload already shipped to a peer is
-emitted at most once per update (`INV-QUERY-20`). Partial payloads, including exclusive
+emitted at most once per update (`INV-QUERY-20`). Partial payloads, including serializable
 payloads, do not establish complete-transaction payload coverage unless the peer
-has received all versions for the transaction. Exclusive `ViewUpdate` visibility
-is view-atomic: a bundle may carry the exclusive versions needed for the
+has received all versions for the transaction. Serializable `ViewUpdate` visibility
+is view-atomic: a bundle may carry the serializable versions needed for the
 maintained subscription view, and result members for that view are emitted only
-when that view's exclusive payload is complete (`INV-QUERY-19`, ch. 3).
+when that view's serializable payload is complete (`INV-QUERY-19`, ch. 3).
 
 A subscription MUST remain active until it is explicitly removed; it MUST NOT
 expire solely because a TTL elapses. Registration and re-registration are
@@ -1005,7 +1005,7 @@ subscriptions, accept the current source and any snapshot; they reject branch
 views with a "not supported yet" error. History queries keep their own branch
 selection.
 
-Inside an open exclusive transaction, `tx_query` records a binding-sensitive
+Inside an open serializable transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,
 `INV-QUERY-14`) compares the shape+binding output `(RowUuid, TxId)` set at
 `base_snapshot.global_base` against now.

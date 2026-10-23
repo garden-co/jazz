@@ -4579,7 +4579,7 @@ impl TxRef<'_> {
             return Err(Error::new(
                 ErrorCode::Query,
                 format!(
-                    "Reading a flat join of `{}` with {joined} is not supported in exclusive \
+                    "Reading a flat join of `{}` with {joined} is not supported in serializable \
                      transactions yet",
                     prepared.query.table
                 ),
@@ -4598,7 +4598,7 @@ impl TxRef<'_> {
                 ErrorCode::Query,
                 format!(
                     "Reading deleted `{}` rows together with {related} is not supported in \
-                     exclusive transactions yet",
+                     serializable transactions yet",
                     prepared.query.table
                 ),
             ));

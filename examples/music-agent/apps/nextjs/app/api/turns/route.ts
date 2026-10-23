@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     if (userTurn.role !== "user")
       return Response.json({ error: "only user turns get replies" }, { status: 400 });
     // Idempotent: a retried request gets the reply that already exists. Finding
-    // it, queueing a new one and moving the head are one exclusive transaction.
+    // it, queueing a new one and moving the head are one serializable transaction.
     const { turnId } = await queueAssistantTurn(
       (await backendJazzClient()).db,
       userTurn.conversationId,

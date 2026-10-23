@@ -316,7 +316,7 @@ this is neither row storage nor a server wire format. The key is
 Defaults are `dev` and `default`; the registry already includes the canonical
 application UUID, so app-name/UUID aliases share the same selection.
 
-Each read/transform/write runs synchronously under a native exclusive `flock`
+Each read/transform/write runs synchronously under a native serializable `flock`
 on `account-selection-v1.lock` in the platform-owned application storage root.
 JavaScript cannot supply this path. The lock spans separate runtimes/processes,
 rejects same-thread recursion, and releases on normal return, exception, or

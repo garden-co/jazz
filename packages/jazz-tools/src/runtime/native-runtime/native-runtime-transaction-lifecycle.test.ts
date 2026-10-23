@@ -84,7 +84,7 @@ function fakeDb<T extends object>(
   db: T,
 ): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
   type FakeOpenBatch = {
-    kind: "mergeable" | "exclusive";
+    kind: "mergeable" | "serializable";
     author?: Uint8Array;
   };
   const openBatches = new Map<string, FakeOpenBatch>();
@@ -650,7 +650,7 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
           all: () => encodeRows([]),
           beginTransaction: (
             _openTransactionId: string,
-            _kind: "mergeable" | "exclusive",
+            _kind: "mergeable" | "serializable",
             author?: Uint8Array,
           ) => {
             if (author) authors.push(new TextDecoder().decode(author));
@@ -693,7 +693,7 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
   expect(staged).toEqual(["todos"]);
 });
 
-it("binds a trusted-serving exclusive transaction to its opening identity", () => {
+it("binds a trusted-serving serializable transaction to its opening identity", () => {
   const alice = "00000000-0000-0000-0000-0000000000a1";
   const issuer = "https://issuer.example";
   const beganAs: string[] = [];
@@ -712,7 +712,7 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
         }) as unknown as {
           beginTransaction(
             openTransactionId: string,
-            kind: "mergeable" | "exclusive",
+            kind: "mergeable" | "serializable",
             author?: Uint8Array,
           ): void;
         };
@@ -736,10 +736,10 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
   );
 
   const tx = createOpenTransactionId();
-  runtime.beginTransaction("exclusive", tx, JSON.stringify({ issuer, user_id: alice }));
+  runtime.beginTransaction("serializable", tx, JSON.stringify({ issuer, user_id: alice }));
   runtime.insert(
     "todos",
-    { title: { type: "Text", value: "session-scoped exclusive write" } },
+    { title: { type: "Text", value: "session-scoped serializable write" } },
     JSON.stringify({ transaction_id: tx, session: { issuer, user_id: alice } }),
     "00000000-0000-0000-0000-000000000001",
   );
@@ -755,7 +755,7 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
       }),
       "00000000-0000-0000-0000-000000000002",
     ),
-  ).toThrow("Native runtime exclusive transaction cannot mix write identities");
+  ).toThrow("Native runtime serializable transaction cannot mix write identities");
 });
 
 it("uses the opening identity for trusted-serving transaction reads", async () => {
@@ -799,7 +799,7 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
 
   const transactionId = createOpenTransactionId();
   runtime.beginTransaction(
-    "exclusive",
+    "serializable",
     transactionId,
     JSON.stringify({ issuer, user_id: alice, claims: { team: "opening-team" } }),
   );
@@ -870,7 +870,7 @@ it("rejects a duplicate live OpenTransactionId without replacing its staged tran
   expect(staged).toEqual(["todos", "todos"]);
 });
 
-it("commits empty exclusive transactions, rejects empty mergeable transactions, and rejects unknown waits", async () => {
+it("commits empty serializable transactions, rejects empty mergeable transactions, and rejects unknown waits", async () => {
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () => fakeDb({}),
@@ -892,7 +892,7 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
   await runtime.rollbackTransaction(emptyMergeable);
 
   const openTransactionId = createOpenTransactionId();
-  runtime.beginTransaction("exclusive", openTransactionId);
+  runtime.beginTransaction("serializable", openTransactionId);
   const committed = await runtime.commitTransaction(openTransactionId);
   expect(committed).toBe("00000000000070008000000000000001");
   await expect(
@@ -981,7 +981,7 @@ it("closing a schema view does not close its owner's transaction", () => {
   expect(() => owner.commitTransaction(openBatchId)).not.toThrow();
 });
 
-it("binds the trusted-serving identity when an exclusive transaction begins", () => {
+it("binds the trusted-serving identity when a serializable transaction begins", () => {
   const alice = "00000000-0000-0000-0000-0000000000a1";
   const observed: Array<{ phase: "begin" | "commit"; author?: string }> = [];
   const runtime = new NativeRuntimeAdapter(
@@ -990,7 +990,7 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
         fakeDb({
           beginTransaction: (
             _openTransactionId: string,
-            _kind: "mergeable" | "exclusive",
+            _kind: "mergeable" | "serializable",
             author?: Uint8Array,
           ) =>
             observed.push({
@@ -1005,7 +1005,7 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
           ) => options?.rowId ?? new Uint8Array(16),
           commitTransaction: (
             _openTransactionId: string,
-            _kind?: "mergeable" | "exclusive",
+            _kind?: "mergeable" | "serializable",
             author?: Uint8Array,
           ) => {
             observed.push({ phase: "commit", author: author && new TextDecoder().decode(author) });
@@ -1026,13 +1026,13 @@ it("binds the trusted-serving identity when an exclusive transaction begins", ()
 
   const openTransactionId = createOpenTransactionId();
   runtime.beginTransaction(
-    "exclusive",
+    "serializable",
     openTransactionId,
     JSON.stringify({ issuer: "https://issuer.example", user_id: alice }),
   );
   runtime.insert(
     "todos",
-    { title: { type: "Text", value: "exclusive" } },
+    { title: { type: "Text", value: "serializable" } },
     JSON.stringify({
       transaction_id: openTransactionId,
       session: { issuer: "https://issuer.example", user_id: alice },
@@ -1176,9 +1176,9 @@ it("does not emit onMutationError when an active wait handles the rejection", as
 const CASCADE_ANCESTOR = "4f6c0b6f3a1e9d2c8b7a6f5e4d3c2b1a";
 it.each([
   [
-    "ExclusiveConflict (reason: Exclusive transaction conflicted with another write)",
-    "exclusive_conflict",
-    "Exclusive transaction conflicted with another write",
+    "SerializationConflict (reason: Serializable transaction conflicted with another write)",
+    "serialization_conflict",
+    "Serializable transaction conflicted with another write",
   ],
   [
     `Cascade { root: TxId { time: TxTime(7), node: NodeUuid(00000000-0000-0000-0000-000000000007) } } (reason: Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected)`,
@@ -1197,9 +1197,9 @@ it.each([
   ],
   // Older native bindings without the appended readable reason.
   [
-    "ExclusiveConflict",
-    "exclusive_conflict",
-    "Exclusive transaction conflicted with another write",
+    "SerializationConflict",
+    "serialization_conflict",
+    "Serializable transaction conflicted with another write",
   ],
 ])(
   "gives a readable reason for a %s wait rejection and keeps the core diagnostic",
@@ -1504,8 +1504,8 @@ it("keeps session-scoped transaction reads on the client-local native method", a
 it.each([
   ["mergeable", "update"],
   ["mergeable", "upsert"],
-  ["exclusive", "update"],
-  ["exclusive", "upsert"],
+  ["serializable", "update"],
+  ["serializable", "upsert"],
 ] as const)(
   "stages %s %s without synchronously reading a suspended owner's row",
   (kind, operation) => {

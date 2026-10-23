@@ -137,7 +137,7 @@ export function proveForegroundWriteAbi(
   const foreground = factory.openAttached(capability);
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
-  const requireTransaction = (kind: "mergeable" | "exclusive") => {
+  const requireTransaction = (kind: "mergeable" | "serializable") => {
     const response = execute({ type: "beginTransaction", kind });
     if (response.type !== "transactionOpened")
       throw new Error(`${kind} foreground transaction did not open`);
@@ -185,7 +185,7 @@ export function proveForegroundWriteAbi(
   if (retired.type !== "operationError")
     throw new Error("foreground accepted a terminal transaction handle");
 
-  const exclusive = requireTransaction("exclusive");
+  const exclusive = requireTransaction("serializable");
   const rollbackRowId = Uint8Array.from({ length: 16 }, () => 0x72);
   const rollbackInsert = execute({
     type: "insert",
