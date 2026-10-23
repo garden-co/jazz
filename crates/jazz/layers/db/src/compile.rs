@@ -721,10 +721,7 @@ impl<'a> Ctx<'a> {
                     "cardinality-matching requirements on scalar relations on SQLite",
                 ));
             }
-            conds.push(format!(
-                "{} = {outer}",
-                column_sql(child, &c, &array.inner_column)?
-            ));
+            conds.push(correlate(child, &c, &array.inner_column, &outer)?);
             wheres.push(format!(
                 "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
                 conds.join(" AND ")
@@ -1095,10 +1092,7 @@ impl<'a> Ctx<'a> {
         };
         let mut wheres = vec![
             format!("{alias}._del = 0"),
-            format!(
-                "{} = {correlated}",
-                column_sql(child, alias, &array.inner_column)?
-            ),
+            correlate(child, alias, &array.inner_column, &correlated)?,
         ];
         for filter in &array.filters {
             wheres.push(self.predicate(filter, child, alias)?);
@@ -1704,10 +1698,11 @@ impl<'a> Ctx<'a> {
                         self.policy_expr(policy, source, &s, None, session, depth - 1)?
                     }
                 };
+                // An array reference grants when it lists the row's id.
                 format!(
-                    "EXISTS (SELECT 1 FROM {} AS {s} WHERE {} = {alias}.id AND {s}._del = 0 AND {inner})",
+                    "EXISTS (SELECT 1 FROM {} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
                     self.source(source)?,
-                    column_sql(source, &s, via_column)?
+                    correlate(source, &s, via_column, &format!("{alias}.id"))?
                 )
             }
         })
@@ -2227,7 +2222,22 @@ fn is_uuid(table: &Table, column: &str) -> bool {
 }
 
 /// Whether `column` is an array column (nullable or not).
-fn is_array(table: &Table, column: &str) -> bool {
+/// A child row of `table` at `alias` correlates with `value` by `column`:
+/// equal to it, or for an array column (a reverse array relation),
+/// holding it.
+fn correlate(table: &Table, alias: &str, column: &str, value: &str) -> Result<String, Error> {
+    let sql = column_sql(table, alias, column)?;
+    if is_array(table, column) {
+        let e = format!("{alias}_e");
+        return Ok(format!(
+            "EXISTS (SELECT 1 FROM json_each({sql}) AS {e} WHERE {} = {value})",
+            array_element_id(&e)
+        ));
+    }
+    Ok(format!("{sql} = {value}"))
+}
+
+pub(crate) fn is_array(table: &Table, column: &str) -> bool {
     let Some(column) = table.column(column) else {
         return false;
     };

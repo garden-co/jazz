@@ -32,8 +32,12 @@ struct GroupKey {
     renames: String,
     sql: String,
     params: String,
-    /// Set only when the SQL depends on the identity's session.
+    /// Set only when the SQL depends on the identity's session (array
+    /// relations, read as the identity, always may).
     identity: Option<String>,
+    /// The array relations nested in each row: queries that differ only
+    /// in them compile to the same root SQL.
+    relations: String,
 }
 
 struct Member {
@@ -256,7 +260,9 @@ impl Inner {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
-            identity: session_used.then(|| format!("{identity:?}")),
+            identity: (session_used || !prepared.query.array_subqueries.is_empty())
+                .then(|| format!("{identity:?}")),
+            relations: format!("{:?}", prepared.query.array_subqueries),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
