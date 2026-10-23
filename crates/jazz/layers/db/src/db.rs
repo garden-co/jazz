@@ -437,6 +437,9 @@ pub struct FileOptions {
     /// builds register theirs (IndexedDB, OPFS) before opening.
     pub vfs: Option<&'static str>,
     pub journal: Journal,
+    /// Page size a new file is created with (`None`: SQLite's default). A
+    /// file that exists keeps the size it was created with.
+    pub page_size: Option<u32>,
 }
 
 /// How the file journals its commits.
@@ -463,6 +466,7 @@ impl Default for FileOptions {
             cache_kib: 8 * 1024,
             vfs: None,
             journal: Journal::Wal,
+            page_size: None,
         }
     }
 }
@@ -801,6 +805,11 @@ impl Db {
         } else {
             " PRAGMA cache_spill = OFF;"
         };
+        // Before anything writes: a new file takes it on creation.
+        if let Some(page_size) = options.page_size {
+            conn.execute_batch(&format!("PRAGMA page_size = {page_size}"))
+                .map_err(storage)?;
+        }
         // `journal_mode` answers with a row, so it is queried, not batched.
         let mode: String = conn
             .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
