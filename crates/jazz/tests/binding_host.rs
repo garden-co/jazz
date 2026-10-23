@@ -800,6 +800,71 @@ fn a_tab_whose_write_the_server_refuses_reverts_to_the_servers_row() {
 }
 
 #[test]
+fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let open = |node: u8| {
+        let identity = identity(node);
+        let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
+        Binding::new(db, identity, false)
+    };
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let worker = open(0xe0);
+    let refused = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = std::rc::Rc::clone(&refused);
+    *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _| {
+        seen.borrow_mut().push(tx_id.clone());
+    }));
+    worker.set_remote_link_hint("live").unwrap();
+    let mut up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, mut tab_down) = tab_over(&worker, open(0xe1));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let write = tab.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, tab.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    // Changed offline through the worker by a tab that then goes away.
+    up.close();
+    let update = tab
+        .update("notes", &row, &title("changed"), &none())
+        .unwrap();
+    pump(&[(&tab_up, &tab_down)]);
+    assert_eq!(titles(&worker), ["changed"]);
+    tab_down.close();
+
+    // The worker uploads it once it is back, and the server refuses it.
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    pump(&[(&up, &down)]);
+    assert_eq!(titles(&worker), ["kept"]);
+    assert_eq!(*refused.borrow(), [update.tx_id]);
+}
+
+#[test]
 fn a_tabs_local_reads_are_its_workers_store() {
     let server = authority();
     let worker = open(0xa8);

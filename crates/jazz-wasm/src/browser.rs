@@ -15,6 +15,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use jazz::db::{Db, DbConfig, FileOptions, Journal};
+use sha2::{Digest, Sha256};
 use sqlite_wasm_vfs::relaxed_idb::{self, Preload, RelaxedIdbCfgBuilder, RelaxedIdbUtil};
 use sqlite_wasm_vfs::sahpool::{self, OpfsSAHPoolCfgBuilder};
 use wasm_bindgen::prelude::*;
@@ -40,8 +41,9 @@ pub(crate) struct StoreSpec {
 impl StoreSpec {
     /// `storage` is `{ backend?: "indexeddb" | "opfs", path?: string }`, or
     /// `undefined` for the IndexedDB default. Without a path the file is
-    /// named after the worker's storage owner.
-    pub(crate) fn from_js(storage: &JsValue, storage_owner: &str) -> Result<Self, JsValue> {
+    /// named after `database`, the physical database name the worker
+    /// admitted (one per app, environment, auth scope and dbName).
+    pub(crate) fn from_js(storage: &JsValue, database: &str) -> Result<Self, JsValue> {
         let field = |name: &str| -> Result<Option<String>, JsValue> {
             if storage.is_undefined() || storage.is_null() {
                 return Ok(None);
@@ -66,18 +68,12 @@ impl StoreSpec {
         };
         let path = match field("path")? {
             Some(path) => path,
+            // Hashed: the physical name is long and holds characters a VFS
+            // may not take.
             None => {
-                let owner: String = storage_owner
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                format!("jazz-{owner}.sqlite")
+                let digest = Sha256::digest(database.as_bytes());
+                let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+                format!("jazz-{hex}.sqlite")
             }
         };
         // Both VFSes key files by absolute name.

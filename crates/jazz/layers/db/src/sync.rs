@@ -2247,6 +2247,33 @@ impl Inner {
         Ok(())
     }
 
+    /// The sessions' commits this store's own commit `seq` carries, as it
+    /// accepted them through a relay.
+    fn relayed_origins(&self, seq: u64) -> Result<Vec<([u8; 16], u64)>, Error> {
+        let me = self.identity.node.as_bytes().to_vec();
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1 AND node != ?2")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(rusqlite::params![seq as i64, me], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(storage)?;
+        let mut origins = Vec::new();
+        for row in rows {
+            let (node, tx) = row.map_err(storage)?;
+            let node: [u8; 16] = node.try_into().map_err(|_| {
+                Error::new(
+                    ErrorCode::Storage,
+                    "a settled commit's node is not 16 bytes",
+                )
+            })?;
+            origins.push((node, tx as u64));
+        }
+        Ok(origins)
+    }
+
     fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<u64>>, Error> {
         match self.conn.query_row(
             "SELECT seq FROM _jazz_settled WHERE node = ?1 AND tx = ?2",
@@ -3346,12 +3373,29 @@ impl Db {
                         );
                         let result = result.map_err(from_wire_error);
                         // A relayed session's refusal is that session's to
-                        // report, not this store's.
+                        // report, not this store's. One whose session is gone
+                        // is reported as the commit the session made.
                         let relayed = client.relayed_fates.contains_key(&tx);
-                        if let (Err(error), Some(rejections), false) =
-                            (&result, inner.upstream_rejections.as_mut(), relayed)
-                        {
-                            rejections.push((tx, error.clone()));
+                        if let Err(error) = &result {
+                            let origins = inner.relayed_origins(tx)?;
+                            for &(node, session_tx) in &origins {
+                                let refused = Err(wire_error(error));
+                                inner.record_fate(node, session_tx, &refused)?;
+                                inner.record_settled(node, session_tx, None)?;
+                            }
+                            let me = *inner.identity.node.as_bytes();
+                            if let (Some(rejections), false) =
+                                (inner.upstream_rejections.as_mut(), relayed)
+                            {
+                                if origins.is_empty() {
+                                    rejections.push((me, tx, error.clone()));
+                                }
+                                rejections.extend(
+                                    origins
+                                        .into_iter()
+                                        .map(|(node, t)| (node, t, error.clone())),
+                                );
+                            }
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.fates.insert(tx, result);

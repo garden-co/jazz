@@ -407,7 +407,7 @@ struct Inner {
     authority: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
-    upstream_rejections: Option<Vec<(u64, Error)>>,
+    upstream_rejections: Option<Vec<([u8; 16], u64, Error)>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Rows written since the last server tick (only while serving).
@@ -967,9 +967,10 @@ impl Db {
         inner.upstream_rejections.get_or_insert_with(Vec::new);
     }
 
-    /// The uploads the authority refused since the last call, by commit
-    /// seq (empty unless [`Db::track_upstream_rejections`] was called).
-    pub fn take_upstream_rejections(&self) -> Vec<(u64, Error)> {
+    /// The uploads the authority refused since the last call, by the node
+    /// and seq of the commit (this store's, or the relayed session's that
+    /// wrote it) (empty unless [`Db::track_upstream_rejections`] was called).
+    pub fn take_upstream_rejections(&self) -> Vec<([u8; 16], u64, Error)> {
         self.inner
             .borrow_mut()
             .upstream_rejections

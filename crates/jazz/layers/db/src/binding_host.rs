@@ -663,9 +663,13 @@ impl Hooks {
     }
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
-    fn report(&self, node: NodeUuid, rejections: Vec<(u64, Error)>) {
-        for (seq, error) in rejections {
-            let claim = self.claims.borrow_mut().remove(&seq);
+    /// A relayed session's refused commit is reported under its own id.
+    fn report(&self, node: NodeUuid, rejections: Vec<([u8; 16], u64, Error)>) {
+        for (writer, seq, error) in rejections {
+            let writer = NodeUuid::from_bytes(writer);
+            let claim = (writer == node)
+                .then(|| self.claims.borrow_mut().remove(&seq))
+                .flatten();
             if claim
                 .and_then(|claim| claim.upgrade())
                 .is_some_and(|claim| claim.get())
@@ -673,7 +677,7 @@ impl Hooks {
                 continue;
             }
             if let Some(rejected) = self.rejected.borrow().as_ref() {
-                let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), node));
+                let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
                 rejected(&tx_id, &error);
             }
         }
@@ -803,11 +807,6 @@ impl Binding {
     /// The subject `bytes` (canonical author JSON) names: an ordinary
     /// author, or a local-first account this backend admitted.
     fn author_of(&self, bytes: &[u8]) -> HostResult<AuthorSubject> {
-        // The runtime's own author was proven when it opened, reserved
-        // issuer or not.
-        if bytes == self.author.canonical().as_bytes() {
-            return Ok(self.author);
-        }
         match author(bytes) {
             Ok(author) => Ok(author),
             Err(error) => {
@@ -853,13 +852,8 @@ impl Binding {
     /// Attributed writes are a privilege-escalation surface: their author is
     /// provenance while admission stays SYSTEM, so only backends make them.
     fn checked(&self, identity: WriteIdentity) -> HostResult<WriteIdentity> {
-        match identity {
-            WriteIdentity::Attribution(_) => self.require_trusted_backend()?,
-            // A write as the runtime's own session is the database's own.
-            WriteIdentity::Session(author) if author == self.author => {
-                return Ok(WriteIdentity::Database);
-            }
-            _ => {}
+        if matches!(identity, WriteIdentity::Attribution(_)) {
+            self.require_trusted_backend()?;
         }
         Ok(identity)
     }
