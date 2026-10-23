@@ -899,7 +899,48 @@ pub(crate) fn branch_key(values: &BTreeMap<String, crate::protocol::BranchColumn
     key
 }
 
+/// The branch columns of a branch key, as [`branch_key`] encoded them.
+fn branch_key_values(key: &[u8]) -> BTreeMap<String, crate::protocol::BranchColumnValue> {
+    let mut values = BTreeMap::new();
+    let mut rest = key;
+    let take = |rest: &mut &[u8]| -> Option<Vec<u8>> {
+        let len = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+        let bytes = rest.get(4..4 + len)?.to_vec();
+        *rest = &rest[4 + len..];
+        Some(bytes)
+    };
+    while !rest.is_empty() {
+        let (Some(name), Some(value)) = (take(&mut rest), take(&mut rest)) else {
+            break;
+        };
+        values.insert(
+            String::from_utf8_lossy(&name).into_owned(),
+            crate::protocol::BranchColumnValue(value),
+        );
+    }
+    values
+}
+
 impl Table {
+    /// The branch key a row under `key` would move to if `cells` were
+    /// written over it: its branch columns, those in `cells` replaced.
+    pub(crate) fn branch_key_after(&self, key: &[u8], cells: &BTreeMap<String, Value>) -> Vec<u8> {
+        let mut values = branch_key_values(key);
+        for column in &self.branch_by {
+            if let Some(value) = cells.get(column) {
+                let mut value = value.clone();
+                while let Value::Nullable(Some(inner)) = value {
+                    value = *inner;
+                }
+                values.insert(
+                    column.clone(),
+                    crate::protocol::BranchColumnValue::from(value),
+                );
+            }
+        }
+        branch_key(&values)
+    }
+
     /// The branch key a row with these cells lives under.
     pub(crate) fn row_branch_key(&self, cells: &BTreeMap<String, Value>) -> Vec<u8> {
         let mut values = BTreeMap::new();

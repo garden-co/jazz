@@ -700,6 +700,15 @@ pub(crate) enum Support {
     },
 }
 
+/// A snapshot whose history this store has not observed (yet): it may be
+/// readable once the store syncs further.
+fn snapshot_unavailable(why: &str) -> Error {
+    Error::new(
+        crate::options::ErrorCode::NotObserved,
+        format!("Snapshot history is unavailable in this store: {why}"),
+    )
+}
+
 /// Whether a reachability traversal is a gather the replica can evaluate
 /// from the result and its edges ([`Support::Reach`]): seeded by rows of
 /// the root table that are themselves in the result (no filter after the
@@ -1937,8 +1946,8 @@ impl Inner {
         // the authority state the reference was captured at.
         let horizon = self.client.as_ref().map_or(self.seq, |client| client.known);
         if snapshot.global_base.0 > horizon {
-            return Err(unsupported(
-                "reading a snapshot newer than this replica's synced state",
+            return Err(snapshot_unavailable(
+                "it was captured past the authority state this store has synced",
             ));
         }
         let mut cut = Cut::at(snapshot.global_base.0);
@@ -1966,8 +1975,8 @@ impl Inner {
                     continue;
                 }
             }
-            return Err(unsupported(
-                "reading a snapshot that names another replica's commits not yet settled here",
+            return Err(snapshot_unavailable(
+                "it names another replica's commits not yet settled here",
             ));
         }
         Ok(cut)

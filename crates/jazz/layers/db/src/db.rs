@@ -552,6 +552,44 @@ pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
 
+const ROW_ALREADY_DELETED: &str = "row already deleted: ";
+const ROW_ALREADY_EXISTS: &str = "encoding error: object already exists: ";
+
+const MISSING_REQUIRED: &str = "missing required field ";
+const BRANCH_MOVE: &str = "invalid mergeable commit: branch column does not match exact branch key";
+
+/// A new row (or restored content) without a value for a required column.
+fn missing_required(table: &str, column: &str) -> Error {
+    rejected(format!("{MISSING_REQUIRED}`{column}` in `{table}`"))
+}
+
+/// A write to (or an insert reusing the id of) a deleted row.
+fn row_already_deleted(row: RowUuid) -> Error {
+    rejected(format!("{ROW_ALREADY_DELETED}{}", row.0))
+}
+
+/// An insert reusing a live row's id.
+fn row_already_exists(row: RowUuid) -> Error {
+    rejected(format!("{ROW_ALREADY_EXISTS}{}", row.0))
+}
+
+impl Error {
+    /// Whether a write was refused for the stored state of its row rather
+    /// than for its arguments: its id is deleted or taken, it would create
+    /// a row without a required value (an upsert may create or patch), or
+    /// it would move a row to another branch. A host reports it through
+    /// the write's handle, as an apply-time rejection, not from the call.
+    pub fn is_apply_time_rejection(&self) -> bool {
+        match self.code {
+            ErrorCode::WriteRejected => [ROW_ALREADY_DELETED, ROW_ALREADY_EXISTS, MISSING_REQUIRED]
+                .iter()
+                .any(|prefix| self.message.starts_with(prefix)),
+            ErrorCode::Schema => self.message == BRANCH_MOVE,
+            _ => false,
+        }
+    }
+}
+
 /// The reason a policy rejects a write, leading its message (the code
 /// stays `WriteRejected`): authority rejections are reported by it.
 pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
@@ -2677,10 +2715,10 @@ impl Inner {
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
         let cells = self.merged_cells(table, row, None, cells)?;
-        if self.existing(&table.stored, row, &key)?.is_some() {
-            return Err(rejected(format!(
-                "row {row:?} already exists in `{table_name}`"
-            )));
+        match self.existing(&table.stored, row, &key)? {
+            Some((_, true)) => return Err(row_already_deleted(row)),
+            Some((_, false)) => return Err(row_already_exists(row)),
+            None => {}
         }
         let mut names = vec!["id".to_owned(), "_b".to_owned(), "_seq".to_owned()];
         let mut values = vec![
@@ -2694,10 +2732,7 @@ impl Inner {
                 (None, Some(default)) => self.bind_cell(column, default)?,
                 (None, None) if column.nullable() => Sql::Null,
                 (None, None) => {
-                    return Err(rejected(format!(
-                        "`{table_name}.{}` is required",
-                        column.name
-                    )));
+                    return Err(missing_required(table_name, &column.name));
                 }
             };
             names.push(quote(&column.stored));
@@ -2777,7 +2812,19 @@ impl Inner {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
         Self::validate_cells(table, &cells)?;
-        let key = match self.locate(table, row, target)? {
+        let located = self.locate(table, row, target)?;
+        // A row's branch columns are its branch key: a write cannot move it
+        // to another branch.
+        if let Located::Row { key, .. } | Located::Inherited { to: key, .. } = &located
+            && table
+                .branch_by
+                .iter()
+                .any(|column| cells.contains_key(column))
+            && table.branch_key_after(key, &cells) != *key
+        {
+            return Err(schema_error(BRANCH_MOVE));
+        }
+        let key = match located {
             Located::Absent { cells: branch, .. } if upsert => {
                 let mut cells = cells;
                 cells.extend(branch);
@@ -2788,11 +2835,19 @@ impl Inner {
             Located::Absent { .. } if self.client.is_some() => {
                 return Ok(WriteHandle { row, seq });
             }
-            Located::Absent { .. } | Located::Row { deleted: true, .. } if !upsert => {
+            Located::Absent { .. } if !upsert => {
                 return Err(rejected(format!(
                     "{verb} target {row:?} does not exist in `{table_name}`"
                 )));
             }
+            // A deleted row's id stays reserved: only a restore revives it.
+            // A delete staged earlier in this transaction is no tombstone
+            // yet, so an upsert replaces it.
+            Located::Row {
+                deleted: true,
+                seq: current,
+                ..
+            } if !upsert || current != seq => return Err(row_already_deleted(row)),
             Located::Row {
                 key,
                 seq: current,
@@ -2922,6 +2977,7 @@ impl Inner {
             }
             // As for a patch: a replica leaves an unknown row to the authority.
             Located::Absent { .. } if self.client.is_some() => {}
+            Located::Row { deleted: true, .. } => return Err(row_already_deleted(row)),
             _ => {
                 return Err(rejected(format!(
                     "DELETE target {row:?} does not exist in `{table_name}`"
@@ -2965,10 +3021,7 @@ impl Inner {
                     (None, Some(default)) => default.clone(),
                     (None, None) if column.nullable() => Value::Nullable(None),
                     (None, None) => {
-                        return Err(rejected(format!(
-                            "`{table_name}.{}` is required",
-                            column.name
-                        )));
+                        return Err(missing_required(table_name, &column.name));
                     }
                 };
                 cells.insert(column.name.clone(), value);

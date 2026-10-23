@@ -595,6 +595,9 @@ pub struct Write {
     pub tx_id: TransactionId,
     /// The local commit seq, for [`Binding::wait_for`].
     pub seq: u64,
+    /// Why the write was refused when it applied, if it was: its waits
+    /// fail with this, and nothing was committed.
+    pub rejected: Option<Error>,
 }
 
 // ---- the binding ------------------------------------------------------------------
@@ -670,10 +673,27 @@ impl Binding {
         }
     }
 
+    /// A write's receipt. A refusal decided by the row's stored state (see
+    /// [`Error::is_apply_time_rejection`]) is an apply-time rejection:
+    /// the call returns a receipt for a rejected transaction, and the
+    /// host reports it through the write's waits.
     fn write(&self, write: Result<WriteHandle, Error>) -> HostResult<Write> {
-        let write = write?;
+        let write = match write {
+            Err(error) if error.is_apply_time_rejection() => return self.rejected(error),
+            write => write?,
+        };
         self.hooks.after_write();
         self.receipt(write.row_uuid(), write.mergeable_tx_id())
+    }
+
+    fn rejected(&self, error: Error) -> HostResult<Write> {
+        // Rejected transactions take ids from the top of this node's range,
+        // which commits (counted from the bottom) never reach.
+        static REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut write = self.receipt(RowUuid::from_bytes([0; 16]), u64::MAX - n)?;
+        write.rejected = Some(error);
+        Ok(write)
     }
 
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
@@ -684,6 +704,7 @@ impl Binding {
             row_id,
             tx_id: TransactionId::from_committed_tx(tx_id),
             seq,
+            rejected: None,
         })
     }
 
@@ -1097,6 +1118,17 @@ impl Binding {
             db.wait_for_transaction(seq, tier).await?;
             Ok(())
         })))
+    }
+
+    /// Resolve once `write` reached `tier`; fail at once with its
+    /// rejection, if it was rejected.
+    pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        if let Some(error) = &write.rejected {
+            binding_args::durability_tier(tier)?;
+            let error = error.clone();
+            return Ok(Box::pin(async move { Err(HostError::Engine(error)) }));
+        }
+        self.wait_for(write.seq, tier)
     }
 
     /// Resolve once every local write so far reached the server. Local
