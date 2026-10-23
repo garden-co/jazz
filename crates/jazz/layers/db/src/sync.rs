@@ -589,6 +589,11 @@ pub(crate) struct Gate {
     pub(crate) live: bool,
     /// `None`: wait for the server however long (the Remote tier).
     pub(crate) deadline: Option<Instant>,
+    /// A fresh foreground must receive its owner's cache before any fallback.
+    pub(crate) wait_for_owner: bool,
+    pub(crate) require_global: bool,
+    pub(crate) _wake: Option<Rc<Instant>>,
+    pub(crate) _attempt_wake: Option<Rc<Instant>>,
 }
 
 impl Gate {
@@ -601,7 +606,10 @@ impl Gate {
     }
 
     pub(crate) fn open(&self) -> bool {
-        if self.answered.get() {
+        if self.wait_for_owner && !self.answered.get() {
+            return false;
+        }
+        if self.answered.get() && (!self.require_global || self.global.get()) {
             return true;
         }
         let link = self.hint.get();
@@ -625,12 +633,15 @@ pub(crate) enum SettledBy {
     /// By the upstream's answer, and whether that answer is the global
     /// authority's.
     Remote(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
+    /// The relay can answer from its cache immediately, but global settlement
+    /// still requires the upstream authority's answer.
+    Relay(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
 }
 
 impl SettledBy {
     pub(crate) fn get(&self) -> bool {
         match self {
-            SettledBy::Always(_) => true,
+            SettledBy::Always(_) | SettledBy::Relay(..) => true,
             SettledBy::Never => false,
             SettledBy::Remote(answered, _) => answered.get(),
         }
@@ -641,7 +652,9 @@ impl SettledBy {
         let global = match self {
             SettledBy::Always(authority) => *authority,
             SettledBy::Never => false,
-            SettledBy::Remote(answered, global) => answered.get() && global.get(),
+            SettledBy::Remote(answered, global) | SettledBy::Relay(answered, global) => {
+                answered.get() && global.get()
+            }
         };
         if global {
             DurabilityTier::Global
@@ -2943,6 +2956,8 @@ impl Db {
             client.outbox.push(message);
             (id, client.connection)
         };
+        let _deadline = self.read_deadline(deadline);
+        let _attempt_deadline = self.read_attempt_deadline();
         let _request = FetchRequest {
             inner: self.inner.clone(),
             id,
@@ -3330,6 +3345,12 @@ impl Db {
                         global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
+                        if global && through >= LOCAL_BASE {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "global read settlement carries an optimistic sequence",
+                            ));
+                        }
                         client.known = client.known.max(through);
                         let Some(key) = client.remote_ids.get(&id).cloned() else {
                             continue;
@@ -3815,7 +3836,12 @@ impl Db {
         self.progress_scoped_fetches();
         self.notify();
         let mut inner = self.inner.borrow_mut();
-        let through = inner.seq;
+        // A relay's optimistic sequence is not an authority cut. Even its
+        // owner-local answer carries at most the accepted prefix it has seen.
+        let through = inner
+            .client
+            .as_ref()
+            .map_or(inner.seq, |client| client.known);
         let mut cache: HashMap<(String, RowUuid, u64), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
@@ -4571,7 +4597,7 @@ impl Db {
                     },
                     match &relayed {
                         Some((answered, _, global)) => {
-                            SettledBy::Remote(answered.clone(), global.clone())
+                            SettledBy::Relay(answered.clone(), global.clone())
                         }
                         None => SettledBy::Always(authority),
                     },
@@ -5337,6 +5363,49 @@ impl Db {
             return Ok(result(rows));
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
+        if self.inner().non_durable
+            && self.is_client()
+            && opts.tier != ReadTier::LocalOnly
+            && !frozen
+        {
+            if prepared.request_claims.is_some()
+                || author.is_some_and(|id| {
+                    id != self.inner().identity.author && id != AuthorSubject::SYSTEM
+                })
+            {
+                return Err(unsupported(
+                    "request-scoped foreground reads through a storage owner",
+                ));
+            }
+            // A temporary normal subscription provides both owner-local and
+            // authority settlement, including an empty answer. Its drop releases
+            // the upstream attachment on success, refusal or cancellation.
+            let mut stream = self.open_subscription(&prepared, author, opts)?;
+            let rows = poll_fn(|_| {
+                if let Some(error) = stream
+                    .refused
+                    .as_ref()
+                    .and_then(|slot| slot.borrow().clone())
+                {
+                    return Poll::Ready(Err(error));
+                }
+                match stream.try_next_event() {
+                    Some(SubscriptionEvent::Delta { added, .. }) => {
+                        Poll::Ready(Ok(added.into_iter().map(|row| row.row).collect()))
+                    }
+                    Some(SubscriptionEvent::Rejected { reason }) => {
+                        Poll::Ready(Err(Error::new(ErrorCode::Query, reason)))
+                    }
+                    Some(SubscriptionEvent::Closed) => Poll::Ready(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "foreground owner read closed before answering",
+                    ))),
+                    None => Poll::Pending,
+                }
+            })
+            .await?;
+            return Ok(result(rows));
+        }
         if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
@@ -5412,9 +5481,11 @@ impl Db {
 impl Db {
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
-    /// whatever its tier, waits for the upstream's answer (the relay's
-    /// stored view, or its upstream's once that answers).
+    /// unless explicitly LocalOnly, waits for its storage owner's answer.
+    /// Authority waits separately require global settlement. Foreground writes
+    /// are unsupported until relay forwarding and durability are implemented.
     pub fn set_non_durable_client(&self) {
+        self.ensure_client();
         self.inner.borrow_mut().non_durable = true;
     }
 
@@ -5422,8 +5493,62 @@ impl Db {
         unimplemented!("coverage attachments are not modelled on SQLite")
     }
 
-    pub fn set_tick_scheduler(&self, _scheduler: Option<Rc<dyn TickScheduler>>) {
-        unimplemented!("host tick schedulers are not supported on SQLite yet")
+    pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.inner.borrow_mut().scheduler = scheduler;
+        self.schedule_read_deadlines();
+    }
+
+    pub(crate) fn read_deadline(&self, at: Option<Instant>) -> Option<Rc<Instant>> {
+        let deadline = at.map(Rc::new)?;
+        self.inner
+            .borrow_mut()
+            .read_deadlines
+            .push(Rc::downgrade(&deadline));
+        self.schedule_read_deadlines();
+        Some(deadline)
+    }
+
+    pub(crate) fn read_attempt_deadline(&self) -> Option<Rc<Instant>> {
+        let link = self.link_hint()?.get();
+        self.read_deadline(
+            (link.hint == RemoteLinkHint::Attempting)
+                .then_some(link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW),
+        )
+    }
+
+    pub(crate) fn schedule_pending_tick(&self) {
+        let scheduler = self.inner.borrow().scheduler.clone();
+        if let Some(scheduler) = scheduler {
+            scheduler.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    /// Hosts may keep only their earliest timer. Every tick re-arms the next
+    /// outstanding deadline, even if the read whose timer fired was cancelled.
+    pub(crate) fn schedule_read_deadlines(&self) {
+        let (scheduler, next) = {
+            let mut inner = self.inner.borrow_mut();
+            let now = Instant::now();
+            let mut next = None;
+            inner.read_deadlines.retain(|weak| {
+                let Some(deadline) = weak.upgrade() else {
+                    return false;
+                };
+                if *deadline > now {
+                    next = Some(next.map_or(*deadline, |at: Instant| at.min(*deadline)));
+                    true
+                } else {
+                    false
+                }
+            });
+            (inner.scheduler.clone(), next)
+        };
+        if let (Some(scheduler), Some(next)) = (scheduler, next) {
+            // Round up: an early timer must not consume the final sub-ms wait.
+            let nanos = next.saturating_duration_since(Instant::now()).as_nanos();
+            let millis = nanos.div_ceil(1_000_000).max(1).min(u128::from(u64::MAX)) as u64;
+            scheduler.schedule_tick_after(millis);
+        }
     }
 }
 

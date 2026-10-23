@@ -24,7 +24,10 @@ use futures_util::future::{AbortHandle, Abortable};
 use jazz::binding_host::{
     self, Binding, EventChunk, HostError, HostObject, HostResult, OpenAs, Write,
 };
-use jazz::db::{block_on, Error, LargeValueUpdate, SubscriptionEvent, SubscriptionStream};
+use jazz::db::{
+    block_on, Error, LargeValueUpdate, SubscriptionEvent, SubscriptionStream, TickScheduler,
+    TickUrgency,
+};
 use jazz::ids::AuthorSubject;
 use jazz::tx::DurabilityTier;
 use wasm_bindgen::prelude::*;
@@ -408,6 +411,30 @@ struct Host {
     store: RefCell<Option<browser::Store>>,
 }
 
+impl TickScheduler for Host {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        let name = match urgency {
+            TickUrgency::Immediate => "immediate",
+            TickUrgency::Deferred => "deferred",
+            TickUrgency::AfterCurrentTurn => "after-current-turn",
+        };
+        let callback = self.tick_scheduler.borrow().clone();
+        if let Some(callback) = callback {
+            let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(name));
+        }
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        let callback = self.tick_scheduler.borrow().clone();
+        if let Some(callback) = callback {
+            let _ = callback.call1(
+                &JsValue::NULL,
+                &JsValue::from_str(&format!("after:{delay_ms}")),
+            );
+        }
+    }
+}
+
 impl Host {
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (a no-op without one).
@@ -456,6 +483,7 @@ impl WasmDbInner {
                 let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
             }
         }));
+        binding.db.set_tick_scheduler(Some(host.clone()));
         Self { binding, host }
     }
 
@@ -1374,6 +1402,10 @@ impl WasmDb {
     pub fn set_tick_scheduler(&self, callback: js_sys::Function) {
         if let Ok(inner) = self.open_inner() {
             *inner.host.tick_scheduler.borrow_mut() = Some(callback);
+            inner
+                .binding
+                .db
+                .set_tick_scheduler(Some(inner.host.clone()));
         }
     }
 
@@ -1548,12 +1580,13 @@ impl WasmDb {
         })
     }
 
-    /// The optimistic in-memory side of a browser client/worker pair needs
-    /// the relay tier, which is not built on SQLite yet.
+    /// Mark an in-memory foreground whose local-first reads must first receive
+    /// its storage owner's cache. Authority waits remain separately qualified.
+    /// Writes remain unsupported until worker forwarding and durability are ported.
     #[wasm_bindgen(js_name = setNonDurableClient)]
     pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
-        self.open_inner()?;
-        Err(not_supported("a non-durable client over a relaying worker"))
+        self.open_inner()?.binding.db.set_non_durable_client();
+        Ok(())
     }
 
     /// Report what the host knows about the path to the authoritative server

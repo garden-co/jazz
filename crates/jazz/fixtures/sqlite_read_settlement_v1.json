@@ -1,0 +1,6 @@
+{
+  "role": "jazz.sqlite.sync.read-settlement.v1",
+  "version": 1,
+  "local": "0b07090000",
+  "global": "0b07090001"
+}
