@@ -1,5 +1,6 @@
 //! The `Db` facade: Jazz's public database API over one SQLite connection.
 
+use crate::values::CachedRow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
@@ -877,7 +878,7 @@ impl Db {
         for table in physical.tables.keys() {
             for name in [table.clone(), format!("{table}__h")] {
                 let max: Option<i64> = conn
-                    .query_row(
+                    .cached_row(
                         &format!("SELECT MAX(_seq) FROM {}", quote(&name)),
                         [],
                         |r| r.get(0),
@@ -1022,7 +1023,7 @@ impl Db {
         let inner = self.inner();
         inner
             .conn
-            .query_row(
+            .cached_row(
                 "SELECT (SELECT count(*) FROM _jazz_lv_node), \
                  (SELECT count(*) FROM _jazz_lv_root WHERE durable > 0)",
                 [],
@@ -1293,7 +1294,7 @@ impl Db {
         );
         let stamps: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = inner
             .conn
-            .query_row(&sql, [row.0.as_bytes().to_vec()], |r| {
+            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
             })
             .optional()
@@ -1325,7 +1326,7 @@ impl Db {
     pub fn interned_authors_for_test(&self) -> usize {
         self.inner()
             .conn
-            .query_row("SELECT COUNT(*) FROM _jazz_authors", [], |row| {
+            .cached_row("SELECT COUNT(*) FROM _jazz_authors", [], |row| {
                 row.get::<_, i64>(0)
             })
             .map_or(0, |count| count as usize)
@@ -2174,7 +2175,7 @@ impl Inner {
         );
         let cell: Sql = self
             .conn
-            .query_row(&sql, [row.0.as_bytes().to_vec()], |r| r.get(0))
+            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| r.get(0))
             .map_err(storage)?;
         Ok(from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None)))
     }
@@ -2191,7 +2192,7 @@ impl Inner {
             "SELECT _seq, _del FROM {} WHERE id = ?1 AND _b = ?2",
             quote(table)
         );
-        match self.conn.query_row(
+        match self.conn.cached_row(
             &sql,
             rusqlite::params![row.0.as_bytes().to_vec(), key],
             |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? != 0)),
@@ -2229,7 +2230,7 @@ impl Inner {
         );
         let deleted: i64 = self
             .conn
-            .query_row(
+            .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key, version as i64],
                 |r| r.get(0),
@@ -2258,7 +2259,7 @@ impl Inner {
         );
         let version: Option<i64> = self
             .conn
-            .query_row(
+            .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq as i64],
                 |r| r.get(0),
@@ -2370,7 +2371,7 @@ impl Inner {
         );
         let value: i64 = self.with_preps(&preps, |_| {
             self.conn
-                .query_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
                 .map_err(storage)
         })?;
         Ok(value != 0)
@@ -2504,7 +2505,7 @@ impl Inner {
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
         let find = |conn: &rusqlite::Connection| {
-            conn.query_row(
+            conn.cached_row(
                 "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
                 rusqlite::params![account, issuer, subject],
                 |row| row.get::<_, i64>(0),
@@ -2545,7 +2546,7 @@ impl Inner {
         }
         let (account, issuer, subject): (Vec<u8>, String, String) = self
             .conn
-            .query_row(
+            .cached_row(
                 "SELECT account, issuer, subject FROM _jazz_authors WHERE n = ?1",
                 [code],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -2713,7 +2714,7 @@ impl Inner {
         );
         let cell: Option<Sql> = self
             .conn
-            .query_row(
+            .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key],
                 |r| r.get(0),
@@ -2857,7 +2858,7 @@ impl Inner {
             quote(&format!("{}__h", table.stored))
         );
         self.conn
-            .query_row(
+            .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key],
                 |r| r.get(0),
@@ -3520,7 +3521,7 @@ impl Inner {
             );
             let cell: Sql = self
                 .conn
-                .query_row(
+                .cached_row(
                     &sql,
                     rusqlite::params![row.0.as_bytes().to_vec(), key],
                     |r| r.get(0),
@@ -4117,7 +4118,7 @@ impl Inner {
             quote(table)
         );
         self.conn
-            .query_row(
+            .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), sync::LOCAL_BASE as i64],
                 |r| r.get::<_, Option<i64>>(0),
@@ -4131,7 +4132,7 @@ impl Inner {
     fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
         let sql = format!("SELECT MAX(_seq) FROM {} WHERE id = ?1", quote(table));
         self.conn
-            .query_row(&sql, [row.0.as_bytes().to_vec()], |r| {
+            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
                 r.get::<_, Option<i64>>(0)
             })
             .map(|seq| seq.map(|seq| seq as u64))

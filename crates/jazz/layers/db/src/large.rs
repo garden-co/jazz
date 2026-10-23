@@ -26,6 +26,7 @@
 //! transaction; per-root reference counts are kept by triggers on every
 //! table that has a large-capable column.
 
+use crate::values::CachedRow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -1322,7 +1323,7 @@ pub(crate) fn admit(
 
 /// Whether the root `value` names is stored here.
 pub(crate) fn root_is_local(conn: &Connection, value: &LargeValueRef) -> Result<bool, Error> {
-    conn.query_row(
+    conn.cached_row(
         "SELECT EXISTS (SELECT 1 FROM _jazz_lv_node WHERE locator = ?1)",
         [value.root.locator.as_bytes().as_slice()],
         |r| r.get(0),
@@ -1359,7 +1360,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             continue;
         }
         let referenced: bool = conn
-            .query_row(
+            .cached_row(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_root WHERE root = ?1 \
                  AND durable > 0) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
@@ -1373,7 +1374,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             continue;
         }
         let node: Option<(Vec<u8>, Vec<u8>)> = conn
-            .query_row(
+            .cached_row(
                 "SELECT hash, bytes FROM _jazz_lv_node WHERE locator = ?1",
                 [&locator],
                 |r| Ok((r.get(0)?, r.get(1)?)),

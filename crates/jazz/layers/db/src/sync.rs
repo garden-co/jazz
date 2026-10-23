@@ -33,6 +33,7 @@
 //!   non-serializable commit.
 
 use crate::schema::history::{history_source_table, is_history_table};
+use crate::values::CachedRow;
 use crate::values::query_error;
 use rusqlite::OptionalExtension;
 use std::cell::Cell as StdCell;
@@ -1929,7 +1930,7 @@ impl Inner {
         for (table, row, key) in rows {
             let unlisted = self
                 .conn
-                .query_row(
+                .cached_row(
                     "SELECT 1 FROM _jazz_revoked WHERE t = ?1 AND id = ?2 AND k = ?3",
                     rusqlite::params![table, row.0.as_bytes().to_vec(), key],
                     |_| Ok(()),
@@ -2196,7 +2197,7 @@ impl Inner {
     fn meta(&self, key: &str) -> Result<Option<u64>, Error> {
         match self
             .conn
-            .query_row("SELECT v FROM _jazz_meta WHERE k = ?1", [key], |r| {
+            .cached_row("SELECT v FROM _jazz_meta WHERE k = ?1", [key], |r| {
                 r.get::<_, Vec<u8>>(0)
             }) {
             Ok(bytes) => Ok(postcard::from_bytes(&bytes).ok()),
@@ -2210,7 +2211,7 @@ impl Inner {
         node: [u8; 16],
         tx: u64,
     ) -> Result<Option<Result<(), WireError>>, Error> {
-        match self.conn.query_row(
+        match self.conn.cached_row(
             "SELECT result FROM _jazz_applied WHERE node = ?1 AND tx = ?2",
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
@@ -2276,7 +2277,7 @@ impl Inner {
     }
 
     fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<u64>>, Error> {
-        match self.conn.query_row(
+        match self.conn.cached_row(
             "SELECT seq FROM _jazz_settled WHERE node = ?1 AND tx = ?2",
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Option<i64>>(0),
