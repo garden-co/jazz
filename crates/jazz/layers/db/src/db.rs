@@ -1021,6 +1021,53 @@ impl Db {
         })
     }
 
+    /// A row's provenance as Jazz's row metadata spells it: created at, by
+    /// (canonical author), updated at, by. `None` when the store has no
+    /// such row. `table` is a schema or stored table name.
+    pub fn row_provenance(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<(u64, String, u64, String)>, Error> {
+        let inner = self.inner();
+        let schema = inner.schema.clone();
+        let Some(table) = schema.table(table).ok().or_else(|| schema.by_stored(table)) else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT \"$createdAt\", \"$createdBy\", COALESCE(\"$updatedAt\", \"$createdAt\"), \
+             COALESCE(\"$updatedBy\", \"$createdBy\") FROM {} WHERE id = ?1 ORDER BY _b LIMIT 1",
+            quote(&table.stored)
+        );
+        let stamps: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = inner
+            .conn
+            .query_row(&sql, [row.0.as_bytes().to_vec()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()
+            .map_err(storage)?;
+        let Some((created_at, Some(created_by), updated_at, Some(updated_by))) = stamps else {
+            return Ok(None);
+        };
+        let canonical = |code: i64| -> Result<String, Error> {
+            let (account, issuer, subject) = inner.author_parts(code)?;
+            let accountless = account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID.0
+                && issuer != AuthorSubject::SYSTEM_ISSUER;
+            Ok(if accountless {
+                serde_json::to_string(&(issuer, subject))
+            } else {
+                serde_json::to_string(&(account.to_string(), issuer, subject))
+            }
+            .expect("author parts have a JSON spelling"))
+        };
+        Ok(Some((
+            created_at.unwrap_or(0) as u64,
+            canonical(created_by)?,
+            updated_at.unwrap_or(0) as u64,
+            canonical(updated_by)?,
+        )))
+    }
+
     /// How many distinct authors this database has interned.
     #[doc(hidden)]
     pub fn interned_authors_for_test(&self) -> usize {

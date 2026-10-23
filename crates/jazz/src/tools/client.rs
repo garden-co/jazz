@@ -229,7 +229,14 @@ impl Shared {
                         removed,
                         settled,
                         ..
-                    } => match forwarder.delta(&self.schema, reset, added, updated, removed) {
+                    } => match forwarder.delta(
+                        &self.schema,
+                        &self.db,
+                        reset,
+                        added,
+                        updated,
+                        removed,
+                    ) {
                         // Not yet settled at the tier the subscription asked for.
                         Ok(delta) => SubscriptionStreamItem::Delta(OrderedRowDelta {
                             pending: !settled || forwarder.unsettleable,
@@ -261,6 +268,7 @@ impl Forwarder {
     fn delta(
         &mut self,
         schema: &Schema,
+        db: &Db,
         reset: bool,
         added_rows: Vec<SubscriptionOutputRow>,
         updated_rows: Vec<SubscriptionOutputRow>,
@@ -269,6 +277,7 @@ impl Forwarder {
         let decoder = Decoder {
             schema,
             query: &self.query,
+            db: Some(db),
         };
         let mut delta = OrderedRowDelta::default();
         if reset {
@@ -886,6 +895,7 @@ impl JazzClient {
         Decoder {
             schema: &self.shared.schema,
             query: &query,
+            db: None,
         }
         .results(&rows)
     }
@@ -1769,6 +1779,9 @@ fn core_to_public_value_for_column_type(
 struct Decoder<'a> {
     schema: &'a Schema,
     query: &'a Query,
+    /// Where a delivered row's provenance is read when the query does not
+    /// project it.
+    db: Option<&'a Db>,
 }
 
 impl Decoder<'_> {
@@ -1900,6 +1913,31 @@ impl Decoder<'_> {
             .collect()
     }
 
+    /// A delivered row's provenance: its projected magic columns, or the
+    /// stored row's stamps.
+    fn provenance(&self, row: &CurrentRow) -> Result<crate::model::metadata::RowProvenance> {
+        let projected = provenance(row);
+        let Some(db) = self.db.filter(|_| projected.created_by == "jazz:unknown") else {
+            return Ok(projected);
+        };
+        Ok(
+            match db
+                .row_provenance(row.table(), row.row_uuid())
+                .map_err(|error| JazzError::Query(error.to_string()))?
+            {
+                Some((created_at, created_by, updated_at, updated_by)) => {
+                    crate::model::metadata::RowProvenance {
+                        created_by,
+                        created_at,
+                        updated_by,
+                        updated_at,
+                    }
+                }
+                None => projected,
+            },
+        )
+    }
+
     fn subscription_row(&self, row: &SubscriptionOutputRow) -> Result<Row> {
         let record = crate::binding_codec::row_record(&row.row)
             .map_err(|error| JazzError::Query(format!("encode subscription row: {error}")))?;
@@ -1907,7 +1945,7 @@ impl Decoder<'_> {
             self.key(&row.row)?,
             record.raw().to_vec(),
             TransactionId([0; 16]),
-            provenance(&row.row),
+            self.provenance(&row.row)?,
         );
         #[cfg(feature = "testing")]
         let public = public.with_fields(self.values(&row.row)?);
