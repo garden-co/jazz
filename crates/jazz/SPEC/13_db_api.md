@@ -41,7 +41,7 @@ Invariant digest:
 - `INV-API-23`: A client binding tick driver MUST classify `Db::tick()` failures. A recoverable protocol condition MUST NOT terminate the driver; the driver MUST continue through its documented repair or reconnect path with bounded backoff. A fatal failure, or exhausted recovery, MUST stop the driver and be surfaced to the caller as an error rather than appearing as a stalled sync operation.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
-- `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
+- `INV-API-27`: `Db::serializable_tx()` MUST expose serializable transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
 - `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive `Allowed`/`Denied`; client-local, offline, incomplete, not-ready, and timed-out requests yield `Unknown`. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
 - `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
@@ -80,7 +80,7 @@ fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
 replay that transient foreground error to a peer attached later.
 
 - `INV-API-35`: Once a local mutation is durably persisted or its ordered publication is owned by the node runtime, the mutation API MUST return its committed `WriteHandle`/`TxId`; a later resident-subscription refresh failure MUST be emitted through the subscription error channel and MUST NOT be returned as a generic mutation or peer-ingest failure.
-- `INV-API-36`: An explicit-id `insert` in an exclusive transaction MUST only create: it MUST reject with `ErrorCode::WriteRejected`, without staging content, when its `(table, row)` target is visible in the transaction's snapshot-plus-overlay view, deleted there, or staged earlier in the same transaction. A target hidden by read policy MUST be rejected with the same error as an `upsert` over it, never disclosed as existing. Overwriting requires `upsert` or `update`; concurrent creates of one absent id remain first-committer-wins.
+- `INV-API-36`: An explicit-id `insert` in a serializable transaction MUST only create: it MUST reject with `ErrorCode::WriteRejected`, without staging content, when its `(table, row)` target is visible in the transaction's snapshot-plus-overlay view, deleted there, or staged earlier in the same transaction. A target hidden by read policy MUST be rejected with the same error as an `upsert` over it, never disclosed as existing. Overwriting requires `upsert` or `update`; concurrent creates of one absent id remain first-committer-wins.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
@@ -486,7 +486,7 @@ and `restore`. `insert` obtains its row id from the configured
 patch over the row's current local cells, so omitted fields keep their value
 (`INV-API-9`).
 
-In an exclusive transaction, `insert` with an explicit row id is
+In a serializable transaction, `insert` with an explicit row id is
 create-only (`INV-API-36`): overwriting an existing row requires `upsert`
 (`INV-API-10`) or `update`. The existence check is keyed by `(table, row)` and
 resolved against the transaction's snapshot-plus-overlay view before any
@@ -498,7 +498,7 @@ insert never implicitly restores the deletion register. Deciding existence is
 a user read (ch. 7), so a target hidden from the transaction's identity by read
 policy is rejected through exactly the path, code, and message an `upsert` over
 it produces, without naming the row as existing. A truly absent target stages
-normally, records its absence read, and remains subject to exclusive
+normally, records its absence read, and remains subject to serializable
 first-committer-wins validation, so of two concurrent creates of one absent id
 exactly one commits. Inserts that let `RowIdSource` choose the id skip the
 check. Standalone `Db::insert` and mergeable-transaction inserts are unchanged.
@@ -576,11 +576,11 @@ later publications or upstream upload work.
 Each single-call write creates **one mergeable transaction**. `mergeable_tx()`
 groups multiple facade writes under one `TxId`; the resulting commit unit carries
 `n_total_writes` equal to the number of grouped versions (`INV-API-26`).
-`exclusive_tx()` exposes the serializable transaction path from ch. 3/ch. 5 on
+`serializable_tx()` exposes the serializable transaction path from ch. 3/ch. 5 on
 the facade and reports validation conflicts as `WriteRejected` (`INV-API-27`).
 
 Owning Rust transaction handles use idempotent RAII abandonment. Dropping an
-uncommitted `MergeableTx` or `ExclusiveTx` synchronously records a deduplicated
+uncommitted `MergeableTx` or `SerializableTx` synchronously records a deduplicated
 tombstone outside the storage-owning node, then retires it immediately when the
 node is uncontended or schedules node maintenance. Every transaction open,
 read, stage, and commit operation MUST inspect and drain its id's tombstone
@@ -740,7 +740,7 @@ Facade errors carry an `ErrorCode` plus a message:
 | `Protocol`      | a local node / protocol operation failed                                                   |
 
 **Callable today:** `Db::open`; the mutation methods (§13.4), including
-`mergeable_tx`, `exclusive_tx`, attributed writes, and `can_*` dry-runs; `table` /
+`mergeable_tx`, `serializable_tx`, attributed writes, and `can_*` dry-runs; `table` /
 `read` / `one` / `all` / `subscribe` (§13.3); and the binding sync surface
 (§13.5). Read policies evaluate `claim("user")` plus admission/session-provided
 runtime claims (ch. 7); client query bindings never supply policy claims.
@@ -826,7 +826,7 @@ Binding payloads use core types directly:
 
 `WriteState` is not a parallel binding shape. Rejection detail is represented by
 the core `Fate::Rejected(RejectionReason)` variant, preserving
-`ExclusiveConflict`, `AuthorizationDenied`, `Cascade { root }`, clock-skew,
+`SerializationConflict`, `AuthorizationDenied`, `Cascade { root }`, clock-skew,
 causality, and malformed-commit detail without a second field that can drift
 from the transaction fate.
 
@@ -895,7 +895,7 @@ the client `Db` facade.
 | subscription streams             |         P |               Y |        Y |        Y |              Y |          Shell |
 | stream row changes/resets        |         P |               P |        P |        P |              P |          Shell |
 | mergeable writes                 |         Y |               Y |        Y |        Y |              Y |          Shell |
-| exclusive transactions           |         Y |               Y |        Y |        Y |              Y |          Shell |
+| serializable transactions        |         Y |               Y |        Y |        Y |              Y |          Shell |
 | write wait/state                 |         Y |               Y |        Y |        Y |              Y |          Shell |
 | dry-run permission probes        |         Y |               Y |        Y |        Y |              Y |          Shell |
 | byte wire transport              |         Y |               N |        Y |        Y |              Y |          Shell |
@@ -961,7 +961,7 @@ When a client API needs an alternate read view — read-your-writes inside an
 open transaction, a branch view, a historical snapshot — the API expresses that
 view to the core (`ReadOpts.read_view`, open-transaction overlays) and the
 normal lowered query executes there. The engine already evaluates queries
-inside open exclusive transactions (`tx_query` over
+inside open serializable transactions (`tx_query` over
 `OverlayRef::OpenTransaction`); binding layers plumb handles to it rather than
 overlaying pending writes above the engine.
 

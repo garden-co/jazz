@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
-import { exclusiveE2eeTransaction, type Db } from "../runtime/db.js";
+import { serializableE2eeTransaction, type Db } from "../runtime/db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
@@ -117,7 +117,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
       try {
         expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(priorRoots);
         const owner = db;
-        const write = await exclusiveE2eeTransaction(db, async (tx) => {
+        const write = await serializableE2eeTransaction(db, async (tx) => {
           await prepared.plan.validate(tx);
           await prepareInitialSpaceRows(
             owner,
@@ -138,7 +138,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
             ?.epochId,
         ).toBe(prepared.value.epoch);
         await expect(
-          exclusiveE2eeTransaction(db, (tx) =>
+          serializableE2eeTransaction(db, (tx) =>
             prepareInitialSpaceRows(
               owner,
               tx,
@@ -181,7 +181,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
                 throw adapterFailure;
               };
               await expect(
-                exclusiveE2eeTransaction(db, (tx) => stale.plan.validate(tx)),
+                serializableE2eeTransaction(db, (tx) => stale.plan.validate(tx)),
               ).rejects.toEqual(new E2eeDataError("key-unavailable"));
             } finally {
               signer.verify = verify;
@@ -191,7 +191,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
             });
             await db.e2ee.spaces.revoke(app.projects, project.id, root!.creatorAccountId).wait();
             await expect(
-              exclusiveE2eeTransaction(db, (tx) => stale.plan.validate(tx)),
+              serializableE2eeTransaction(db, (tx) => stale.plan.validate(tx)),
             ).rejects.toThrow();
           } finally {
             stale.plan.dispose();

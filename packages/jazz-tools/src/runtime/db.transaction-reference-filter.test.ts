@@ -21,7 +21,7 @@ it("matches reference filters inside a transaction as it does outside", async ()
     expect(
       await db.all(app.notes.where({ projectId: project.id }), { tier: "local-first" }),
     ).toEqual([note.value]);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     try {
       expect(
         await tx.all(app.notes.where({ projectUuid: project.id }), { tier: "local-first" }),

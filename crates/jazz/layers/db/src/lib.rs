@@ -36,11 +36,15 @@ pub mod db;
 #[cfg(feature = "durable-object-limits")]
 mod durable_object_limits;
 pub(crate) mod large;
+pub(crate) mod merge;
 pub mod names;
 pub mod options;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
 pub mod values;
+
+#[cfg(feature = "testing")]
+pub use large::full_materializations_for_test;
 
 /// Structured read results.
 pub mod result_tree {

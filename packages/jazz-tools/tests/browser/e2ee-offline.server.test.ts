@@ -60,7 +60,7 @@ it("updates encrypted data immediately offline and accepts it after reconnect in
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Offline project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Original" });
     await tx.commit().wait({ tier: "global" });

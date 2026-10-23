@@ -4,7 +4,7 @@
 
 jazz is a local-first, distributed, real-time database with full edit history,
 RLS-authorized sync, and two transaction kinds: eventually-consistent
-`mergeable` transactions and serializable `exclusive` transactions. Its query
+`mergeable` transactions and `serializable` transactions. Its query
 and maintenance semantics are defined by **lowering everything onto
 [`groove`](../../groove/SPEC/1_intro.md)**, the incremental-view-maintenance
 engine. jazz adds distribution, history, and authorization around that engine;
@@ -44,7 +44,7 @@ decisions. Guidance appendices are entirely non-normative.
 | --- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | 1   | Introduction                                                                          | this file: what jazz is, principles, conventions                               |
 | 2   | Data model & identity                                                                 | tables, columns, schema, rows, the id types                                    |
-| 3   | Transactions & durability                                                             | mergeable/exclusive, fates, durability tiers, commit units                     |
+| 3   | Transactions & durability                                                             | mergeable/serializable, fates, durability tiers, commit units                  |
 | 4   | History, domination & merging                                                         | argmax history, column-LWW, current state                                      |
 | 5   | Reads & snapshots                                                                     | current, point-in-time, visibility                                             |
 | 6   | Queries                                                                               | shapes, bindings, content-addressing, matched include paths, query-driven sync |
@@ -92,9 +92,9 @@ mechanism is specified. They are normative intent, not mechanism.
    in an `open` state and syncs upstream _only at commit_, as one idempotent
    `CommitUnit`; the core holds no open-transaction state (ch. 3). Downstream
    subscription delivery is view-atomic, not transport-atomic: a `ViewUpdate` may
-   carry only the subset of an exclusive transaction needed by the maintained
+   carry only the subset of a serializable transaction needed by the maintained
    subscription view, and those rows become visible only when that view's
-   required exclusive payload is complete (ch. 8).
+   required serializable payload is complete (ch. 8).
 4. **Full history is first-class — at the core.** The core is
    history-complete; downstream nodes may hold arbitrary evicted or partial
    subsets. No protocol step may assume a downstream node has complete history
@@ -145,7 +145,7 @@ the other spec is written with its spec name, for example
 Terms are defined where they are introduced. The load-bearing terms needed
 up front are listed here; the full set is in appendix E:
 
-- **mergeable / exclusive** — the two transaction kinds: eventually-consistent
+- **mergeable / serializable** — the two transaction kinds: eventually-consistent
   column-LWW vs serializable compare-and-set (ch. 3).
 - **fate** — an upstream authority's verdict on a transaction: `Pending` /
   `Accepted` / `Rejected` (ch. 3).

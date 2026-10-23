@@ -37,7 +37,7 @@ it("preserves authority transaction positions through browser snapshot coverage"
     const later = alice.insert(app.proposals, { value: "later" });
     await later.wait({ tier: "global" });
     const ordinary = await bob.all(app.proposals, { tier: "remote" });
-    const read = await bob.exclusiveTransaction((tx) => tx.allSettledForE2ee(app.proposals));
+    const read = await bob.serializableTransaction((tx) => tx.allSettledForE2ee(app.proposals));
     const { rows, settlements } = await read.wait({ tier: "global" });
     expect(rows).toEqual(ordinary);
     expect(settlements).toHaveLength(2);
@@ -77,7 +77,7 @@ it.each(["upsert", "delete"] as const)(
       const original = db.insert(app.proposals, { value: "accepted content" });
       await original.wait({ tier: "global" });
       const baseline = await (
-        await db.exclusiveTransaction((tx) => tx.allSettledForE2ee(app.proposals))
+        await db.serializableTransaction((tx) => tx.allSettledForE2ee(app.proposals))
       ).wait({ tier: "global" });
       expect(baseline.rows).toEqual([original.value]);
       expect(baseline.settlements[0]!.transactionId).toBe(await original.txId);
@@ -85,14 +85,14 @@ it.each(["upsert", "delete"] as const)(
         const deletion = db.delete(app.proposals, original.value.id);
         await deletion.wait({ tier: "global" });
         const snapshot = await (
-          await db.exclusiveTransaction((tx) =>
+          await db.serializableTransaction((tx) =>
             tx.allSettledForE2ee(app.proposals.includeDeleted()),
           )
         ).wait({ tier: "global" });
         expect(snapshot.rows).toEqual([original.value]);
         expect(snapshot.settlements).toEqual(baseline.settlements);
       } else {
-        const tx = db.beginExclusiveTransaction();
+        const tx = db.beginSerializableTransaction();
         try {
           tx.upsert(app.proposals, original.value.id, { value: "provisional content" });
           expect(await tx.all(app.proposals, { tier: "local-first" })).toEqual([

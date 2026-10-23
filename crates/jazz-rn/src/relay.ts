@@ -189,7 +189,7 @@ export type NativeForegroundCommand =
       updatedAtMs?: number;
     };
 /** The existing core transaction semantics selected by the foreground codec. */
-export type NativeForegroundTransactionKind = "mergeable" | "exclusive";
+export type NativeForegroundTransactionKind = "mergeable" | "serializable";
 
 export type NativeForegroundResponse =
   | {
@@ -431,8 +431,8 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
     return concatForegroundBytes(Uint8Array.of(8), encodeForegroundU64(command.operation));
   }
   if (command.type === "beginTransaction") {
-    if (command.kind !== "mergeable" && command.kind !== "exclusive") {
-      throw new Error("Jazz native foreground transaction kind must be mergeable or exclusive");
+    if (command.kind !== "mergeable" && command.kind !== "serializable") {
+      throw new Error("Jazz native foreground transaction kind must be mergeable or serializable");
     }
     return Uint8Array.of(9, command.kind === "mergeable" ? 0 : 1);
   }

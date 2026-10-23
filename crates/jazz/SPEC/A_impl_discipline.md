@@ -170,7 +170,7 @@ Remaining jazz moves:
   registration/lifecycle, lowering, and evaluation into separate homes; move the
   semantic oracle into the testing-gated oracle module.
 - **`ingest.rs` grouping.** Keep the parking family together as one block, and
-  keep exclusive-predicate validation together as one block or move it to
+  keep serializable-predicate validation together as one block or move it to
   `validation.rs`.
 
 Durable style rules:

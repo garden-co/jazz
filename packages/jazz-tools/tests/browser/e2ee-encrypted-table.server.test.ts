@@ -78,7 +78,7 @@ it.each([
           },
         },
       });
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Project" });
       const note = tx.insert(app.notes, {
         projectId: project.id,

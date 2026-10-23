@@ -155,9 +155,9 @@ describe("MusicAgent server execution", () => {
     }
   });
 
-  test("an exclusive write that loses at the authority is a retryable conflict", async () => {
+  test("an serializable write that loses at the authority is a retryable conflict", async () => {
     const { db } = await load();
-    const { isExclusiveConflict } = await import("../src/lib/write-errors");
+    const { isSerializationConflict } = await import("../src/lib/write-errors");
     const other = await secondBackend();
     const turn = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
     await other.one(app.turns.where({ id: turn.id }), { tier: "remote" });
@@ -168,7 +168,7 @@ describe("MusicAgent server execution", () => {
     const barrier = new Promise<void>((resolve) => (bothRead = resolve));
     const results = await Promise.allSettled(
       [db, other].map(async (client) => {
-        const write = await client.exclusiveTransaction(async (tx) => {
+        const write = await client.serializableTransaction(async (tx) => {
           await tx.one(app.turns.where({ id: turn.id }));
           if (++read === 2) bothRead();
           await barrier;
@@ -181,7 +181,7 @@ describe("MusicAgent server execution", () => {
       result.status === "rejected" ? [result.reason] : [],
     );
     expect(failures).toHaveLength(1);
-    expect(isExclusiveConflict(failures[0])).toBe(true);
+    expect(isSerializationConflict(failures[0])).toBe(true);
   });
 
   test("a runner that loses its lease stops writing and never finishes the turn", async () => {
@@ -202,7 +202,7 @@ describe("MusicAgent server execution", () => {
       // elsewhere), and notes the body as it stood at that moment.
       const { retryOnConflict } = await import("../src/lib/retry");
       const takeover = await retryOnConflict(async () => {
-        const write = await db.exclusiveTransaction(async (tx) => {
+        const write = await db.serializableTransaction(async (tx) => {
           const current = (await tx.one(app.turns.where({ id: turnId })))!;
           tx.update(app.turns, turnId, { runnerId: "another-runner" });
           return current.body;

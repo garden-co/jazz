@@ -51,7 +51,7 @@ it("automatically configures an encrypted browser app for atomic creation and re
       },
     });
     expect(await db.e2ee.devices.list()).toEqual([expect.objectContaining({ state: "active" })]);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Browser project" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Encrypted in the browser" });
     await tx.commit().wait({ tier: "global" });

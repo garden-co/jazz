@@ -62,7 +62,7 @@ it("reads and searches existing ciphertext after renaming its column", async () 
     await deploy({ ...target, schema: oldApp, permissions: permissions(oldApp) });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({ ...account, e2ee: { app: oldApp, store } });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(oldApp.projects, { title: "Project" });
     const note = tx.insert(oldApp.notes, { projectId: project.id, title: "Private title" });
     await tx.commit().wait({ tier: "global" });
@@ -176,7 +176,7 @@ it.each(["partial", "full"] as const)(
       await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
       const account = await localAccountConfig(server.appId, server.url);
       db = await createDb({ ...account, e2ee: { app: oldApp, store } });
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(oldApp.projects, { title: "Project" });
       const note = tx.insert(oldApp.notes, { projectId: project.id, title: "Historical secret" });
       await tx.commit().wait({ tier: "global" });
@@ -193,7 +193,7 @@ it.each(["partial", "full"] as const)(
           tier: "remote",
         }),
       ).toEqual([{ id: note.id, projectId: project.id, title: "Historical secret" }]);
-      const next = db.beginExclusiveTransaction();
+      const next = db.beginSerializableTransaction();
       const message = next.insert(newApp.messages, { projectId: project.id, title: "New secret" });
       await next.commit().wait({ tier: "global" });
       expect(
@@ -317,7 +317,7 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
     await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({ ...account, e2ee: { app: oldApp, store } });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(oldApp.projects, { title: "Project" });
     const note = tx.insert(oldApp.notes, { projectId: project.id, title: "Historical secret" });
     await tx.commit().wait({ tier: "global" });

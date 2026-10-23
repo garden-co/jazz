@@ -95,7 +95,7 @@ it.each(["removed", "retained"] as const)(
           },
         },
       });
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Project" });
       const folder = tx.insert(app.folders, { title: "Folder" });
       const other = tx.insert(app.folders, { title: "Other" });

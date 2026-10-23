@@ -97,6 +97,14 @@ struct Shared {
     work: Arc<Notify>,
     /// Bumped after every tick; waiters re-poll on each change.
     progress: watch::Sender<u64>,
+    /// True while a test holds the upstream detached; the keeper neither
+    /// keeps nor re-opens a link until it turns false.
+    upstream_paused: watch::Sender<bool>,
+    /// No server is configured, so nothing can confirm a write past Local.
+    serverless: bool,
+    /// The upstream link is a trusted backend or admin link, which may
+    /// attribute writes to other authors.
+    trusted: bool,
     state: RefCell<State>,
 }
 
@@ -111,6 +119,12 @@ struct State {
     writes: HashMap<TransactionId, u64>,
     forwarders: Vec<Forwarder>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Whether the background tick loop runs. A client without an
+    /// upstream starts it with its first subscription; until then its
+    /// calls tick inline, so it needs no `LocalSet`.
+    driven: bool,
+    /// Failed upstream connect attempts so far, and the last one's error.
+    connect_failures: (u64, Option<String>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +142,9 @@ struct Forwarder {
     cancellation: oneshot::Receiver<()>,
     /// The rows the public stream holds, in order.
     rows: Vec<SubscriptionOutputRow>,
+    /// It asks for the server's answer and this client has no server:
+    /// every delivery stays pending.
+    unsettleable: bool,
 }
 
 impl Shared {
@@ -154,11 +171,25 @@ impl Shared {
             if let Some(value) = poll() {
                 return Ok(value);
             }
+            if !self.state.borrow().driven {
+                self.tick().await;
+                tokio::task::yield_now().await;
+                continue;
+            }
             self.tick_soon();
             if progress.changed().await.is_err() {
                 return Err(JazzError::ChannelClosed);
             }
         }
+    }
+
+    /// Start the background tick loop if it is not running.
+    fn ensure_driven(self: &Rc<Self>) {
+        if std::mem::replace(&mut self.state().driven, true) {
+            return;
+        }
+        let driver = tokio::task::spawn_local(drive(Rc::downgrade(self), self.work.clone()));
+        self.state().tasks.push(driver);
     }
 
     /// Await an engine future whose progress depends on ticks. Engine
@@ -198,9 +229,21 @@ impl Shared {
                         added,
                         updated,
                         removed,
+                        settled,
                         ..
-                    } => match forwarder.delta(&self.schema, reset, added, updated, removed) {
-                        Ok(delta) => SubscriptionStreamItem::Delta(delta),
+                    } => match forwarder.delta(
+                        &self.schema,
+                        &self.db,
+                        reset,
+                        added,
+                        updated,
+                        removed,
+                    ) {
+                        // Not yet settled at the tier the subscription asked for.
+                        Ok(delta) => SubscriptionStreamItem::Delta(OrderedRowDelta {
+                            pending: !settled || forwarder.unsettleable,
+                            ..delta
+                        }),
                         Err(error) => SubscriptionStreamItem::Rejected {
                             reason: SubscriptionRejectReason::UnsupportedShapeCapability {
                                 detail: error.to_string(),
@@ -227,6 +270,7 @@ impl Forwarder {
     fn delta(
         &mut self,
         schema: &Schema,
+        db: &Db,
         reset: bool,
         added_rows: Vec<SubscriptionOutputRow>,
         updated_rows: Vec<SubscriptionOutputRow>,
@@ -235,6 +279,7 @@ impl Forwarder {
         let decoder = Decoder {
             schema,
             query: &self.query,
+            db: Some(db),
         };
         let mut delta = OrderedRowDelta::default();
         if reset {
@@ -249,15 +294,14 @@ impl Forwarder {
             }
         }
         for row in &removed_rows {
-            let held = self
-                .rows
-                .iter()
-                .position(|held| held.row_uuid() == row.row_uuid && held.table() == row.table);
+            let held = self.rows.iter().position(|held| {
+                held.row_uuid() == row.row_uuid
+                    && held.table() == row.table
+                    && held.joined_rows() == row.joined.as_slice()
+            });
             let id = match held {
                 Some(at) => decoder.key(&self.rows.remove(at))?,
-                None => ResultKey::from_occurrence(OutputOccurrenceId::single_source(
-                    ObjectId::from_uuid(row.row_uuid.0),
-                )),
+                None => jazz_db::values::occurrence_key(row.row_uuid, row.version, &row.joined),
             };
             delta.removed.push(OrderedRemoved {
                 id,
@@ -265,11 +309,18 @@ impl Forwarder {
             });
         }
         for row in &updated_rows {
-            let held = self
-                .rows
-                .iter()
-                .position(|held| held.row_uuid() == row.row_uuid() && held.table() == row.table());
-            let changed = held.is_none_or(|at| self.rows[at].row != row.row);
+            let held = self.rows.iter().position(|held| {
+                held.row_uuid() == row.row_uuid()
+                    && held.table() == row.table()
+                    && held.joined_rows() == row.joined_rows()
+            });
+            // A row that only moved, or got a new version with the same
+            // shown cells, carries no payload: they are what it was
+            // delivered with.
+            let changed = held.is_none_or(|at| {
+                let before = &self.rows[at].row;
+                before.is_deleted() != row.row.is_deleted() || !before.cells().eq(row.row.cells())
+            });
             if let Some(at) = held {
                 self.rows.remove(at);
             }
@@ -328,10 +379,17 @@ async fn keep_upstream(
     mut attached: Option<NativeTransportTerminalFuture>,
 ) {
     let mut delay = RECONNECT_BASE_DELAY;
+    let mut paused = match shared.upgrade() {
+        Some(shared) => shared.upstream_paused.subscribe(),
+        None => return,
+    };
     loop {
         let terminal = match attached.take() {
             Some(terminal) => terminal,
             None => {
+                if paused.wait_for(|paused| !*paused).await.is_err() {
+                    return;
+                }
                 {
                     let Some(shared) = shared.upgrade() else {
                         return;
@@ -354,6 +412,11 @@ async fn keep_upstream(
                         tracing::debug!(%error, "jazz client upstream connect failed");
                         if let Some(shared) = shared.upgrade() {
                             shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+                            let mut state = shared.state();
+                            let failures = state.connect_failures.0 + 1;
+                            state.connect_failures = (failures, Some(error.to_string()));
+                            drop(state);
+                            shared.tick_soon();
                         }
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(RECONNECT_MAX_DELAY);
@@ -362,8 +425,13 @@ async fn keep_upstream(
                 }
             }
         };
-        let stopped = terminal.await;
-        tracing::debug!(?stopped, "jazz client upstream stopped");
+        tokio::select! {
+            stopped = terminal => {
+                tracing::debug!(?stopped, "jazz client upstream stopped");
+            }
+            // A test detached the link; dropping its terminal closes it.
+            _ = paused.wait_for(|paused| *paused) => {}
+        }
         let Some(shared) = shared.upgrade() else {
             return;
         };
@@ -450,9 +518,17 @@ impl JazzClient {
             schema: context.schema.clone(),
             work: work.clone(),
             progress,
+            upstream_paused: watch::channel(false).0,
+            serverless: connector.is_none(),
+            trusted: context.backend_secret.is_some() || context.admin_secret.is_some(),
             state: RefCell::new(State::default()),
         });
 
+        if connector.is_none() {
+            // Still a replica: its writes queue for upload, so a store opened
+            // without a server keeps them for the first one it connects to.
+            shared.db.set_remote_link_hint(RemoteLinkHint::NoServer);
+        }
         if let Some(connector) = connector {
             let wake = work.clone();
             let request = NativeTransportRequest {
@@ -496,9 +572,8 @@ impl JazzClient {
                 attached,
             ));
             shared.state().tasks.push(keeper);
+            shared.ensure_driven();
         }
-        let driver = tokio::task::spawn_local(drive(Rc::downgrade(&shared), work));
-        shared.state().tasks.push(driver);
         Ok(Self {
             write_context: None,
             shared,
@@ -547,6 +622,11 @@ impl JazzClient {
             if author.account_id().is_none() {
                 return Err(JazzError::Write(
                     "attribution requires an admitted account identity".into(),
+                ));
+            }
+            if !self.shared.trusted && !self.shared.serverless {
+                return Err(JazzError::Write(
+                    "attribution requires a trusted serving node".into(),
                 ));
             }
             return Ok(WriteIdentity::Attribution(author));
@@ -658,12 +738,11 @@ impl JazzClient {
         Err(JazzError::Write(
             match state.closed_transactions.get(&transaction_id) {
                 Some(ClosedTransaction::Committed) => {
-                    format!("transaction {transaction_id} is already committed")
+                    format!("open transaction {transaction_id} is already committed")
                 }
-                Some(ClosedTransaction::RolledBack) => {
-                    format!("transaction {transaction_id} is already rolled back")
-                }
-                None => format!("transaction {transaction_id} is not open"),
+                Some(ClosedTransaction::RolledBack) | None => format!(
+                    "open transaction {transaction_id} has already been completed or was never opened"
+                ),
             },
         ))
     }
@@ -741,6 +820,7 @@ impl JazzClient {
                 "subscriptions in a transaction are not supported".to_owned(),
             ));
         }
+        let unsettleable = self.shared.serverless && opts.tier != ReadTier::LocalOnly;
         let stream = self.open_core_subscription(&with_history_identity(&query), opts)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let (cancel, cancellation) = oneshot::channel();
@@ -750,7 +830,9 @@ impl JazzClient {
             sender,
             cancellation,
             rows: Vec::new(),
+            unsettleable,
         });
+        self.shared.ensure_driven();
         self.shared.tick_soon();
         Ok(SubscriptionStream::new(receiver, cancel))
     }
@@ -788,11 +870,15 @@ impl JazzClient {
         let rows = if let Some(transaction_id) = self.open_transaction()? {
             let prepared = self.prepare(&read)?;
             let db = self.db()?;
-            crate::db::block_on(
-                db.serializable_tx_ref(transaction_id)
-                    .all_prepared(&prepared),
-            )
-            .map_err(|error| JazzError::Query(error.to_string()))?
+            // A client's serializable read hydrates from the authority,
+            // which needs ticks to answer.
+            self.shared
+                .settle(
+                    db.serializable_tx_ref(transaction_id)
+                        .all_prepared(&prepared),
+                )
+                .await?
+                .map_err(|error| JazzError::Query(error.to_string()))?
         } else if opts.tier == ReadTier::Remote
             || matches!(opts.first_load, FirstLoad::WaitForRemote { timeout_ms } if timeout_ms > 0)
         {
@@ -811,17 +897,35 @@ impl JazzClient {
             let prepared = self.prepare(&read)?;
             let session = self.session_identity()?;
             let db = self.db()?;
-            crate::db::block_on(async {
-                match session {
-                    Some(author) => db.all_for_identity(&prepared, opts, author).await,
-                    None => db.all(&prepared, opts).await,
-                }
-            })
-            .map_err(|error| JazzError::Query(error.to_string()))?
+            let read_local = || {
+                crate::db::block_on(async {
+                    let roots = match &session {
+                        Some(author) => {
+                            db.all_for_identity(&prepared, opts.clone(), author.clone())
+                                .await
+                        }
+                        None => db.all(&prepared, opts.clone()).await,
+                    }?;
+                    // Array relations nest in their parents' cells, as a
+                    // subscription's rows carry them.
+                    db.nest_relations(&prepared, roots)
+                })
+            };
+            // A row whose large values are still being fetched answers once
+            // their chunks arrive, while the upstream that will send them is
+            // connected.
+            self.shared
+                .until(|| match read_local() {
+                    Err(error) if error.is_missing_chunks() && db.awaiting_chunks() => None,
+                    result => Some(result),
+                })
+                .await?
+                .map_err(|error| JazzError::Query(error.to_string()))?
         };
         Decoder {
             schema: &self.shared.schema,
             query: &query,
+            db: None,
         }
         .results(&rows)
     }
@@ -926,6 +1030,7 @@ impl JazzClient {
                 cells,
                 InsertOptions {
                     row_id,
+                    identity: self.write_identity()?,
                     ..Default::default()
                 },
             ))
@@ -966,7 +1071,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                UpsertOptions::default(),
+                UpsertOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1005,7 +1114,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                UpdateOptions::default(),
+                UpdateOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1037,7 +1150,10 @@ impl JazzClient {
             crate::db::block_on(db.serializable_tx_ref(transaction_id).delete(
                 table,
                 row,
-                DeleteOptions::default(),
+                DeleteOptions {
+                    identity: self.write_identity()?,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1076,7 +1192,11 @@ impl JazzClient {
                 table,
                 row,
                 cells,
-                RestoreOptions::default(),
+                RestoreOptions {
+                    identity: self.write_identity()?,
+                    updated_at_ms,
+                    ..Default::default()
+                },
             ))
             .map_err(write_error)?;
             self.staged(transaction_id);
@@ -1103,12 +1223,9 @@ impl JazzClient {
     /// if every read and written row is unchanged since then. Staged writes
     /// are not visible to ordinary reads until the transaction commits.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        if !matches!(self.write_identity()?, WriteIdentity::Database) {
-            return Err(JazzError::Write(
-                "transactions with an explicit session or attribution are not supported yet"
-                    .to_owned(),
-            ));
-        }
+        // Each staged write carries this handle's identity (checked when
+        // staged, and named on the commit for the authority).
+        self.write_identity()?;
         let db = self.db()?;
         let mut transaction_id = OpenTransactionId::new();
         {
@@ -1193,15 +1310,29 @@ impl JazzClient {
             DurabilityTier::Local => CoreDurabilityTier::Local,
             DurabilityTier::GlobalServer => CoreDurabilityTier::Global,
         };
+        if self.shared.serverless && core_tier > CoreDurabilityTier::Local {
+            return Err(JazzError::Write(format!(
+                "{tier:?} durability is unreachable: this client has no server"
+            )));
+        }
         let db = self.db()?;
         self.shared
             .settle(db.wait_for_transaction(seq, core_tier))
             .await?
             .map(drop)
             .map_err(|error| {
-                JazzError::Write(format!(
-                    "transaction was rejected before reaching {tier:?} durability: {error}"
-                ))
+                // A policy rejection is reported by its reason, as the
+                // authority's verdict on the transaction.
+                if error.is_authorization_denied() {
+                    JazzError::Sync(format!(
+                        "transaction was rejected before reaching {tier:?} durability: {}",
+                        crate::db::AUTHORIZATION_DENIED
+                    ))
+                } else {
+                    JazzError::Write(format!(
+                        "transaction was rejected before reaching {tier:?} durability: {error}"
+                    ))
+                }
             })
     }
 
@@ -1284,6 +1415,7 @@ impl JazzClient {
     }
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
+        self.shared.upstream_paused.send_replace(true);
         let detached = detach(&self.shared);
         self.shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
         detached
@@ -1302,10 +1434,33 @@ impl JazzClient {
             .map_err(|_| JazzError::Sync(format!("timed out waiting for {tier:?}")))?
     }
 
+    /// Let the keeper open a fresh link for the preserved client state and
+    /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        Err(JazzError::Connection(
-            "reattaching a detached test link is not supported yet on SQLite".to_owned(),
-        ))
+        let (failed, attached) = {
+            let state = self.shared.state.borrow();
+            (state.connect_failures.0, state.upstream.is_some())
+        };
+        // Neither detached nor reconnecting: nothing to reattach.
+        if !self.shared.upstream_paused.send_replace(false) && attached {
+            return Ok(false);
+        }
+        // The first attempt either attaches or fails; the keeper retries
+        // after a failure on its own.
+        self.shared
+            .until(|| {
+                let state = self.shared.state.borrow();
+                if state.upstream.is_some() {
+                    return Some(Ok(true));
+                }
+                match &state.connect_failures {
+                    (n, error) if *n > failed => Some(Err(JazzError::Connection(
+                        error.clone().unwrap_or_default(),
+                    ))),
+                    _ => None,
+                }
+            })
+            .await?
     }
 }
 
@@ -1671,6 +1826,9 @@ fn core_to_public_value_for_column_type(
 struct Decoder<'a> {
     schema: &'a Schema,
     query: &'a Query,
+    /// Where a delivered row's provenance is read when the query does not
+    /// project it.
+    db: Option<&'a Db>,
 }
 
 impl Decoder<'_> {
@@ -1769,8 +1927,10 @@ impl Decoder<'_> {
                 NodeUuid(*node),
             )));
         }
-        Ok(ResultKey::from_occurrence(
-            OutputOccurrenceId::single_source(id),
+        Ok(jazz_db::values::occurrence_key(
+            row.row_uuid(),
+            row.root_version(),
+            row.joined_rows(),
         ))
     }
 
@@ -1800,6 +1960,31 @@ impl Decoder<'_> {
             .collect()
     }
 
+    /// A delivered row's provenance: its projected magic columns, or the
+    /// stored row's stamps.
+    fn provenance(&self, row: &CurrentRow) -> Result<crate::model::metadata::RowProvenance> {
+        let projected = provenance(row);
+        let Some(db) = self.db.filter(|_| projected.created_by == "jazz:unknown") else {
+            return Ok(projected);
+        };
+        Ok(
+            match db
+                .row_provenance(row.table(), row.row_uuid())
+                .map_err(|error| JazzError::Query(error.to_string()))?
+            {
+                Some((created_at, created_by, updated_at, updated_by)) => {
+                    crate::model::metadata::RowProvenance {
+                        created_by,
+                        created_at,
+                        updated_by,
+                        updated_at,
+                    }
+                }
+                None => projected,
+            },
+        )
+    }
+
     fn subscription_row(&self, row: &SubscriptionOutputRow) -> Result<Row> {
         let record = crate::binding_codec::row_record(&row.row)
             .map_err(|error| JazzError::Query(format!("encode subscription row: {error}")))?;
@@ -1807,7 +1992,7 @@ impl Decoder<'_> {
             self.key(&row.row)?,
             record.raw().to_vec(),
             TransactionId([0; 16]),
-            provenance(&row.row),
+            self.provenance(&row.row)?,
         );
         #[cfg(feature = "testing")]
         let public = public.with_fields(self.values(&row.row)?);

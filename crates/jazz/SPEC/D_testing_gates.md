@@ -124,7 +124,7 @@ randomized maintained-vs-one-shot equivalence.
 ### D.4 Oracle norm and public-surface preference
 
 Every consistency claim gets randomized oracle coverage. The coverage includes
-domination, merge convergence, exclusive validation, and sync convergence
+domination, merge convergence, serializable validation, and sync convergence
 (`INV-TEST-3`).
 
 **Implementation status (verified).**

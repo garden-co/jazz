@@ -85,3 +85,59 @@ fn candidate_create_permissions_are_explicitly_unsupported() {
         assert_eq!(rows.len(), usize::from(!include_created));
     }
 }
+
+/// Alice may read ordinary nested EXISTS sources, but neither an outer nor an
+/// inner join may silently treat candidate-created evidence as accepted rows.
+#[test]
+fn nested_candidate_sources_remain_explicitly_unsupported() {
+    let schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("parents").policies(common::allow_all_policies()))
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent", "parents")
+                    .policies(common::allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("leaves")
+                    .fk_column("child", "children")
+                    .policies(common::allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x78; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let leaf = Query::from("children")
+        .join_via("leaves", "child", [])
+        .joins
+        .remove(0);
+    let ordinary =
+        Query::from("parents").join_via_with_nested_joins("children", "parent", [], [leaf]);
+    let prepared = db.prepare_query(&ordinary).unwrap();
+    assert!(
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .is_empty()
+    );
+    for nested in [false, true] {
+        let mut candidate = ordinary.clone();
+        let join = if nested {
+            &mut candidate.joins[0].nested_joins[0]
+        } else {
+            &mut candidate.joins[0]
+        };
+        join.source_mode = jazz::query::CandidateSourceMode::IncludeAuthorizedCreatedV1;
+        let error = db
+            .prepare_query(&candidate)
+            .and_then(|prepared| block_on(db.all(&prepared, ReadOpts::default())))
+            .expect_err("candidate-created joins need their independent authorization port");
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(error.message.contains("candidate-created"), "{error}");
+    }
+}

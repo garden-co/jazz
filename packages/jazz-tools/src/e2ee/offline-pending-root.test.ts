@@ -54,7 +54,7 @@ it("does not let a pending root deletion hide accepted offline encryption histor
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Retained accepted scope" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Before disconnect" });
     await tx.commit().wait({ tier: "global" });
