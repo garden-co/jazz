@@ -729,8 +729,8 @@ fn decode_read(bytes: &[u8], relation: bool) -> Vec<jazz::binding_codec::Decoded
 }
 
 /// A backend serving Alice must filter one-shot root and nested reads as Alice,
-/// including rows already cached by a backend replica. Served remote reads reject
-/// until the wire protocol can carry their identity and claims.
+/// including rows already cached by a backend replica. A trusted remote request
+/// returns only Alice's authority-approved roots.
 #[test]
 fn one_shot_binding_reads_keep_the_requested_session() {
     for replica in [false, true] {
@@ -785,9 +785,13 @@ fn one_shot_binding_reads_keep_the_requested_session() {
                     None,
                 )
                 .unwrap();
-            let error = core_error(drive(up, down, read).unwrap_err());
-            assert_eq!(error.code, ErrorCode::Query);
-            assert!(error.message.contains("served session"));
+            let visible = decode_read(&drive(up, down, read).unwrap(), false);
+            assert_eq!(visible.len(), 2);
+            assert!(
+                visible
+                    .iter()
+                    .all(|row| row.cells["owner"] == Value::String("alice".into()))
+            );
         }
 
         for (identity, expected) in [
@@ -1188,4 +1192,389 @@ fn pending_mergeable_session_claims_survive_restart_without_leaking() {
     .unwrap();
     assert_eq!(cached.len(), 1);
     assert_eq!(subject(&cached[0], "owner"), "bob");
+}
+
+fn remote_as(
+    db: &Binding,
+    query: Query,
+    name: &str,
+    claims: Option<serde_json::Value>,
+) -> jazz::binding_host::HostFuture<Vec<u8>> {
+    let author = author(name).canonical().to_owned();
+    db.all(
+        postcard::to_allocvec(&query).unwrap(),
+        &json!({"tier": "remote"}),
+        None,
+        Some(author.as_bytes()),
+        claims,
+    )
+    .unwrap()
+}
+
+/// Alice and Bob's concurrent backend requests carry separate claims all the
+/// way to the authority. Only each request's permitted rows are shipped, and
+/// neither request changes another connection's cached claims.
+#[test]
+fn scoped_remote_reads_isolate_concurrent_claims_and_ship_only_permitted_roots() {
+    let policy = || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
+    let authority = open_with_policy(31, true, None, policy());
+    for (id, owner) in [(1, "alice"), (2, "bob"), (3, "mallory")] {
+        authority
+            .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
+            .unwrap();
+    }
+    let backend = open_with_policy(32, true, None, policy());
+    let up = backend.connect_upstream();
+    let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let query = Query::from("files").filter(eq(
+        col("owner"),
+        jazz::query::claim(jazz::query::provider_claim_key("owner")),
+    ));
+    let alice = author("alice").canonical().to_owned();
+    authority
+        .set_identity_claims(alice.as_bytes(), json!({"owner": "mallory"}))
+        .unwrap();
+    let visible = decode_read(
+        &drive(
+            &up,
+            &down,
+            remote_as(
+                &backend,
+                query.clone(),
+                "alice",
+                Some(json!({"owner": "alice"})),
+            ),
+        )
+        .unwrap(),
+        false,
+    );
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].cells["owner"], Value::String("alice".into()));
+    assert_eq!(
+        rows(&backend).len(),
+        1,
+        "no unrelated Bob or Mallory rows are shipped"
+    );
+    let mut a = remote_as(
+        &backend,
+        query.clone(),
+        "alice",
+        Some(json!({"owner": "alice"})),
+    );
+    let mut b = remote_as(&backend, query, "alice", Some(json!({"owner": "bob"})));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(a.as_mut().poll(&mut cx).is_pending());
+    assert!(b.as_mut().poll(&mut cx).is_pending());
+    for (future, owner) in [(b, "bob"), (a, "alice")] {
+        let visible = decode_read(&drive(&up, &down, future).unwrap(), false);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].cells["owner"], Value::String(owner.into()));
+    }
+    assert_eq!(rows(&backend).len(), 2);
+    let prepared = authority.db.prepare_query(&Query::from("files")).unwrap();
+    let cached = block_on(authority.db.all_for_identity(
+        &prepared,
+        ReadOpts::default(),
+        author("alice"),
+    ))
+    .unwrap();
+    assert_eq!(cached.len(), 1);
+    assert_eq!(subject(&cached[0], "owner"), "mallory");
+}
+
+/// Ordinary Alice connections cannot forge Bob or fresh claims, even
+/// if the local host calls itself a backend. A refused request leaks no rows.
+#[test]
+fn untrusted_connections_cannot_submit_scoped_reads() {
+    for name in ["alice", "bob"] {
+        let authority = open_with_policy(
+            33,
+            true,
+            None,
+            PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]),
+        );
+        authority
+            .insert("files", &cells("bob"), &json!({"rowId": vec![1; 16]}))
+            .unwrap();
+        let backend = open(34, true, None);
+        let up = backend.connect_upstream();
+        let down = authority.accept_subscriber(author("alice"), BTreeMap::new());
+        let id = author(name);
+        let read = backend
+            .all(
+                postcard::to_allocvec(&Query::from("files")).unwrap(),
+                &json!({"tier": "remote"}),
+                None,
+                Some(id.canonical().as_bytes()),
+                Some(json!({"owner": "bob"})),
+            )
+            .unwrap();
+        let error = core_error(drive(&up, &down, read).unwrap_err());
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        assert!(error.message.contains("trusted backend connection"));
+        assert!(rows(&backend).is_empty());
+    }
+}
+
+/// A revoked or local-only Alice row cannot leak from the backend cache into a
+/// remote answer. Pagination applies once, at the authority, and an empty
+/// authorized answer stays empty even while the cache contains Alice rows.
+#[test]
+fn scoped_remote_answers_exclude_stale_and_pending_rows_and_preserve_windows() {
+    let authority = open(35, true, None);
+    for id in 1..=4 {
+        authority
+            .insert("files", &cells("alice"), &json!({"rowId": vec![id; 16]}))
+            .unwrap();
+    }
+    let backend = open(36, true, None);
+    let up = backend.connect_upstream();
+    let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let query = Query::from("files").order_by("id", jazz::query::OrderDirection::Asc);
+    assert_eq!(
+        decode_read(
+            &drive(
+                &up,
+                &down,
+                remote_as(&backend, query.clone(), "alice", None)
+            )
+            .unwrap(),
+            false
+        )
+        .len(),
+        4
+    );
+    authority
+        .update("files", &[1; 16], &cells("bob"), &json!({}))
+        .unwrap();
+    let visible = decode_read(
+        &drive(
+            &up,
+            &down,
+            remote_as(&backend, query.clone().offset(1).limit(1), "alice", None),
+        )
+        .unwrap(),
+        false,
+    );
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].row_id, RowUuid::from_bytes([3; 16]));
+    let staged = backend
+        .insert("files", &cells("alice"), &json!({"rowId": vec![9; 16]}))
+        .unwrap();
+    // Poll registers the read; feed only read frames, keeping the local write
+    // unsent. The wire-level filtering models a delayed upload, not a core hook.
+    let mut read = remote_as(&backend, query.clone(), "alice", None);
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    block_on(backend.tick()).unwrap();
+    let outbound = up.take_outbound();
+    let mut deferred = Vec::new();
+    for frame in outbound {
+        if matches!(
+            postcard::from_bytes::<jazz::db::SyncMessage>(&frame).unwrap(),
+            jazz::db::SyncMessage::Commit { .. }
+        ) {
+            deferred.push(frame);
+        } else {
+            down.receive([frame]);
+        }
+    }
+    block_on(authority.tick()).unwrap();
+    up.receive(down.take_outbound());
+    block_on(backend.tick()).unwrap();
+    let visible = decode_read(&drive(&up, &down, read).unwrap(), false);
+    assert_eq!(visible.len(), 3);
+    assert!(
+        visible
+            .iter()
+            .all(|row| row.row_id != RowUuid::from_bytes([9; 16]))
+    );
+    down.receive(deferred);
+    drive(
+        &up,
+        &down,
+        backend.wait_for_write(&staged, "global").unwrap(),
+    )
+    .unwrap();
+    for id in [2, 3, 4, 9] {
+        authority
+            .update("files", &[id; 16], &cells("bob"), &json!({}))
+            .unwrap();
+    }
+    assert!(
+        decode_read(
+            &drive(&up, &down, remote_as(&backend, query, "alice", None)).unwrap(),
+            false
+        )
+        .is_empty()
+    );
+}
+
+/// A peer can bypass the SDK's shape checks, so raw wire requests exercise the
+/// authority boundary: Alice's nested/cross-row evidence and relay reads reject
+/// explicitly; malformed authors reject without closing the serving connection.
+#[test]
+fn scoped_wire_requests_reject_unported_shapes_relays_and_malformed_authors() {
+    for kind in ["nested", "evidence", "relay", "malformed", "forged-system"] {
+        let policy = if kind == "evidence" {
+            PolicyExpr::Exists {
+                table: "files".into(),
+                condition: Box::new(PolicyExpr::True),
+            }
+        } else {
+            PolicyExpr::eq_session(
+                "owner",
+                vec!["user".into(), "identity".into(), "subject".into()],
+            )
+        };
+        let authority = open_with_policy(37, true, None, policy);
+        let _up = (kind == "relay").then(|| authority.connect_upstream());
+        let down = authority.accept_subscriber(
+            if kind == "forged-system" {
+                author("alice")
+            } else {
+                AuthorSubject::SYSTEM
+            },
+            BTreeMap::new(),
+        );
+        let query = if kind == "nested" {
+            Query::from("files")
+                .array_subquery(ArraySubquery::new("children", "files", "parent", "id"))
+        } else {
+            Query::from("files")
+        };
+        let request = jazz::db::SyncMessage::ScopedFetchV1 {
+            id: 41,
+            query,
+            binding: BTreeMap::new(),
+            author: if kind == "malformed" {
+                "not-an-author".into()
+            } else if kind == "forged-system" {
+                AuthorSubject::SYSTEM.canonical().to_owned()
+            } else {
+                author("alice").canonical().to_owned()
+            },
+            claims: BTreeMap::new(),
+            include_deleted: false,
+        };
+        down.receive([postcard::to_allocvec(&request).unwrap()]);
+        block_on(authority.tick()).unwrap();
+        let messages: Vec<jazz::db::SyncMessage> = down
+            .take_outbound()
+            .iter()
+            .map(|frame| postcard::from_bytes(frame).unwrap())
+            .collect();
+        let expected = if kind == "forged-system" {
+            ErrorCode::WriteRejected
+        } else {
+            ErrorCode::Query
+        };
+        assert!(
+            messages.iter().any(|message| matches!(
+                message,
+                jazz::db::SyncMessage::Refused {
+                    id: 41,
+                    code,
+                    ..
+                } if *code == expected
+            )),
+            "{kind}: {messages:?}"
+        );
+        assert!(!messages.iter().any(|message| matches!(
+            message,
+            jazz::db::SyncMessage::Rows { .. } | jazz::db::SyncMessage::Answer { .. }
+        )));
+    }
+}
+
+/// Alice's cancelled request is removed before transport dispatch; reconnecting
+/// while a read waits yields a typed error rather than reusing old request claims.
+#[test]
+fn scoped_reads_cancel_cleanly_and_fail_on_reconnect() {
+    let authority = open(38, true, None);
+    let backend = open(39, true, None);
+    let up = backend.connect_upstream();
+    let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    // Drain the handshake before cancellation.
+    for _ in 0..4 {
+        down.receive(up.take_outbound());
+        up.receive(down.take_outbound());
+        block_on(authority.tick()).unwrap();
+        block_on(backend.tick()).unwrap();
+    }
+    for _ in 0..20 {
+        let mut read = remote_as(&backend, Query::from("files"), "alice", None);
+        assert!(
+            read.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(read);
+    }
+    block_on(backend.tick()).unwrap();
+    assert!(!up.take_outbound().iter().any(|frame| matches!(
+        postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+        jazz::db::SyncMessage::ScopedFetchV1 { .. }
+    )));
+    let mut read = remote_as(&backend, Query::from("files"), "alice", None);
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    let _new_up = backend.connect_upstream();
+    let error = core_error(block_on(read).unwrap_err());
+    assert_eq!(error.code, ErrorCode::NotObserved);
+}
+
+/// Alice can explicitly read her tombstones, but Bob's remain hidden. Losing
+/// the authority cannot promote the backend's cached Alice rows to a remote read.
+#[test]
+fn scoped_remote_reads_preserve_deleted_rows_and_fail_without_authority() {
+    let authority = open(40, true, None);
+    for (id, owner) in [(1, "alice"), (2, "bob")] {
+        authority
+            .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
+            .unwrap();
+        authority.delete("files", &[id; 16], &json!({})).unwrap();
+    }
+    let backend = open(41, true, None);
+    let up = backend.connect_upstream();
+    let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let alice = author("alice");
+    let query = Query::from("files").select(["owner"]);
+    let read = backend
+        .all(
+            postcard::to_allocvec(&query).unwrap(),
+            &json!({"tier": "remote", "include_deleted": true}),
+            None,
+            Some(alice.canonical().as_bytes()),
+            None,
+        )
+        .unwrap();
+    let visible = decode_read(&drive(&up, &down, read).unwrap(), false);
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].row_id, RowUuid::from_bytes([1; 16]));
+    assert_eq!(visible[0].cells["owner"], Value::String("alice".into()));
+    assert!(
+        decode_read(
+            &drive(
+                &up,
+                &down,
+                remote_as(&backend, query.clone(), "alice", None)
+            )
+            .unwrap(),
+            false,
+        )
+        .is_empty()
+    );
+    backend
+        .db
+        .set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
+    let error = core_error(block_on(remote_as(&backend, query, "alice", None)).unwrap_err());
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    assert!(error.message.contains("no available authority"));
 }
