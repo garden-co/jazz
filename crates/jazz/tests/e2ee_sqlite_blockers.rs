@@ -12,11 +12,10 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 
-/// Alice may insert through an ordinary accepted-parent EXISTS. The candidate-create
-/// variant must fail explicitly until SQLite implements its independent authorization.
-/// alice -> existing parent -> ordinary insert succeeds / candidate-source insert rejected
+/// Alice may use an already accepted parent through either EXISTS form.
+/// Same-unit creation still requires the independent proof tested separately.
 #[test]
-fn candidate_create_permissions_are_explicitly_unsupported() {
+fn candidate_create_permissions_keep_accepted_parent_evidence() {
     let alice = AuthorSubject::for_test_bytes([0x61; 16]);
     let parent = RowUuid::from_bytes([0x62; 16]);
     for include_created in [false, true] {
@@ -71,16 +70,10 @@ fn candidate_create_permissions_are_explicitly_unsupported() {
                 ..Default::default()
             },
         ));
-        if include_created {
-            let error = result.expect_err("candidate-created sources must not use ordinary EXISTS");
-            assert_eq!(error.code, ErrorCode::Query);
-            assert!(error.message.contains("ExistsIncludingCreated"), "{error}");
-        } else {
-            assert!(result.is_ok(), "ordinary EXISTS remains supported");
-        }
+        assert!(result.is_ok(), "accepted parent evidence remains supported");
         let query = db.prepare_query(&Query::from("children")).unwrap();
         let rows = block_on(db.all(&query, ReadOpts::default())).unwrap();
-        assert_eq!(rows.len(), usize::from(!include_created));
+        assert_eq!(rows.len(), 1);
     }
 }
 
