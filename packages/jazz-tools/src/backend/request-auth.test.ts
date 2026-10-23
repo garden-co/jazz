@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveRequestSession } from "./request-auth.js";
+import { RequestAuthenticationError, resolveRequestSession } from "./request-auth.js";
 
 const JWT_KID = "backend-request-test-kid";
 const JWT_SECRET = "backend-request-test-secret";
@@ -139,6 +139,7 @@ describe("backend request auth", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     await Promise.all(
       Array.from(servers, async (server) => {
@@ -486,6 +487,93 @@ describe("backend request auth", () => {
       authMode: "local-first",
     });
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { nodeEnv: undefined, allowLocalFirstAuth: undefined, accepted: true },
+    { nodeEnv: "development", allowLocalFirstAuth: undefined, accepted: true },
+    { nodeEnv: "test", allowLocalFirstAuth: undefined, accepted: true },
+    { nodeEnv: "production", allowLocalFirstAuth: undefined, accepted: false },
+    { nodeEnv: "PrOdUcTiOn", allowLocalFirstAuth: undefined, accepted: false },
+    { nodeEnv: "development", allowLocalFirstAuth: true, accepted: true },
+    { nodeEnv: "development", allowLocalFirstAuth: false, accepted: false },
+    { nodeEnv: "production", allowLocalFirstAuth: true, accepted: true },
+    { nodeEnv: "production", allowLocalFirstAuth: false, accepted: false },
+  ])(
+    "local-first JWT accepted=$accepted when NODE_ENV=$nodeEnv and override=$allowLocalFirstAuth",
+    async ({ nodeEnv, allowLocalFirstAuth, accepted }) => {
+      vi.stubEnv("NODE_ENV", nodeEnv);
+      const identity = {
+        issuer: "urn:jazz:local-first",
+        subject: "11111111-1111-1111-1111-111111111111",
+      };
+      const token = makeUnsignedJwt({ iss: identity.issuer, sub: identity.subject });
+      const account = "00000000-0000-4000-8000-000000000012";
+      mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: identity.subject });
+      const fetcher = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ account, identity })));
+
+      const result = resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          allowLocalFirstAuth,
+        },
+      );
+
+      if (accepted) {
+        await expect(result).resolves.toMatchObject({
+          issuer: identity.issuer,
+          user_id: identity.subject,
+          account_id: account,
+          authMode: "local-first",
+        });
+        expect(mocks.verifyLocalFirstIdentityProof).toHaveBeenCalledWith(token, "app");
+        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(fetcher).toHaveBeenCalledWith(
+          "https://core.example/apps/app/accounts/found-local-first",
+          expect.objectContaining({
+            method: "POST",
+            headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+          }),
+        );
+      } else {
+        await expect(result).rejects.toThrow(/allowLocalFirstAuth disabled/);
+        expect(mocks.verifyLocalFirstIdentityProof).not.toHaveBeenCalled();
+        expect(fetcher).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("honours sync-server rejection when local-first auth is explicitly enabled in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const userId = "11111111-1111-1111-1111-111111111111";
+    const token = makeUnsignedJwt({ iss: "urn:jazz:local-first", sub: userId });
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: userId });
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("invalid account credential", { status: 401 }));
+
+    await expect(
+      resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          allowLocalFirstAuth: true,
+        },
+      ),
+    ).rejects.toBeInstanceOf(RequestAuthenticationError);
+    expect(mocks.verifyLocalFirstIdentityProof).toHaveBeenCalledWith(token, "app");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://core.example/apps/app/accounts/found-local-first",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+      }),
+    );
   });
 
   it("rejects local-first JWTs when allowLocalFirstAuth is disabled", async () => {
