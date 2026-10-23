@@ -233,6 +233,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty,
             default: None,
             json: false,
+            merge: Default::default(),
         });
     }
     // Every version reads its current row's deletion (see
@@ -244,6 +245,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            merge: Default::default(),
         });
     }
     versions

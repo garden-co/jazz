@@ -311,6 +311,8 @@ pub struct Column {
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
+    /// How concurrent writes to the column merge at the authority.
+    pub merge: crate::schema::MergeStrategy,
 }
 
 impl Column {
@@ -449,6 +451,7 @@ fn stored_provenance_columns() -> Vec<Column> {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            merge: Default::default(),
         })
         .collect()
 }
@@ -477,6 +480,7 @@ fn provenance_columns() -> Vec<Column> {
             })),
             default: None,
             json: false,
+            merge: Default::default(),
         })
         .collect()
 }
@@ -584,6 +588,11 @@ impl Schema {
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: format!("{:?}", column.large_value_kind) == "Json",
+                    merge: table
+                        .merge_strategies
+                        .get(&column.name)
+                        .copied()
+                        .unwrap_or_default(),
                 })
                 .collect();
             let mut indexes: Vec<Vec<String>> = table
@@ -774,6 +783,7 @@ impl Table {
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
                     json: false,
+                    merge: Default::default(),
                 })
                 .collect(),
             references: BTreeMap::new(),

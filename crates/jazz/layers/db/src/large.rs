@@ -1550,6 +1550,7 @@ mod tests {
             ty: crate::records::ValueType::String,
             default: None,
             json: false,
+            merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column])).unwrap();
         let count = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();

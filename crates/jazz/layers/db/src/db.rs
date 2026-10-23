@@ -12,7 +12,7 @@ use crate::protocol::{
 };
 use crate::query::Query;
 use crate::records::{Value, ValueType};
-use crate::schema::JazzSchema;
+use crate::schema::{JazzSchema, MergeStrategy};
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
@@ -548,7 +548,7 @@ fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn rejected(message: impl Into<String>) -> Error {
+pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
 
@@ -1122,9 +1122,13 @@ impl Db {
 
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
-    fn write_op(&self, op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+    fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.with_upload(|| {
-            let handle = self.write(op.table(), |inner, seq| inner.apply_as(&op, who, seq))?;
+            let table = op.table().to_owned();
+            let handle = self.write(&table, |inner, seq| {
+                inner.counter_deltas(&mut op)?;
+                inner.apply_as(&op, who, seq)
+            })?;
             self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
             Ok(handle)
         })
@@ -2345,6 +2349,118 @@ impl Inner {
 
     /// Keep the superseded image (linear history: history holds superseded
     /// images only).
+    /// The stored value of `column` in `row` on branch `key`, if any.
+    fn cell_at(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        column: &str,
+    ) -> Result<Option<Value>, Error> {
+        let Some(column) = table.columns.iter().find(|c| c.name == column) else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2",
+            quote(&column.stored),
+            quote(&table.stored)
+        );
+        let cell: Option<Sql> = self
+            .conn
+            .query_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        match cell {
+            Some(cell) => from_sql(&column.ty, cell.as_ref(), &self.chunks),
+            None => Ok(None),
+        }
+    }
+
+    /// Turn a write's counter cells from the values it sets into the
+    /// changes it makes to what this node holds (see [`crate::merge`]).
+    pub(crate) fn counter_deltas(&self, op: &mut StagedOp) -> Result<(), Error> {
+        let (table_name, row, cells, target) = match op {
+            StagedOp::Update(t, r, c, o) => (t.clone(), *r, c, &o.target),
+            StagedOp::Upsert(t, r, c, o) => (t.clone(), *r, c, &o.target),
+            _ => return Ok(()),
+        };
+        let schema = self.schema.clone();
+        let table = schema.table(&table_name)?;
+        let counters: Vec<String> = cells
+            .keys()
+            .filter(|name| {
+                table
+                    .columns
+                    .iter()
+                    .any(|c| &c.name == *name && c.merge == MergeStrategy::Counter)
+            })
+            .cloned()
+            .collect();
+        if counters.is_empty() {
+            return Ok(());
+        }
+        let target = Target::of(target, self)?;
+        let held_at = match self.locate(table, row, &target)? {
+            Located::Row {
+                key,
+                deleted: false,
+                ..
+            } => Some(key),
+            Located::Inherited { from, .. } => Some(from),
+            _ => None,
+        };
+        for name in counters {
+            let seen = match &held_at {
+                Some(key) => self.cell_at(table, row, key, &name)?,
+                None => None,
+            };
+            let delta = crate::merge::counter_delta(&name, &cells[&name], seen.as_ref())?;
+            cells.insert(name, delta);
+        }
+        Ok(())
+    }
+
+    /// A write's merged cells against what branch `held` (if any) holds:
+    /// counter changes added, g-sets unioned.
+    fn merged_cells(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        held: Option<&[u8]>,
+        mut cells: BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, Error> {
+        for column in &table.columns {
+            let Some(value) = cells.get(&column.name) else {
+                continue;
+            };
+            let merged = match column.merge {
+                MergeStrategy::Lww => continue,
+                MergeStrategy::Counter | MergeStrategy::GSet => {
+                    let current = match held {
+                        Some(key) => self.cell_at(table, row, key, &column.name)?,
+                        None => None,
+                    };
+                    if column.merge == MergeStrategy::Counter {
+                        crate::merge::counter_apply(
+                            &column.name,
+                            &column.ty,
+                            current.as_ref(),
+                            value,
+                        )?
+                    } else {
+                        crate::merge::gset_union(&column.name, current.as_ref(), value)?
+                    }
+                }
+            };
+            cells.insert(column.name.clone(), merged);
+        }
+        Ok(cells)
+    }
+
     /// Whether `row` on branch `key` has a superseded committed image.
     fn has_history(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
@@ -2513,6 +2629,7 @@ impl Inner {
         }
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
+        let cells = self.merged_cells(table, row, None, cells)?;
         if self.existing(&table.stored, row, &key)?.is_some() {
             return Err(rejected(format!(
                 "row {row:?} already exists in `{table_name}`"
@@ -2640,6 +2757,7 @@ impl Inner {
                 if cells.is_empty() && !deleted {
                     return Ok(WriteHandle { row, seq: current });
                 }
+                let cells = self.merged_cells(table, row, (!deleted).then_some(&key[..]), cells)?;
                 self.snapshot(table, row, &key, seq)?;
                 // An upsert over a tombstone replaces it.
                 self.set_cells(
@@ -2660,6 +2778,7 @@ impl Inner {
                 at,
             } => {
                 self.authorize_patch(table, row, &from, &who, verb)?;
+                let cells = self.merged_cells(table, row, Some(&from), cells)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &cells, seq, None, true)?;
                 to
@@ -3784,7 +3903,9 @@ impl Db {
         result
     }
 
-    fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
+    fn stage(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
+        // A counter write's change is from what the transaction sees.
+        self.in_overlay(id, None, |inner, _| inner.counter_deltas(&mut op))?;
         // Validate against the overlay now, so errors surface at the call.
         self.in_overlay(id, Some(op.clone()), |_, _| Ok(()))?;
         let mut inner = self.inner();
