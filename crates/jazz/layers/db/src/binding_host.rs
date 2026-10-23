@@ -726,6 +726,9 @@ pub struct Binding {
     /// Open transactions a staged write was refused in for its row's
     /// state: the transaction's commit reports the first such refusal.
     refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
+    /// Open transactions bound to an identity: their writes are its, and
+    /// their reads run as it.
+    bound: Rc<RefCell<BTreeMap<OpenTransactionId, WriteIdentity>>>,
     /// Local-first accounts a backend admitted (see
     /// [`Binding::admit_local_first_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
@@ -754,6 +757,7 @@ impl Binding {
             author: identity.author,
             trusted_backend,
             refused: Rc::default(),
+            bound: Rc::default(),
             admitted: Rc::default(),
         }
     }
@@ -972,8 +976,9 @@ impl Binding {
 
     // ---- transactions ----
 
-    /// Begin one owner-wide transaction. Transactions bound to another
-    /// identity are not supported yet.
+    /// Begin one owner-wide transaction, bound to the session `author` or
+    /// the backend `attribution` if one is given: its writes are that
+    /// identity's, and its reads run as it.
     pub fn begin_transaction(
         &self,
         id: &str,
@@ -985,12 +990,19 @@ impl Binding {
         if author.is_some() && attribution.is_some() {
             return Err("transaction identity cannot contain both author and attribution".into());
         }
-        if author.is_some() || attribution.is_some() {
-            return Err(not_supported("transactions bound to another identity"));
-        }
+        let identity = match (author, attribution) {
+            (Some(author), _) => WriteIdentity::Session(self.author_of(author)?),
+            (_, Some(attribution)) => {
+                self.checked(WriteIdentity::Attribution(self.author_of(attribution)?))?
+            }
+            (None, None) => WriteIdentity::Database,
+        };
         match TransactionKind::parse(kind)? {
             TransactionKind::Mergeable => block_on(self.db.begin_mergeable(id))?,
             TransactionKind::Serializable => block_on(self.db.begin_serializable(id))?,
+        }
+        if identity != WriteIdentity::Database {
+            self.bound.borrow_mut().insert(id, identity);
         }
         Ok(())
     }
@@ -998,6 +1010,7 @@ impl Binding {
     /// Commit an owner-wide transaction (`kind` defaults to mergeable).
     pub fn commit_transaction(&self, id: &str, kind: Option<&str>) -> HostResult<Write> {
         let id = open_transaction(id)?;
+        self.bound.borrow_mut().remove(&id);
         let kind = TransactionKind::parse(kind.unwrap_or("mergeable"))?;
         if let Some(error) = self.refused.borrow_mut().remove(&id) {
             self.db.abandon_transaction_handle(id)?;
@@ -1023,7 +1036,45 @@ impl Binding {
     pub fn rollback_transaction(&self, id: &str) -> HostResult<()> {
         let id = open_transaction(id)?;
         self.refused.borrow_mut().remove(&id);
+        self.bound.borrow_mut().remove(&id);
         Ok(self.db.abandon_transaction_handle(id)?)
+    }
+
+    /// The identity a write staged in transaction `id` runs as: the one the
+    /// transaction is bound to, if any, which the write may only repeat.
+    fn staged_identity(
+        &self,
+        id: OpenTransactionId,
+        identity: WriteIdentity,
+    ) -> HostResult<WriteIdentity> {
+        let identity = self.checked(identity)?;
+        match self.bound.borrow().get(&id) {
+            None => Ok(identity),
+            Some(bound) if identity == WriteIdentity::Database || identity == *bound => Ok(*bound),
+            Some(_) => Err(HostError::Argument(
+                "a staged write's identity must match its open transaction's bound identity".into(),
+            )),
+        }
+    }
+
+    /// The author a read in open transaction `id` runs as: the session the
+    /// transaction is bound to, which an explicit author may only repeat.
+    fn transaction_reader(
+        &self,
+        id: OpenTransactionId,
+        author: Option<&[u8]>,
+    ) -> HostResult<Option<AuthorSubject>> {
+        let bound = match self.bound.borrow().get(&id) {
+            Some(WriteIdentity::Session(bound)) => *bound,
+            _ => return Ok(None),
+        };
+        match author.map(|bytes| self.author_of(bytes)).transpose()? {
+            Some(author) if author != bound => Err(HostError::Argument(
+                "the open transaction identity does not match the transaction's bound identity"
+                    .into(),
+            )),
+            _ => Ok(Some(bound)),
+        }
     }
 
     /// A staged write's outcome. Like a direct write's (see
@@ -1051,6 +1102,7 @@ impl Binding {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
         let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
         let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
         self.staged(id, staged)?;
@@ -1069,7 +1121,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let options = update_options_as(options, &|bytes| self.author_of(bytes))?;
+        let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -1087,8 +1140,9 @@ impl Binding {
         cells: &[u8],
         options: &O,
     ) -> HostResult<()> {
-        let options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
+        let mut options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
         let id = open_transaction(id)?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
         let staged = block_on(
@@ -1109,7 +1163,8 @@ impl Binding {
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
+        let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
         self.staged(id, staged)
     }
@@ -1132,6 +1187,7 @@ impl Binding {
             updated_at_ms: updated_at_ms
                 .map(|value| checked_u64(value, "updatedAtMs"))
                 .transpose()?,
+            identity: self.staged_identity(id, WriteIdentity::Database)?,
             ..Default::default()
         };
         let staged = block_on(
@@ -1154,7 +1210,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let cells = cells.map(decode_cells).transpose()?;
-        let options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
+        let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -1191,8 +1248,17 @@ impl Binding {
         claims: Option<serde_json::Value>,
     ) -> HostResult<HostFuture<Vec<u8>>> {
         let opts = read_opts(opts)?;
-        let explicit = author.is_some();
-        let author = self.read_author(author)?;
+        let open_tx = open_transaction_id.map(open_transaction).transpose()?;
+        // A transaction bound to a session reads as it.
+        let bound = match open_tx {
+            Some(id) => self.transaction_reader(id, author)?,
+            None => None,
+        };
+        let explicit = author.is_some() || bound.is_some();
+        let author = match bound {
+            Some(bound) => Some(bound),
+            None => self.read_author(author)?,
+        };
         let admission = match (explicit, author) {
             (true, Some(author)) => Some((
                 author,
@@ -1200,7 +1266,6 @@ impl Binding {
             )),
             _ => None,
         };
-        let open_tx = open_transaction_id.map(open_transaction).transpose()?;
         let db = self.db.clone();
         // A Remote read must be covered by the server; its budget runs
         // from its first wait.

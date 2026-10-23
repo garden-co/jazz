@@ -1689,20 +1689,27 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
     ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
 
-    // This adapter's direct writes are advisory: capture both cross-identity
-    // deletes and prove their local effects through identity-scoped reads.
-    const aliceDeletesBob = runtime.delete("todos", bobTodo.id, aliceSession);
-    const bobDeletesAlice = runtime.delete("todos", aliceTodo.id, bobSession);
-    await Promise.all([
-      runtime.waitForTransaction(await committedTxId(aliceDeletesBob), "local"),
-      runtime.waitForTransaction(await committedTxId(bobDeletesAlice), "local"),
-    ]);
+    // A session cannot delete a row its read policy hides: to it, the row
+    // is indistinguishable from an absent one. Each row stays its owner's.
+    expect(() => runtime.delete("todos", bobTodo.id, aliceSession)).toThrow(
+      "read policy denied DELETE",
+    );
+    expect(() => runtime.delete("todos", aliceTodo.id, bobSession)).toThrow(
+      "read policy denied DELETE",
+    );
 
     await expect(
       runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual([expect.objectContaining({ id: aliceTodo.id })]);
     await expect(
       runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
+    ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
+
+    // Its own row a session may delete.
+    const aliceDeletesHers = runtime.delete("todos", aliceTodo.id, aliceSession);
+    await runtime.waitForTransaction(await committedTxId(aliceDeletesHers), "local");
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
     ).resolves.toEqual([]);
   });
 
