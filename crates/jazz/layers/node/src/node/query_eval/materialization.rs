@@ -1145,14 +1145,7 @@ where
             .drain(..)
             .zip(occurrence_ids.drain(..))
             .collect::<Vec<_>>();
-        if query.order_by.is_empty() {
-            paired.sort_by(
-                |(left_row, left_occurrence), (right_row, right_occurrence)| {
-                    default_query_row_order(left_row, right_row)
-                        .then_with(|| left_occurrence.cmp(right_occurrence))
-                },
-            );
-        } else if query.aggregate.is_some() {
+        if query.aggregate.is_some() {
             sort_aggregate_rows(
                 query,
                 &mut paired,
@@ -1166,6 +1159,13 @@ where
                         .then_with(|| left_occurrence.cmp(right_occurrence))
                 },
             )?;
+        } else if query.order_by.is_empty() {
+            paired.sort_by(
+                |(left_row, left_occurrence), (right_row, right_occurrence)| {
+                    default_query_row_order(left_row, right_row)
+                        .then_with(|| left_occurrence.cmp(right_occurrence))
+                },
+            );
         } else {
             let table = table.ok_or(Error::InvalidStoredValue(
                 "ordered maintained rows are missing their table schema",
@@ -1234,11 +1234,6 @@ where
         schema_version: SchemaVersionId,
         rows: &mut [CurrentRow],
     ) -> Result<(), Error> {
-        if query.order_by.is_empty() {
-            sort_query_default_rows(rows);
-            return Ok(());
-        }
-        sort_current_rows(rows);
         if query.aggregate.is_some() {
             sort_aggregate_rows(
                 query,
@@ -1248,6 +1243,11 @@ where
             )?;
             return Ok(());
         }
+        if query.order_by.is_empty() {
+            sort_query_default_rows(rows);
+            return Ok(());
+        }
+        sort_current_rows(rows);
         let table = self.table_in_schema(&query.table, schema_version)?;
         rows.sort_by(|left, right| {
             for order in &query.order_by {
