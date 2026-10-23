@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::ids::RowUuid;
 use crate::options::{Error, ErrorCode};
-use crate::records::{Value, ValueType};
+use crate::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
+use crate::result_tree::{ResultNode, ResultRelation};
 use crate::schema::JazzSchema;
 use crate::tools::{PolicyExpr, TablePolicies};
 use rusqlite::types::{FromSql, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
@@ -102,8 +103,88 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
+        Value::Array(items) => Sql::Text(array_json(items)?.to_string().into_bytes()),
         other => return Err(unsupported(format!("storing {other:?} in SQLite"))),
     }))
+}
+
+/// An array cell as JSON text, so plain SQLite reads it with `json_each`.
+/// Elements are JSON scalars (uuids as their hyphenated strings, enum
+/// tags as numbers) or nested arrays; equal arrays encode to equal text.
+fn array_json(items: &[Value]) -> Result<serde_json::Value, Error> {
+    items
+        .iter()
+        .map(element_json)
+        .collect::<Result<Vec<_>, _>>()
+        .map(serde_json::Value::Array)
+}
+
+fn element_json(item: &Value) -> Result<serde_json::Value, Error> {
+    Ok(match item {
+        Value::Nullable(None) => serde_json::Value::Null,
+        Value::Nullable(Some(inner)) => element_json(inner)?,
+        Value::U8(v) => (*v).into(),
+        Value::U16(v) => (*v).into(),
+        Value::U32(v) => (*v).into(),
+        Value::U64(v) | Value::U48(v) => (*v).into(),
+        Value::I32(v) => (*v).into(),
+        Value::I64(v) => (*v).into(),
+        Value::F64(v) => serde_json::Number::from_f64(*v)
+            .ok_or_else(|| unsupported("storing NaN or infinity in an array"))?
+            .into(),
+        Value::Bool(v) => (*v).into(),
+        Value::String(v) => v.clone().into(),
+        Value::Uuid(v) => v.to_string().into(),
+        Value::EnumTag(v) => (*v).into(),
+        Value::Array(items) => array_json(items)?,
+        other => {
+            return Err(unsupported(format!(
+                "storing {other:?} inside an array in SQLite"
+            )));
+        }
+    })
+}
+
+/// A JSON array element back as a value of its declared type.
+fn json_element(ty: &ValueType, json: &serde_json::Value) -> Option<Value> {
+    use serde_json::Value as Json;
+    Some(match (ty, json) {
+        (ValueType::Nullable(_), Json::Null) => Value::Nullable(None),
+        (ValueType::Nullable(inner), json) => {
+            Value::Nullable(Some(Box::new(json_element(inner, json)?)))
+        }
+        (ValueType::U8, json) => Value::U8(json.as_u64()?.try_into().ok()?),
+        (ValueType::U16, json) => Value::U16(json.as_u64()?.try_into().ok()?),
+        (ValueType::U32, json) => Value::U32(json.as_u64()?.try_into().ok()?),
+        (ValueType::U64, json) => Value::U64(json.as_u64()?),
+        (ValueType::U48, json) => Value::U48(json.as_u64()?),
+        (ValueType::I32, json) => Value::I32(json.as_i64()?.try_into().ok()?),
+        (ValueType::I64, json) => Value::I64(json.as_i64()?),
+        (ValueType::F64, json) => Value::F64(json.as_f64()?),
+        (ValueType::Bool, Json::Bool(v)) => Value::Bool(*v),
+        (ValueType::String, Json::String(v)) => Value::String(v.clone()),
+        (ValueType::Uuid, Json::String(v)) => Value::Uuid(v.parse().ok()?),
+        (ValueType::EnumTag(_), json) => Value::EnumTag(json.as_u64()?.try_into().ok()?),
+        (ValueType::Array(element), Json::Array(items)) => Value::Array(
+            items
+                .iter()
+                .map(|item| json_element(element, item))
+                .collect::<Option<_>>()?,
+        ),
+        _ => return None,
+    })
+}
+
+/// An array element bound for comparison with what `json_each` reads back
+/// as its `value`: uuids are their hyphenated text there.
+pub(crate) fn array_needle(sql: Sql) -> Sql {
+    match sql {
+        Sql::Blob(bytes) => match uuid::Uuid::from_slice(&bytes) {
+            Ok(id) => Sql::Text(id.to_string().into_bytes()),
+            Err(_) => Sql::Blob(bytes),
+        },
+        sql => sql,
+    }
 }
 
 /// Decode a SQLite cell by the column's declared type, reading a chunked
@@ -131,9 +212,59 @@ pub(crate) fn from_sql(
         (ValueType::Bytes, ValueRef::Text(cell)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
         }
+        // An author record, read as a JSON array of its fields (see
+        // `compile::column_sql`).
+        (ValueType::Record(descriptor), ValueRef::Text(cell)) => {
+            let json = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("record cell: {e}")))?;
+            return Ok(json_record(descriptor, &json));
+        }
+        (ValueType::Array(_), ValueRef::Text(cell)) => {
+            let json = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+            return Ok(json_element(ty, &json));
+        }
         _ => {}
     }
     Ok(decode_fixed(ty, cell))
+}
+
+/// A record from a JSON array of its fields in descriptor order: strings,
+/// uuids as hex, nulls, and nested records.
+fn json_record(
+    descriptor: &crate::records::RecordDescriptor,
+    json: &serde_json::Value,
+) -> Option<Value> {
+    use serde_json::Value as Json;
+    fn field(ty: &ValueType, json: &Json) -> Option<Value> {
+        Some(match (ty, json) {
+            (ValueType::Nullable(_), Json::Null) => Value::Nullable(None),
+            (ValueType::Nullable(inner), json) => {
+                Value::Nullable(Some(Box::new(field(inner, json)?)))
+            }
+            (ValueType::String, Json::String(v)) => Value::String(v.clone()),
+            (ValueType::Uuid, Json::String(v)) => Value::Uuid(v.parse().ok()?),
+            (ValueType::Record(descriptor), json) => json_record(descriptor, json)?,
+            _ => return None,
+        })
+    }
+    let Json::Array(items) = json else {
+        return None;
+    };
+    let fields = descriptor.fields();
+    if items.len() != fields.len() {
+        return None;
+    }
+    let values = fields
+        .iter()
+        .zip(items)
+        .map(|(f, item)| field(&f.value_type, item))
+        .collect::<Option<Vec<_>>>()?;
+    let raw = descriptor.create(&values).ok()?;
+    Some(Value::Record(crate::records::OwnedRecord::new(
+        raw,
+        *descriptor,
+    )))
 }
 
 fn decode_fixed(ty: &ValueType, cell: ValueRef<'_>) -> Option<Value> {
@@ -180,6 +311,8 @@ pub struct Column {
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
+    /// How concurrent writes to the column merge at the authority.
+    pub merge: crate::schema::MergeStrategy,
 }
 
 impl Column {
@@ -210,31 +343,91 @@ pub struct Table {
     pub stored_provenance: Vec<Column>,
 }
 
-/// Provenance as read. Timestamps are Unix ms (u64, as in Jazz); authors
-/// are read by their identity parts, so policies and filters can compare
+/// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
+/// read whole (`$createdBy`: account and identity), by identity, or by
+/// part, so policies and filters can compare `$createdBy.account`,
 /// `$createdBy.identity.subject` and friends.
-pub(crate) const PROVENANCE: [&str; 6] = [
+pub(crate) const PROVENANCE: [&str; 12] = [
     "$createdAt",
     "$updatedAt",
+    "$createdBy",
+    "$createdBy.account",
+    "$createdBy.identity",
     "$createdBy.identity.issuer",
     "$createdBy.identity.subject",
+    "$updatedBy",
+    "$updatedBy.account",
+    "$updatedBy.identity",
     "$updatedBy.identity.issuer",
     "$updatedBy.identity.subject",
 ];
 
+/// The current deletion of a row, readable with `includeDeleted`: the
+/// deleting version's update stamp, NULL for live and restored rows. Never
+/// stored: a deleted row is its current version with `_del` set, and that
+/// version's update stamp is the deletion's.
+pub(crate) const DELETION: [&str; 6] = [
+    "$deletedAt",
+    "$deletedBy",
+    "$deletedBy.account",
+    "$deletedBy.identity",
+    "$deletedBy.identity.issuer",
+    "$deletedBy.identity.subject",
+];
+
+/// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
+pub(crate) fn is_deletion(column: &str) -> bool {
+    column == "$deletedAt" || column == "$deletedBy" || column.starts_with("$deletedBy.")
+}
+
 /// Provenance as stored: each author is one code into `_jazz_authors`
-/// instead of its two strings on every row version.
+/// instead of its account and two strings on every row version.
 pub(crate) const STORED_PROVENANCE: [&str; 4] =
     ["$createdAt", "$updatedAt", "$createdBy", "$updatedBy"];
 
-/// The stored author column and identity part behind a readable provenance
-/// column, e.g. `$createdBy.identity.subject` -> (`$createdBy`, `subject`).
+/// An author as interned in `_jazz_authors`: account, issuer, subject.
+pub(crate) type AuthorKey = (uuid::Uuid, String, String);
+
+/// A writer's durable attribution. Every row author has an account (the
+/// `$createdBy` record's `account` is not nullable); a writer without one
+/// (the system, an accountless principal) is attributed to the reserved
+/// system account, as Jazz attributes system writes.
+pub(crate) fn author_key(author: &crate::ids::AuthorSubject) -> AuthorKey {
+    let (issuer, subject) = author.principal_parts();
+    let account = author
+        .account_id()
+        .unwrap_or(jazz_types::account_registry::SYSTEM_ACCOUNT_ID);
+    (account.0, issuer, subject)
+}
+
+/// The stored author column and `_jazz_authors` field behind a readable
+/// provenance column, e.g. `$createdBy.identity.subject` -> (`$createdBy`,
+/// `subject`).
 pub(crate) fn author_part(column: &str) -> Option<(&'static str, &'static str)> {
     Some(match column {
+        "$createdBy.account" => ("$createdBy", "account"),
         "$createdBy.identity.issuer" => ("$createdBy", "issuer"),
         "$createdBy.identity.subject" => ("$createdBy", "subject"),
+        "$updatedBy.account" => ("$updatedBy", "account"),
         "$updatedBy.identity.issuer" => ("$updatedBy", "issuer"),
         "$updatedBy.identity.subject" => ("$updatedBy", "subject"),
+        "$deletedBy.account" => ("$deletedBy", "account"),
+        "$deletedBy.identity.issuer" => ("$deletedBy", "issuer"),
+        "$deletedBy.identity.subject" => ("$deletedBy", "subject"),
+        _ => return None,
+    })
+}
+
+/// The stored author column behind a readable author record, and whether
+/// it is the whole author (else its identity alone).
+pub(crate) fn author_record(column: &str) -> Option<(&'static str, bool)> {
+    Some(match column {
+        "$createdBy" => ("$createdBy", true),
+        "$createdBy.identity" => ("$createdBy", false),
+        "$updatedBy" => ("$updatedBy", true),
+        "$updatedBy.identity" => ("$updatedBy", false),
+        "$deletedBy" => ("$deletedBy", true),
+        "$deletedBy.identity" => ("$deletedBy", false),
         _ => return None,
     })
 }
@@ -258,23 +451,36 @@ fn stored_provenance_columns() -> Vec<Column> {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            merge: Default::default(),
         })
         .collect()
+}
+
+fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
+    match ty {
+        ValueType::Nullable(inner) => inner,
+        ty => ty,
+    }
 }
 
 fn provenance_columns() -> Vec<Column> {
     PROVENANCE
         .iter()
+        .chain(&DELETION)
         .map(|name| Column {
             name: (*name).to_owned(),
             stored: (*name).to_owned(),
-            ty: if name.ends_with("At") {
-                ValueType::Nullable(Box::new(ValueType::U64))
+            ty: ValueType::Nullable(Box::new(if name.ends_with("At") {
+                ValueType::U64
             } else {
-                ValueType::Nullable(Box::new(ValueType::String))
-            },
+                unwrap_nullable_type(
+                    crate::ids::AuthorSubject::metadata_type(name).expect("an author path"),
+                )
+                .clone()
+            })),
             default: None,
             json: false,
+            merge: Default::default(),
         })
         .collect()
 }
@@ -382,6 +588,11 @@ impl Schema {
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: format!("{:?}", column.large_value_kind) == "Json",
+                    merge: table
+                        .merge_strategies
+                        .get(&column.name)
+                        .copied()
+                        .unwrap_or_default(),
                 })
                 .collect();
             let mut indexes: Vec<Vec<String>> = table
@@ -572,6 +783,7 @@ impl Table {
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
                     json: false,
+                    merge: Default::default(),
                 })
                 .collect(),
             references: BTreeMap::new(),
@@ -687,7 +899,48 @@ pub(crate) fn branch_key(values: &BTreeMap<String, crate::protocol::BranchColumn
     key
 }
 
+/// The branch columns of a branch key, as [`branch_key`] encoded them.
+fn branch_key_values(key: &[u8]) -> BTreeMap<String, crate::protocol::BranchColumnValue> {
+    let mut values = BTreeMap::new();
+    let mut rest = key;
+    let take = |rest: &mut &[u8]| -> Option<Vec<u8>> {
+        let len = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+        let bytes = rest.get(4..4 + len)?.to_vec();
+        *rest = &rest[4 + len..];
+        Some(bytes)
+    };
+    while !rest.is_empty() {
+        let (Some(name), Some(value)) = (take(&mut rest), take(&mut rest)) else {
+            break;
+        };
+        values.insert(
+            String::from_utf8_lossy(&name).into_owned(),
+            crate::protocol::BranchColumnValue(value),
+        );
+    }
+    values
+}
+
 impl Table {
+    /// The branch key a row under `key` would move to if `cells` were
+    /// written over it: its branch columns, those in `cells` replaced.
+    pub(crate) fn branch_key_after(&self, key: &[u8], cells: &BTreeMap<String, Value>) -> Vec<u8> {
+        let mut values = branch_key_values(key);
+        for column in &self.branch_by {
+            if let Some(value) = cells.get(column) {
+                let mut value = value.clone();
+                while let Value::Nullable(Some(inner)) = value {
+                    value = *inner;
+                }
+                values.insert(
+                    column.clone(),
+                    crate::protocol::BranchColumnValue::from(value),
+                );
+            }
+        }
+        branch_key(&values)
+    }
+
     /// The branch key a row with these cells lives under.
     pub(crate) fn row_branch_key(&self, cells: &BTreeMap<String, Value>) -> Vec<u8> {
         let mut values = BTreeMap::new();
@@ -751,6 +1004,56 @@ pub struct CurrentRow {
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
     /// The declared type of each projected cell, shared by a read's rows.
     pub(crate) types: Arc<[ValueType]>,
+    /// A flat join's joined source rows in declared order, after the root
+    /// (`id`): with it, the row's occurrence. Empty for other reads.
+    pub(crate) joined: Arc<[JoinedRow]>,
+    /// A flat join's root version when the root is a history source.
+    pub(crate) version: Option<SourceVersion>,
+}
+
+/// A history version's transaction identity, `(tx, node)` as its
+/// `$transactionId` reads.
+pub type SourceVersion = (u64, crate::ids::NodeUuid);
+
+/// A row's result key: the row itself, or a flat join's root followed by
+/// its joined source rows, each with its history version if it has one.
+/// Relations arrive as nested rows, not joined outputs.
+pub fn occurrence_key(
+    root: RowUuid,
+    version: Option<SourceVersion>,
+    joined: &[JoinedRow],
+) -> jazz_types::object::ResultKey {
+    use jazz_types::object::{ObjectId, OutputOccurrenceId, ResultKey, SourceOccurrenceId};
+    let source = |row: RowUuid, version: Option<SourceVersion>| {
+        let id = ObjectId::from_uuid(row.0);
+        match version {
+            Some((tx, node)) => SourceOccurrenceId::history(id, jazz_types::time::TxTime(tx), node),
+            None => SourceOccurrenceId::current(id),
+        }
+    };
+    if joined.is_empty() && version.is_none() {
+        return ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+            root.0,
+        )));
+    }
+    ResultKey::from_occurrence(
+        OutputOccurrenceId::from_source_occurrences(
+            source(root, version),
+            joined
+                .iter()
+                .map(|joined| source(joined.row, joined.version)),
+            [],
+        )
+        .expect("an occurrence without union arms is valid"),
+    )
+}
+
+/// One joined source row of a flat-join occurrence: the row, and its
+/// version when the source is a history relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JoinedRow {
+    pub row: RowUuid,
+    pub version: Option<SourceVersion>,
 }
 
 impl CurrentRow {
@@ -760,6 +1063,17 @@ impl CurrentRow {
 
     pub fn table(&self) -> &str {
         &self.table
+    }
+
+    /// A flat join's joined source rows in declared order (the root is
+    /// [`Self::row_uuid`]); empty for other reads.
+    pub fn joined_rows(&self) -> &[JoinedRow] {
+        &self.joined
+    }
+
+    /// A flat join's root version, when its root is a history source.
+    pub fn root_version(&self) -> Option<SourceVersion> {
+        self.version
     }
 
     pub fn is_deleted(&self) -> bool {
@@ -795,4 +1109,186 @@ impl CurrentRow {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_ref()))
     }
+}
+
+impl ResultNode {
+    /// The node's row with each relation appended as a cell under its
+    /// column name: an array of records, each the child's `row_uuid`
+    /// followed by its own cells (relations nested the same way). This is
+    /// the shape the bindings publish for relation reads.
+    pub fn into_nested_row(self) -> Result<CurrentRow, Error> {
+        let ResultNode { row, relations } = self;
+        if relations.is_empty() {
+            return Ok(row);
+        }
+        let mut cells = (*row.cells).clone();
+        let mut types = row.types.to_vec();
+        for (name, relation) in relations {
+            let children = match relation {
+                ResultRelation::Array(children) => children,
+                ResultRelation::Null | ResultRelation::Hole => Vec::new(),
+            };
+            let children = children
+                .into_iter()
+                .map(ResultNode::into_nested_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            let (element, values) = child_records(&children)?;
+            cells.push((name, Some(Value::Array(values))));
+            types.push(ValueType::Array(Box::new(element)));
+        }
+        Ok(CurrentRow {
+            cells: Arc::new(cells),
+            types: types.into(),
+            ..row
+        })
+    }
+}
+
+/// One relation's children as records under a shared descriptor. A field
+/// is nullable when its declared type is, or when any child left it
+/// unwritten. A nested relation's type is its siblings' widest: an empty
+/// relation names no fields, and a child's own unwritten cells widen only
+/// its records, so each child's value is re-encoded under the shared type.
+fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Error> {
+    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+    if let Some(first) = children.first() {
+        for (index, ((name, _), ty)) in first.cells().zip(first.cell_types()).enumerate() {
+            let unwritten = children
+                .iter()
+                .any(|child| child.cells.get(index).is_some_and(|(_, v)| v.is_none()));
+            // A nested relation's records: the type its non-empty values share.
+            let mut shared: Option<ValueType> = None;
+            for child in children
+                .iter()
+                .filter(|child| !relation_is_empty(child, index))
+            {
+                if let (Some((_, Some(Value::Array(_)))), Some(own)) =
+                    (child.cells.get(index), child.types.get(index))
+                {
+                    shared = Some(match shared {
+                        None => own.clone(),
+                        Some(ty) => widen(&ty, own)?,
+                    });
+                }
+            }
+            let ty = shared.unwrap_or_else(|| ty.clone());
+            let ty = match ty {
+                ValueType::Nullable(_) => ty,
+                _ if unwritten => ValueType::Nullable(Box::new(ty)),
+                _ => ty,
+            };
+            fields.push((name.to_owned(), ty));
+        }
+    }
+    let descriptor = RecordDescriptor::new(fields.clone());
+    let mut values = Vec::with_capacity(children.len());
+    for child in children {
+        if child.cells.len() + 1 != fields.len() {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation children with different projections",
+            ));
+        }
+        let mut record = vec![Value::Uuid(child.id.0)];
+        for ((_, value), (_, ty)) in child.cells.iter().zip(&fields[1..]) {
+            record.push(match value {
+                None => Value::Nullable(None),
+                Some(value) => coerce(value, ty)?,
+            });
+        }
+        let raw = descriptor
+            .create(&record)
+            .map_err(|error| Error::new(ErrorCode::Query, format!("relation record: {error}")))?;
+        values.push(Value::Record(OwnedRecord::new(raw, descriptor)));
+    }
+    Ok((ValueType::Record(Box::new(descriptor)), values))
+}
+
+/// Whether a child's cell at `index` is an empty nested relation.
+fn relation_is_empty(child: &CurrentRow, index: usize) -> bool {
+    matches!(child.cells.get(index), Some((_, Some(Value::Array(items)))) if items.is_empty())
+}
+
+/// The narrowest type both relation types' values fit: nullable if either
+/// is, record fields widened pairwise.
+fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
+    if a == b {
+        return Ok(a.clone());
+    }
+    Ok(match (a, b) {
+        (ValueType::Nullable(x), ValueType::Nullable(y)) => {
+            ValueType::Nullable(Box::new(widen(x, y)?))
+        }
+        (ValueType::Nullable(x), y) | (y, ValueType::Nullable(x)) => {
+            ValueType::Nullable(Box::new(widen(x, y)?))
+        }
+        (ValueType::Array(x), ValueType::Array(y)) => ValueType::Array(Box::new(widen(x, y)?)),
+        (ValueType::Record(x), ValueType::Record(y))
+            if x.fields().len() == y.fields().len()
+                && x.fields()
+                    .iter()
+                    .zip(y.fields())
+                    .all(|(f, g)| f.name == g.name) =>
+        {
+            let fields = x
+                .fields()
+                .iter()
+                .zip(y.fields())
+                .map(|(f, g)| {
+                    Ok((
+                        f.name.clone().unwrap_or_default(),
+                        widen(&f.value_type, &g.value_type)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            ValueType::Record(Box::new(RecordDescriptor::new(fields)))
+        }
+        // An empty relation's records name only their row id.
+        (ValueType::Record(x), other @ ValueType::Record(_))
+        | (other @ ValueType::Record(_), ValueType::Record(x))
+            if x.fields().len() == 1 =>
+        {
+            other.clone()
+        }
+        _ => {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation children with different projections",
+            ));
+        }
+    })
+}
+
+/// `value` re-encoded as `ty`, a type [`widen`] produced from its own.
+fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
+    Ok(match (value, ty) {
+        (Value::Nullable(None), _) => Value::Nullable(None),
+        (Value::Nullable(Some(inner)), ValueType::Nullable(t)) => {
+            Value::Nullable(Some(Box::new(coerce(inner, t)?)))
+        }
+        (value, ValueType::Nullable(t)) => Value::Nullable(Some(Box::new(coerce(value, t)?))),
+        (Value::Array(items), ValueType::Array(t)) => Value::Array(
+            items
+                .iter()
+                .map(|item| coerce(item, t))
+                .collect::<Result<_, _>>()?,
+        ),
+        (Value::Record(record), ValueType::Record(descriptor))
+            if record.descriptor() != descriptor.as_ref() =>
+        {
+            let values = record.to_values().map_err(|error| {
+                Error::new(ErrorCode::Query, format!("relation record: {error}"))
+            })?;
+            let values = values
+                .iter()
+                .zip(descriptor.fields())
+                .map(|(value, field)| coerce(value, &field.value_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            let raw = descriptor.create(&values).map_err(|error| {
+                Error::new(ErrorCode::Query, format!("relation record: {error}"))
+            })?;
+            Value::Record(OwnedRecord::new(raw, **descriptor))
+        }
+        (value, _) => value.clone(),
+    })
 }

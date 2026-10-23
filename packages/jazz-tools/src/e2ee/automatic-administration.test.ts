@@ -59,7 +59,7 @@ it("configures sliced-app space administration without managed schema imports", 
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Automatic space" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Encrypted content" });
     expect(await tx.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);

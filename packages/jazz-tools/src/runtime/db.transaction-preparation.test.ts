@@ -226,7 +226,7 @@ it("does not delay an ordinary transaction beside suspended admission", async ()
   const pending = deferred.commit().wait();
   pending.catch(() => {});
   try {
-    const ordinary = db.beginExclusiveTransaction();
+    const ordinary = db.beginSerializableTransaction();
     const row = ordinary.insert(app.documents, { payload: new Uint8Array([2]) });
     await ordinary.commit().wait();
     expect(await db.all(app.documents, { tier: "local-first" })).toEqual([row]);
@@ -238,7 +238,7 @@ it("does not delay an ordinary transaction beside suspended admission", async ()
 });
 
 it("returns an inserted row immediately without overtaking earlier preparation", async () => {
-  const tx = db.beginExclusiveTransaction();
+  const tx = db.beginSerializableTransaction();
   const id = tx.openTransactionId();
   let documentId: string;
   source.client.prepareTransaction(id, async () => {
@@ -268,14 +268,14 @@ it("returns an inserted row immediately without overtaking earlier preparation",
 
 it.each(
   ["update", "upsert", "delete"].flatMap((operation) =>
-    ["mergeable", "exclusive"].map((kind) => ({ operation, kind })),
+    ["mergeable", "serializable"].map((kind) => ({ operation, kind })),
   ),
 )(
   "preserves an ordinary $operation after deferred preparation in a $kind transaction",
   async ({ operation, kind }) => {
     const inserted = db.insert(app.documents, { payload: new Uint8Array([0]) });
     await inserted.wait({ tier: "local" });
-    const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+    const tx = kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
     // Bind to the table before registering work at the logical-operation seam.
     await tx.all(app.documents, { tier: "local-first" });
     const id = tx.openTransactionId();
@@ -314,7 +314,7 @@ it("queues restoration with defaults and isolates returned and input bytes", asy
     .insert(app.documents, { payload: new Uint8Array([0]) })
     .wait({ tier: "local" });
   await db.delete(app.documents, original.id).wait({ tier: "local" });
-  const tx = db.beginExclusiveTransaction();
+  const tx = db.beginSerializableTransaction();
   source.client.prepareTransaction(tx.openTransactionId(), async () => {});
   const payload = new Uint8Array([5]);
   const restored = tx.restore(app.documents, original.id, { payload });

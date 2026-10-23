@@ -1,7 +1,8 @@
 //! Virtual history relation descriptors. These descriptors are query-only: they
 //! are not application tables, storage declarations, or permission grants.
 
-use super::{ColumnSchema, GrooveColumnType, TableSchema};
+use super::magic::MagicColumn;
+use super::{ColumnSchema, TableSchema};
 
 /// Reserved prefix for query-visible history relations.
 pub const HISTORY_PREFIX: &str = "history.";
@@ -44,11 +45,11 @@ impl HistoryMetadataColumn {
     }
 
     fn schema(self) -> ColumnSchema {
-        let ty = match self {
-            Self::TransactionId => crate::tx::TxId::value_type(),
-            Self::AcceptedAt => GrooveColumnType::U64,
+        let column = match self {
+            Self::TransactionId => MagicColumn::TransactionId,
+            Self::AcceptedAt => MagicColumn::AcceptedAt,
         };
-        ColumnSchema::new(self.name(), ty)
+        ColumnSchema::new(column.name(), column.value_type().clone())
     }
 
     /// Whether a name denotes history metadata.

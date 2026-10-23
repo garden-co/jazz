@@ -79,7 +79,6 @@ fn insert_document(db: &Db, document: RowUuid, team: RowUuid, updated_at: u64) {
 fn local_read_opts() -> ReadOpts {
     ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

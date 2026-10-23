@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db } from "../runtime/db.js";
 import {
   observeE2eeHistory,
@@ -283,7 +283,7 @@ export class DeviceApproval {
             }),
             { tier: "remote" },
           );
-        const read = await exclusiveE2eeTransaction(this.db, (tx) =>
+        const read = await serializableE2eeTransaction(this.db, (tx) =>
           this.readSnapshot(tx, recoveryRootId),
         );
         const snapshot = await read.wait({ tier: "global" });
@@ -939,7 +939,7 @@ export class DeviceApproval {
       } else if (!snapshot.publicState.recoveryRoots.some((root) => root.id === targetId)) {
         throw new Error("Unknown or inactive E2EE recovery root");
       }
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "remote" });
         this.assertOpen();
         if (
@@ -1332,7 +1332,7 @@ export class DeviceApproval {
       const author = device;
       recoverySigner = await this.signer.createKeyPair();
       const signing = recoverySigner;
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const snapshot = await this.currentSnapshot(tx);
         if (!snapshot.publicState.active.has(this.deviceId))
           throw new Error("Recovery creation requires an active device");

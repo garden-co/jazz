@@ -102,7 +102,7 @@ it.each(["ready", "error", "update", "history"])(
           },
         },
       });
-      const tx = client.db.beginExclusiveTransaction();
+      const tx = client.db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Project" });
       const note = tx.insert(app.notes, { projectId: project.id, title: "Private title" });
       const unchanged =
