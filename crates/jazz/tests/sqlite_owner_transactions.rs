@@ -22,6 +22,7 @@ fn config(node: u8) -> DbConfig {
     let schema = common::compile_schema(&Schema::from([(
         TableName::new("counters"),
         TableSchema {
+            synthetic_references_v1: Default::default(),
             columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("value", ColumnType::Integer)
                     .merge_strategy(ColumnMergeStrategy::Counter),

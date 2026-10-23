@@ -359,6 +359,7 @@ fn an_own_counter_echo_is_promoted_once_and_keeps_original_snapshot_dots() {
     let schema = common::compile_schema(&Schema::from([(
         TableName::new("notes"),
         TableSchema {
+            synthetic_references_v1: Default::default(),
             columns: RowDescriptor::new(vec![
                 ColumnDescriptor::new("text", ColumnType::Text),
                 ColumnDescriptor::new("value", ColumnType::Integer)
