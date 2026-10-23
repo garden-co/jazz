@@ -489,7 +489,11 @@ export class IndexedDbPageStore {
   /** The caller retains the live physical Web Lock after closing this handle. */
   private async destroySqliteFile(): Promise<void> {
     const request = indexedDB.open(this.name, SQLITE_BROWSER_DATABASE_VERSION);
-    request.onupgradeneeded = () => request.transaction?.abort();
+    request.onupgradeneeded = () => {
+      const probe = request.result;
+      request.transaction?.abort();
+      probe.close();
+    };
     const db = await requestResult(request);
     try {
       const tx = db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite", {
@@ -1032,7 +1036,9 @@ export class IndexedDbPageStore {
       const request = indexedDB.open(name);
       request.onupgradeneeded = () => {
         missing = true;
+        const probe = request.result;
         request.transaction?.abort();
+        probe.close();
       };
       try {
         db = await requestResult(request);
