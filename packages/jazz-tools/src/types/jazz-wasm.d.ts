@@ -139,6 +139,16 @@ declare module "jazz-wasm" {
       head?: unknown,
       base?: unknown,
     ): StreamingMutation;
+    /** Fresh global catalogue coverage without returned row bodies; empty bytes on completion. */
+    coverCatalogue(
+      table: string,
+      author?: Uint8Array,
+      claims?: unknown,
+    ): Uint8Array | PendingNativeRead;
+    /** Empty bytes mean no accepted table identity; otherwise a 16-byte UUID. */
+    tableIdentity(table: string): Promise<Uint8Array>;
+    /** Empty bytes mean no accepted column identity; otherwise a 16-byte UUID. */
+    columnIdentity(table: string, column: string): Promise<Uint8Array>;
     /** Delete a durable browser store; no database may have it open. */
     static destroyBrowserStorage(storage: unknown, storageOwner: string): Promise<void>;
     /** Resolves once every commit so far is in the browser store's backing storage. */
@@ -161,6 +171,15 @@ declare module "jazz-wasm" {
       openTransactionId?: string,
       author?: Uint8Array,
       claims?: Record<string, unknown>,
+    ): Uint8Array | PendingNativeRead;
+    /** Binding-only authority sidecar; still requires separate snapshot acceptance. */
+    allSettlementMetadata(
+      query: Uint8Array,
+      opts: unknown,
+      openTransactionId: string,
+      author?: Uint8Array,
+      claims?: Record<string, unknown>,
+      includeRows?: boolean,
     ): Uint8Array | PendingNativeRead;
     subscribe(
       query: Uint8Array,

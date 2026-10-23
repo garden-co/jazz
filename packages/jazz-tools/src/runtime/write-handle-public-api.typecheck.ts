@@ -79,13 +79,12 @@ async function assertWriteHandleContract() {
     () => "committed",
   );
   serializableResult.wait();
-  // @ts-expect-error Serializable mutations are confirmed by the authority without a tier.
+  // Explicit global waits require authority confirmation, including while offline.
   serializableResult.wait({ tier: "global" });
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
   const serializableCommit: SerializableWriteHandle = db.beginSerializableTransaction().commit();
   serializableCommit.wait();
-  // @ts-expect-error Serializable commits are confirmed by the authority without a tier.
   serializableCommit.wait({ tier: "global" });
 
   void restored;

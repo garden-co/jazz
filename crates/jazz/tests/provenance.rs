@@ -339,6 +339,53 @@ fn author_codes_never_leave_their_database() {
     }
 }
 
+/// Alice's rejected write and speculative transaction must not leave cached
+/// author IDs that later name Bob or lose Alice's provenance after rollback.
+/// alice -> rollback -> bob commits -> alice commits -> distinct authors
+#[test]
+fn rollback_does_not_reuse_another_authors_cached_identity() {
+    let db = db();
+    assert!(block_on(db.insert("notes", BTreeMap::new(), as_user(1, row(1)))).is_err());
+    block_on(db.insert("notes", body("Bob"), as_user(2, row(2)))).unwrap();
+    block_on(db.insert("notes", body("Alice"), as_user(1, row(1)))).unwrap();
+    let tx = OpenTransactionId::new();
+    block_on(db.begin_serializable(tx)).unwrap();
+    block_on(
+        db.serializable_tx_ref(tx)
+            .insert("notes", body("draft"), Default::default()),
+    )
+    .unwrap();
+    db.abandon_transaction_handle(tx).unwrap();
+    block_on(db.insert(
+        "notes",
+        body("system"),
+        InsertOptions {
+            row_id: Some(row(3)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let query = db
+        .prepare_query(&Query::from("notes").select(["$createdBy.identity.subject"]))
+        .unwrap();
+    let rows = block_on(db.all(&query, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 3);
+    for (id, author) in [
+        (row(1), user(1)),
+        (row(2), user(2)),
+        (
+            row(3),
+            AuthorSubject::system_at(NodeUuid::from_bytes([3; 16])),
+        ),
+    ] {
+        let row = rows.iter().find(|r| r.row_uuid() == id).unwrap();
+        assert_eq!(
+            subject_cell(row, "$createdBy.identity.subject"),
+            author.principal_parts().1
+        );
+    }
+}
+
 /// An author is its account and exact principal: `$createdBy` reads as the
 /// whole record, its parts filter, and two principals of one account stay
 /// distinct authors.

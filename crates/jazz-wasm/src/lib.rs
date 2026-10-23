@@ -1136,6 +1136,23 @@ impl WasmDb {
         })
     }
 
+    /// Accepted catalogue identities require the E2EE SQLite catalogue port.
+    #[wasm_bindgen(js_name = tableIdentity)]
+    pub fn table_identity(&self, _table: String) -> Result<js_sys::Promise, JsValue> {
+        self.open_inner()?;
+        Err(not_supported("E2EE accepted table identities"))
+    }
+
+    #[wasm_bindgen(js_name = columnIdentity)]
+    pub fn column_identity(
+        &self,
+        _table: String,
+        _column: String,
+    ) -> Result<js_sys::Promise, JsValue> {
+        self.open_inner()?;
+        Err(not_supported("E2EE accepted column identities"))
+    }
+
     /// Register a typed schema view backed by this same runtime owner.
     #[wasm_bindgen(js_name = registerSchema)]
     pub fn register_schema(&self, schema: Vec<u8>) -> Result<WasmDb, JsValue> {
@@ -1219,6 +1236,36 @@ impl WasmDb {
             )
             .map_err(host_error)?;
         wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+    }
+
+    /// Accepted catalogue coverage requires the E2EE SQLite catalogue port.
+    #[wasm_bindgen(js_name = coverCatalogue)]
+    pub fn cover_catalogue(
+        &self,
+        _table: String,
+        _author: Option<Vec<u8>>,
+        _claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        self.open_inner()?;
+        Err(not_supported("E2EE accepted catalogue coverage"))
+    }
+
+    /// Ordinary history reads do not provide the paired accepted-content and
+    /// settlement observation required by E2EE transactions.
+    #[wasm_bindgen(js_name = allSettlementMetadata)]
+    pub fn all_settlement_metadata(
+        &self,
+        _query: Vec<u8>,
+        _opts: JsValue,
+        _open_transaction_id: String,
+        _author: Option<Vec<u8>>,
+        _claims: JsValue,
+        _include_rows: Option<bool>,
+    ) -> Result<JsValue, JsValue> {
+        self.open_inner()?;
+        Err(not_supported(
+            "E2EE accepted-history transaction observations",
+        ))
     }
 
     /// Bind correlation claims to this already-open client's own identity.
