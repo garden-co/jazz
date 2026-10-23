@@ -636,3 +636,31 @@ fn a_commit_over_the_replicas_own_unsettled_writes_is_accepted() {
     assert!(net.settle(OWNER, receipt.0).is_ok());
     assert_eq!(net.members("own"), 1);
 }
+
+/// A read that lists deleted rows is re-run the same way by the authority:
+/// a revoked invite read with `include_deleted` still holds at commit.
+#[test]
+fn a_read_of_deleted_rows_validates_as_it_was_read() {
+    let net = Net::new(1);
+    let invite = net.write_invite(OWNER, "gone");
+    net.revoke(OWNER, invite);
+    let db = net.db(OWNER);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("gone")).unwrap();
+    let tx = db.serializable_tx_ref(open);
+    assert!(net.drive(tx.all_prepared(&query)).unwrap().is_empty());
+    let read = net.drive(tx.all_prepared_with(&query, true)).unwrap();
+    assert_eq!(
+        read.iter()
+            .map(|row| (row.row_uuid(), row.is_deleted()))
+            .collect::<Vec<_>>(),
+        [(invite, true)],
+        "the deleted invite is listed"
+    );
+    net.drive(tx.insert("members", code("gone"), Default::default()))
+        .unwrap();
+    let receipt = net.drive(db.commit_serializable_handle(open)).unwrap();
+    net.settle(OWNER, receipt.0)
+        .expect("the authority re-reads deleted rows too");
+}

@@ -578,6 +578,7 @@ pub(crate) fn rejected(message: impl Into<String>) -> Error {
 
 const ROW_ALREADY_DELETED: &str = "row already deleted: ";
 const ROW_ALREADY_EXISTS: &str = "encoding error: object already exists: ";
+const ROW_NOT_DELETED: &str = "row not deleted: ";
 
 const MISSING_REQUIRED: &str = "missing required field ";
 const BRANCH_MOVE: &str = "invalid mergeable commit: branch column does not match exact branch key";
@@ -592,6 +593,11 @@ fn row_already_deleted(row: RowUuid) -> Error {
     rejected(format!("{ROW_ALREADY_DELETED}{}", row.0))
 }
 
+/// A restore of a live row.
+fn row_not_deleted(row: RowUuid) -> Error {
+    rejected(format!("{ROW_NOT_DELETED}{}", row.0))
+}
+
 /// An insert reusing a live row's id.
 fn row_already_exists(row: RowUuid) -> Error {
     rejected(format!("{ROW_ALREADY_EXISTS}{}", row.0))
@@ -599,15 +605,20 @@ fn row_already_exists(row: RowUuid) -> Error {
 
 impl Error {
     /// Whether a write was refused for the stored state of its row rather
-    /// than for its arguments: its id is deleted or taken, it would create
-    /// a row without a required value (an upsert may create or patch), or
-    /// it would move a row to another branch. A host reports it through
+    /// than for its arguments: its id is deleted or taken, it restores a
+    /// live row, it would create a row without a required value (an upsert
+    /// may create or patch), or it would move a row to another branch. A host reports it through
     /// the write's handle, as an apply-time rejection, not from the call.
     pub fn is_apply_time_rejection(&self) -> bool {
         match self.code {
-            ErrorCode::WriteRejected => [ROW_ALREADY_DELETED, ROW_ALREADY_EXISTS, MISSING_REQUIRED]
-                .iter()
-                .any(|prefix| self.message.starts_with(prefix)),
+            ErrorCode::WriteRejected => [
+                ROW_ALREADY_DELETED,
+                ROW_ALREADY_EXISTS,
+                ROW_NOT_DELETED,
+                MISSING_REQUIRED,
+            ]
+            .iter()
+            .any(|prefix| self.message.starts_with(prefix)),
             ErrorCode::Schema => self.message == BRANCH_MOVE,
             _ => false,
         }
@@ -3216,13 +3227,16 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        let Located::Row {
-            key, deleted: true, ..
-        } = self.locate(table, row, target)?
-        else {
-            return Err(rejected(format!(
-                "RESTORE target {row:?} is not deleted in `{table_name}`"
-            )));
+        let key = match self.locate(table, row, target)? {
+            Located::Row {
+                key, deleted: true, ..
+            } => key,
+            Located::Absent { .. } => {
+                return Err(rejected(format!(
+                    "RESTORE target {row:?} does not exist in `{table_name}`"
+                )));
+            }
+            Located::Row { .. } | Located::Inherited { .. } => return Err(row_not_deleted(row)),
         };
         self.snapshot(table, row, &key, seq)?;
         let mut cells = BTreeMap::new();
@@ -3771,6 +3785,7 @@ enum BatchKind {
 /// versions) at the snapshot, re-checked at commit.
 struct ReadRecord {
     prepared: PreparedQuery,
+    include_deleted: bool,
     rows: Vec<(RowUuid, u64)>,
 }
 
@@ -4149,6 +4164,7 @@ impl Db {
                 .map(|read| sync::WireRead {
                     query: read.prepared.query.clone(),
                     binding: read.prepared.binding.clone(),
+                    include_deleted: read.include_deleted,
                     rows: read
                         .rows
                         .iter()
@@ -4179,7 +4195,11 @@ impl Db {
                 }
             }
             for read in reads {
-                let now = inner.run(&read.prepared, None, &ReadSpec::default())?;
+                let spec = ReadSpec {
+                    include_deleted: read.include_deleted,
+                    ..ReadSpec::default()
+                };
+                let now = inner.run(&read.prepared, None, &spec)?;
                 if versions(&now) != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
@@ -4324,7 +4344,12 @@ impl Db {
         staged
     }
 
-    fn record_read(&self, id: OpenTransactionId, prepared: &PreparedQuery) -> Result<(), Error> {
+    fn record_read(
+        &self,
+        id: OpenTransactionId,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+    ) -> Result<(), Error> {
         let mut inner = self.inner();
         let Some(Batch {
             kind: BatchKind::Serializable { snapshot, own, .. },
@@ -4334,6 +4359,7 @@ impl Db {
             return Ok(());
         };
         let read = ReadSpec {
+            include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
@@ -4345,6 +4371,7 @@ impl Db {
         {
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
+                include_deleted,
                 rows,
             });
         }
@@ -4424,6 +4451,16 @@ impl TxRef<'_> {
     }
 
     pub async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_with(prepared, false).await
+    }
+
+    /// A read in the transaction; `include_deleted` lists deleted rows too
+    /// (with their deletion metadata), as outside one.
+    pub async fn all_prepared_with(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
         // answers and the authority's validation decides).
@@ -4454,12 +4491,30 @@ impl TxRef<'_> {
                 ),
             ));
         }
+        if snapshot.is_some() && include_deleted && !prepared.query.array_subqueries.is_empty() {
+            // Its read set would need each deleted row's related rows.
+            let related = prepared
+                .query
+                .array_subqueries
+                .iter()
+                .map(|relation| format!("`{}`", relation.table))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::new(
+                ErrorCode::Query,
+                format!(
+                    "Reading deleted `{}` rows together with {related} is not supported in \
+                     exclusive transactions yet",
+                    prepared.query.table
+                ),
+            ));
+        }
         if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
         {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
-            let through = self.db.fetch(prepared, at, false, None).await?;
+            let through = self.db.fetch(prepared, at, include_deleted, None).await?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -4482,12 +4537,13 @@ impl TxRef<'_> {
                 prepared,
                 None,
                 &ReadSpec {
+                    include_deleted,
                     cut,
                     ..ReadSpec::default()
                 },
             )
         })?;
-        self.db.record_read(self.id, prepared)?;
+        self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)
     }
 
