@@ -3,7 +3,7 @@
 ## Overview
 
 Core is the only authority. It authorizes reads and writes, decides the final
-fate of both mergeable and exclusive transactions, and acknowledges global
+fate of both mergeable and serializable transactions, and acknowledges global
 durability. Clients retain authorized data and optimistic local edits. Local
 browser and native persistence relays remain non-authoritative parts of a
 client; there is no semantic server edge between a client and Core.
@@ -19,7 +19,7 @@ durability. Sharding and distributed query execution are outside this change.
 - A client-authored transaction starts pending. Persisting it locally raises its
   durability to Local without accepting it.
 - Core authenticates the session and evaluates current write policy before
-  accepting either transaction kind. Exclusive transactions additionally require
+  accepting either transaction kind. Serializable transactions additionally require
   their normal serialized conflict checks.
 - A successful Core acknowledgement establishes acceptance and Global
   durability. Rejection follows the existing rollback/dependency rules.
@@ -203,7 +203,7 @@ trusted serving, manufacture authority, or change authorship.
 Relays provide unopinionated transport and caching. A relay link uses
 `PeerRole::Relay` with an explicit relay transport capability and no permission
 subject (`INV-EDGE-1`), and forwards
-both mergeable and exclusive commit units without deciding their outcome: stored
+both mergeable and serializable commit units without deciding their outcome: stored
 units remain `Fate::Pending` / `DurabilityTier::Local`, and the relay assigns no
 fate (`INV-EDGE-2`).
 
@@ -258,9 +258,9 @@ may substitute for or widen the capability. Disconnect or transport replacement
 invalidates the proof and requires authorization under the freshly admitted
 epoch (`INV-EDGE-25`).
 
-This applies to both mergeable and exclusive transactions. Exclusive read-set
+This applies to both mergeable and serializable transactions. Serializable read-set
 validation is an additional core admission requirement, not an alternative to
-write authorization. For example, a foreground may submit an exclusive
+write authorization. For example, a foreground may submit a serializable
 todo/check/note insertion through its worker: all three write policies must
 pass under its admitted session before core validates and accepts the bundle.
 If the note is forbidden, none of the otherwise permitted siblings is admitted.

@@ -18,7 +18,7 @@ function makeFriends(db: Db, user1: User, user2: User) {
   user2.friendsIds = user2Friends;
 }
 
-const readModes = ["direct", "mergeable-tx", "exclusive-tx"] as const;
+const readModes = ["direct", "mergeable-tx", "serializable-tx"] as const;
 type ReadMode = (typeof readModes)[number];
 
 const orderedIds = {
@@ -46,7 +46,8 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       return db.all(query, options);
     }
 
-    const tx = readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    const tx =
+      readMode === "mergeable-tx" ? db.beginTransaction() : db.beginSerializableTransaction();
     try {
       return await tx.all(query, options);
     } finally {
@@ -59,7 +60,8 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       return db.one(query, options);
     }
 
-    const tx = readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    const tx =
+      readMode === "mergeable-tx" ? db.beginTransaction() : db.beginSerializableTransaction();
     try {
       return await tx.one(query, options);
     } finally {
@@ -72,7 +74,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     async () => {
       const project = insertProject(db, "Committed project");
       const tx =
-        readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+        readMode === "mergeable-tx" ? db.beginTransaction() : db.beginSerializableTransaction();
       try {
         const user = tx.insert(app.users, {
           name: "Staged assignee",
@@ -98,12 +100,12 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
     },
   );
 
-  it.skipIf(readMode !== "exclusive-tx")(
-    "relation reads participate in exclusive transaction conflict detection",
+  it.skipIf(readMode !== "serializable-tx")(
+    "relation reads participate in serializable transaction conflict detection",
     async () => {
       const user = insertUser(db, "Original assignee");
       const todo = insertTodo(db, { assigneesIds: [user.id] });
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
 
       const read = await tx.one(
         app.todos
@@ -247,7 +249,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         const user = insertUser(db, "Assignee");
         const todo = insertTodo(db, { assigneesIds: [user.id] });
         const begin = () =>
-          readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+          readMode === "mergeable-tx" ? db.beginTransaction() : db.beginSerializableTransaction();
 
         const deleting = begin();
         try {
@@ -258,11 +260,11 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
               .where({ id: { eq: todo.id } })
               .include({ assignees: app.users.select("id", "name") }),
           );
-          if (readMode === "exclusive-tx") {
-            // An exclusive read of deleted rows with related rows cannot be
+          if (readMode === "serializable-tx") {
+            // A serializable read of deleted rows with related rows cannot be
             // recorded precisely, so it is rejected (garden-co/jazz#3694).
             await expect(deletedRead).rejects.toThrow(
-              "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+              "Reading deleted `todos` rows together with `users` is not supported in serializable transactions yet",
             );
           } else {
             const deleted = await deletedRead;
@@ -297,12 +299,12 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       },
     );
 
-    it.skipIf(readMode !== "exclusive-tx")(
-      "includeDeleted relation reads are not supported in exclusive transactions yet",
+    it.skipIf(readMode !== "serializable-tx")(
+      "includeDeleted relation reads are not supported in serializable transactions yet",
       async () => {
         const user = insertUser(db, "Assignee");
         const todo = insertTodo(db, { assigneesIds: [user.id] });
-        const tx = db.beginExclusiveTransaction();
+        const tx = db.beginSerializableTransaction();
         try {
           await expect(
             tx.one(
@@ -312,7 +314,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
                 .include({ assignees: app.users.select("id", "name") }),
             ),
           ).rejects.toThrow(
-            "Reading deleted `todos` rows together with `users` is not supported in exclusive transactions yet",
+            "Reading deleted `todos` rows together with `users` is not supported in serializable transactions yet",
           );
         } finally {
           tx.rollback();

@@ -11,8 +11,8 @@ Invariant digest:
 
 - `INV-SHARD-1`: Chapter 15 MUST NOT describe sharded core as implemented; conforming current implementations MUST treat sharding as an exploratory/open design area. This is a guidance/process anchor, not runtime conformance.
 - `INV-SHARD-7`: A sharded implementation MUST assign every non-global row to a schema-declared shard ownership key and MUST specify behavior for rows without a natural root and rows whose ownership key changes.
-- `INV-SHARD-8`: Exclusive transactions MUST be single-shard unless a cross-shard serialization mechanism is explicitly specified.
-- `INV-SHARD-9`: A cross-shard exclusive transaction MUST NOT be accepted without validation evidence for every shard touched by its row and predicate read-sets.
+- `INV-SHARD-8`: Serializable transactions MUST be single-shard unless a cross-shard serialization mechanism is explicitly specified.
+- `INV-SHARD-9`: A cross-shard serializable transaction MUST NOT be accepted without validation evidence for every shard touched by its row and predicate read-sets.
 - `INV-SHARD-10`: A sharded design MUST retain a global catalogue/sequencer for schema versions, lenses, policy bundles, and the ownership map unless it explicitly specifies an equivalent replacement.
 - `INV-SHARD-11`: A sharded design MUST define settled positions as per-shard positions or vectors and MUST specify how at(position) and at_time(t) resolve across shards.
 - `INV-SHARD-12`: A multi-shard subscription result MUST NOT be marked complete unless completeness evidence has been obtained for every shard contributing to the result.
@@ -51,7 +51,7 @@ shared coordination surface small:
   evaluation at the owning Core. How this authority composes across shards
   remains exploratory; there is no intermediary authority between relays and
   Core (ch. 9).
-- **Exclusive authority.** **Exclusive transactions are single-shard only**
+- **Serializable authority.** **Serializable transactions are single-shard only**
   unless an explicit cross-shard serialization mechanism is specified. S4's
   per-warehouse cap discipline (appendix B) is exactly this
   single-shard-serialization shape.

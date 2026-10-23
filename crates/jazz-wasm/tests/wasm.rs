@@ -126,7 +126,7 @@ fn fixture_db() -> WasmDb {
 /// shared `WasmDb` receiver. `close` must therefore be callable through a
 /// shared reference and remain idempotent.
 #[wasm_bindgen_test]
-async fn close_is_idempotent_without_an_exclusive_wasm_receiver() {
+async fn close_is_idempotent_without_an_serializable_wasm_receiver() {
     let db = fixture_db();
 
     let closing = db.close();

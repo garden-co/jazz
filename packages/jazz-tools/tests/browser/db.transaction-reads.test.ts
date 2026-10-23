@@ -29,15 +29,15 @@ afterEach(async () => {
   await db.shutdown();
 });
 
-describe("db exclusive transaction initialization browser integration", () => {
+describe("db serializable transaction initialization browser integration", () => {
   it("rejects beginning before the JazzClient exists", () => {
-    expect(() => db.beginExclusiveTransaction()).toThrow(
-      "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+    expect(() => db.beginSerializableTransaction()).toThrow(
+      "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
     );
   });
 });
 
-describe.each(["direct", "mergeable", "exclusive"] as const)(
+describe.each(["direct", "mergeable", "serializable"] as const)(
   "%s upsert failure reporting",
   (kind) => {
     it("suppresses mutation-error callbacks when the application waits", async () => {
@@ -47,7 +47,8 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
       const id = "00000000-0000-0000-0000-000000000126";
       const write = (() => {
         if (kind === "direct") return db.upsert(app.todos, id, { done: true });
-        const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+        const tx =
+          kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
         tx.insert(app.todos, { title: "Must not be committed", done: false });
         tx.upsert(app.todos, id, { done: true });
         return tx.commit();
@@ -67,7 +68,8 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
       const id = "00000000-0000-0000-0000-000000000126";
       const write = (() => {
         if (kind === "direct") return db.upsert(app.todos, id, { done: true });
-        const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+        const tx =
+          kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
         tx.insert(app.todos, { title: "Must not be committed", done: false });
         tx.upsert(app.todos, id, { done: true });
         return tx.commit();
@@ -81,7 +83,7 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
           reason: expect.stringContaining("missing required field `title`"),
           transaction: expect.objectContaining({
             transactionId,
-            kind: kind === "exclusive" ? "exclusive" : "mergeable",
+            kind: kind === "serializable" ? "serializable" : "mergeable",
           }),
         }),
       );
@@ -93,13 +95,13 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
   },
 );
 
-describe.each(["mergeable", "exclusive"] as const)("%s include-deleted reads", (kind) => {
+describe.each(["mergeable", "serializable"] as const)("%s include-deleted reads", (kind) => {
   it("reads deleted content through the durable owner", async () => {
     const todo = await db
       .insert(app.todos, { title: "retained", done: false })
       .wait({ tier: "local" });
     await db.delete(app.todos, todo.id).wait({ tier: "local" });
-    const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+    const tx = kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
     try {
       const query = app.todos.where({ id: todo.id });
       expect(await tx.one(query.includeDeleted())).toEqual(todo);
@@ -110,7 +112,7 @@ describe.each(["mergeable", "exclusive"] as const)("%s include-deleted reads", (
   });
 });
 
-describe("db exclusive transaction reads browser integration", () => {
+describe("db serializable transaction reads browser integration", () => {
   beforeEach(async () => {
     await db.all(app.todos);
   });
@@ -120,7 +122,7 @@ describe("db exclusive transaction reads browser integration", () => {
       .insert(app.todos, { title: "before deletion", done: false })
       .wait({ tier: "local" });
     await db.delete(app.todos, todo.id).wait({ tier: "local" });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     try {
       await db
         .restore(app.todos, todo.id, { title: "restored", done: false })
@@ -139,7 +141,7 @@ describe("db exclusive transaction reads browser integration", () => {
       title: "visible at begin",
       done: false,
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     db.insert(app.todos, { title: "committed after begin", done: false });
 
     await expect(tx.all(app.todos)).resolves.toEqual([beforeBegin]);
@@ -147,8 +149,8 @@ describe("db exclusive transaction reads browser integration", () => {
   });
 
   it("shows only the current transaction's staged inserts through tx.all", async () => {
-    const aliceTx = db.beginExclusiveTransaction();
-    const bobTx = db.beginExclusiveTransaction();
+    const aliceTx = db.beginSerializableTransaction();
+    const bobTx = db.beginSerializableTransaction();
 
     const aliceDraft = aliceTx.insert(app.todos, { title: "Alice draft", done: false });
     const bobDraft = bobTx.insert(app.todos, { title: "Bob draft", done: false });
@@ -166,8 +168,8 @@ describe("db exclusive transaction reads browser integration", () => {
   it("keeps same-row staged updates isolated to the transaction that issued them", async () => {
     const { value: base } = db.insert(app.todos, { title: "Shared", done: false });
 
-    const aliceTx = db.beginExclusiveTransaction();
-    const bobTx = db.beginExclusiveTransaction();
+    const aliceTx = db.beginSerializableTransaction();
+    const bobTx = db.beginSerializableTransaction();
 
     aliceTx.update(app.todos, base.id, { title: "Alice draft" });
     bobTx.update(app.todos, base.id, { title: "Bob draft" });
@@ -188,7 +190,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
   it("keeps staged deletes isolated to the transaction that issued them", async () => {
     const { value: todo } = db.insert(app.todos, { title: "Shared", done: false });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
 
     tx.delete(app.todos, todo.id);
 
@@ -201,8 +203,8 @@ describe("db exclusive transaction reads browser integration", () => {
   });
 
   it("makes transaction writes visible globally once the transaction commits and the authority accepts the transaction", async () => {
-    const tx = db.beginExclusiveTransaction();
-    const insertedTodo = tx.insert(app.todos, { title: "Exclusive transaction", done: false });
+    const tx = db.beginSerializableTransaction();
+    const insertedTodo = tx.insert(app.todos, { title: "Serializable transaction", done: false });
 
     expect(await db.one(app.todos)).toBeNull();
 
@@ -212,7 +214,7 @@ describe("db exclusive transaction reads browser integration", () => {
   });
 
   it("rejects transaction operations after commit", async () => {
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
     const openTransactionId = tx.openTransactionId();
 
@@ -230,8 +232,8 @@ describe("db exclusive transaction reads browser integration", () => {
   });
 
   it("changes from rolled-back transactions are not visible globally", async () => {
-    const tx = db.beginExclusiveTransaction();
-    tx.insert(app.todos, { title: "Exclusive transaction", done: false });
+    const tx = db.beginSerializableTransaction();
+    tx.insert(app.todos, { title: "Serializable transaction", done: false });
 
     await tx.rollback();
 
@@ -239,7 +241,7 @@ describe("db exclusive transaction reads browser integration", () => {
   });
 
   it("rejects transaction operations after rollback", async () => {
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
     const openTransactionId = tx.openTransactionId();
 
@@ -262,7 +264,7 @@ describe("db exclusive transaction reads browser integration", () => {
       done: false,
     });
 
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
 
     const customId = "00000000-0000-0000-0000-000000000123";
     const insertedTodo = tx.insert(
@@ -306,7 +308,7 @@ describe("db exclusive transaction reads browser integration", () => {
   it("rejects queued partial upserts for missing rows atomically inside transactions", async () => {
     const { value: existing } = db.insert(app.todos, { title: "Keep original", done: false });
     expect(await db.all(app.todos)).toEqual([existing]);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
 
     // Patch shape is known immediately; row existence is resolved in the queue.
     expect(() =>
@@ -324,14 +326,14 @@ describe("db exclusive transaction reads browser integration", () => {
     expect(await db.all(app.todos)).toEqual([existing]);
   });
 
-  describe("db.exclusiveTransaction(cb)", () => {
+  describe("db.serializableTransaction(cb)", () => {
     it("returns the callback value when an async transaction only reads", async () => {
       const { value: existingTodo } = db.insert(app.todos, {
         title: "Alice checked the roadmap",
         done: false,
       });
 
-      const result = await db.exclusiveTransaction(async (tx) => {
+      const result = await db.serializableTransaction(async (tx) => {
         const rows = await tx.all(app.todos);
         expect(rows).toEqual([existingTodo]);
         return "no writes needed";
@@ -348,7 +350,7 @@ describe("db exclusive transaction reads browser integration", () => {
       const error = new Error("no write transaction failed");
 
       await expect(
-        db.exclusiveTransaction(async (tx) => {
+        db.serializableTransaction(async (tx) => {
           const rows = await tx.all(app.todos);
           expect(rows).toEqual([existingTodo]);
           throw error;
@@ -359,8 +361,8 @@ describe("db exclusive transaction reads browser integration", () => {
     });
 
     it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
-      const txResult = await db.exclusiveTransaction((tx) => {
-        return tx.insert(app.todos, { title: "Exclusive transaction", done: false });
+      const txResult = await db.serializableTransaction((tx) => {
+        return tx.insert(app.todos, { title: "Serializable transaction", done: false });
       });
       const insertedTodo = txResult.value;
 
@@ -370,7 +372,7 @@ describe("db exclusive transaction reads browser integration", () => {
     describe("rolls back changes if the callback rejects", () => {
       it("insert", async () => {
         await expect(() =>
-          db.exclusiveTransaction(async (tx) => {
+          db.serializableTransaction(async (tx) => {
             const todo = tx.insert(app.todos, { title: "Todo", done: false });
             expect(await tx.one(app.todos)).toEqual(todo);
             expect(await db.one(app.todos)).toBeNull();
@@ -385,7 +387,7 @@ describe("db exclusive transaction reads browser integration", () => {
         const { value: todo } = db.insert(app.todos, { title: "Todo", done: false });
 
         await expect(() =>
-          db.exclusiveTransaction(async (tx) => {
+          db.serializableTransaction(async (tx) => {
             tx.update(app.todos, todo.id, { title: "Updated todo" });
             expect((await tx.one(app.todos))?.title).toEqual("Updated todo");
             expect((await db.one(app.todos))?.title).toEqual("Todo");
@@ -400,7 +402,7 @@ describe("db exclusive transaction reads browser integration", () => {
         const { value: todo } = db.insert(app.todos, { title: "Todo", done: false });
 
         await expect(() =>
-          db.exclusiveTransaction(async (tx) => {
+          db.serializableTransaction(async (tx) => {
             tx.delete(app.todos, todo.id);
             expect(await tx.one(app.todos)).toBeNull();
             expect(await db.one(app.todos)).toEqual(todo);
@@ -416,8 +418,8 @@ describe("db exclusive transaction reads browser integration", () => {
   it("concurrent transactions cannot modify the same data", async () => {
     const { value: base } = db.insert(app.todos, { title: "Shared", done: false });
 
-    const aliceTx = db.beginExclusiveTransaction();
-    const bobTx = db.beginExclusiveTransaction();
+    const aliceTx = db.beginSerializableTransaction();
+    const bobTx = db.beginSerializableTransaction();
 
     aliceTx.update(app.todos, base.id, { title: "Alice's title" });
     bobTx.update(app.todos, base.id, { title: "Bob's title" });
@@ -432,7 +434,7 @@ describe("db exclusive transaction reads browser integration", () => {
 
   it("reads a cold remote row", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("exclusive-cold-read"),
+      uniqueDbName("serializable-cold-read"),
     );
     await deploy({
       appId,
@@ -463,7 +465,7 @@ describe("db exclusive transaction reads browser integration", () => {
         tier: "remote",
       });
 
-      const transaction = reader.beginExclusiveTransaction();
+      const transaction = reader.beginSerializableTransaction();
       try {
         const transactionRowsBeforeUpdate = await transaction.all(
           app.todos.where({ id: inserted.value.id }),

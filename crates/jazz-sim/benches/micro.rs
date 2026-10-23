@@ -14,7 +14,7 @@ use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::fixture::{
-    apply_sync_message_settled, commit_exclusive_settled, commit_mergeable_unit_settled,
+    apply_sync_message_settled, commit_mergeable_unit_settled, commit_serializable_settled,
     ingest_commit_unit_settled,
 };
 use jazz_sim::{emit_json_line, metadata_fields};
@@ -305,7 +305,7 @@ fn run_read_set_capture(config: &Config) {
 
     let mut row_hist = NsHist::new();
     let tx = OpenTransactionId::new();
-    jazz::db::block_on(node_.open_exclusive(tx)).expect("open tx");
+    jazz::db::block_on(node_.open_serializable(tx)).expect("open tx");
     for idx in 0..config.iterations {
         let start = Instant::now();
         let _ =
@@ -318,7 +318,7 @@ fn run_read_set_capture(config: &Config) {
     let mut predicate_hist = NsHist::new();
     for _ in 0..config.iterations {
         let tx = OpenTransactionId::new();
-        jazz::db::block_on(node_.open_exclusive(tx)).expect("open tx");
+        jazz::db::block_on(node_.open_serializable(tx)).expect("open tx");
         let start = Instant::now();
         let rows =
             jazz::db::block_on(node_.tx_current_rows(tx, TABLE)).expect("tx current rows capture");
@@ -349,7 +349,7 @@ fn run_validation_entries(config: &Config) {
     let mut row_hist = NsHist::new();
     for idx in 0..config.iterations {
         let tx = OpenTransactionId::new();
-        jazz::db::block_on(client.open_exclusive(tx)).expect("open tx");
+        jazz::db::block_on(client.open_serializable(tx)).expect("open tx");
         let _ = jazz::db::block_on(client.tx_read(tx, TABLE, row(idx % 64))).expect("tx read");
         jazz::db::block_on(client.tx_write(
             tx,
@@ -359,9 +359,13 @@ fn run_validation_entries(config: &Config) {
             None,
         ))
         .expect("tx write");
-        let (_tx_id, unit) =
-            commit_exclusive_settled(&mut client, tx, AuthorSubject::SYSTEM, 10_000 + idx as u64)
-                .expect("commit exclusive");
+        let (_tx_id, unit) = commit_serializable_settled(
+            &mut client,
+            tx,
+            AuthorSubject::SYSTEM,
+            10_000 + idx as u64,
+        )
+        .expect("commit serializable");
         let (tx, versions) = commit_parts(&unit);
         let start = Instant::now();
         let [fate] = ingest_commit_unit_settled(&mut core, tx, versions, 20_000 + idx as u64)
@@ -382,7 +386,7 @@ fn run_validation_entries(config: &Config) {
     let mut predicate_hist = NsHist::new();
     for idx in 0..config.iterations {
         let tx = OpenTransactionId::new();
-        jazz::db::block_on(client.open_exclusive(tx)).expect("open tx");
+        jazz::db::block_on(client.open_serializable(tx)).expect("open tx");
         let _ = jazz::db::block_on(client.tx_current_rows(tx, TABLE)).expect("tx current rows");
         jazz::db::block_on(client.tx_write(
             tx,
@@ -392,9 +396,13 @@ fn run_validation_entries(config: &Config) {
             None,
         ))
         .expect("tx write");
-        let (_tx_id, unit) =
-            commit_exclusive_settled(&mut client, tx, AuthorSubject::SYSTEM, 100_000 + idx as u64)
-                .expect("commit exclusive");
+        let (_tx_id, unit) = commit_serializable_settled(
+            &mut client,
+            tx,
+            AuthorSubject::SYSTEM,
+            100_000 + idx as u64,
+        )
+        .expect("commit serializable");
         let (tx, versions) = commit_parts(&unit);
         let start = Instant::now();
         let fates = ingest_commit_unit_settled(&mut core, tx, versions, 200_000 + idx as u64)
