@@ -3017,6 +3017,18 @@ impl Inner {
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
     /// schema (also for a version this store has not admitted).
+    /// Whether session `index` declared a schema version this store has
+    /// not admitted.
+    fn session_unadmitted(&self, index: usize) -> bool {
+        self.sessions[index].version.is_some_and(|version| {
+            version != self.owner.jazz.version_id()
+                && !self
+                    .admitted
+                    .iter()
+                    .any(|admitted| admitted.version_id() == version)
+        })
+    }
+
     pub(crate) fn session_schema(&mut self, index: usize) -> Option<Rc<Schema>> {
         let version = self.sessions[index].version?;
         if version == self.owner.jazz.version_id() {
@@ -3179,6 +3191,18 @@ impl Db {
                         break;
                     }
                     session.ingress.1 += bytes;
+                }
+                // A session on a schema version this server has not
+                // admitted (a draft awaiting its lens) waits: serving it
+                // under another version would expose rows it may not read
+                // that way.
+                if !matches!(message, SyncMessage::Schema { .. }) {
+                    let mut inner = self.inner.borrow_mut();
+                    if inner.session_unadmitted(index) {
+                        inbound.push_front(message);
+                        inner.sessions[index].backlog = inbound;
+                        break;
+                    }
                 }
                 self.serve(index, message)?;
             }
