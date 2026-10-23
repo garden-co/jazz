@@ -459,6 +459,12 @@ impl ServerRuntimeHandle {
             )
             .map_err(|error| error.to_string())?;
             owner.catalogue.persist()?;
+            if !owner.awaiting_permissions {
+                owner
+                    .db
+                    .install_authority_catalogue(&owner.catalogue.snapshot)
+                    .map_err(|error| error.to_string())?;
+            }
             Ok(id)
         })
         .await
@@ -601,6 +607,7 @@ impl ServerRuntimeHandle {
 /// A deployment as ordered activation steps: each lineage schema with the
 /// incoming lenses, then the write schema.
 fn deployment_steps(snapshot: &CatalogueSnapshot) -> Result<Vec<Step>, String> {
+    Db::validate_catalogue_snapshot(snapshot).map_err(|error| error.to_string())?;
     let genesis = snapshot
         .schemas
         .iter()
@@ -917,6 +924,12 @@ impl Owner {
         }
         owner.catalogue.store = store;
         owner.catalogue.persist()?;
+        if !owner.awaiting_permissions {
+            owner
+                .db
+                .install_authority_catalogue(&owner.catalogue.snapshot)
+                .map_err(|error| error.to_string())?;
+        }
         Ok(owner)
     }
 
@@ -1007,6 +1020,9 @@ impl Owner {
                     message @ (SyncMessage::Subscribe { .. }
                     | SyncMessage::Unsubscribe { .. }
                     | SyncMessage::Fetch { .. }
+                    | SyncMessage::ScopedFetchV1 { .. }
+                    | SyncMessage::AcceptedFetchV1 { .. }
+                    | SyncMessage::CatalogueFetchV1 { .. }
                     | SyncMessage::Hold { .. }),
                 ) if gated => owner_session.held.push_back(message),
                 Ok(message) => inbound.push_back(message),
@@ -1132,6 +1148,9 @@ impl Owner {
             schema: id,
         };
         self.catalogue.persist()?;
+        self.db
+            .install_authority_catalogue(&self.catalogue.snapshot)
+            .map_err(|error| error.to_string())?;
         self.release_held_reads();
         Ok(id)
     }
@@ -1172,6 +1191,9 @@ impl Owner {
             self.catalogue.schemas.insert(id, schema);
         }
         self.catalogue.snapshot = snapshot;
-        self.catalogue.persist()
+        self.catalogue.persist()?;
+        self.db
+            .install_authority_catalogue(&self.catalogue.snapshot)
+            .map_err(|error| error.to_string())
     }
 }

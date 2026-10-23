@@ -515,6 +515,27 @@ pub enum SyncMessage {
         through: u64,
         rows: Vec<[u8; 16]>,
     },
+    /// Tag 24, jazz.sqlite.sync.catalogue-metadata.v1. Cached authority
+    /// metadata is useful offline but never asserts fresh query coverage.
+    CatalogueMetadataV1 {
+        head: CatalogueHeadV1,
+        schemas: Vec<CatalogueSchemaV1>,
+    },
+    /// Tag 25, jazz.sqlite.sync.catalogue-fetch.v1. Evaluate the opened
+    /// schema's zero-row query under this authenticated or trusted scope.
+    CatalogueFetchV1 {
+        id: u64,
+        table: String,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(String, BTreeMap<String, Value>)>,
+    },
+    /// Tag 26, jazz.sqlite.sync.catalogue-covered.v1. The metadata must be
+    /// admitted before this fresh authority answer can complete its request.
+    CatalogueCoveredV1 {
+        id: u64,
+        head: CatalogueHeadV1,
+        opened: crate::ids::SchemaVersionId,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -592,6 +613,8 @@ pub(crate) struct Client {
     persisted_known: u64,
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
     accepted_answers: HashSet<u64>,
+    catalogue_answers:
+        HashMap<u64, Option<Result<(CatalogueHeadV1, crate::ids::SchemaVersionId), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// Large-value nodes asked for and not yet answered.
@@ -726,6 +749,14 @@ struct ForwardedFetch {
     deadline: Option<Rc<Instant>>,
 }
 
+struct ForwardedCatalogue {
+    upstream: u64,
+    connection: u64,
+    opened: crate::ids::SchemaVersionId,
+    owner: Rc<Schema>,
+    deadline: Rc<Instant>,
+}
+
 struct ReleasedReads {
     subscriptions: Vec<RemoteRead>,
     fetches: Vec<u64>,
@@ -788,6 +819,8 @@ pub(crate) struct Session {
     /// settle once the upstream answers, never from the relay's store.
     relayed: BTreeMap<u64, RemoteRead>,
     forwarded: BTreeMap<u64, ForwardedFetch>,
+    forwarded_catalogue: BTreeMap<u64, ForwardedCatalogue>,
+    catalogue_pending: bool,
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
@@ -823,6 +856,8 @@ impl Session {
             schema: None,
             relayed: BTreeMap::new(),
             forwarded: BTreeMap::new(),
+            forwarded_catalogue: BTreeMap::new(),
+            catalogue_pending: false,
         }
     }
 
@@ -833,7 +868,12 @@ impl Session {
     fn close(&mut self, dropped: &std::cell::Cell<usize>) -> ReleasedReads {
         dropped.set(dropped.get() + self.subs.len());
         let relayed = std::mem::take(&mut self.relayed);
-        let fetches = self.forwarded.values().map(|read| read.upstream).collect();
+        let fetches = self
+            .forwarded
+            .values()
+            .map(|read| read.upstream)
+            .chain(self.forwarded_catalogue.values().map(|read| read.upstream))
+            .collect();
         *self = Session {
             open: false,
             ..Session::new(Box::new(ClosedTransport), self.identity)
@@ -2716,11 +2756,13 @@ impl Client {
     fn cancel_fetch(&mut self, id: u64) {
         self.answers.remove(&id);
         self.accepted_answers.remove(&id);
+        self.catalogue_answers.remove(&id);
         self.outbox.retain(|message| {
             !matches!(message,
                 SyncMessage::Fetch { id: request, .. }
                     | SyncMessage::ScopedFetchV1 { id: request, .. }
                     | SyncMessage::AcceptedFetchV1 { id: request, .. }
+                    | SyncMessage::CatalogueFetchV1 { id: request, .. }
                     if *request == id)
         });
     }
@@ -2750,6 +2792,7 @@ impl Client {
             persisted_known: 0,
             answers: HashMap::new(),
             accepted_answers: HashSet::new(),
+            catalogue_answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
             wanted: BTreeSet::new(),
@@ -2816,6 +2859,7 @@ impl Db {
                     | SyncMessage::Fetch { .. }
                     | SyncMessage::ScopedFetchV1 { .. }
                     | SyncMessage::AcceptedFetchV1 { .. }
+                    | SyncMessage::CatalogueFetchV1 { .. }
             )
         });
         let version = inner.owner.jazz.version_id();
@@ -3666,6 +3710,33 @@ impl Db {
                             ));
                         }
                     }
+                    SyncMessage::CatalogueMetadataV1 { head, schemas } => {
+                        inner.record_catalogue(&head, &schemas)?;
+                        for session in &mut inner.sessions {
+                            session.catalogue_pending = true;
+                        }
+                    }
+                    SyncMessage::CatalogueCoveredV1 { id, head, opened } => {
+                        let result = if inner.catalogue_head()?.as_ref() != Some(&head)
+                            || inner.catalogue_schema(opened)?.is_none()
+                        {
+                            Err(Error::new(
+                                ErrorCode::NotObserved,
+                                "catalogue coverage lacks its exact accepted metadata",
+                            ))
+                        } else {
+                            Ok((head, opened))
+                        };
+                        if let Some(slot) = inner
+                            .client
+                            .as_mut()
+                            .expect("client")
+                            .catalogue_answers
+                            .get_mut(&id)
+                        {
+                            *slot = Some(result);
+                        }
+                    }
                     SyncMessage::AcceptedRowsV1 { rows } => {
                         for mut row in rows {
                             let Ok(table) = inner.owner.stored_table(&row.table).map(str::to_owned)
@@ -3733,7 +3804,9 @@ impl Db {
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
                         let error = Error::new(code, message);
-                        if let Some(slot) = client.answers.get_mut(&id) {
+                        if let Some(slot) = client.catalogue_answers.get_mut(&id) {
+                            *slot = Some(Err(error));
+                        } else if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if let Some(key) = client.remote_ids.get(&id)
                             && let Some(remote) = client.remote.get(key)
@@ -4092,6 +4165,9 @@ impl Db {
         }
         crate::large::expire_receipts(&self.inner.borrow().conn, now_ms())?;
         for index in 0..sessions {
+            if self.inner.borrow().sessions[index].catalogue_pending {
+                self.queue_catalogue_metadata(index)?;
+            }
             let inbound: Vec<SyncMessage> = {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
@@ -4153,7 +4229,8 @@ impl Db {
                     SyncMessage::Subscribe { id, .. }
                     | SyncMessage::Fetch { id, .. }
                     | SyncMessage::ScopedFetchV1 { id, .. }
-                    | SyncMessage::AcceptedFetchV1 { id, .. } => Some(*id),
+                    | SyncMessage::AcceptedFetchV1 { id, .. }
+                    | SyncMessage::CatalogueFetchV1 { id, .. } => Some(*id),
                     _ => None,
                 };
                 match (self.serve(index, message), read) {
@@ -4175,6 +4252,7 @@ impl Db {
             }
         }
         self.progress_scoped_fetches();
+        self.progress_catalogue_fetches();
         self.notify();
         let mut inner = self.inner.borrow_mut();
         // A relay's optimistic sequence is not an authority cut. Even its
@@ -4721,7 +4799,9 @@ impl Db {
                 "scoped relay reads across different schema versions",
             ));
         }
-        if inner.sessions[index].forwarded.contains_key(&id) {
+        if inner.sessions[index].forwarded.contains_key(&id)
+            || inner.sessions[index].forwarded_catalogue.contains_key(&id)
+        {
             return Err(query_error("duplicate pending scoped relay request ID"));
         }
         let client = inner.client.as_mut().expect("relay");
@@ -5040,6 +5120,66 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
                 session.schema = None;
+                drop(inner);
+                self.queue_catalogue_metadata(index)?;
+            }
+            SyncMessage::CatalogueFetchV1 {
+                id,
+                table,
+                opened,
+                scope,
+            } => {
+                let (author, scope_claims) = match scope {
+                    Some((author, requested)) => {
+                        let author = AuthorSubject::from_canonical(&author)
+                            .map_err(|e| query_error(e.to_string()))?;
+                        let authenticated = claims.clone().unwrap_or_else(|| {
+                            self.inner()
+                                .claims
+                                .get(&connection_identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                        if connection_identity != AuthorSubject::SYSTEM
+                            && (author != connection_identity || requested != authenticated)
+                        {
+                            return Err(Error::new(
+                                ErrorCode::WriteRejected,
+                                "catalogue request scope differs from its authenticated connection",
+                            ));
+                        }
+                        (author, requested)
+                    }
+                    None => (
+                        connection_identity,
+                        claims.unwrap_or_else(|| {
+                            self.inner()
+                                .claims
+                                .get(&connection_identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        }),
+                    ),
+                };
+                if self.is_client() {
+                    self.forward_catalogue_fetch(index, id, table, opened, (author, scope_claims))?;
+                } else {
+                    let (head, schemas) = self.authority_catalogue_coverage(
+                        &table,
+                        opened,
+                        Some((author, scope_claims)),
+                    )?;
+                    let mut inner = self.inner();
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::CatalogueMetadataV1 {
+                            head: head.clone(),
+                            schemas,
+                        });
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
+                }
             }
             SyncMessage::Subscribe {
                 id,
@@ -5675,6 +5815,7 @@ fn overtakes_writes(message: &SyncMessage) -> bool {
             | SyncMessage::Fetch { .. }
             | SyncMessage::ScopedFetchV1 { .. }
             | SyncMessage::AcceptedFetchV1 { .. }
+            | SyncMessage::CatalogueFetchV1 { .. }
             | SyncMessage::Advise { .. }
     )
 }
@@ -6136,5 +6277,227 @@ impl Db {
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )
+    }
+}
+
+impl Db {
+    pub(super) async fn fetch_catalogue(
+        &self,
+        table: &str,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> Result<(), Error> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        let _wake = self.read_deadline(Some(deadline));
+        let _attempt = self.read_attempt_deadline();
+        let (id, connection) = {
+            let mut inner = self.inner();
+            let client = inner.client.as_mut().expect("client");
+            if client.transport.is_none() || !may_wait(client.hint.get()) {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "catalogue coverage has no available authority",
+                ));
+            }
+            let id = client.next_id;
+            client.next_id += 1;
+            client.catalogue_answers.insert(id, None);
+            client.outbox.push(SyncMessage::CatalogueFetchV1 {
+                id,
+                table: table.into(),
+                opened,
+                scope: scope.map(|(author, claims)| (author.canonical().to_owned(), claims)),
+            });
+            (id, client.connection)
+        };
+        let _request = FetchRequest {
+            inner: self.inner.clone(),
+            id,
+        };
+        self.schedule_pending_tick();
+        poll_fn(|_| {
+            let mut inner = self.inner();
+            let client = inner.client.as_mut().expect("client");
+            if client.connection != connection {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "catalogue coverage interrupted by reconnect",
+                )));
+            }
+            if let Some(Some(answer)) = client.catalogue_answers.remove(&id) {
+                return Poll::Ready(answer.and_then(|(head, version)| {
+                    if inner.catalogue_head()?.as_ref() != Some(&head)
+                        || inner.catalogue_schema(opened)?.is_none()
+                    {
+                        Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "catalogue coverage metadata changed before completion",
+                        ))
+                    } else if version == opened {
+                        Ok(())
+                    } else {
+                        Err(Error::new(
+                            ErrorCode::Protocol,
+                            "catalogue coverage answered another schema",
+                        ))
+                    }
+                }));
+            }
+            // Keep an unanswered slot; removing it would lose a later answer.
+            client.catalogue_answers.insert(id, None);
+            if client.transport.is_none()
+                || !may_wait(client.hint.get())
+                || Instant::now() >= deadline
+            {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "fresh catalogue coverage unavailable",
+                )));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    pub(super) fn broadcast_catalogue_metadata(&self) -> Result<(), Error> {
+        let count = self.inner.borrow().sessions.len();
+        for index in 0..count {
+            self.queue_catalogue_metadata(index)?;
+        }
+        Ok(())
+    }
+    fn queue_catalogue_metadata(&self, index: usize) -> Result<(), Error> {
+        let mut inner = self.inner();
+        if !inner.sessions[index].open {
+            return Ok(());
+        }
+        inner.sessions[index].catalogue_pending = false;
+        if inner.catalogue_head()?.is_none() {
+            return Ok(());
+        }
+        let opened = inner.sessions[index]
+            .version
+            .unwrap_or(inner.owner.jazz.version_id());
+        let (head, schemas) = inner.catalogue_records(opened)?;
+        inner.sessions[index]
+            .outbox
+            .push(SyncMessage::CatalogueMetadataV1 { head, schemas });
+        Ok(())
+    }
+    fn forward_catalogue_fetch(
+        &self,
+        index: usize,
+        id: u64,
+        table: String,
+        opened: crate::ids::SchemaVersionId,
+        scope: (AuthorSubject, BTreeMap<String, Value>),
+    ) -> Result<(), Error> {
+        let deadline = self
+            .read_deadline(Some(Instant::now() + std::time::Duration::from_secs(15)))
+            .expect("deadline");
+        let mut inner = self.inner();
+        if inner.sessions[index].forwarded.contains_key(&id)
+            || inner.sessions[index].forwarded_catalogue.contains_key(&id)
+        {
+            return Err(query_error("duplicate forwarded request ID"));
+        }
+        let owner = inner.owner.clone();
+        let client = inner.client.as_mut().expect("relay");
+        if client.transport.is_none() || !may_wait(client.hint.get()) {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "catalogue relay has no available authority",
+            ));
+        }
+        let upstream = client.next_id;
+        client.next_id += 1;
+        let connection = client.connection;
+        client.catalogue_answers.insert(upstream, None);
+        client.outbox.push(SyncMessage::CatalogueFetchV1 {
+            id: upstream,
+            table,
+            opened,
+            scope: Some((scope.0.canonical().to_owned(), scope.1)),
+        });
+        inner.sessions[index].forwarded_catalogue.insert(
+            id,
+            ForwardedCatalogue {
+                upstream,
+                connection,
+                opened,
+                owner,
+                deadline,
+            },
+        );
+        Ok(())
+    }
+    fn progress_catalogue_fetches(&self) {
+        let mut inner = self.inner();
+        for index in 0..inner.sessions.len() {
+            let mut ready = Vec::new();
+            for (&id, request) in &inner.sessions[index].forwarded_catalogue {
+                let answer = if !Rc::ptr_eq(&request.owner, &inner.owner)
+                    || Instant::now() >= *request.deadline
+                    || inner.client.as_ref().is_none_or(|c| {
+                        c.connection != request.connection
+                            || c.transport.is_none()
+                            || !may_wait(c.hint.get())
+                    }) {
+                    Some(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "catalogue relay coverage interrupted or unavailable",
+                    )))
+                } else {
+                    inner
+                        .client
+                        .as_ref()
+                        .expect("relay")
+                        .catalogue_answers
+                        .get(&request.upstream)
+                        .cloned()
+                        .flatten()
+                };
+                if let Some(answer) = answer {
+                    ready.push((id, answer));
+                }
+            }
+            for (id, answer) in ready {
+                let request = inner.sessions[index]
+                    .forwarded_catalogue
+                    .remove(&id)
+                    .expect("pending");
+                if let Some(client) = inner.client.as_mut() {
+                    client.cancel_fetch(request.upstream);
+                }
+                let result = answer.and_then(|(head, opened)| {
+                    let (cached, schemas) = inner.catalogue_records(opened)?;
+                    if cached != head || opened != request.opened {
+                        return Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "catalogue relay lacks the exact covered metadata",
+                        ));
+                    }
+                    Ok((head, opened, schemas))
+                });
+                match result {
+                    Ok((head, opened, schemas)) => {
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::CatalogueMetadataV1 {
+                                head: head.clone(),
+                                schemas,
+                            });
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
+                    }
+                    Err(error) => inner.sessions[index].outbox.push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    }),
+                }
+            }
+        }
     }
 }

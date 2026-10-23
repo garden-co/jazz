@@ -1082,6 +1082,46 @@ impl Binding {
         })))
     }
 
+    /// Cached authority-issued identities; these calls never fetch or allocate.
+    pub fn table_identity(&self, table: &str) -> HostResult<Vec<u8>> {
+        Ok(self
+            .db
+            .table_identity(table)?
+            .map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
+    }
+    pub fn column_identity(&self, table: &str, column: &str) -> HostResult<Vec<u8>> {
+        Ok(self
+            .db
+            .column_identity(table, column)?
+            .map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
+    }
+    /// Fresh catalogue coverage still executes the opened schema's query and
+    /// policy path at the authority; cached identities cannot satisfy it.
+    pub fn cover_catalogue(
+        &self,
+        table: String,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<Vec<u8>>> {
+        let explicit = author.is_some();
+        let author = self.read_author(author)?;
+        let scope = author
+            .map(|author| {
+                let claims = if explicit {
+                    self::claims(author, claims.unwrap_or(serde_json::Value::Null))?
+                } else {
+                    BTreeMap::new()
+                };
+                Ok::<_, HostError>((author, claims))
+            })
+            .transpose()?;
+        let db = self.db.clone();
+        Ok(Box::pin(self.hooks.progress.parked(async move {
+            db.cover_catalogue(&table, scope).await?;
+            Ok(Vec::new())
+        })))
+    }
+
     /// Paired accepted content and settlement metadata for one serializable
     /// transaction. The read registers before its returned future is polled.
     pub fn all_settlement_metadata<O: HostObject>(

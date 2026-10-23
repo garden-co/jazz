@@ -37,6 +37,9 @@ pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
     LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
+#[path = "catalogue.rs"]
+mod catalogue;
+pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
 #[path = "accepted.rs"]
 mod accepted;
 #[path = "sync.rs"]
@@ -899,6 +902,7 @@ impl Db {
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         conn.execute_batch(accepted::ACCEPTED_DDL)
             .map_err(storage)?;
+        conn.execute_batch(catalogue::DDL).map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
         for table in physical.tables.keys() {
@@ -987,6 +991,7 @@ impl Db {
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
         let db = Self::open(config).await?;
         db.set_authority();
+        db.initialize_authority_catalogue()?;
         Ok(db)
     }
 
