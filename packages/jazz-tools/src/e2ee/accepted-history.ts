@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db, QueryBuilder, E2eeTransactionScope } from "../runtime/db.js";
 import type { E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
@@ -322,7 +322,7 @@ export async function readAcceptedHistory<T>(
     if (!entries.has(key)) retain(db, key, retained);
     return structuredClone(retained.result) as T;
   }
-  const transaction = await exclusiveE2eeTransaction(db, (tx) => capture(tx, read));
+  const transaction = await serializableE2eeTransaction(db, (tx) => capture(tx, read));
   const bundle = await transaction.wait({ tier: "global" });
   await retainAcceptedBundle(db, key, bundle);
   return bundle.result;
@@ -335,7 +335,7 @@ export async function prepareAcceptedHistory<T, P>(
   read: (reader: E2eeHistoryReader) => Promise<T>,
   prepare: (tx: E2eeTransactionScope, snapshot: T) => Promise<P>,
 ): Promise<{ snapshot: T; prepared: P; transactionId: string }> {
-  const transaction = await exclusiveE2eeTransaction(db, async (tx) => {
+  const transaction = await serializableE2eeTransaction(db, async (tx) => {
     const bundle = await capture(tx, read);
     const prepared = await prepare(tx, bundle.result);
     return { bundle, prepared };

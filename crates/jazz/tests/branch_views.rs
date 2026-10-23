@@ -210,11 +210,13 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
     }
     let (bob, _) = open_db();
     let query = bob.prepare_query(&bob.table("todos")).unwrap();
+    let error = block_on(bob.all(&query, opts)).unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::NotObserved);
     assert!(
-        block_on(bob.all(&query, opts))
-            .unwrap_err()
+        error
             .to_string()
-            .contains("newer than this replica's synced state")
+            .contains("Snapshot history is unavailable"),
+        "{error}"
     );
 }
 
@@ -1979,6 +1981,7 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let opts = ReadOpts {
         read_view: ReadViewSpec {
+            include_deleted: false,
             source: ReadViewSourceSpec::BranchView {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),
@@ -2218,6 +2221,7 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let opts = ReadOpts {
         read_view: ReadViewSpec {
+            include_deleted: false,
             source: ReadViewSourceSpec::BranchView {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),
@@ -2962,4 +2966,60 @@ fn branch_view_reads_keep_enum_branch_columns() {
             (own, Some(Value::EnumTag(1))),
         ])
     );
+}
+
+/// A row's branch columns are its branch: an update that changes one is a
+/// schema error and leaves the row where it was; writing the same value is
+/// fine.
+#[test]
+fn an_update_cannot_move_a_row_to_another_branch() {
+    let (db, _) = open_db();
+    let draft = selector(0xd1);
+    let row = db
+        .insert(
+            "todos",
+            BTreeMap::from([("title".into(), Value::String("Draft".into()))]),
+            jazz::db::InsertOptions {
+                target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .row_uuid();
+    let update = |branch: u8| {
+        block_on(db.update(
+            "todos",
+            row,
+            BTreeMap::from([(
+                "branch_id".into(),
+                Value::Uuid(uuid::Uuid::from_bytes([branch; 16])),
+            )]),
+            jazz::db::UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: draft.clone(),
+                    base: None,
+                },
+                ..Default::default()
+            },
+        ))
+    };
+    let error = update(0xd2).unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema);
+    assert!(
+        error
+            .message
+            .contains("branch column does not match exact branch key"),
+        "{error}"
+    );
+    update(0xd1).unwrap();
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let on = |branch: u8| {
+        db.all(
+            &query,
+            ReadOpts::default().branch_view(selector(branch), None),
+        )
+        .unwrap()
+        .len()
+    };
+    assert_eq!((on(0xd1), on(0xd2)), (1, 0));
 }

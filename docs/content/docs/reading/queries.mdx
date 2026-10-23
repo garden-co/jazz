@@ -128,9 +128,18 @@ A local-first read can wait a bounded time for the server before its first resul
 `firstLoadRemoteWaitMs`:
 
 ```ts
-const todos = await db.all(app.todos, { tier: "local-first", firstLoadRemoteWaitMs: 500 });
-db.subscribe(app.todos, onChange, { tier: "local-first", firstLoadRemoteWaitMs: 500 });
-const rows = useAll(app.todos, { tier: "local-first", firstLoadRemoteWaitMs: 500 });
+const todos = await db.all(app.todos, {
+  tier: "local-first",
+  firstLoadRemoteWaitMs: 500,
+});
+db.subscribe(app.todos, onChange, {
+  tier: "local-first",
+  firstLoadRemoteWaitMs: 500,
+});
+const rows = useAll(app.todos, {
+  tier: "local-first",
+  firstLoadRemoteWaitMs: 500,
+});
 ```
 
 In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
@@ -200,6 +209,23 @@ views without storing duplicate ownership fields.
 
 See [Permissions](/docs/auth/permissions) for policy examples using `$createdBy` and the other
 magic columns.
+
+### Deletion metadata columns
+
+After `.includeDeleted()`, you can select, filter, and sort by `$deletedAt` and `$deletedBy`.
+They return the winning deletion's authored timestamp as a `Date` and author as a `RowAuthor`, or `null` for live and restored rows.
+
+```ts
+const deletedTasks = await db.all(
+  app.tasks
+    .includeDeleted()
+    .where({ $deletedAt: { isNull: false } })
+    .select("title", "$deletedAt", "$deletedBy"),
+);
+```
+
+For [history rows](/docs/reading/history#deleted-rows), every version shares
+the logical row's current deletion timestamp and author.
 
 ## Framework hooks
 

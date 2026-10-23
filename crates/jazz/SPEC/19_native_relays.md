@@ -599,7 +599,7 @@ that acknowledgement while already executing on the core owner thread would
 deadlock. Repeated close or unsubscribe reports `false`.
 
 ABI V1 also includes a deliberately narrow write family: `BeginTransaction` with
-the ordinary `mergeable` or `exclusive` core semantics, full-cell
+the ordinary `mergeable` or `serializable` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
 `RollbackTransaction`. `WaitForCoreTransaction` accepts only that foreground's
 previously committed public `txId` and becomes a pending operation until the

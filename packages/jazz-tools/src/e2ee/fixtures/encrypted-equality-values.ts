@@ -147,7 +147,7 @@ export async function createEqualityValuesFixture() {
     });
     // Canonicalisation needs accepted spaces, but no unrelated encrypted seed rows.
     // The optional-string cases retain separate scopes to isolate their null rows.
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const valuesRoot = tx.insert(app.projects, { title: "Equality values" });
     const nullRoot = tx.insert(app.projects, { title: "Null values" });
     const omittedRoot = tx.insert(app.projects, { title: "Omitted values" });

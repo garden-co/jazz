@@ -29,15 +29,15 @@ The durable audit row never keeps this evidence:
 
 The in-memory path works. The recovery path does not:
 
-1. `commit_exclusive` persists the transaction as `Pending`/`Local` and hands the
+1. `commit_serializable` persists the transaction as `Pending`/`Local` and hands the
    in-memory commit unit, with its evidence, to the outbox.
 2. If the process dies before the fate arrives, the reopened outbox holds only
    tx ids. `peer_connection.rs` rebuilds each unit with
    `NodeState::commit_unit_for` (`node/state/commit.rs`), which reads the
    stored transaction back with no evidence.
-3. The authority's `validate_exclusive_commit_unit` (`node/ingest/fates.rs`)
+3. The authority's `validate_serializable_commit_unit` (`node/ingest/fates.rs`)
    returns `false` when `base_snapshot` is `None`. `ingest_commit_unit`
-   (`node/ingest/commit_bundles.rs`) then rejects with `ExclusiveConflict`.
+   (`node/ingest/commit_bundles.rs`) then rejects with `SerializationConflict`.
 
 Every exclusive transaction that was in flight at a crash is therefore
 rejected on replay as a conflict, even though no conflicting write exists.
@@ -58,7 +58,7 @@ that records the fate writes the slots back to null. Evidence is kept only
 while it can still matter, so storage cost is bounded by in-flight exclusive
 transactions, not by history. It is not an audit log and never becomes one.
 
-Evidence is written only for `TxKind::Exclusive` rows. Mergeable rows keep all
+Evidence is written only for `TxKind::Serializable` rows. Mergeable rows keep all
 four slots null. SPEC 2 §2.8 still holds that mergeable rows never confer
 serializability.
 
@@ -156,7 +156,7 @@ a property of every Groove record, not of this family: the ordered-KV store
 owns value integrity. Cuts into fixed-width fields, and into the nested query
 and binding bytes, are structural and are rejected.
 
-The implementation is `crates/jazz/layers/node/src/node/exclusive_read_evidence.rs`.
+The implementation is `crates/jazz/layers/node/src/node/serializable_read_evidence.rs`.
 It is written by `transaction_values_with_cardinality_scope` (`node/codec.rs`)
 and read by `stored_transaction_from_record` (`node/currency.rs`). Maintained
 view bundles (`node/views.rs`) set `base_snapshot` to `None` explicitly.
@@ -207,7 +207,7 @@ tolerates evidence being present or absent on duplicates.
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | New client, new server                           | An in-flight exclusive transaction replays after restart with its evidence and is validated normally. It is accepted, or rejected only for a real conflict.                                                                                                                                    |
 | New client, old server                           | The old server already validates evidence carried on the unit, so the replay validates normally. The fix is client-side and helps old servers too.                                                                                                                                             |
-| Old client, new server                           | The old client still replays without evidence. The new server rejects it with `ExclusiveConflict`, as today. Nothing gets worse.                                                                                                                                                               |
+| Old client, new server                           | The old client still replays without evidence. The new server rejects it with `SerializationConflict`, as today. Nothing gets worse.                                                                                                                                                           |
 | New binary opens an old data dir                 | Rows written by the old binary have null slots, so a transaction that was in flight at the upgrade is rejected on replay, as today. Rows written after the upgrade replay correctly. No migration and no rewrite of old rows.                                                                  |
 | New data dir opened by an old binary (downgrade) | The old decoder never reads slots 5–8, so the rows decode as before and the evidence is ignored. An in-flight exclusive transaction is rejected on replay, as today. No corruption and no new failure. Downgrade is not a supported path across alpha.60 anyway, because #3281 breaks storage. |
 | Relay (Local tier) restart                       | The relay stores forwarded unfated exclusive units with evidence and re-forwards them intact. Old relays behave as today.                                                                                                                                                                      |
@@ -215,7 +215,7 @@ tolerates evidence being present or absent on duplicates.
 ## Security and correctness
 
 - Conflict detection is not weakened. The authority runs the same
-  `validate_exclusive_commit_unit` on the same evidence it would have received
+  `validate_serializable_commit_unit` on the same evidence it would have received
   before the crash. A write that really conflicted while the node was down is
   still rejected, and a unit with no evidence is still rejected. The only
   change is that honest evidence is no longer lost.
@@ -236,7 +236,7 @@ tolerates evidence being present or absent on duplicates.
     slots at positions 5–8 (`schema.rs` `transactions_table`, codec
     `TransactionRowRecord`). It still writes them null and still reads them
     back as `None`.
-  - `validate_exclusive_commit_unit` still requires `base_snapshot` and
+  - `validate_serializable_commit_unit` still requires `base_snapshot` and
     validates against snapshot dots. The PR says so ("Exclusive transactions
     still validate against snapshot dots, not base seq S plus read set", #3473).
   - `commit_unit_for` still rebuilds outbox units from storage. That branch has
@@ -275,26 +275,26 @@ tolerates evidence being present or absent on duplicates.
 ## Evidence
 
 - Exact bytes (`jazz-node`):
-  `node::exclusive_read_evidence::tests::exclusive_read_evidence_v1_bytes_are_pinned`.
+  `node::serializable_read_evidence::tests::serializable_read_evidence_v1_bytes_are_pinned`.
 - Rejection (`jazz-node`):
-  `node::exclusive_read_evidence::tests::exclusive_read_evidence_rejects_malformed_noncanonical_and_unknown_versions`
-  and `node::tests::harness::mergeable_transaction_row_with_exclusive_evidence_is_rejected`.
+  `node::serializable_read_evidence::tests::serializable_read_evidence_rejects_malformed_noncanonical_and_unknown_versions`
+  and `node::tests::harness::mergeable_transaction_row_with_serializable_evidence_is_rejected`.
 - Write policy (`jazz-node`):
-  `node::exclusive_read_evidence::tests::exclusive_read_evidence_is_written_only_when_replayable`.
+  `node::serializable_read_evidence::tests::serializable_read_evidence_is_written_only_when_replayable`.
 - Lifecycle (`jazz-node`):
-  `node::tests::harness::exclusive_evidence_is_stored_while_pending_and_cleared_at_settlement`.
+  `node::tests::harness::serializable_evidence_is_stored_while_pending_and_cleared_at_settlement`.
   It checks that the stored row carries all four slots while pending, that
   `commit_unit_for` after reopen equals the published unit, and that the slots
   are null after the authority's fate is applied.
 - View carriers (`jazz-node`):
-  `node::tests::harness::view_bundle_for_a_pending_exclusive_transaction_matches_its_stored_evidence`.
+  `node::tests::harness::view_bundle_for_a_pending_serializable_transaction_matches_its_stored_evidence`.
   Core's view bundle for an exclusive transaction never carries evidence,
   while its author still holds the pending row with evidence. The view
   receiver's stored-versus-incoming identity checks (`node/views.rs`) compare
   the payload through `known_transaction_payload_matches`, which already
   ignores evidence on either side, instead of exact equality.
 - Relay (`jazz-node`):
-  `node::tests::harness::relay_stores_only_decodable_exclusive_evidence_and_replays_after_restart`.
+  `node::tests::harness::relay_stores_only_decodable_serializable_evidence_and_replays_after_restart`.
   A relay stores a genuine downstream unit with evidence and, after a
   restart, `commit_unit_for` returns it unchanged and Core accepts it. A unit
   with a mismatched `binding_id` is stored without evidence; after the
@@ -303,11 +303,11 @@ tolerates evidence being present or absent on duplicates.
   `query::tests::canonical_binding_bytes_decode_round_trips_and_rejects_the_rest`.
 - End to end (`jazz-db`, `db::tests::node_runtime`), each through a real
   RocksDB close and reopen:
-  - `exclusive_transaction_in_flight_at_restart_replays_without_false_conflict`.
-    This is the #3663 regression. It fails with `ExclusiveConflict` when
+  - `serializable_transaction_in_flight_at_restart_replays_without_false_conflict`.
+    This is the #3663 regression. It fails with `SerializationConflict` when
     evidence is not persisted and passes with it.
-  - `exclusive_transaction_replayed_after_restart_still_rejects_a_real_conflict`.
-  - `exclusive_transaction_without_persisted_evidence_is_still_rejected_on_replay`.
+  - `serializable_transaction_replayed_after_restart_still_rejects_a_real_conflict`.
+  - `serializable_transaction_without_persisted_evidence_is_still_rejected_on_replay`.
 - Registry: `jazz.exclusive-read-evidence.v1` in
   `crates/jazz/fixtures/persistent_codec_family_registry.json`, verified by
   `crates/jazz/tests/persistent_codec_family_registry.rs`.

@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import type { Db, E2eeTransactionScope } from "../runtime/db.js";
 import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
@@ -159,7 +159,7 @@ export class Groups {
         this.warmMembership({ accountId: this.accountId }),
         this.db.all(query, { tier: "remote" }),
       ]);
-      const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const read = await serializableE2eeTransaction(this.db, async (tx) => {
         const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
         const [group, deliveries] = await Promise.all([
           this.readMembership(tx, { accountId: this.accountId }, own),
@@ -280,7 +280,7 @@ export class Groups {
   /** Backfill effective memberships, including inherited paths, then verify recovery. */
   async protectRecovery(value: string): Promise<void> {
     await this.warmMembership({ accountId: this.accountId });
-    const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+    const read = await serializableE2eeTransaction(this.db, async (tx) => {
       const own = await this.deviceStates(tx);
       return {
         own,
@@ -319,7 +319,7 @@ export class Groups {
     try {
       device = await this.loadDevice();
       await this.warmMembership({ accountId: this.accountId });
-      const discovery = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const discovery = await serializableE2eeTransaction(this.db, async (tx) => {
         const own = await this.deviceStates(tx);
         return {
           own,
@@ -347,7 +347,7 @@ export class Groups {
         );
         if (!observedRoots.length) continue;
         await this.warmMembership({ groupIds: batchIds });
-        const read = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const read = await serializableE2eeTransaction(this.db, async (tx) => {
           const own = await this.deviceStates(tx);
           const group = await this.readMembership(tx, { groupIds: batchIds }, own.publicHistory);
           // Keep observed creators in the covered read set if a root changes.
@@ -472,7 +472,7 @@ export class Groups {
     });
     const device = await this.loadDevice();
     try {
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const author = await this.deviceStates(tx);
         if (!author.active.has(device.id))
           throw new Error("An active device must author group membership changes");
@@ -555,7 +555,7 @@ export class Groups {
         this.assertOpen,
         this.requireDevice().keyLifetime,
       );
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const membership = await this.deviceStates(tx);
         if (!membership.active.has(device.id))
           throw new Error("An approved active device must create the group");
@@ -622,7 +622,7 @@ export class Groups {
         result: GroupState | undefined;
       };
       try {
-        const transaction = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const transaction = await serializableE2eeTransaction(this.db, async (tx) => {
           const snapshot = await this.readInspectionSnapshot(tx, observed, observations.deliveries);
           const result = await this.inspectSnapshot(snapshot, observed, device, false, {
             deliver: async (expected, secret) => {
@@ -647,7 +647,7 @@ export class Groups {
         // A denied publication cannot deny a previously usable key. Establish
         // a fresh accepted snapshot before using the existing denial handling.
         delivered = undefined;
-        const fallback = await exclusiveE2eeTransaction(this.db, async (tx) => {
+        const fallback = await serializableE2eeTransaction(this.db, async (tx) => {
           const snapshot = await this.readInspectionSnapshot(tx, observed);
           // Delivery was denied, but key confirmation can itself race with
           // revocation. Keep even this read-only fallback inside fresh authority
@@ -888,7 +888,7 @@ export class Groups {
     await this.warmMembership({ groupIds: [expected.id] });
     const secret = runtimeRandomBytes(32);
     try {
-      const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
         const own = await this.deviceStates(tx);
         const group = await this.readGroupMembership(tx, expected, own.publicHistory);
         const roots = group.targetRoots;
@@ -992,7 +992,7 @@ export class Groups {
     }
     const observations = await this.readDeliveryObservations(expected.id, preparedDeliveries);
     try {
-      const delivery = await exclusiveE2eeTransaction(this.db, async (tx) => {
+      const delivery = await serializableE2eeTransaction(this.db, async (tx) => {
         const state = await this.deviceStates(tx);
         const group = await this.readGroupMembership(tx, expected, state.publicHistory);
         await this.prepareDelivery(tx, expected, secret, device, observations, { state, group });
@@ -1013,7 +1013,7 @@ export class Groups {
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
       tier: "remote",
     });
-    const prior = await exclusiveE2eeTransaction(this.db, async (tx) => ({
+    const prior = await serializableE2eeTransaction(this.db, async (tx) => ({
       deliveries:
         preparedDeliveries ??
         (await tx.allSettledForE2ee(this.tables.__e2ee_group_deliveries.where({ groupId: id }))),
@@ -1235,7 +1235,7 @@ export class Groups {
     await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: expected.id }), {
       tier: "remote",
     });
-    const proposal = await exclusiveE2eeTransaction(this.db, async (tx) => {
+    const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
       const own = await this.deviceStates(tx);
       const group = await this.readGroupMembership(tx, expected, own.publicHistory);
       const roots = group.targetRoots;

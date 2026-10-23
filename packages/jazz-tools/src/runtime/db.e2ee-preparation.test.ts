@@ -45,7 +45,7 @@ afterEach(async () => {
 it.each(["all", "one", "settled", "insert", "upsert"] as const)(
   "rejects a foreign-schema prepared %s and prevents committing prior writes",
   async (operation) => {
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     tx.insert(app.markers, { title: "Must roll back" });
     await expect(
       prepareDbTransaction(tx, async (scope) => {
@@ -76,7 +76,7 @@ it.each(["all", "one", "settled", "insert", "upsert"] as const)(
 );
 
 it("drains same-schema preparation after commit is requested without losing typed rows", async () => {
-  const tx = db.beginExclusiveTransaction();
+  const tx = db.beginSerializableTransaction();
   let release!: () => void;
   const ready = new Promise<void>((resolve) => {
     release = resolve;

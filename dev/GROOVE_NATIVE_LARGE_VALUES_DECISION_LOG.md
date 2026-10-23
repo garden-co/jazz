@@ -45,7 +45,7 @@ NAPI and WASM continue to copy completed results into host-owned memory.
 
 ## 2026-08-23 — One lowering seam for transaction kinds
 
-Exclusive transactions lower oversized scalar cells through the same Groove
+Serializable transactions lower oversized scalar cells through the same Groove
 preparation helper used by mergeable publication before encoding their version
 records. Publication then discovers and atomically accepts the matching live
 claim from the descriptor, exactly as authority ingress does. Transaction kind

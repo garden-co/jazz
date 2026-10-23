@@ -83,7 +83,7 @@ it.each(["explicit disconnect", "unexpected transport loss"] as const)(
       });
       clients.push(rejecting);
       const owners = [owner, rejecting];
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Stale offline epoch" },
@@ -236,7 +236,7 @@ it.each([
         reopenAt === "immediately after creation with a group recipient"
           ? await before.e2ee.groups.create().wait()
           : undefined;
-      const tx = before.beginExclusiveTransaction();
+      const tx = before.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Persisted project" },
@@ -356,7 +356,7 @@ it("updates an existing encrypted space offline and accepts the write after reco
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Offline project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Before disconnect" });
     await tx.commit().wait({ tier: "global" });
@@ -434,7 +434,7 @@ it.each([false, true])(
         },
       };
       db = await createDb(config);
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Immediate offline project" });
       const note = tx.insert(app.notes, { projectId: project.id, title: "Initial value" });
       await tx.commit().wait({ tier: "global" });
@@ -512,7 +512,7 @@ it("stores an encrypted update locally after unexpected transport loss", async (
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Transport loss project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Before transport loss" });
     await tx.commit().wait({ tier: "global" });
@@ -573,7 +573,7 @@ it.each(["ordinary owner read", "owner reconnect"])(
       clients.push(reader);
       await owner.e2ee.devices.list();
       await reader.e2ee.devices.list();
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Shared initial space" },
@@ -638,7 +638,7 @@ it("keeps independent offline readers revoked after ordinary-query and device-li
     )!;
     await first.e2ee.devices.approve(request.id).wait();
     await second.e2ee.devices.list();
-    const initial = first.beginExclusiveTransaction();
+    const initial = first.beginSerializableTransaction();
     const project = initial.insert(app.projects, { title: "Pending deletion scope" });
     initial.insert(app.notes, { projectId: project.id, title: "Encrypted note" });
     await initial.commit().wait({ tier: "global" });
@@ -730,7 +730,7 @@ it.each([
       await reader.e2ee.devices.list();
       const group = await owner.e2ee.groups.create().wait();
       await owner.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         groupApp.projects,
         { title: "Group removal" },
@@ -853,7 +853,7 @@ it("keeps accepted space access while a removal is pending and after Jazz reject
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Rejected removal" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Accepted data" });
     await tx.commit().wait({ tier: "global" });
@@ -978,7 +978,7 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
     const reader = await createDb({ ...bob, e2ee: { app, store: store() } });
     clients.push(reader);
     await reader.e2ee.devices.list();
-    const tx = owner.beginExclusiveTransaction();
+    const tx = owner.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Rejected addition" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Owner only" });
     await tx.commit().wait({ tier: "global" });

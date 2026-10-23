@@ -52,7 +52,7 @@ it.each(["warm", "cold", "concurrent", "immediate commit"])(
       const ordinary =
         scenario === "cold" ? undefined : await bob.all(app.proposals, { tier: "remote" });
       if (scenario === "immediate commit") {
-        const tx = bob.beginExclusiveTransaction();
+        const tx = bob.beginSerializableTransaction();
         const reading = tx.allSettledForE2ee(app.proposals);
         const committed = tx.commit();
         const [snapshot] = await Promise.all([reading, committed.wait({ tier: "global" })]);
@@ -60,7 +60,7 @@ it.each(["warm", "cold", "concurrent", "immediate commit"])(
         expect(snapshot.settlements).toHaveLength(3);
         return;
       }
-      const read = await bob.exclusiveTransaction(async (tx) => {
+      const read = await bob.serializableTransaction(async (tx) => {
         const snapshot = await tx.allSettledForE2ee(app.proposals);
         if (scenario === "concurrent")
           await alice.insert(app.proposals, { value: "after snapshot" }).wait({ tier: "global" });

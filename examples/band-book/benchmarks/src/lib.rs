@@ -311,7 +311,6 @@ impl Session {
             &self.prepared,
             ReadOpts {
                 tier: ReadTier::LocalOnly,
-                include_deleted: false,
                 ..ReadOpts::default()
             },
             self.identity,
@@ -342,7 +341,6 @@ impl Session {
             &self.prepared,
             ReadOpts {
                 tier: ReadTier::Remote,
-                include_deleted: false,
                 ..ReadOpts::default()
             },
             self.identity,
