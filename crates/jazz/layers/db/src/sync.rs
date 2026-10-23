@@ -53,13 +53,19 @@ use jazz_types::time::{GlobalTime, TxTime};
 use serde::{Deserialize, Serialize};
 
 use super::*;
+#[path = "sync/owner.rs"]
+mod owner;
 #[path = "sync/relay.rs"]
 mod relay;
 pub use relay::OwnerDurabilityBarrier;
 use relay::{RelayUpload, UploadId};
 pub(crate) const RELAY_DDL: &str = relay::DDL;
+pub(crate) const OWNER_DDL: &str = owner::DDL;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 pub use crate::wire::TransportError;
+pub(crate) use owner::{
+    check_open_schema as check_owner_open_schema, stored_subject as stored_owner_subject,
+};
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
@@ -72,6 +78,9 @@ fn now_ms() -> i64 {
 /// 2^53, so seqs stay exact where SQLite integers surface as JS numbers
 /// (Durable Objects).
 pub const LOCAL_BASE: u64 = 1 << 52;
+/// Ephemeral own publications follow the durable owner's ordered prefix. Both
+/// ranges remain exactly representable by JavaScript's number type.
+pub(super) const FOREGROUND_BASE: u64 = LOCAL_BASE + (1 << 51);
 
 /// A message transport between a client and its server.
 pub trait Transport {
@@ -288,6 +297,16 @@ pub enum WireKind {
         reads: Vec<WireRead>,
         own: Vec<(u64, [u8; 16], u64)>,
     },
+    /// jazz.sqlite.serializable-observed.v1: original dependencies plus one
+    /// serializable-read-content.v1 digest for each row of each read. The
+    /// authority validates values that pending replay may have changed without
+    /// changing the final row's original transaction identity.
+    SerializableObservedV1 {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<(u64, [u8; 16], u64)>,
+        content: Vec<Vec<[u8; 32]>>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -347,6 +366,23 @@ const _: () = assert!(
     CHUNK_BATCH_BYTES + jazz_types::large_values::MAX_ENCODED_NODE_BYTES + 64 * 1024
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
 );
+
+/// An exact accepted base needed by a private owner input. `None` means the
+/// coordinate has no accepted image, not that its image may be omitted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnerInputBaseV1 {
+    pub table: String,
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub seq: Option<u64>,
+}
+
+/// The exact accepted image (or absence) at one frozen inherited base cut.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnerFrozenBaseV1 {
+    pub base: OwnerInputBaseV1,
+    pub at: u64,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
@@ -564,6 +600,30 @@ pub enum SyncMessage {
         node: [u8; 16],
         tx: u64,
     },
+    /// Tag 29, jazz.sqlite.sync.owner-projection.v1. A foreground advertises
+    /// qualified-input support and only the pending identities it already holds.
+    /// This is a format declaration, never an identity or trust grant.
+    OwnerProjectionV1 {
+        known: Vec<([u8; 16], u64)>,
+    },
+    /// Tag 30, jazz.sqlite.sync.owner-inputs.v1. Complete original Commit bytes
+    /// paired with stable owner publication positions, in publication order.
+    /// Accepted bases precede this envelope through the ordinary row protocol.
+    OwnerInputsV1 {
+        schema: [u8; 16],
+        through: u64,
+        bases: Vec<OwnerInputBaseV1>,
+        frozen: Vec<OwnerFrozenBaseV1>,
+        units: Vec<(u64, Vec<u8>)>,
+    },
+    /// Tag 31, jazz.sqlite.sync.owner-ready.v1. The immediate private owner
+    /// supports recovery for this subject and schema. This is neither a flush
+    /// receipt nor authority acceptance; the host authenticates the transport.
+    OwnerReadyV1 {
+        schema: [u8; 16],
+        subject: String,
+        node: [u8; 16],
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -574,10 +634,15 @@ pub(crate) enum Kind {
         snapshot: u64,
         reads: Vec<WireRead>,
         own: Vec<u64>,
+        content: Vec<Vec<[u8; 32]>>,
     },
 }
 
 struct Pending {
+    /// The relay journal owns retry and persistence for this private projection.
+    owner_managed: bool,
+    /// This owner completed its storage barrier for the immutable own upload.
+    locally_durable: bool,
     tx: u64,
     seq: u64,
     node: [u8; 16],
@@ -640,7 +705,16 @@ pub(crate) struct Client {
     connection: u64,
     /// Schema declared when this upstream connection opened.
     upstream_schema: Option<crate::ids::SchemaVersionId>,
-    fates: HashMap<u64, Result<(), Error>>,
+    fates: HashMap<UploadId, Result<(), Error>>,
+    /// Exact immutable bytes of the private inputs received from this owner.
+    owner_inputs: BTreeMap<UploadId, Vec<u8>>,
+    owner_projection_bound: bool,
+    /// Pinned for this foreground's lifetime, including reconnects.
+    owner_node: Option<[u8; 16]>,
+    /// An acknowledgement applies only to the current connection and schema.
+    owner_ready: Option<crate::ids::SchemaVersionId>,
+    /// Ordered semantic frames held while an owner input fetches its chunks.
+    owner_inbound: VecDeque<SyncMessage>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
@@ -657,7 +731,7 @@ pub(crate) struct Client {
     /// Nodes to ask for on the next send.
     wanted: BTreeSet<ChunkRequest>,
     /// Nodes pushed for each unsettled commit.
-    pushed: HashMap<u64, Vec<jazz_types::large_values::Locator>>,
+    pushed: HashMap<UploadId, Vec<jazz_types::large_values::Locator>>,
     /// Requests the server could not answer; never asked again.
     unavailable: BTreeSet<ChunkRequest>,
     /// Chunks arrived this tick: results waiting for them run again.
@@ -857,6 +931,8 @@ pub(crate) struct Session {
     forwarded_catalogue: BTreeMap<u64, ForwardedCatalogue>,
     relay_uploads: BTreeSet<UploadId>,
     owner_acked: BTreeSet<UploadId>,
+    owner_projection: bool,
+    owner_observed: BTreeSet<UploadId>,
     catalogue_pending: bool,
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
@@ -896,6 +972,8 @@ impl Session {
             forwarded_catalogue: BTreeMap::new(),
             relay_uploads: BTreeSet::new(),
             owner_acked: BTreeSet::new(),
+            owner_projection: false,
+            owner_observed: BTreeSet::new(),
             catalogue_pending: false,
         }
     }
@@ -2150,9 +2228,9 @@ impl Inner {
     /// not ship rows it wrote that the reader cannot read (a write-only
     /// insert). Those versions are the replica's own writes: they stay, as
     /// settled at `through`, rather than vanishing on the rebase.
-    fn keep_unlisted_own(&mut self, tx: u64, through: u64) -> Result<(), Error> {
+    fn keep_unlisted_own(&mut self, id: UploadId, through: u64) -> Result<(), Error> {
         let client = self.client.as_ref().expect("client");
-        let Some(pending) = client.pending.iter().find(|p| p.tx == tx) else {
+        let Some(pending) = client.pending.iter().find(|p| (p.node, p.tx) == id) else {
             return Ok(());
         };
         let position = pending.seq;
@@ -2313,7 +2391,7 @@ impl Inner {
         if let Some(Err(error)) = self
             .client
             .as_ref()
-            .and_then(|client| client.fates.get(&tx))
+            .and_then(|client| client.fates.get(&(*origin.node.as_bytes(), tx)))
         {
             return Ok(Some(error.clone()));
         }
@@ -2333,6 +2411,7 @@ impl Inner {
     }
 
     fn write_state(&self, tx: u64) -> Result<WriteState, Error> {
+        self.require_owner_subject(self.identity.author)?;
         if let Some(error) = self.write_rejection(tx)? {
             return Ok(WriteState::rejected(&error, DurabilityTier::None));
         }
@@ -2649,6 +2728,7 @@ impl Inner {
             .conn
             .query_row(
                 "SELECT MAX(v) FROM (SELECT MAX(tx) AS v FROM _jazz_pending \
+             UNION ALL SELECT MAX(seq) FROM _jazz_owner_positions_v1 \
              UNION ALL SELECT MAX(tx) FROM _jazz_applied WHERE node = ?1 \
              UNION ALL SELECT MAX(tx) FROM _jazz_settled WHERE node = ?1 \
              UNION ALL SELECT MAX(seq) FROM _jazz_settled WHERE seq < ?2)",
@@ -2765,7 +2845,22 @@ impl Inner {
             match self.settled(*origin.node.as_bytes(), origin.time.0)? {
                 Some(Some(seq)) => cut.extra.push(seq),
                 Some(None) => {}
-                None => cut.extra.push(tx),
+                None => {
+                    let current = self
+                        .client
+                        .as_ref()
+                        .and_then(|client| {
+                            client
+                                .pending
+                                .iter()
+                                .find(|p| {
+                                    p.node == *origin.node.as_bytes() && p.tx == origin.time.0
+                                })
+                                .map(|p| p.seq)
+                        })
+                        .unwrap_or(tx);
+                    cut.extra.push(current);
+                }
             }
         }
         Ok(cut)
@@ -2816,7 +2911,7 @@ impl Inner {
                     cut.extra.push(pending.seq);
                     continue;
                 }
-                if client.fates.get(&tx).is_some_and(Result::is_err) {
+                if client.fates.get(&(node, tx)).is_some_and(Result::is_err) {
                     continue;
                 }
             }
@@ -2890,6 +2985,8 @@ impl Inner {
                     )
                 })?;
             client.pending.push(Pending {
+                owner_managed: false,
+                locally_durable: false,
                 tx,
                 seq,
                 node: *node,
@@ -3007,6 +3104,11 @@ impl Client {
             pending: Vec::new(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            owner_inputs: BTreeMap::new(),
+            owner_projection_bound: false,
+            owner_node: None,
+            owner_ready: None,
+            owner_inbound: VecDeque::new(),
             shadow: HashMap::new(),
             known: 0,
             persisted_known: 0,
@@ -3033,6 +3135,8 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
         client.transport = Some(transport);
+        client.owner_ready = None;
+        client.owner_inbound.clear();
         let mut link = client.hint.get();
         link.detached = false;
         if !link.reported {
@@ -3073,6 +3177,7 @@ impl Db {
                 SyncMessage::Subscribe { .. }
                     | SyncMessage::Hold { .. }
                     | SyncMessage::Schema { .. }
+                    | SyncMessage::OwnerProjectionV1 { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
@@ -3091,6 +3196,13 @@ impl Db {
                 version: *version.as_bytes(),
             },
         );
+        if inner.non_durable {
+            let client = inner.client.as_mut().expect("client");
+            let known = client.owner_inputs.keys().copied().collect();
+            client
+                .outbox
+                .insert(1, SyncMessage::OwnerProjectionV1 { known });
+        }
         // Every settled row the replica holds, whether or not a live query
         // still reads it: the new session watches them, so a later change
         // (a deletion, lost access) still reaches the cached copy.
@@ -3140,6 +3252,7 @@ impl Db {
             return false;
         }
         client.transport = None;
+        client.owner_ready = None;
         let mut link = client.hint.get();
         link.detached = true;
         client.hint.set(link);
@@ -3246,7 +3359,11 @@ impl Db {
                     || ops.iter().any(StagedOp::is_session)
             })
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
-        let rows = inner.written_rows(&ops, seq)?;
+        let rows = if inner.scope_isolated_owner || inner.non_durable {
+            inner.owner_input_coordinates(&ops)?
+        } else {
+            inner.written_rows(&ops, seq)?
+        };
         let mut shadows = Vec::new();
         for (table, row, key) in &rows {
             if !inner
@@ -3258,7 +3375,10 @@ impl Db {
             {
                 shadows.push((
                     (table.clone(), *row, key.clone()),
-                    inner.settled_before(table, *row, key)?,
+                    match inner.current_image(table, *row, key)? {
+                        Some(image) if image.seq < LOCAL_BASE => Some(image),
+                        _ => inner.settled_before(table, *row, key)?,
+                    },
                 ));
             }
         }
@@ -3272,6 +3392,7 @@ impl Db {
                 snapshot,
                 reads,
                 own,
+                content,
             } => {
                 let origins = own
                     .iter()
@@ -3281,7 +3402,16 @@ impl Db {
                             .map(|id| (position, *id.node.as_bytes(), id.time.0))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                if origins
+                // Every read carries content evidence. A write-only batch has
+                // no observed content and keeps the existing origin encoding.
+                if !reads.is_empty() {
+                    WireKind::SerializableObservedV1 {
+                        snapshot,
+                        reads,
+                        own: origins,
+                        content,
+                    }
+                } else if origins
                     .iter()
                     .all(|(position, node, tx)| position == tx && node == origin.node.as_bytes())
                 {
@@ -3309,6 +3439,7 @@ impl Db {
             updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
         };
         inner.persist_pending(origin.time.0, &commit, &rows)?;
+        inner.record_owner_input_rows((*origin.node.as_bytes(), origin.time.0), &rows, &ops)?;
         for ((table, row, key), image) in &shadows {
             inner
                 .exec(
@@ -3326,6 +3457,8 @@ impl Db {
         client.shadow.extend(shadows);
         client.unsent.push(commit);
         client.pending.push(Pending {
+            owner_managed: false,
+            locally_durable: false,
             tx: origin.time.0,
             seq,
             node: *origin.node.as_bytes(),
@@ -3596,17 +3729,20 @@ impl Db {
                 dots: Vec::new(),
             });
         }
-        let captured: Vec<u64> = {
+        let captured: Vec<UploadId> = {
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
-            client.pending.iter().map(|p| p.seq).collect()
+            client.pending.iter().map(|p| (p.node, p.tx)).collect()
         };
         poll_fn(|_| {
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             let settling = client.transport.is_some()
                 && may_wait(client.hint.get())
-                && client.pending.iter().any(|p| captured.contains(&p.seq));
+                && client
+                    .pending
+                    .iter()
+                    .any(|p| captured.contains(&(p.node, p.tx)));
             if settling {
                 Poll::Pending
             } else {
@@ -3623,7 +3759,7 @@ impl Db {
             dots: client
                 .pending
                 .iter()
-                .filter(|p| captured.contains(&p.seq))
+                .filter(|p| captured.contains(&(p.node, p.tx)))
                 .map(|p| TxId {
                     time: TxTime(p.tx),
                     node: NodeUuid::from_bytes(p.node),
@@ -3636,6 +3772,7 @@ impl Db {
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         poll_fn(|_| {
             let inner = self.inner.borrow();
+            inner.require_owner_subject(inner.identity.author)?;
             if let Some(error) = inner.write_rejection(tx)? {
                 return Poll::Ready(Err(error));
             }
@@ -3646,11 +3783,13 @@ impl Db {
             if state.durability >= tier {
                 return Poll::Ready(Ok(tx));
             }
-            if inner
-                .client
-                .as_ref()
-                .is_some_and(|client| client.pending.iter().any(|p| p.seq == tx))
-            {
+            let origin = inner.local_origin(tx)?;
+            if inner.client.as_ref().is_some_and(|client| {
+                client
+                    .pending
+                    .iter()
+                    .any(|p| p.node == *origin.node.as_bytes() && p.tx == origin.time.0)
+            }) {
                 return Poll::Pending;
             }
             Poll::Ready(Err(Error::new(
@@ -3867,7 +4006,15 @@ impl Db {
         });
         let ready = {
             let mut inner = self.inner.borrow_mut();
-            if applied.is_err() {
+            if let Err(error) = &applied {
+                if inner.scope_isolated_owner || inner.non_durable {
+                    inner.owner_projection_error = Some(Error::new(
+                        ErrorCode::Storage,
+                        format!(
+                            "scope-isolated owner recovery requires reopen after a failed sync tick: {error}"
+                        ),
+                    ));
+                }
                 inner.rollback_savepoint("sync_tick").map_err(storage)?;
                 inner.catalogue_capture_pending.set(capture_pending);
             }
@@ -3921,7 +4068,8 @@ impl Db {
             }
             // Chunks are not ordered with rows; everything else is applied
             // in arrival order.
-            let mut queue = VecDeque::new();
+            let mut queue =
+                std::mem::take(&mut inner.client.as_mut().expect("client").owner_inbound);
             for message in inbound {
                 match message {
                     SyncMessage::Chunks { nodes, missing } => {
@@ -3931,8 +4079,25 @@ impl Db {
                 }
             }
             // Rows install without their chunks: a chunked cell carries the
-            // sort key its indexes need.
+            // sort key its indexes need. Pending operations must first fetch the
+            // verified prefixes needed to reconstruct those index keys.
             while let Some(message) = queue.pop_front() {
+                if let SyncMessage::OwnerInputsV1 { schema, units, .. } = &message
+                    && !inner.owner_input_chunks_ready(*schema, units)?
+                {
+                    queue.push_front(message);
+                    let bytes = queue
+                        .iter()
+                        .map(|message| encode(message).len())
+                        .sum::<usize>();
+                    if bytes > 4 * jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES {
+                        return Err(unsupported(
+                            "owner input hydration backlog exceeding eight MiB",
+                        ));
+                    }
+                    inner.client.as_mut().expect("client").owner_inbound = queue;
+                    break;
+                }
                 let message = match message {
                     SyncMessage::Fate {
                         tx,
@@ -3946,11 +4111,14 @@ impl Db {
                                 "unqualified write fate is ambiguous on a relay",
                             ));
                         }
-                        let node = client
-                            .pending
-                            .iter()
-                            .find(|pending| pending.tx == tx)
-                            .map_or(client.node, |pending| pending.node);
+                        let mut origins = client.pending.iter().filter(|pending| pending.tx == tx);
+                        let node = origins.next().map_or(client.node, |pending| pending.node);
+                        if origins.any(|pending| pending.node != node) {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "unqualified write fate is ambiguous across original writers",
+                            ));
+                        }
                         SyncMessage::FateV1 {
                             node,
                             tx,
@@ -3961,6 +4129,27 @@ impl Db {
                     other => other,
                 };
                 match message {
+                    SyncMessage::OwnerReadyV1 {
+                        schema,
+                        subject,
+                        node,
+                    } => {
+                        inner.receive_owner_ready(schema, subject, node)?;
+                    }
+                    SyncMessage::OwnerInputsV1 {
+                        schema,
+                        through,
+                        bases,
+                        frozen,
+                        units,
+                    } => {
+                        let required =
+                            inner.receive_owner_inputs(schema, through, bases, frozen, units)?;
+                        inner.replay_pending(&required)?;
+                        // The exact bases and complete units are reconciled now,
+                        // before any following answer or authority fate.
+                        rebase = false;
+                    }
                     SyncMessage::OwnerStoredV1 { node, tx } => {
                         let client = inner.client.as_mut().expect("client");
                         if client
@@ -3972,6 +4161,12 @@ impl Db {
                         }
                     }
                     SyncMessage::Rows { images } => {
+                        if inner.non_durable && images.iter().any(|image| image.seq >= LOCAL_BASE) {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "foreground received an unqualified pending row",
+                            ));
+                        }
                         let names = inner.owner.clone();
                         for image in images {
                             let Some(image) = image_in(&names, image) else {
@@ -4159,17 +4354,19 @@ impl Db {
                             continue;
                         }
                         let relayed = client.relay_uploads.contains_key(&id);
-                        let own = client
+                        let pending = client
                             .pending
                             .iter()
-                            .any(|pending| pending.node == node && pending.tx == tx);
+                            .find(|pending| pending.node == node && pending.tx == tx);
+                        let own = pending.is_some();
+                        let owner_managed = pending.is_some_and(|pending| pending.owner_managed);
                         // Unknown or repeated receipts cannot manufacture a write.
                         if !relayed && !own {
                             continue;
                         }
                         let accepted = result.is_ok();
                         if own && accepted {
-                            inner.keep_unlisted_own(tx, through)?;
+                            inner.keep_unlisted_own(id, through)?;
                         }
                         if relayed {
                             // Track attempted receipts too: a storage failure before
@@ -4191,10 +4388,15 @@ impl Db {
                                 inner.record_settled(node, tx, accepted.then_some(through))
                             })
                             .and_then(|()| {
+                                if own && (inner.scope_isolated_owner || inner.non_durable) {
+                                    inner.finish_owner_input_rows(id)?;
+                                }
                                 if relayed {
                                     inner.finish_relay_upload(id)
-                                } else {
+                                } else if !owner_managed {
                                     inner.forget_pending(tx)
+                                } else {
+                                    Ok(())
                                 }
                             });
                         if let Err(error) = persisted {
@@ -4211,14 +4413,15 @@ impl Db {
                         client.known = client.known.max(through);
                         if own {
                             client.owner_stored.remove(&id);
+                            client.owner_inputs.remove(&id);
                             client
                                 .pending
                                 .retain(|pending| pending.node != node || pending.tx != tx);
                             client
                                 .sent
                                 .retain(|message| relay::upload_id(message) != Some(id));
-                            client.fates.insert(tx, result.map_err(from_wire_error));
-                            if let Some(locators) = client.pushed.remove(&tx) {
+                            client.fates.insert(id, result.map_err(from_wire_error));
+                            if let Some(locators) = client.pushed.remove(&id) {
                                 crate::large::mark_pushed(&inner.conn, &locators)?;
                             }
                             rebase = true;
@@ -4263,23 +4466,63 @@ impl Db {
             return Ok(());
         }
         let client = inner.client.as_ref().expect("client");
+        // Once this foreground has admitted a private owner, a reconnect must
+        // acknowledge that owner before any retry payload leaves the tab.
+        let uploads_ready = !inner.non_durable
+            || client.owner_node.is_none()
+            || (client.owner_ready == Some(inner.owner.jazz.version_id())
+                && client.upstream_schema == client.owner_ready);
         let mut relayed = client
             .relay_uploads
             .iter()
-            .filter(|(_, upload)| !upload.sent)
+            .filter(|(_, upload)| uploads_ready && !upload.sent)
             .map(|(id, upload)| (*id, upload.order, upload.schema, upload.message.clone()))
             .collect::<Vec<_>>();
         relayed.sort_by_key(|(_, order, _, _)| *order);
         let upstream = client.upstream_schema;
+        let scoped = inner.scope_isolated_owner;
+        if scoped
+            && upstream != Some(inner.owner.jazz.version_id())
+            && (!client.unsent.is_empty() || !client.relay_uploads.is_empty())
+        {
+            return Err(unsupported(
+                "owner uploads after a schema change without upstream reconnection",
+            ));
+        }
+        let position = |message: &SyncMessage| -> Result<u64, Error> {
+            if !scoped {
+                return Ok(0);
+            }
+            let (node, tx) = relay::upload_id(message).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Storage,
+                    "owner outbox contains a non-commit unit",
+                )
+            })?;
+            inner
+                .local_position(TxId::new(TxTime(tx), NodeUuid::from_bytes(node)))?
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Storage,
+                        "owner upload has no publication position",
+                    )
+                })
+        };
         let mut forwarded = Vec::new();
+        let mut ordered = Vec::new();
         for (_, _, schema, message) in &relayed {
             if Some(*schema) != upstream {
                 return Err(unsupported(
                     "recovering relay uploads under a different upstream schema",
                 ));
             }
-            forwarded.extend(inner.relay_pushes(message)?);
-            forwarded.push(message.clone());
+            let mut unit = inner.relay_pushes(message)?;
+            unit.push(message.clone());
+            if scoped {
+                ordered.push((position(message)?, unit));
+            } else {
+                forwarded.extend(unit);
+            }
         }
         let pushes = inner
             .client
@@ -4287,10 +4530,24 @@ impl Db {
             .expect("client")
             .unsent
             .iter()
-            .map(|commit| inner.pushes_for(commit))
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter(|_| uploads_ready)
+            .map(|commit| Ok((position(commit)?, inner.pushes_for(commit)?)))
+            .collect::<Result<Vec<_>, Error>>()?;
         let client = inner.client.as_mut().expect("client");
         let mut out = std::mem::take(&mut client.outbox);
+        if !uploads_ready {
+            out.retain(|message| {
+                if matches!(
+                    message,
+                    SyncMessage::Commit { .. } | SyncMessage::PushChunks { .. }
+                ) {
+                    client.outbox.push(message.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -4301,7 +4558,11 @@ impl Db {
                 requests: batch.iter().map(WireChunkRef::of).collect(),
             });
         }
-        let commits = std::mem::take(&mut client.unsent);
+        let commits = if uploads_ready {
+            std::mem::take(&mut client.unsent)
+        } else {
+            Vec::new()
+        };
         // Each commit's new large-value nodes go ahead of it.
         let client = inner.client.as_mut().expect("client");
         for (id, _, _, _) in relayed {
@@ -4309,20 +4570,33 @@ impl Db {
         }
         let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
-            if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { tx: a, .. }, SyncMessage::Commit { tx: b, .. }) if a == b)) {
+            if !client
+                .sent
+                .iter()
+                .any(|m| relay::upload_id(m) == relay::upload_id(commit))
+            {
                 client.sent.push(commit.clone());
             }
         }
-        for (commit, (locators, batches)) in commits.into_iter().zip(pushes) {
-            if let SyncMessage::Commit { tx, .. } = &commit
+        for (commit, (position, (locators, mut batches))) in commits.into_iter().zip(pushes) {
+            if let Some(id) = relay::upload_id(&commit)
                 && !locators.is_empty()
             {
-                client.pushed.insert(*tx, locators);
+                client.pushed.insert(id, locators);
             }
-            out.extend(batches);
-            out.push(commit);
+            batches.push(commit);
+            if scoped {
+                ordered.push((position, batches));
+            } else {
+                out.extend(batches);
+            }
         }
-        out.extend(forwarded);
+        if scoped {
+            ordered.sort_by_key(|(position, _)| *position);
+            out.extend(ordered.into_iter().flat_map(|(_, unit)| unit));
+        } else {
+            out.extend(forwarded);
+        }
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
         let mut out = out.into_iter();
@@ -4350,15 +4624,22 @@ impl Db {
     /// Restore every shadowed row to its settled image and replay the
     /// pending transactions, in order, over them.
     fn rebase(&self) -> Result<(), Error> {
-        let mut inner = self.inner.borrow_mut();
-        let Some(client) = inner.client.as_mut() else {
+        self.inner.borrow_mut().replay_pending(&BTreeSet::new())
+    }
+}
+
+impl Inner {
+    /// Validate an owner envelope before its answer, while later authority
+    /// fates may still invalidate ordinary speculative descendants normally.
+    fn replay_pending(&mut self, required: &BTreeSet<UploadId>) -> Result<(), Error> {
+        let Some(client) = self.client.as_mut() else {
             return Ok(());
         };
         let shadow = std::mem::take(&mut client.shadow);
-        let pending: Vec<(u64, Vec<StagedOp>)> = client
+        let pending: Vec<(UploadId, u64, Vec<StagedOp>)> = client
             .pending
             .iter()
-            .map(|p| (p.seq, p.ops.clone()))
+            .map(|p| ((p.node, p.tx), p.seq, p.ops.clone()))
             .collect();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
@@ -4368,37 +4649,46 @@ impl Db {
         for ((table, row, key), image) in &shadow {
             match image {
                 Some(image) => {
-                    inner.drop_row(table, *row, key, image.seq)?;
-                    inner.put_image(image, false)?;
+                    self.drop_row(table, *row, key, image.seq)?;
+                    self.put_image(image, false)?;
                 }
-                None => inner.drop_row(table, *row, key, 0)?,
+                None => self.drop_row(table, *row, key, 0)?,
             }
         }
-        for (tx, ops) in pending {
-            inner
-                .conn
+        for (id, tx, ops) in pending {
+            self.conn
                 .execute_batch("SAVEPOINT replay")
                 .map_err(storage)?;
-            let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
-            if replayed.is_ok() {
-                inner
-                    .conn
-                    .execute_batch("RELEASE replay")
-                    .map_err(storage)?;
-            } else {
-                inner.rollback_savepoint("replay").map_err(storage)?;
+            let replayed = ops.iter().try_for_each(|op| {
+                if self.non_durable {
+                    let who = op.author().map_or(Who::Local, Who::Attributed);
+                    self.apply_replayed_as(op, who, tx).map(drop)
+                } else {
+                    self.apply(op, tx).map(drop)
+                }
+            });
+            match replayed {
+                Ok(()) => self.conn.execute_batch("RELEASE replay").map_err(storage)?,
+                Err(error) => {
+                    self.rollback_savepoint("replay").map_err(storage)?;
+                    if required.contains(&id) {
+                        self.client.as_mut().expect("client").shadow = shadow;
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            format!("owner input cannot be replayed as a complete unit: {error}"),
+                        ));
+                    }
+                }
             }
         }
-        let client = inner.client.as_mut().expect("client");
+        let client = self.client.as_mut().expect("client");
         client.shadow = shadow
             .into_iter()
             .filter(|(row, _)| keep.contains(row))
             .collect();
-        inner.persist_shadow()
+        self.persist_shadow()
     }
-}
 
-impl Inner {
     fn release_session_reads(&mut self, released: ReleasedReads) {
         for (query, binding, include_deleted) in released.subscriptions {
             self.release_remote(&query, &binding, include_deleted);
@@ -4658,6 +4948,7 @@ impl Db {
         self.progress_scoped_fetches();
         self.progress_catalogue_fetches();
         self.progress_relay_uploads()?;
+        self.progress_owner_input_fates()?;
         self.progress_owner_durability();
         self.notify();
         let mut inner = self.inner.borrow_mut();
@@ -5014,6 +5305,40 @@ impl Db {
                     )));
                 }
             }
+            let (owner_inputs, input_rows) =
+                match inner.owner_query_inputs(index, &mut images, &mut evictions) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        // This peer cannot hold a coherent projection. Refuse its
+                        // reads and release its interests; do not poison the owner
+                        // or publish partial input frames to another reader.
+                        let session = &mut inner.sessions[index];
+                        let mut ids = session.subs.keys().copied().collect::<BTreeSet<_>>();
+                        ids.extend(session.outbox.iter().filter_map(|message| match message {
+                            SyncMessage::Answer { id, .. }
+                            | SyncMessage::AcceptedAnswerV1 { id, .. } => Some(*id),
+                            _ => None,
+                        }));
+                        for id in ids {
+                            let _ = session.transport.send(SyncMessage::Refused {
+                                id,
+                                code: error.code,
+                                message: error.message.clone(),
+                            });
+                        }
+                        let released = session.close(&dropped);
+                        inner.release_session_reads(released);
+                        continue;
+                    }
+                };
+            for (table, row, key) in input_rows {
+                watch.insert(wk((
+                    table.clone(),
+                    "id".to_owned(),
+                    watch_key(&Sql::Blob(row.as_bytes().to_vec())),
+                )));
+                held_rows.entry(table).or_default().insert((row, key), true);
+            }
             let witnesses = inner.content_witnesses(&mut images, &mut history_seqs)?;
             let accepted_rows = inner.accepted_images(&images)?;
             let mut out = std::mem::take(&mut inner.sessions[index].stale);
@@ -5036,6 +5361,7 @@ impl Db {
                 out.push(SyncMessage::Rows { images });
             }
             out.extend(evictions);
+            out.extend(owner_inputs);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
             for message in out {
@@ -5150,10 +5476,40 @@ impl Db {
                 watch_key(&Sql::Blob(image.id.to_vec())),
             )));
         }
+        let (owner_inputs, input_rows) = if at.is_none() && history.is_none() && !accepted {
+            match inner.owner_query_inputs(index, &mut images, &mut Vec::new()) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    inner.sessions[index].watch = watch;
+                    inner.sessions[index].held = held;
+                    return Err(error);
+                }
+            }
+        } else {
+            if inner.scope_isolated_owner && images.iter().any(|image| image.seq >= LOCAL_BASE) {
+                return Err(unsupported("historical pending owner query inputs"));
+            }
+            (Vec::new(), Vec::new())
+        };
+        for (table, row, key) in input_rows {
+            watch.insert(wk((
+                table.clone(),
+                "id".to_owned(),
+                watch_key(&Sql::Blob(row.as_bytes().to_vec())),
+            )));
+            held.entry(table).or_default().insert((row, key), true);
+        }
         let witnesses = inner.content_witnesses(&mut images, &mut seqs)?;
         let accepted_rows = inner.accepted_images(&images)?;
         let origins = inner.origins(&seqs)?;
-        let through = at.unwrap_or(inner.seq);
+        // An owner's local publication aliases never qualify an authority
+        // snapshot, including for a current (non-historical) fetch response.
+        let through = at.unwrap_or_else(|| {
+            inner
+                .client
+                .as_ref()
+                .map_or(inner.seq, |client| client.known)
+        });
         let session = &mut inner.sessions[index];
         session.watch = watch;
         session.held = held;
@@ -5175,6 +5531,7 @@ impl Db {
         if !images.is_empty() {
             session.outbox.push(SyncMessage::Rows { images });
         }
+        session.outbox.extend(owner_inputs);
         let rows = rows.iter().map(|r| *r.id.0.as_bytes()).collect();
         session.outbox.push(if accepted {
             SyncMessage::AcceptedAnswerV1 { id, through, rows }
@@ -5516,11 +5873,15 @@ impl Db {
             Some(claims) => prepared.with_identity_claims(identity, claims.clone()),
             None => prepared,
         };
+        self.inner().require_owner_subject(identity)?;
         let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
         // Queries, writes and held rows name tables and columns as the
         // client's schema version does.
         let db = self.session_db(index);
         match message {
+            SyncMessage::OwnerProjectionV1 { known } => {
+                db.admit_owner_observer(index, known)?;
+            }
             SyncMessage::Schema { version } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
@@ -5849,6 +6210,11 @@ impl Db {
                     };
                     if let Err(error) = db.forward_upload(index, policy, request) {
                         let mut inner = self.inner.borrow_mut();
+                        // This unit is already journalled. A private projection
+                        // fault cannot reject a unit that recovery will forward.
+                        if inner.owner_projection_error.is_some() {
+                            return Err(error);
+                        }
                         let through = inner.client.as_ref().expect("relay").known;
                         inner.sessions[index].outbox.push(SyncMessage::FateV1 {
                             node,
@@ -6049,6 +6415,12 @@ impl Db {
                 snapshot,
                 reads,
                 own,
+            }
+            | WireKind::SerializableObservedV1 {
+                snapshot,
+                reads,
+                own,
+                ..
             } => {
                 let mut positions = BTreeSet::new();
                 let mut origins = BTreeSet::new();
@@ -6074,6 +6446,26 @@ impl Db {
             }
         };
         if let Some((snapshot, reads, own)) = serializable {
+            let content = match &kind {
+                WireKind::SerializableObservedV1 { content, .. } => {
+                    if content.len() != reads.len()
+                        || content
+                            .iter()
+                            .zip(reads)
+                            .any(|(content, read)| content.len() != read.rows.len())
+                    {
+                        return Err((
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "invalid serializable-observed-v1 read content",
+                            ),
+                            Vec::new(),
+                        ));
+                    }
+                    Some(content)
+                }
+                _ => None,
+            };
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -6105,7 +6497,7 @@ impl Db {
                     ));
                 }
             }
-            for read in reads {
+            for (index, read) in reads.iter().enumerate() {
                 let prepared = PreparedQuery {
                     query: read.query.clone(),
                     binding: read.binding.clone(),
@@ -6118,11 +6510,17 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                let now: Vec<([u8; 16], u64)> = inner
-                    .read_versions(&prepared, identity, &spec)
-                    .map_err(|e| (e, Vec::new()))?
+                let observed = inner
+                    .read_rows(&prepared, identity, &spec)
+                    .map_err(|e| (e, Vec::new()))?;
+                let content_changed = if let Some(content) = content {
+                    read_contents(&observed).map_err(|error| (error, Vec::new()))? != content[index]
+                } else {
+                    false
+                };
+                let now: Vec<([u8; 16], u64)> = versions(&observed)
                     .iter()
-                    .map(|(row, seq)| (*row.0.as_bytes(), *seq))
+                    .map(|(row, seq)| (*row.as_bytes(), *seq))
                     .collect();
                 // A row the sender read at an own commit's local seq is
                 // compared where that commit settled.
@@ -6131,7 +6529,7 @@ impl Db {
                     .iter()
                     .map(|(row, seq)| (*row, settled.get(seq).copied().unwrap_or(*seq)))
                     .collect();
-                if now != then {
+                if now != then || content_changed {
                     let rows = mentioned(&inner);
                     return Err((
                         conflict("a row read by the transaction changed since its snapshot"),
@@ -6155,7 +6553,9 @@ impl Db {
                 .collect::<Vec<_>>();
             let serializable = matches!(
                 kind,
-                WireKind::Serializable { .. } | WireKind::SerializableOriginsV1 { .. }
+                WireKind::Serializable { .. }
+                    | WireKind::SerializableOriginsV1 { .. }
+                    | WireKind::SerializableObservedV1 { .. }
             );
             let applied = inner.candidate_unit(&unit, seq, serializable, false, |inner| {
                 ops.iter()
@@ -6194,6 +6594,10 @@ impl Db {
 
     /// One tick for both roles.
     pub(crate) fn sync_tick(&self) -> Result<(), Error> {
+        {
+            let inner = self.inner();
+            inner.require_owner_subject(inner.identity.author)?;
+        }
         self.server_tick()?;
         self.client_tick()
     }
@@ -6636,11 +7040,19 @@ impl Db {
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
     /// unless explicitly LocalOnly, waits for its storage owner's answer.
-    /// Authority waits separately require global settlement. Foreground writes
-    /// are unsupported until relay forwarding and durability are implemented.
+    /// Authority waits separately require global settlement. New writes require
+    /// the current connection's subject- and schema-bound private-owner reply.
     pub fn set_non_durable_client(&self) {
         self.ensure_client();
-        self.inner.borrow_mut().non_durable = true;
+        let mut inner = self.inner.borrow_mut();
+        if inner.scope_isolated_owner {
+            inner.owner_projection_error = Some(unsupported(
+                "turning a scope-isolated storage owner into a foreground",
+            ));
+            return;
+        }
+        inner.non_durable = true;
+        inner.seq = inner.seq.max(FOREGROUND_BASE);
     }
 
     pub fn query_coverage_attachment_counts_for_test(&self) -> (usize, usize) {
@@ -6747,7 +7159,7 @@ impl Db {
             client
                 .fates
                 .iter()
-                .map(|(tx, r)| (tx - LOCAL_BASE, r.is_ok()))
+                .map(|((node, tx), r)| ((node, tx.saturating_sub(LOCAL_BASE)), r.is_ok()))
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )

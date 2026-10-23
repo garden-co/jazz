@@ -30,6 +30,7 @@ fn decode_upload(bytes: &[u8], id: UploadId) -> Result<SyncMessage, Error> {
 pub(super) type UploadId = ([u8; 16], u64);
 
 pub(super) struct RelayUpload {
+    pub(super) source: AuthorSubject,
     pub(super) order: u64,
     pub(super) schema: crate::ids::SchemaVersionId,
     pub(super) message: SyncMessage,
@@ -78,6 +79,33 @@ pub(super) fn large_values(message: &SyncMessage) -> Vec<&jazz_types::large_valu
 }
 
 impl Inner {
+    pub(super) fn own_upload(&self, id: UploadId) -> Result<SyncMessage, Error> {
+        let bytes: Vec<u8> = self.conn.query_row(
+            "SELECT p.commit_msg FROM _jazz_pending p JOIN _jazz_local_commits_v1 c ON c.tx=p.tx WHERE c.node=?1 AND c.tx=?2",
+            rusqlite::params![id.0.as_slice(), id.1 as i64], |row| row.get(0),
+        ).map_err(storage)?;
+        let (message, trailing): (SyncMessage, _) =
+            postcard::take_from_bytes(&bytes).map_err(corrupt)?;
+        if !trailing.is_empty() || upload_id(&message) != Some(id) {
+            return Err(corrupt("invalid own upload identity or bytes"));
+        }
+        Ok(message)
+    }
+
+    fn upload_is_complete(&self, message: &SyncMessage) -> Result<bool, Error> {
+        for value in large_values(message) {
+            if let Err(error) = crate::large::admit(&self.conn, &self.chunks, value) {
+                if error.code == ErrorCode::Storage {
+                    return Err(error);
+                }
+                // Authority validation still decides the unit's fate. Local
+                // retention is never asserted for missing or malformed data.
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     pub(super) fn load_relay_uploads(&self) -> Result<BTreeMap<UploadId, RelayUpload>, Error> {
         let mut statement = self.conn.prepare("SELECT ordinal,node,tx,schema_id,commit_msg,source,request FROM _jazz_relay_upload_v1 WHERE pending=1 ORDER BY ordinal").map_err(storage)?;
         let rows = statement
@@ -146,6 +174,7 @@ impl Inner {
             uploads.insert(
                 (node, tx as u64),
                 RelayUpload {
+                    source,
                     order: order as u64,
                     schema: crate::ids::SchemaVersionId::from_bytes(schema),
                     message,
@@ -207,7 +236,7 @@ impl Inner {
 
     /// Only exact write coordinates are inspected; unrelated rows never enter
     /// a relay receipt's reconciliation work.
-    fn relay_touched(&self, message: &SyncMessage) -> Result<Vec<RowKey>, Error> {
+    pub(super) fn relay_touched(&self, message: &SyncMessage) -> Result<Vec<RowKey>, Error> {
         let SyncMessage::Commit { ops, .. } = message else {
             return Err(corrupt("invalid relay unit"));
         };
@@ -267,8 +296,13 @@ impl Db {
         }
         if node == *inner.identity.node.as_bytes()
             || inner
-                .local_position(TxId::new(TxTime(tx), NodeUuid::from_bytes(node)))?
-                .is_some()
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _jazz_local_commits_v1 WHERE node=?1 AND tx=?2)",
+                    rusqlite::params![node.as_slice(), tx as i64],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage)?
         {
             return Err(Error::new(
                 ErrorCode::WriteRejected,
@@ -350,6 +384,7 @@ impl Db {
             inner.client.as_mut().expect("relay").relay_uploads.insert(
                 (node, tx),
                 RelayUpload {
+                    source: AuthorSubject::from_canonical(&source).map_err(corrupt)?,
                     order,
                     schema: version,
                     message,
@@ -359,6 +394,17 @@ impl Db {
             );
         }
         inner.sessions[index].relay_uploads.insert((node, tx));
+        let project = inner.scope_isolated_owner
+            && inner
+                .client
+                .as_ref()
+                .expect("relay")
+                .relay_uploads
+                .contains_key(&(node, tx));
+        drop(inner);
+        if project {
+            self.project_owner_upload((node, tx))?;
+        }
         Ok(())
     }
 
@@ -415,27 +461,30 @@ impl Db {
                 });
                 session.relay_uploads.remove(&(node, tx));
                 session.owner_acked.remove(&(node, tx));
+                session.owner_observed.remove(&(node, tx));
             }
         }
         Ok(())
     }
 }
 
-/// An opaque set of complete relay uploads captured before a storage flush.
+/// Complete relayed and private-owner uploads captured before a storage flush.
 /// Confirming it after the flush cannot acknowledge later arrivals or another owner.
 pub struct OwnerDurabilityBarrier {
     owner: std::rc::Weak<std::cell::RefCell<Inner>>,
     uploads: Vec<UploadId>,
+    own_uploads: Vec<UploadId>,
 }
 
 impl Db {
-    /// Require an explicit backing-store flush before acknowledging relay storage.
+    /// Require an explicit backing-store flush before acknowledging owner storage.
     /// Async storage hosts call this before accepting any peer traffic.
     pub fn require_owner_durability_flush(&self) {
         self.inner().deferred_owner_durability = true;
     }
 
     /// Capture complete, still-pending uploads for the next backing-store barrier.
+    /// Private owners include their own uploads as well as relayed uploads.
     /// Incomplete uploads wait for ordinary chunk delivery and cannot receive a
     /// local durability claim.
     pub fn prepare_owner_durability(&self) -> Result<Option<OwnerDurabilityBarrier>, Error> {
@@ -449,31 +498,35 @@ impl Db {
         if inner.non_durable {
             return Ok(None);
         }
+        inner.require_owner_subject(inner.identity.author)?;
         let mut uploads = Vec::new();
         for (id, upload) in &client.relay_uploads {
             if upload.locally_durable {
                 continue;
             }
-            let mut complete = true;
-            for value in large_values(&upload.message) {
-                if let Err(error) = crate::large::admit(&inner.conn, &inner.chunks, value) {
-                    if error.code == ErrorCode::Storage {
-                        return Err(error);
-                    }
-                    // Authority validation still decides the unit's fate. Local
-                    // retention is never asserted for missing or malformed data.
-                    complete = false;
-                    break;
-                }
-            }
-            if complete {
+            if inner.upload_is_complete(&upload.message)? {
                 uploads.push(*id);
             }
         }
-        Ok((!uploads.is_empty()).then(|| OwnerDurabilityBarrier {
-            owner: Rc::downgrade(&self.inner),
-            uploads,
-        }))
+        let mut own_uploads = Vec::new();
+        if inner.scope_isolated_owner {
+            for pending in &client.pending {
+                if pending.owner_managed || pending.locally_durable {
+                    continue;
+                }
+                let id = (pending.node, pending.tx);
+                if inner.upload_is_complete(&inner.own_upload(id)?)? {
+                    own_uploads.push(id);
+                }
+            }
+        }
+        Ok(
+            (!uploads.is_empty() || !own_uploads.is_empty()).then(|| OwnerDurabilityBarrier {
+                owner: Rc::downgrade(&self.inner),
+                uploads,
+                own_uploads,
+            }),
+        )
     }
 
     /// Confirm exactly the captured uploads after successful backing-store flush.
@@ -498,7 +551,14 @@ impl Db {
                 "foreground cannot confirm owner durability",
             ));
         }
+        inner.require_owner_subject(inner.identity.author)?;
         if let Some(client) = &mut inner.client {
+            let own: BTreeSet<_> = barrier.own_uploads.into_iter().collect();
+            for pending in &mut client.pending {
+                if !pending.owner_managed && own.contains(&(pending.node, pending.tx)) {
+                    pending.locally_durable = true;
+                }
+            }
             for id in barrier.uploads {
                 if let Some(upload) = client.relay_uploads.get_mut(&id) {
                     upload.locally_durable = true;
@@ -520,12 +580,17 @@ impl Db {
             .relay_uploads
             .iter()
             .filter_map(|(id, upload)| upload.locally_durable.then_some(*id))
+            .chain(client.pending.iter().filter_map(|pending| {
+                pending
+                    .locally_durable
+                    .then_some((pending.node, pending.tx))
+            }))
             .collect();
         for session in &mut inner.sessions {
             if !session.open {
                 continue;
             }
-            for &(node, tx) in &session.relay_uploads {
+            for &(node, tx) in session.relay_uploads.union(&session.owner_observed) {
                 if stored.contains(&(node, tx)) && session.owner_acked.insert((node, tx)) {
                     session.outbox.push(SyncMessage::OwnerStoredV1 { node, tx });
                 }
