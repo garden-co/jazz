@@ -264,42 +264,42 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }
       };
 
-      const isRetryableExclusiveConflict = (error: unknown) =>
+      const isRetryableSerializationConflict = (error: unknown) =>
         error instanceof PersistedWriteRejectedError &&
         (error.code === "cascade_rejected" ||
-          error.code === "exclusive_conflict" ||
+          error.code === "serialization_conflict" ||
           error.code === "transaction_conflict");
 
-      /** Re-runs `attempt` until it is not rejected by a concurrent exclusive transaction. */
-      const retryOnExclusiveConflict = async <T>(attempt: () => Promise<T>): Promise<T> => {
+      /** Re-runs `attempt` until it is not rejected by a concurrent serializable transaction. */
+      const retryOnSerializationConflict = async <T>(attempt: () => Promise<T>): Promise<T> => {
         while (true) {
           try {
             return await attempt();
           } catch (error) {
-            if (isRetryableExclusiveConflict(error)) continue;
+            if (isRetryableSerializationConflict(error)) continue;
             throw error;
           }
         }
       };
 
       const readLocalFirst =
-        (tx: TransactionScope<"exclusive">) => (query: QueryBuilder<Record<string, unknown>>) =>
+        (tx: TransactionScope<"serializable">) => (query: QueryBuilder<Record<string, unknown>>) =>
           tx.all(query, { tier: "local-first" });
 
-      const runExclusiveMutation = async (
+      const runSerializableMutation = async (
         model: string,
         where: CleanedWhere[],
         preflight: (match: JazzRowRecord) => Promise<void>,
         mutate: (
-          tx: TransactionScope<"exclusive">,
+          tx: TransactionScope<"serializable">,
           match: JazzRowRecord,
         ) => JazzRowRecord | Promise<JazzRowRecord>,
       ): Promise<JazzRowRecord | null> => {
         const db = await config.db();
 
-        return retryOnExclusiveConflict(async () => {
-          // Synchronize the relevant query before anchoring the exclusive snapshot. This also
-          // initializes the Jazz client, which is required before starting an exclusive
+        return retryOnSerializationConflict(async () => {
+          // Synchronize the relevant query before anchoring the serializable snapshot. This also
+          // initializes the Jazz client, which is required before starting a serializable
           // transaction.
           const [globalMatch] = await findAllRows(model, { where, limit: 1 }, (query) =>
             db.all(query, { tier: "remote" }),
@@ -307,7 +307,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           if (!globalMatch) return null;
           await preflight(globalMatch);
 
-          const result = await db.exclusiveTransaction(async (tx) => {
+          const result = await db.serializableTransaction(async (tx) => {
             const [match] = await findAllRows(model, { where, limit: 1 }, readLocalFirst(tx));
             if (!match) {
               return null;
@@ -343,13 +343,13 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             readAll,
           );
 
-        return retryOnExclusiveConflict(async () => {
+        return retryOnSerializationConflict(async () => {
           const globalMatches = await findAllRows(model, { where, limit });
           if (globalMatches.length === 0) return [];
           await assertUpdatesUnique(globalMatches);
 
-          const result = await db.exclusiveTransaction(
-            async (tx: TransactionScope<"exclusive">) => {
+          const result = await db.serializableTransaction(
+            async (tx: TransactionScope<"serializable">) => {
               const matches = await findAllRows(model, { where, limit }, readLocalFirst(tx));
               if (matches.length === 0) return [];
 
@@ -364,12 +364,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         });
       };
 
-      let exclusiveMutationTail = Promise.resolve();
+      let serializableMutationTail = Promise.resolve();
 
-      const serializeExclusiveMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
-        const previous = exclusiveMutationTail;
+      const enqueueSerializableMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
+        const previous = serializableMutationTail;
         let release = () => {};
-        exclusiveMutationTail = new Promise<void>((resolve) => {
+        serializableMutationTail = new Promise<void>((resolve) => {
           release = resolve;
         });
         await previous;
@@ -388,16 +388,16 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const { id, ...fields } = data as Record<string, unknown> & { id?: string };
           const qb = createQueryBuilder(table, wasmSchema);
 
-          return retryOnExclusiveConflict(async () => {
-            // Do the potentially remote reads before opening the exclusive batch.
+          return retryOnSerializationConflict(async () => {
+            // Do the potentially remote reads before opening the serializable batch.
             // The same predicates are repeated locally below, where the authority
             // serializes the actual admission decision.
             await findAllRows(model, { limit: 1 });
             await assertUniqueConstraints(model, [{ id: "<new>", ...fields }]);
             if (id) await assertRowIdAvailable(model, id);
 
-            const result = await db.exclusiveTransaction(
-              async (tx: TransactionScope<"exclusive">) => {
+            const result = await db.serializableTransaction(
+              async (tx: TransactionScope<"serializable">) => {
                 await assertUniqueConstraints(
                   model,
                   [{ id: "<new>", ...fields }],
@@ -502,8 +502,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }): Promise<T | null> {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
-          const consumed = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(
+          const consumed = await enqueueSerializableMutation(() =>
+            runSerializableMutation(
               model,
               where,
               async () => {},
@@ -545,8 +545,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             delete fields.id;
             return fields;
           };
-          const updated = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(
+          const updated = await enqueueSerializableMutation(() =>
+            runSerializableMutation(
               model,
               where,
               async (match) => {

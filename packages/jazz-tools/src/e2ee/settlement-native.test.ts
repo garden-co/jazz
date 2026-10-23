@@ -46,7 +46,7 @@ it("reads authority-ordered WASM proposals through the native Node binding", asy
     await second.wait({ tier: "global" });
     const ordinary = await reader.all(app.proposals, { tier: "remote" });
     expect(ordinary).toHaveLength(2);
-    const read = await reader.exclusiveTransaction((tx) => tx.allSettledForE2ee(app.proposals));
+    const read = await reader.serializableTransaction((tx) => tx.allSettledForE2ee(app.proposals));
     const snapshot = await read.wait({ tier: "global" });
     expect(snapshot.rows).toEqual(ordinary);
     const byId = new Map(snapshot.settlements.map((entry) => [entry.rowId, entry]));
@@ -94,7 +94,7 @@ it.each(["update", "upsert", "delete"] as const)(
       const original = db.insert(app.proposals, { value: "accepted content" });
       await original.wait({ tier: "global" });
       const baseline = await (
-        await db.exclusiveTransaction((tx) => tx.allSettledForE2ee(app.proposals))
+        await db.serializableTransaction((tx) => tx.allSettledForE2ee(app.proposals))
       ).wait({ tier: "global" });
       expect(baseline.rows).toEqual([original.value]);
       expect(baseline.settlements[0]!.transactionId).toBe(await original.txId);
@@ -102,7 +102,7 @@ it.each(["update", "upsert", "delete"] as const)(
         const deletion = db.delete(app.proposals, original.value.id);
         await deletion.wait({ tier: "global" });
         const snapshot = await (
-          await db.exclusiveTransaction((tx) =>
+          await db.serializableTransaction((tx) =>
             tx.allSettledForE2ee(app.proposals.includeDeleted()),
           )
         ).wait({ tier: "global" });
@@ -110,7 +110,7 @@ it.each(["update", "upsert", "delete"] as const)(
         expect(snapshot.settlements).toEqual(baseline.settlements);
         expect(snapshot.settlements[0]!.transactionId).not.toBe(await deletion.txId);
       } else {
-        const tx = db.beginExclusiveTransaction();
+        const tx = db.beginSerializableTransaction();
         try {
           tx[operation](app.proposals, original.value.id, { value: "provisional content" });
           expect(await tx.all(app.proposals, { tier: "local-first" })).toEqual([
@@ -121,7 +121,7 @@ it.each(["update", "upsert", "delete"] as const)(
           await tx.rollback();
         }
         const unchanged = await (
-          await db.exclusiveTransaction((read) => read.allSettledForE2ee(app.proposals))
+          await db.serializableTransaction((read) => read.allSettledForE2ee(app.proposals))
         ).wait({ tier: "global" });
         expect(unchanged).toEqual(baseline);
       }

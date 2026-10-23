@@ -21,7 +21,7 @@ type NativeForegroundCommand =
   | { type: "poll"; operation: number }
   | { type: "cancel"; operation: number }
   | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
-  | { type: "beginTransaction"; kind: "mergeable" | "exclusive" }
+  | { type: "beginTransaction"; kind: "mergeable" | "serializable" }
   | {
       type: "insert";
       transaction: number;
@@ -314,7 +314,7 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   expect(
     relay.encodeNativeForegroundCommand({
       type: "beginTransaction",
-      kind: "exclusive",
+      kind: "serializable",
     }),
   ).toEqual(Uint8Array.of(9, 1));
   expect(
@@ -373,7 +373,7 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
       type: "beginTransaction",
       kind: "neither",
     } as unknown as NativeForegroundCommand),
-  ).toThrow("Jazz native foreground transaction kind must be mergeable or exclusive");
+  ).toThrow("Jazz native foreground transaction kind must be mergeable or serializable");
   expect(relay.decodeNativeForegroundResponse(Uint8Array.of(0, NATIVE_RELAY_ABI_V1))).toEqual({
     type: "probe",
     abiVersion: NATIVE_RELAY_ABI_V1,

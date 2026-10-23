@@ -23,8 +23,8 @@ import { assertAccountConfig, copyAccountConfigAdmission } from "../accounts/con
 import type { ColumnDescriptor, WasmSchema, WasmRow, StorageDriver } from "../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
-  ExclusiveWriteHandle,
-  ExclusiveWriteResult,
+  SerializableWriteHandle,
+  SerializableWriteResult,
   WriteResult,
   JazzClient,
   withTransactionAdmission,
@@ -1436,12 +1436,12 @@ function deriveStreamingInsertBranch(
 
 export type { TransactionKind } from "./client.js";
 
-type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "exclusive"
-  ? ExclusiveWriteHandle
+type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "serializable"
+  ? SerializableWriteHandle
   : WriteHandle;
 
-type TransactionWriteResult<TResult, TKind extends TransactionKind> = TKind extends "exclusive"
-  ? ExclusiveWriteResult<TResult>
+type TransactionWriteResult<TResult, TKind extends TransactionKind> = TKind extends "serializable"
+  ? SerializableWriteResult<TResult>
   : WriteResult<TResult>;
 
 type RunInTransactionResult<TResult, TKind extends TransactionKind> = Promise<
@@ -1481,8 +1481,11 @@ function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
   txId: TxId | Promise<TxId>,
   client: JazzClient,
 ): TransactionWriteResult<TResult, TKind> {
-  if (transaction.kind === "exclusive") {
-    return new ExclusiveWriteResult(value, txId, client) as TransactionWriteResult<TResult, TKind>;
+  if (transaction.kind === "serializable") {
+    return new SerializableWriteResult(value, txId, client) as TransactionWriteResult<
+      TResult,
+      TKind
+    >;
   }
 
   return new WriteResult(value, txId, client) as TransactionWriteResult<TResult, TKind>;
@@ -1541,7 +1544,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
 }
 
 /**
- * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
+ * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private readonly pendingReads = new Set<Promise<unknown>>();
@@ -1632,8 +1635,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       this.committing = false;
     };
     txId.then(finishCommit, finishCommit);
-    if (this.kind === "exclusive") {
-      return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
+    if (this.kind === "serializable") {
+      return new SerializableWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
     }
     return new WriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
   }
@@ -2142,7 +2145,7 @@ const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>(
 export function exclusiveE2eeTransaction<TResult>(
   db: Db,
   callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
-): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
+): Promise<SerializableWriteResult<Awaited<TResult>>> {
   const transaction = beginDbTransactionAfter(db, async () => {});
   return runInTransaction(
     transaction,
@@ -2155,10 +2158,10 @@ export function exclusiveE2eeTransaction<TResult>(
 export function beginDbTransactionAfter(
   db: Db,
   prepare: () => Promise<void>,
-): Transaction<"exclusive"> {
+): Transaction<"serializable"> {
   transactionAdmission.set(db, prepare);
   try {
-    return db.beginExclusiveTransaction();
+    return db.beginSerializableTransaction();
   } finally {
     transactionAdmission.delete(db);
   }
@@ -3353,9 +3356,9 @@ export class Db {
     notifyLocalWrite(this);
     const context = this.getAccessContext();
     const ownerClient = this.getCurrentClient();
-    if (kind === "exclusive" && !ownerClient) {
+    if (kind === "serializable" && !ownerClient) {
       throw new Error(
-        "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+        "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
     const prerequisite = transactionAdmission.get(this);
@@ -3412,14 +3415,14 @@ export class Db {
   }
 
   /**
-   * Begin an exclusive transaction for writes that need serializable validation by the authority.
+   * Begin a serializable transaction for writes that need serializable validation by the authority.
    *
    * Use {@link Transaction.commit} to commit the transaction.
    *
-   * Prefer using {@link Db.exclusiveTransaction} when an explicit commit is not required.
+   * Prefer using {@link Db.serializableTransaction} when an explicit commit is not required.
    */
-  beginExclusiveTransaction(): Transaction<"exclusive"> {
-    return this.createTransaction("exclusive");
+  beginSerializableTransaction(): Transaction<"serializable"> {
+    return this.createTransaction("serializable");
   }
 
   /**
@@ -3439,14 +3442,14 @@ export class Db {
   }
 
   /**
-   * Run {@link callback} inside an exclusive transaction and commit it once the callback returns.
+   * Run {@link callback} inside a serializable transaction and commit it once the callback returns.
    *
    * @returns a write result containing the result of the callback
    */
-  exclusiveTransaction<TResult>(
-    callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
-  ): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
-    const transaction = this.beginExclusiveTransaction();
+  serializableTransaction<TResult>(
+    callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
+  ): Promise<SerializableWriteResult<Awaited<TResult>>> {
+    const transaction = this.beginSerializableTransaction();
     return runInTransaction(
       transaction,
       callback,

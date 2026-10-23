@@ -974,7 +974,7 @@ mod tests {
     use crate::time::{GlobalTime, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 
-    /// An serializable transaction's aggregate read travels with the result it
+    /// A serializable transaction's aggregate read travels with the result it
     /// observed (garden-co/jazz#3768). The wire form of `PredicateRead` ends
     /// with `aggregate_result` as a postcard option of length-prefixed bytes:
     /// `00` when absent, `01 <len> <jazz.aggregate-read-result.v1 bytes>` when
