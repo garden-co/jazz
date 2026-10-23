@@ -122,8 +122,8 @@ export declare class NapiDb {
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
   /**
-   * The optimistic in-memory side of a client/worker pair needs the relay
-   * tier, which is not built on SQLite yet.
+   * The optimistic in-memory side of a client/worker pair: its
+   * subscriptions open with the worker's answer.
    */
   setNonDurableClient(): void
   /**
