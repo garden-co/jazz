@@ -72,9 +72,7 @@ fn candidate_create_permissions_are_explicitly_unsupported() {
             },
         ));
         if include_created {
-            let error = result
-                .err()
-                .expect("candidate-created sources must not use ordinary EXISTS");
+            let error = result.expect_err("candidate-created sources must not use ordinary EXISTS");
             assert_eq!(error.code, ErrorCode::Query);
             assert!(error.message.contains("ExistsIncludingCreated"), "{error}");
         } else {

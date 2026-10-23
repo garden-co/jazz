@@ -904,7 +904,7 @@ impl Db {
             return Err(schema_error("staged streaming requires a root-view target"));
         }
         if matches!(identity, WriteIdentity::Attribution(_)) {
-            self.inner().require_attribution_authority()?;
+            self.inner().require_attribution_backend()?;
         }
         if cells.contains_key(column) {
             return Err(rejected(

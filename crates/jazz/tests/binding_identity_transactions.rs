@@ -3,14 +3,17 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::pin;
+use std::task::{Context, Poll, Waker};
 
-use jazz::binding_host::{Binding, HostError, StagedStreamingMutation};
+use jazz::binding_host::{Binding, HostError, Link, StagedStreamingMutation};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, ReadOpts, WriteIdentity, block_on,
+    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, ReadOpts, ReadTier, WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{ArraySubquery, Query, col, eq, lit};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::tools::{
     ColumnType, OpenTransactionId, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
@@ -39,6 +42,7 @@ fn open(node: u8, backend: bool, path: Option<&Path>) -> Binding {
                 TableSchemaBuilder::new("files")
                     .column("owner", ColumnType::Text)
                     .nullable_column("payload", ColumnType::Bytea)
+                    .nullable_column("parent", ColumnType::Uuid)
                     .policies(
                         TablePolicies::new()
                             .with_select(policy.clone())
@@ -113,7 +117,11 @@ fn rows(db: &Binding) -> Vec<jazz::db::CurrentRow> {
             "$updatedBy.identity.subject",
         ]))
         .unwrap();
-    block_on(db.db.all(&query, ReadOpts::default())).unwrap()
+    block_on(
+        db.db
+            .all(&query, ReadOpts::for_read_tier(ReadTier::LocalOnly)),
+    )
+    .unwrap()
 }
 
 fn subject(row: &jazz::db::CurrentRow, column: &str) -> String {
@@ -340,11 +348,82 @@ fn attribution_admission_and_capabilities_cannot_change_identity() {
     assert!(rows(&backend).is_empty());
 }
 
-/// A backend that becomes a replica cannot upload an attributed batch using a
-/// wire protocol that has no separate provenance field. It publishes nothing.
+fn drive<T>(up: &Link, down: &Link, future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..200 {
+        if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+            return result;
+        }
+        down.receive(up.take_outbound());
+        up.receive(down.take_outbound());
+        block_on(down.binding().tick()).unwrap();
+        block_on(up.binding().tick()).unwrap();
+    }
+    panic!("replica operation did not settle");
+}
+
+fn companion(backend: &Binding, tx: &str, id: u8) {
+    backend
+        .insert_in_transaction(
+            tx,
+            "files",
+            &cells("alice"),
+            &json!({"rowId": vec![id; 16]}),
+        )
+        .unwrap();
+}
+
+/// A backend may stage Bob's attributed or session batch, but an Alice session
+/// connection cannot vouch for Bob. The authority rejects the whole upload and
+/// companion transaction, and the replica retracts both optimistic rows.
+/// backend --Bob batch--> Alice link --reject--> authority
 #[test]
 fn attributed_batch_cannot_escape_through_replica_sync() {
-    let backend = open(5, true, None);
+    for session in [false, true] {
+        let backend = open(5, true, None);
+        let authority = open(8, true, None);
+        let bob = author("bob").canonical().to_owned();
+        let tx = OpenTransactionId::new().to_string();
+        let session_identity = session.then_some(bob.as_bytes());
+        let attribution = (!session).then_some(bob.as_bytes());
+        // Preserve the role-change case: open before becoming a replica.
+        backend
+            .begin_transaction(&tx, "serializable", session_identity, attribution)
+            .unwrap();
+        let up = backend.connect_upstream();
+        let down = authority.accept_subscriber(author("alice"), BTreeMap::new());
+        stage(&backend, 1, session_identity, attribution)
+            .attach(&tx)
+            .unwrap();
+        companion(&backend, &tx, 2);
+        let write = backend
+            .commit_transaction(&tx, Some("serializable"))
+            .unwrap();
+        assert_eq!(rows(&backend).len(), 2);
+        let result = drive(
+            &up,
+            &down,
+            backend.wait_for_write(&write, "global").unwrap(),
+        );
+        let error = core_error(result.unwrap_err());
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        assert!(error.message.contains("trusted serving node"), "{error:?}");
+        assert!(rows(&authority).is_empty());
+        assert!(rows(&backend).is_empty());
+    }
+}
+
+/// Bob's attribution and Alice's ciphertext survive a pending replica restart,
+/// then settle atomically through a trusted backend link. Provenance does not
+/// grant Bob read access to Alice-owned rows.
+/// backend --persist pending--> reopen --SYSTEM link--> authority
+#[test]
+fn attributed_replica_upload_survives_restart_and_settles_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica.sqlite");
+    let backend = open(9, true, Some(&path));
+    let up = backend.connect_upstream();
     let bob = author("bob").canonical().to_owned();
     let tx = OpenTransactionId::new().to_string();
     backend
@@ -353,33 +432,116 @@ fn attributed_batch_cannot_escape_through_replica_sync() {
     stage(&backend, 1, None, Some(bob.as_bytes()))
         .attach(&tx)
         .unwrap();
-    let _upstream = backend.connect_upstream();
+    companion(&backend, &tx, 2);
+    let write = backend
+        .commit_transaction(&tx, Some("serializable"))
+        .unwrap();
+    assert_eq!(rows(&backend).len(), 2);
+    drop(up);
+    drop(backend);
+
+    let backend = open(9, true, Some(&path));
+    let authority = open(10, true, None);
+    let up = backend.connect_upstream();
+    let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    drive(
+        &up,
+        &down,
+        backend.wait_for_write(&write, "global").unwrap(),
+    )
+    .unwrap();
+    for db in [&backend, &authority] {
+        let committed = rows(db);
+        assert_eq!(committed.len(), 2);
+        assert_eq!(committed[0].seq(), committed[1].seq());
+        for row in committed {
+            assert_eq!(subject(&row, "$createdBy.identity.subject"), "bob");
+            assert_eq!(subject(&row, "$updatedBy.identity.subject"), "bob");
+        }
+        assert_eq!(
+            block_on(db.db.read_value_range(
+                "files",
+                RowUuid::from_bytes([1; 16]),
+                "payload",
+                0..200_000
+            ))
+            .unwrap(),
+            bytes()
+        );
+    }
+    let query = authority.db.prepare_query(&Query::from("files")).unwrap();
     assert!(
+        block_on(
+            authority
+                .db
+                .all_for_identity(&query, ReadOpts::default(), author("bob"))
+        )
+        .unwrap()
+        .is_empty()
+    );
+}
+
+/// A trusted backend replica may act for Alice, but still obeys her session's
+/// policies at the authority. Mallory's upload and companion are both refused;
+/// a trusted connection does not turn session writes into SYSTEM writes.
+#[test]
+fn trusted_replica_session_batches_enforce_authority_policy_atomically() {
+    for name in ["alice", "mallory"] {
+        let backend = open(11, true, None);
+        let authority = open(12, true, None);
+        let up = backend.connect_upstream();
+        let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+        let session = author(name).canonical().to_owned();
+        let tx = OpenTransactionId::new().to_string();
         backend
+            .begin_transaction(&tx, "serializable", Some(session.as_bytes()), None)
+            .unwrap();
+        stage(&backend, 1, Some(session.as_bytes()), None)
+            .attach(&tx)
+            .unwrap();
+        companion(&backend, &tx, 2);
+        let write = backend
             .commit_transaction(&tx, Some("serializable"))
-            .is_err()
-    );
-    assert!(rows(&backend).is_empty());
-    let tx = OpenTransactionId::new().to_string();
-    assert!(
-        backend
-            .begin_transaction(&tx, "serializable", None, Some(bob.as_bytes()))
-            .is_err()
-    );
-    assert!(
-        backend
-            .begin_transaction(&tx, "serializable", Some(bob.as_bytes()), None)
-            .is_err()
-    );
+            .unwrap();
+        assert_eq!(rows(&backend).len(), 2);
+        let result = drive(
+            &up,
+            &down,
+            backend.wait_for_write(&write, "global").unwrap(),
+        );
+        if name == "alice" {
+            result.unwrap();
+            let committed = rows(&authority);
+            assert_eq!(committed.len(), 2);
+            assert_eq!(committed[0].seq(), committed[1].seq());
+            for row in committed {
+                assert_eq!(subject(&row, "$createdBy.identity.subject"), "alice");
+            }
+            assert_eq!(
+                block_on(authority.db.read_value_range(
+                    "files",
+                    RowUuid::from_bytes([1; 16]),
+                    "payload",
+                    0..200_000
+                ))
+                .unwrap(),
+                bytes()
+            );
+        } else {
+            assert_eq!(
+                core_error(result.unwrap_err()).code,
+                ErrorCode::WriteRejected
+            );
+            assert!(rows(&authority).is_empty());
+            assert!(rows(&backend).is_empty());
+        }
+    }
 }
 
 /// Alice receives the backend's Bob-attributed row through ordinary sync;
 /// database-local author codes never become another peer's identities.
 #[test]
 fn attributed_provenance_survives_authority_to_replica_sync() {
-    use std::future::Future;
-    use std::pin::pin;
-    use std::task::{Context, Poll, Waker};
     let backend = open(6, true, None);
     let alice = open(7, false, None);
     let bob = author("bob").canonical().to_owned();
@@ -427,4 +589,126 @@ fn attributed_provenance_survives_authority_to_replica_sync() {
         block_on(alice.tick()).unwrap();
     }
     panic!("Alice's remote read did not complete");
+}
+
+/// Alice's session reads and validates the same permitted rows on both the
+/// backend replica and authority, even when Bob's rows are already cached.
+#[test]
+fn replica_session_read_sets_validate_as_the_bound_session() {
+    let authority = open(13, true, None);
+    let backend = open(14, true, None);
+    for (id, owner) in [(1, "alice"), (2, "bob")] {
+        authority
+            .insert("files", &cells(owner), &json!({"rowId": vec![id; 16]}))
+            .unwrap();
+    }
+    let up = backend.connect_upstream();
+    let down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let session = author("alice").canonical().to_owned();
+    let tx = OpenTransactionId::new();
+    backend
+        .begin_transaction(
+            &tx.to_string(),
+            "serializable",
+            Some(session.as_bytes()),
+            None,
+        )
+        .unwrap();
+    let query = backend.db.prepare_query(&Query::from("files")).unwrap();
+    let transaction = backend.db.serializable_tx_ref(tx);
+    let visible = drive(&up, &down, transaction.all_prepared(&query)).unwrap();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(subject(&visible[0], "owner"), "alice");
+    companion(&backend, &tx.to_string(), 3);
+    let write = backend
+        .commit_transaction(&tx.to_string(), Some("serializable"))
+        .unwrap();
+    drive(
+        &up,
+        &down,
+        backend.wait_for_write(&write, "global").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rows(&authority).len(), 3);
+}
+
+/// Alice's session cannot read Bob's nested child through an Alice-owned root.
+/// The same restriction applies on the authority and a trusted backend replica.
+#[test]
+fn session_transaction_relations_keep_the_bound_reader() {
+    for replica in [false, true] {
+        let authority = open(15, true, None);
+        authority
+            .insert("files", &cells("alice"), &json!({"rowId": vec![1; 16]}))
+            .unwrap();
+        for (id, owner) in [(2, "alice"), (3, "bob")] {
+            let descriptor =
+                RecordDescriptor::new([("owner", ValueType::String), ("parent", ValueType::Uuid)]);
+            let row = descriptor
+                .create(&[
+                    Value::String(owner.into()),
+                    Value::Uuid(RowUuid::from_bytes([1; 16]).0),
+                ])
+                .unwrap();
+            let cells = jazz::binding_codec::encode_named_cells(&OwnedRecord::new(row, descriptor))
+                .unwrap();
+            authority
+                .insert("files", &cells, &json!({"rowId": vec![id; 16]}))
+                .unwrap();
+        }
+        let backend = open(16, true, None);
+        let links = replica.then(|| {
+            (
+                backend.connect_upstream(),
+                authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new()),
+            )
+        });
+        let db = if replica { &backend } else { &authority };
+        let session = author("alice").canonical().to_owned();
+        let tx = OpenTransactionId::new();
+        db.begin_transaction(
+            &tx.to_string(),
+            "serializable",
+            Some(session.as_bytes()),
+            None,
+        )
+        .unwrap();
+        let query = db
+            .db
+            .prepare_query(
+                &Query::from("files")
+                    .filter(eq(
+                        col("id"),
+                        lit(Value::Uuid(RowUuid::from_bytes([1; 16]).0)),
+                    ))
+                    .array_subquery(ArraySubquery::new("children", "files", "parent", "id")),
+            )
+            .unwrap();
+        let transaction = db.db.serializable_tx_ref(tx);
+        let future = transaction.all_prepared(&query);
+        let visible = match &links {
+            Some((up, down)) => drive(up, down, future),
+            None => block_on(future),
+        }
+        .unwrap();
+        assert_eq!(visible.len(), 1);
+        let Value::Array(children) = visible[0]
+            .cells()
+            .find_map(|(name, value)| (name == "children").then_some(value).flatten())
+            .unwrap()
+        else {
+            panic!("children must be an array")
+        };
+        assert_eq!(children.len(), 1, "Bob's child is private");
+        companion(db, &tx.to_string(), 4);
+        let write = db
+            .commit_transaction(&tx.to_string(), Some("serializable"))
+            .unwrap();
+        let future = db.wait_for_write(&write, "global").unwrap();
+        match &links {
+            Some((up, down)) => drive(up, down, future),
+            None => block_on(future),
+        }
+        .unwrap();
+    }
 }

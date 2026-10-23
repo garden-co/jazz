@@ -1380,7 +1380,7 @@ impl Db {
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         if matches!(op.identity(), Some(WriteIdentity::Attribution(_))) {
-            self.inner().require_attribution_authority()?;
+            self.inner().require_attribution_backend()?;
         }
         self.with_upload(|| {
             let table = op.table().to_owned();
@@ -3996,12 +3996,12 @@ impl Inner {
         self.apply_as(op, who, seq)
     }
 
-    /// Attributed writes require a SYSTEM authority; authenticated replay
-    /// preserves previously admitted provenance separately from this admission.
-    fn require_attribution_authority(&self) -> Result<(), Error> {
-        if self.identity.author != AuthorSubject::SYSTEM || self.client.is_some() {
+    /// Attributed writes require a SYSTEM backend. On a replica the authority
+    /// additionally requires a trusted connection before accepting attribution.
+    fn require_attribution_backend(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
             return Err(unsupported(
-                "backend-attributed writes outside a SYSTEM SQLite authority",
+                "backend-attributed writes outside a SYSTEM SQLite backend",
             ));
         }
         Ok(())
@@ -4167,20 +4167,15 @@ impl Db {
         )
     }
 
-    /// Open a serializable batch for an authenticated session on an authority.
+    /// Open a serializable batch for an authenticated session.
     /// The identity governs its reads, every write and staged upload attachment.
-    /// Replicas author local batches as their database identity; their upstream
-    /// checks permissions against the authenticated transport session.
+    /// A replica's authority checks the transport identity; only a trusted
+    /// backend link may submit a different session's writes and claims.
     pub async fn begin_serializable_for_identity(
         &self,
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        if self.is_client() {
-            return Err(unsupported(
-                "session-authored serializable batches on a replica",
-            ));
-        }
         self.begin_serializable(id).await?;
         self.inner
             .borrow_mut()
@@ -4191,14 +4186,15 @@ impl Db {
         Ok(())
     }
 
-    /// Open an authority-local SYSTEM batch with separate row provenance.
-    /// Upload capabilities must bind the same author.
+    /// Open a SYSTEM backend batch with separate row provenance.
+    /// Upload capabilities must bind the same author. On a replica, attribution
+    /// is accepted only over a trusted backend connection to the authority.
     pub async fn begin_serializable_for_attribution(
         &self,
         id: OpenTransactionId,
         author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.inner().require_attribution_authority()?;
+        self.inner().require_attribution_backend()?;
         self.begin_serializable(id).await?;
         self.inner().batches.get_mut(&id).expect("opened").identity =
             WriteIdentity::Attribution(author);
@@ -4318,7 +4314,7 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, None, &spec)?;
+                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
@@ -4383,11 +4379,6 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
-        if self.is_client() && batch.identity != WriteIdentity::Database {
-            return Err(unsupported(
-                "identity-bound serializable batches on a replica",
-            ));
-        }
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
@@ -4482,7 +4473,7 @@ impl Db {
             if let WriteIdentity::Session(author) = batch.identity {
                 op.attribute(author, true);
             } else if let WriteIdentity::Attribution(author) = batch.identity {
-                inner.require_attribution_authority()?;
+                inner.require_attribution_backend()?;
                 op.attribute(author, false);
             }
         }
@@ -4725,16 +4716,17 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
+            let reader = inner.batches.get(&self.id).and_then(Batch::reader);
             let roots = inner.run(
                 prepared,
-                inner.batches.get(&self.id).and_then(Batch::reader),
+                reader,
                 &ReadSpec {
                     include_deleted,
                     cut,
                     ..ReadSpec::default()
                 },
             )?;
-            inner.nest_relations(prepared, None, roots)
+            inner.nest_relations(prepared, reader, roots)
         })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)
