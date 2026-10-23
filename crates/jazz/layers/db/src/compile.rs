@@ -2963,9 +2963,15 @@ impl Ctx<'_> {
                 }
             }
         }
-        // Ties break by ascending row id, whatever the keys' directions.
-        keys.push(format!("{alias}.id ASC"));
-        ranked.push(format!("{alias}.id ASC"));
+        // Ties break by row id in the direction of the last key, so a declared
+        // index (which ends in `id`) supplies the whole order in one scan, in
+        // either direction, with no sort step.
+        let tie = match order.last().map(|key| key.direction) {
+            Some(OrderDirection::Desc) => "DESC",
+            _ => "ASC",
+        };
+        keys.push(format!("{alias}.id {tie}"));
+        ranked.push(format!("{alias}.id {tie}"));
         Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
     }
 }
