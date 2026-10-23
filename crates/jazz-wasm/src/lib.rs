@@ -712,9 +712,9 @@ impl WasmWrite {
         serde_wasm_bindgen::to_value(&state).map_err(to_js_error)
     }
 
-    /// Resolve once the write reached `tier`: at once for `none` and
-    /// `local` (the commit is in the store when the write call returns), on
-    /// the server's acceptance for `global`, rejecting if it refused.
+    /// Resolve once the write reached `tier`: immediately for `none`, after
+    /// the backing-store flush for `local`, or on authority acceptance for
+    /// `global`. A known rejection fails the wait at every tier.
     #[wasm_bindgen(js_name = wait)]
     pub fn wait(
         &self,
