@@ -3300,23 +3300,35 @@ impl Inner {
         })
     }
 
+    /// The schema session `index` declared, governed by the current
+    /// schema's policies. A declared version pins its subscriptions even
+    /// while it is the current one, so they keep reading by its names after
+    /// a newer version becomes current.
     pub(crate) fn session_schema(&mut self, index: usize) -> Option<Rc<Schema>> {
         let version = self.sessions[index].version?;
-        if version == self.owner.jazz.version_id() {
-            return None;
-        }
         if let Some((owner, schema)) = &self.sessions[index].schema
             && Rc::ptr_eq(owner, &self.owner)
         {
             return Some(schema.clone());
         }
-        let jazz = self
-            .admitted
-            .iter()
-            .find(|admitted| admitted.version_id() == version)?;
-        let schema = Rc::new(self.named(jazz).with_policies_of(self.owner.clone()));
+        let schema = self.governed(version)?;
         self.sessions[index].schema = Some((self.owner.clone(), schema.clone()));
         Some(schema)
+    }
+
+    /// Admitted `version` under its stored names, governed by the current
+    /// schema's policies.
+    pub(crate) fn governed(&self, version: crate::ids::SchemaVersionId) -> Option<Rc<Schema>> {
+        let jazz = if version == self.owner.jazz.version_id() {
+            &self.owner.jazz
+        } else {
+            self.admitted
+                .iter()
+                .find(|admitted| admitted.version_id() == version)?
+        };
+        Some(Rc::new(
+            self.named(jazz).with_policies_of(self.owner.clone()),
+        ))
     }
 
     /// Apply one server image; returns whether a rebase is needed (the row

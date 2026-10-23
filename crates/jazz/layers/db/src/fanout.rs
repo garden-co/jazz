@@ -661,6 +661,15 @@ impl Inner {
             .collect();
         for (gid, group) in groups {
             let mut group = group.borrow_mut();
+            // A schema the current one governs (a sync session's) takes the
+            // policies of whichever schema is current now.
+            if reset
+                && let Some(pinned) = &group.prepared.schema
+                && pinned.policies_from.is_some()
+                && let Some(governed) = self.governed(pinned.jazz.version_id())
+            {
+                group.prepared.schema = Some(governed);
+            }
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
             let watches = self
