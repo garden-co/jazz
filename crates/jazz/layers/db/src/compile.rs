@@ -21,7 +21,7 @@ use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported}
 mod history;
 
 /// Inherits chains with no explicit bound unroll this deep.
-const DEFAULT_INHERITS_DEPTH: usize = 10;
+pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
 const FIXPOINT_GUARD: usize = 1_000;
 
@@ -281,6 +281,7 @@ pub struct Ctx<'a> {
     next_alias: usize,
     candidate_evidence: Option<CandidateEvidence>,
     in_policy: bool,
+    in_inherited_policy: bool,
 }
 
 /// A frozen snapshot: the state as of commit `seq`, plus the open
@@ -361,6 +362,7 @@ impl<'a> Ctx<'a> {
             next_alias: 0,
             candidate_evidence: None,
             in_policy: false,
+            in_inherited_policy: false,
         }
     }
 
@@ -557,10 +559,14 @@ impl<'a> Ctx<'a> {
         let key = quote(table.stored_name(column));
         let accepted = self.bind(Sql::Integer(scope.accepted as i64));
         let publication = self.bind(Sql::Integer(scope.publication as i64));
-        let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
+        // Accepted-only baseline sources do not reference the scratch-table
+        // key. Do not append an unused final parameter to standalone prep SQL.
+        let stored = (scope.post || include_created)
+            .then(|| self.bind(Sql::Text(table.stored.as_bytes().to_vec())));
         let c = self.alias("proof_current");
         let h = self.alias("proof_history");
         let base = if scope.post {
+            let stored = stored.as_ref().expect("post-state key");
             format!(
                 "SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND ({c}._seq<={accepted} OR {c}._seq={publication}) AND NOT EXISTS (SELECT 1 FROM _jazz_candidate_created_v1 x WHERE x.t={stored} AND x.id={c}.id)",
                 qualified(&c, false)
@@ -579,6 +585,7 @@ impl<'a> Ctx<'a> {
         if !include_created {
             return Ok(format!("({base})"));
         }
+        let stored = stored.as_ref().expect("created-source key");
         Ok(format!(
             "({base} UNION ALL SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND {c}._seq={publication} AND {c}._b=x'' AND EXISTS (SELECT 1 FROM _jazz_candidate_qualified_v1 q WHERE q.t={stored} AND q.id={c}.id))",
             qualified(&c, false)
@@ -1918,6 +1925,11 @@ impl<'a> Ctx<'a> {
                 table: target,
                 condition,
             } => {
+                if self.in_inherited_policy {
+                    return Err(unsupported(
+                        "ExistsIncludingCreated through inherited permission policies",
+                    ));
+                }
                 let target = self.table(target)?;
                 let e = self.alias("created");
                 let inner =
@@ -1964,15 +1976,20 @@ impl<'a> Ctx<'a> {
                 })?;
                 let target = self.table(target_name)?;
                 let p = self.alias("p");
-                let inner = match target.policy(*operation) {
-                    None => "0".to_owned(),
-                    Some(policy) => {
-                        self.policy_expr(policy, target, &p, None, session, depth - 1)?
+                let inner = self.inherited_policy(target, *operation, &p, session, depth - 1)?;
+                let source = if self.candidate_evidence.is_some() {
+                    if is_array(table, via_column) {
+                        return Err(unsupported(
+                            "array-reference inheritance in candidate authorization units",
+                        ));
                     }
+                    let value = column_sql(table, alias, via_column)?;
+                    self.candidate_source(target, false, "id", &value)?
+                } else {
+                    self.source(target)?
                 };
                 format!(
-                    "EXISTS (SELECT 1 FROM {} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
-                    self.source(target)?,
+                    "EXISTS (SELECT 1 FROM {source} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
                     quote(table.stored_name(via_column))
                 )
             }
@@ -1988,20 +2005,45 @@ impl<'a> Ctx<'a> {
                 }
                 let source = self.table(source_table)?;
                 let s = self.alias("s");
-                let inner = match source.policy(*operation) {
-                    None => "0".to_owned(),
-                    Some(policy) => {
-                        self.policy_expr(policy, source, &s, None, session, depth - 1)?
+                let inner = self.inherited_policy(source, *operation, &s, session, depth - 1)?;
+                let from = if self.candidate_evidence.is_some() {
+                    if is_array(source, via_column) {
+                        return Err(unsupported(
+                            "array-reference inheritance in candidate authorization units",
+                        ));
                     }
+                    self.candidate_source(source, false, via_column, &format!("{alias}.id"))?
+                } else {
+                    self.source(source)?
                 };
-                // An array reference grants when it lists the row's id.
+                // Ordinary schemas retain array-reference inheritance. Private
+                // candidate scopes require an indexed scalar reference.
                 format!(
-                    "EXISTS (SELECT 1 FROM {} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
-                    self.source(source)?,
+                    "EXISTS (SELECT 1 FROM {from} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
                     correlate(source, &s, via_column, &format!("{alias}.id"))?
                 )
             }
         })
+    }
+
+    /// Inherited capabilities use accepted roots and cannot expose a marked
+    /// predicate from the target's INSERT policy. Restore the context before
+    /// compiling siblings so an independent marked OR arm keeps its own mode.
+    fn inherited_policy(
+        &mut self,
+        table: &Table,
+        operation: Operation,
+        alias: &str,
+        session: &Session,
+        depth: usize,
+    ) -> Result<String, Error> {
+        let previous = std::mem::replace(&mut self.in_inherited_policy, true);
+        let result = match table.policy(operation) {
+            None => Ok("0".to_owned()),
+            Some(policy) => self.policy_expr(policy, table, alias, None, session, depth),
+        };
+        self.in_inherited_policy = previous;
+        result
     }
 
     // ---- relation IR ----------------------------------------------------
