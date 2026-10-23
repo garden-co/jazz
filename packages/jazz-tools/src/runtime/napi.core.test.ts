@@ -1963,16 +1963,16 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRejection = await aliceDenied.catch((error) => error);
     expect(Object.getOwnPropertyDescriptor(aliceRejection, "message")).toMatchObject({
       enumerable: false,
-      value: expect.stringContaining("AuthorizationDenied"),
+      value: expect.stringContaining("authorization_denied"),
     });
-    await expect(aliceDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(aliceDenied).rejects.toThrow("authorization_denied");
     const bobDenied = runtime.waitForTransaction(await committedTxId(bobTodo), "global");
     await expect(bobDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
       reason: "Write rejected by server authorization",
     });
-    await expect(bobDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(bobDenied).rejects.toThrow("authorization_denied");
   }, 15_000);
 
   it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
@@ -2042,10 +2042,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
       await expect(
         runtime.waitForTransaction(await committedTxId(aliceTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
       await expect(
         runtime.waitForTransaction(await committedTxId(bobTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

@@ -520,7 +520,13 @@ struct Host {
     tick_requested: Arc<AtomicBool>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<FunctionRef<JsonValue, ()>>>,
+    /// The same callback, told of an upload the authority refused that no
+    /// wait claimed (it arrives during a tick, outside any JS call).
+    upstream_mutation_errors: RefCell<Option<MutationErrorCallback>>,
 }
+
+type MutationErrorCallback =
+    ThreadsafeFunction<serde_json::Value, (), serde_json::Value, napi::Status, false, true>;
 
 impl Host {
     fn request_tick(&self) {
@@ -554,6 +560,13 @@ impl Inner {
         let scheduler = Rc::clone(&host);
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
+        let reporter = Rc::clone(&host);
+        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error| {
+            if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
+                let event = mutation_error_event(&tx_id.to_string(), error, true);
+                callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
+            }
+        }));
         Self { binding, host }
     }
 
@@ -566,6 +579,7 @@ impl Inner {
         if let Some(error) = &write.rejected {
             self.report_unclaimed(env, &write, error, Rc::clone(&claimed))?;
         }
+        self.binding.hooks.track(&write, &claimed);
         Ok(Write {
             inner: Some(self.clone()),
             write,
@@ -584,7 +598,7 @@ impl Inner {
         claimed: Rc<Cell<bool>>,
     ) -> napi::Result<()> {
         let host = Rc::clone(&self.host);
-        let event = mutation_error_event(&write.tx_id.to_string(), error);
+        let event = mutation_error_event(&write.tx_id.to_string(), error, false);
         let report = env.create_function_from_closure("reportMutationError", move |context| {
             if claimed.get() {
                 return Ok(());
@@ -607,12 +621,13 @@ impl Inner {
 /// `globalThis.setTimeout(handler, delay)`.
 type SetTimeout<'a> = Function<'a, FnArgs<(Function<'a, (), ()>, f64)>, Unknown<'a>>;
 
-/// A `MutationErrorEvent` for transaction `tx` rejected with `error`.
-fn mutation_error_event(tx: &str, error: &CoreError) -> serde_json::Value {
-    let code = error.code.as_str();
+/// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
+/// the authority, if `upstream`).
+fn mutation_error_event(tx: &str, error: &CoreError, upstream: bool) -> serde_json::Value {
+    let (code, reason) = binding_host::mutation_error_parts(error, upstream);
     serde_json::json!({
         "code": code,
-        "reason": error.message,
+        "reason": reason,
         "transaction": {
             "transactionId": tx,
             "kind": "mergeable",
@@ -621,7 +636,7 @@ fn mutation_error_event(tx: &str, error: &CoreError) -> serde_json::Value {
                 "kind": "rejected",
                 "transactionId": tx,
                 "code": code,
-                "reason": error.message,
+                "reason": reason,
             },
         },
     })
@@ -1599,6 +1614,12 @@ impl NapiDb {
     pub fn on_mutation_error(&self, callback: Function<'_, JsonValue, ()>) -> js::Result<()> {
         let inner = self.open_inner()?;
         *inner.host.mutation_errors.borrow_mut() = Some(callback.create_ref()?);
+        let upstream = callback
+            .build_threadsafe_function::<serde_json::Value>()
+            .callee_handled::<false>()
+            .weak::<true>()
+            .build()?;
+        *inner.host.upstream_mutation_errors.borrow_mut() = Some(upstream);
         Ok(())
     }
 
@@ -1839,6 +1860,7 @@ impl NapiDb {
         if self.owns_runtime {
             inner.host.tick_scheduler.borrow_mut().take();
             inner.host.mutation_errors.borrow_mut().take();
+            inner.host.upstream_mutation_errors.borrow_mut().take();
             block_on(inner.binding.close()).map_err(host_error)?;
         }
         Ok(Either::A(Vec::new().into()))

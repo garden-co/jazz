@@ -439,6 +439,10 @@ impl WasmDbInner {
                 let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
             }
         }));
+        let reporter = Rc::clone(&host);
+        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error| {
+            report_later(&reporter, &tx_id.to_string(), error, true, None);
+        }));
         Self { binding, host }
     }
 
@@ -448,6 +452,7 @@ impl WasmDbInner {
         if let Some(error) = &write.rejected {
             self.report_unclaimed(&write, error, Rc::clone(&claimed));
         }
+        self.binding.hooks.track(&write, &claimed);
         Ok(WasmWrite {
             inner: Some(self.clone()),
             write,
@@ -459,34 +464,54 @@ impl WasmDbInner {
     /// claims it first: the caller gets until the current task ends (its
     /// promise chain included) to call `wait`.
     fn report_unclaimed(&self, write: &Write, error: &Error, claimed: Rc<std::cell::Cell<bool>>) {
-        let host = Rc::clone(&self.host);
-        let event = mutation_error_event(&write.tx_id.to_string(), error);
-        let report = Closure::once_into_js(move || {
-            if claimed.get() {
-                return;
-            }
-            let callback = host.mutation_errors.borrow().clone();
-            if let (Some(callback), Ok(event)) = (callback, event) {
-                let _ = callback.call1(&JsValue::NULL, &event);
-            }
-        });
-        let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
-            .ok()
-            .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
-        if let Some(set_timeout) = set_timeout {
-            let _ = set_timeout.call2(&JsValue::NULL, &report, &JsValue::from_f64(0.0));
-        }
+        report_later(
+            &self.host,
+            &write.tx_id.to_string(),
+            error,
+            false,
+            Some(claimed),
+        );
     }
 }
 
-/// A `MutationErrorEvent` for transaction `tx` rejected with `error`.
-fn mutation_error_event(tx: &str, error: &Error) -> Result<JsValue, JsValue> {
-    let code = error.code.as_str();
+/// Tell the mutation-error callback of transaction `tx`'s rejection (by
+/// the authority, if `upstream`) on a later task, unless a wait set
+/// `claimed` by then.
+fn report_later(
+    host: &Rc<Host>,
+    tx: &str,
+    error: &Error,
+    upstream: bool,
+    claimed: Option<Rc<std::cell::Cell<bool>>>,
+) {
+    let host = Rc::clone(host);
+    let event = mutation_error_event(tx, error, upstream);
+    let report = Closure::once_into_js(move || {
+        if claimed.is_some_and(|claimed| claimed.get()) {
+            return;
+        }
+        let callback = host.mutation_errors.borrow().clone();
+        if let (Some(callback), Ok(event)) = (callback, event) {
+            let _ = callback.call1(&JsValue::NULL, &event);
+        }
+    });
+    let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
+        .ok()
+        .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+    if let Some(set_timeout) = set_timeout {
+        let _ = set_timeout.call2(&JsValue::NULL, &report, &JsValue::from_f64(0.0));
+    }
+}
+
+/// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
+/// the authority, if `upstream`).
+fn mutation_error_event(tx: &str, error: &Error, upstream: bool) -> Result<JsValue, JsValue> {
+    let (code, reason) = binding_host::mutation_error_parts(error, upstream);
     let rejected = js_sys::Object::new();
     set_prop(&rejected, "kind", JsValue::from_str("rejected"))?;
     set_prop(&rejected, "transactionId", JsValue::from_str(tx))?;
     set_prop(&rejected, "code", JsValue::from_str(code))?;
-    set_prop(&rejected, "reason", JsValue::from_str(&error.message))?;
+    set_prop(&rejected, "reason", JsValue::from_str(&reason))?;
     let transaction = js_sys::Object::new();
     set_prop(&transaction, "transactionId", JsValue::from_str(tx))?;
     set_prop(&transaction, "kind", JsValue::from_str("mergeable"))?;
@@ -494,7 +519,7 @@ fn mutation_error_event(tx: &str, error: &Error) -> Result<JsValue, JsValue> {
     set_prop(&transaction, "latestSettlement", rejected.into())?;
     let event = js_sys::Object::new();
     set_prop(&event, "code", JsValue::from_str(code))?;
-    set_prop(&event, "reason", JsValue::from_str(&error.message))?;
+    set_prop(&event, "reason", JsValue::from_str(&reason))?;
     set_prop(&event, "transaction", transaction.into())?;
     Ok(event.into())
 }

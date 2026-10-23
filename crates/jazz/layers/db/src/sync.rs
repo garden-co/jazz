@@ -2570,12 +2570,9 @@ impl Db {
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
         let session = ops.iter().any(StagedOp::is_session);
-        let author = if session && inner.local_sessions {
-            Some(inner.identity.author)
-        } else {
-            ops.iter().find_map(StagedOp::author)
-        }
-        .or_else(|| (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author()));
+        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
+            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+        });
         // A session's writes carry its claims, for the authority's check.
         let session_claims = author
             .filter(|_| session)
@@ -3243,7 +3240,14 @@ impl Db {
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
-                        client.fates.insert(tx, result.map_err(from_wire_error));
+                        let result = result.map_err(from_wire_error);
+                        if let (Err(error), Some(rejections)) =
+                            (&result, inner.upstream_rejections.as_mut())
+                        {
+                            rejections.push((tx, error.clone()));
+                        }
+                        let client = inner.client.as_mut().expect("client");
+                        client.fates.insert(tx, result);
                         let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &locators)?;
@@ -4644,9 +4648,10 @@ impl Db {
 }
 
 /// Who an uploaded commit is applied as. A session link writes under its
-/// own identity and may not name another author; a trusted link (no policy
-/// identity) writes as the session it names (checked as it), or unchecked,
-/// attributed to the author it names.
+/// own identity (a session it names is checked as the link) and may not
+/// attribute to another author; a trusted link (no policy identity) writes
+/// as the session it names (impersonation: checked as it), or unchecked,
+/// attributed to the author it names or as itself.
 fn commit_who(
     policy: Option<AuthorSubject>,
     author: Option<&str>,
@@ -4660,6 +4665,9 @@ fn commit_who(
         // A node's own writes (it names itself as the system at that node)
         // over a session link are that session's: the link decides.
         (Some(session), Some(AuthorSubject::SystemAt(_))) => Ok(Who::Session(session)),
+        // A session link cannot vouch for the sessions it writes as: their
+        // writes are checked as the link's own.
+        (Some(link), Some(_)) if session => Ok(Who::Session(link)),
         (Some(session), Some(author)) if author != session => Err(Error::new(
             ErrorCode::WriteRejected,
             "attribution requires a trusted serving node",
