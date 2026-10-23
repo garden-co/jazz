@@ -1,5 +1,21 @@
 # Account and device lifecycle formats
 
+## UUID compatibility
+
+E2EE accepts UUIDv4 and UUIDv7 for generated record, device, epoch and recovery
+root IDs. Signed records require lowercase hyphenated UUIDs with the RFC variant;
+account IDs keep their existing application-defined representation. Writers
+currently generate UUIDv4 with `crypto.randomUUID()`. Ordinary Jazz row inserts
+may generate UUIDv7, and those IDs must reach the same authentication checks.
+
+This corrects the unreleased stack's v4-only validation. It does not change JE2C
+v1 framing, any stored encoding version, existing UUIDv4 bytes, signatures or ID
+generation. IDs are authenticated exactly as supplied, with no version conversion
+or normalisation. Existing independent byte fixtures remain the v4 contract.
+Readers with the earlier v4-only check reject v7 records, so all readers must
+include this correction before applications use v7 E2EE IDs. Invalid UUIDs and
+unsupported versions remain invalid; valid UUIDs alone confer no authority.
+
 Explicit managed-schema and permission composition is required. Recovery record
 validation is included for forward safety; recovery authoring is a separate layer.
 
@@ -185,8 +201,8 @@ Columns are `accountId`, `predecessor`, `epochId`, `signerId`, `action`,
 `verification`, `history`, `deliveries` and `signature`. `action` is exactly
 `remove-device` or `retire-recovery-root`. Exactly one target column is present:
 `removedDeviceId` for device removal and `retiredRecoveryRootId` for root
-retirement. The epoch and target identifiers are lower-case hyphenated UUIDv4
-strings. A successor cannot reuse its predecessor's epoch ID.
+retirement. The epoch and target identifiers are lower-case hyphenated UUIDv4 or
+UUIDv7 strings. A successor cannot reuse its predecessor's epoch ID.
 
 `membership` and `revision` are canonical compact UTF-8 JSON arrays of sorted,
 unique UUID strings: active device IDs and the approval IDs used to establish
@@ -257,12 +273,12 @@ The signed frame is pinned by `fixtures/e2ee-account-successor.c`.
 
 ## Public device approval statement, version 1
 
-The key-free statement contains `id`, `accountId`, `epochId`, `deviceId`
-and `signerId`. Record, epoch and device IDs are lower-case hyphenated UUIDv4
-strings. Account IDs retain their exact application-scoped representation.
-The statement contains no private challenge, proof envelope, key confirmation
-or encrypted delivery. Its independent signature does not reuse the private
-approval signature, which covers encrypted verification bytes.
+The key-free statement contains `id`, `accountId`, `epochId`, `deviceId` and
+`signerId`. Record, epoch and device IDs are lower-case hyphenated UUIDv4 or
+UUIDv7 strings. Account IDs retain their exact application-scoped
+representation. The statement contains no private challenge, proof envelope, key
+confirmation or encrypted delivery. Its independent signature does not reuse the
+private approval signature, which covers encrypted verification bytes.
 
 Signed bytes are canonical context version one, with application equal to the
 verified account scope tuple, policy `jazz.e2ee.public-device-approval.v1`,
@@ -292,17 +308,17 @@ before key delivery. Acceptance alone does not prove signer eligibility.
 
 `__e2ee_public_account_successors` contains `id`, `accountId`, `predecessor`,
 `epochId`, `signerId`, `action`, `removedDeviceId`, `retiredRecoveryRootId`,
-`membership`, `revision` and `signature`. `action` is exactly `remove-device`
-or `retire-recovery-root`, with exactly one target column present according to
-the action; the signed frame includes the selected target UUID as specified
-above.
-IDs other than the account ID are lower-case hyphenated UUIDv4 strings; the
-new epoch must differ from its predecessor. Membership uses the canonical sorted,
-unique UUIDv4 array defined for private successors. Device removal excludes its
-target, while root retirement leaves the device set unchanged. The public
-revision is a canonical JSON array of sorted, unique, non-empty row-ID strings.
-It preserves raw candidates even when their IDs are not UUIDv4; otherwise an
-invalid candidate could prevent a legitimate rotation.
+`membership`, `revision` and `signature`. `action` is exactly `remove-device` or
+`retire-recovery-root`, with exactly one target column present according to the
+action; the signed frame includes the selected target UUID as specified above.
+IDs other than the account ID are lower-case hyphenated UUIDv4 or UUIDv7
+strings; the new epoch must differ from its predecessor. Membership uses the
+canonical sorted, unique array of UUIDv4 or UUIDv7 strings defined for private
+successors. Device removal excludes its target, while root retirement leaves the
+device set unchanged. The public revision is a canonical JSON array of sorted,
+unique, non-empty row-ID strings. It preserves raw candidates even when their
+IDs are neither UUIDv4 nor UUIDv7; otherwise an invalid candidate could prevent
+a legitimate rotation.
 
 The signature context uses the verified application tuple, policy
 `jazz.e2ee.public-account-successor.v1`, scope `account`, identifier `accountId`,
@@ -340,16 +356,16 @@ or provide protection against a compromised local process.
 
 Each entry has `scope`, `id`, `mechanism`, `version`, `publicKey`, `privateKey`
 and `challenge`, followed by `signingMechanism`, `signingVersion`,
-`signingPublicKey` and `signingPrivateKey`. Signing fields use the same mechanism
-and byte-array constraints; signing and recipient keypairs are independent.
-`scope` is the compact JSON string encoding the tuple
-`[verified account registry URL, environment, account ID]`, without identifier
-normalisation. Scopes must be unique. `id` is a hyphenated UUIDv4. `mechanism`
-and `version` follow the common envelope ID/version rules. Each key is a JSON
-array of integer bytes (0–255), between 1 and 65,536 elements; the installed
-mechanism validates the actual keypair. The challenge is exactly 32 bytes in
-the same array representation. Device keypairs and challenges use independent
-secure randomness, not the login root.
+`signingPublicKey` and `signingPrivateKey`. Signing fields use the same
+mechanism and byte-array constraints; signing and recipient keypairs are
+independent. `scope` is the compact JSON string encoding the tuple `[verified
+account registry URL, environment, account ID]`, without identifier
+normalisation. Scopes must be unique. `id` is a hyphenated UUIDv4 or UUIDv7.
+`mechanism` and `version` follow the common envelope ID/version rules. Each key
+is a JSON array of integer bytes (0–255), between 1 and 65,536 elements; the
+installed mechanism validates the actual keypair. The challenge is exactly 32
+bytes in the same array representation. Device keypairs and challenges use
+independent secure randomness, not the login root.
 
 New records use compact JSON with the fields in the order above; object-key order
 and JSON whitespace are not authenticated and readers do not require that
@@ -451,8 +467,8 @@ device and the recovery root sign the same version-one `JE2C` context:
 - epoch: the approving account epoch; recipient: the new device ID.
 
 `signature` holds the device signature and `recoverySignature` the root
-signature. All record, epoch, device and recovery-root IDs are UUIDv4 values.
-The literal `recovery-approval-format.test.ts` fixture pins these bytes.
+signature. All record, epoch, device and recovery-root IDs are UUIDv4 or UUIDv7
+values. The literal `recovery-approval-format.test.ts` fixture pins these bytes.
 Ordinary approval bytes are unchanged and ordinary approvals must not carry a
 recovery signature.
 

@@ -22,7 +22,9 @@ it("rejects racing recovery registration, retries rotation and retains independe
     const account = await localAccountConfig(server.appId, server.url);
     const adapters = await createNativeCrypto();
     let beforeRotationSeal: (() => Promise<void>) | undefined;
-    const open = async () => {
+    let corruptHistory = false;
+    let injectedHistory = 0;
+    const open = async (inspect = false) => {
       let saved: string | null = null;
       const db = await createDb({
         ...account,
@@ -39,6 +41,17 @@ it("rejects racing recovery registration, retries rotation and retains independe
             ...adapters,
             keyEnvelope: {
               ...adapters.keyEnvelope,
+              async unwrap(key, context, envelope) {
+                if (
+                  inspect &&
+                  corruptHistory &&
+                  new TextDecoder().decode(context).includes("history")
+                ) {
+                  injectedHistory++;
+                  return new Uint8Array(32).fill(9);
+                }
+                return adapters.keyEnvelope.unwrap(key, context, envelope);
+              },
               async seal(recipient, context, secret) {
                 if (new TextDecoder().decode(context).includes("jazz.e2ee.account-successor.v1")) {
                   const action = beforeRotationSeal;
@@ -115,17 +128,59 @@ it("rejects racing recovery registration, retries rotation and retains independe
     );
     const roots = await first.all(deviceRequestApp.__e2ee_recovery_roots, { tier: "remote" });
     expect(roots).toHaveLength(1);
+    const statusBeforeRotation = await first.e2ee.recovery.status(material!);
     await third.e2ee.devices.revoke(creator!.id).wait();
     expect(await third.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: creator!.id, state: "revoked" }),
     );
     await Promise.all(clients.map((db) => db.shutdown()));
 
-    const { db: recovered } = await open();
+    const { db: recovered, readStore: recoveryStore } = await open(true);
     const recovering = (await recovered.e2ee.devices.list()).find(
       (device) => device.state === "pending",
     )!;
     expect(recovering).toBeDefined();
+    // Inspect the rotated account from this pending device before recovering it.
+    // Neither failed nor successful status may activate it or change its store.
+    const requestsBeforeStatus = await recovered.all(deviceRequestApp.__e2ee_device_requests, {
+      tier: "remote",
+    });
+    const approvalsBeforeStatus = await recovered.all(
+      deviceRequestApp.__e2ee_public_device_approvals,
+      {
+        tier: "remote",
+      },
+    );
+    const storeBeforeStatus = recoveryStore();
+    const expectReadOnlyStatus = async () => {
+      expect(
+        await recovered.all(deviceRequestApp.__e2ee_device_requests, { tier: "remote" }),
+      ).toEqual(requestsBeforeStatus);
+      expect(
+        await recovered.all(deviceRequestApp.__e2ee_public_device_approvals, { tier: "remote" }),
+      ).toEqual(approvalsBeforeStatus);
+      expect(recoveryStore()).toBe(storeBeforeStatus);
+      expect(await recovered.e2ee.devices.list()).toContainEqual(
+        expect.objectContaining({ id: recovering.id, state: "pending" }),
+      );
+    };
+    corruptHistory = true;
+    await expect(recovered.e2ee.recovery.status(material!)).rejects.toMatchObject({
+      code: "recovery-delivery-unusable",
+      message: "No authenticated recovery delivery for the current account epoch",
+    });
+    expect(injectedHistory).toBeGreaterThan(0);
+    corruptHistory = false;
+    await expectReadOnlyStatus();
+    const checked = await recovered.e2ee.recovery.status(material!);
+    expect(checked.account).toMatchObject({
+      validation: "validated",
+      activeDeviceIds: [pending.id],
+      validatedRootId: statusBeforeRotation.account.validatedRootId,
+    });
+    expect(checked.account.epochId).not.toBe(statusBeforeRotation.account.epochId);
+    expect(checked.groups.validation).toBe("not-checked");
+    await expectReadOnlyStatus();
     await recovered.e2ee.recovery.use(material!).wait();
     expect(await recovered.e2ee.devices.list()).toEqual(
       expect.arrayContaining([
