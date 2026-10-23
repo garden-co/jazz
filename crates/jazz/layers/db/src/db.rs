@@ -915,6 +915,7 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        conn.execute_batch(sync::RELAY_DDL).map_err(storage)?;
         conn.execute_batch(candidates::TEMP_DDL).map_err(storage)?;
         conn.execute_batch(accepted::ACCEPTED_DDL)
             .map_err(storage)?;

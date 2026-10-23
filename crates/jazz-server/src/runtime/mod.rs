@@ -1005,12 +1005,13 @@ impl Owner {
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
             match postcard::from_bytes::<SyncMessage>(&frame) {
-                Ok(SyncMessage::Commit { tx, .. }) if gated => {
+                Ok(SyncMessage::Commit { node, tx, .. }) if gated => {
                     owner_session
                         .queues
                         .outbound
                         .borrow_mut()
-                        .push_back(SyncMessage::Fate {
+                        .push_back(SyncMessage::FateV1 {
+                            node,
                             tx,
                             through: self.db.seq_high_water(),
                             result: Err(WireError::Rejected(

@@ -53,6 +53,10 @@ use jazz_types::time::{GlobalTime, TxTime};
 use serde::{Deserialize, Serialize};
 
 use super::*;
+#[path = "sync/relay.rs"]
+mod relay;
+use relay::{RelayUpload, UploadId};
+pub(crate) const RELAY_DDL: &str = relay::DDL;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 pub use crate::wire::TransportError;
 
@@ -545,6 +549,14 @@ pub enum SyncMessage {
         head: CatalogueHeadV1,
         opened: crate::ids::SchemaVersionId,
     },
+    /// Tag 27, jazz.sqlite.sync.origin-write-fate.v1. A relay multiplexes writers,
+    /// so the complete original transaction identity is mandatory.
+    FateV1 {
+        node: [u8; 16],
+        tx: u64,
+        through: u64,
+        result: Result<(), WireError>,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -604,6 +616,8 @@ pub struct Upstream(u64);
 pub(crate) struct Client {
     /// Checked once on owner recovery, before any outbox prefix can escape.
     initialization_recovery_error: Option<Error>,
+    relay_uploads: BTreeMap<UploadId, RelayUpload>,
+    relay_finished: BTreeSet<UploadId>,
     transport: Option<Box<dyn Transport>>,
     pub(crate) hint: Rc<StdCell<Link>>,
     next_id: u64,
@@ -833,6 +847,7 @@ pub(crate) struct Session {
     relayed: BTreeMap<u64, RemoteRead>,
     forwarded: BTreeMap<u64, ForwardedFetch>,
     forwarded_catalogue: BTreeMap<u64, ForwardedCatalogue>,
+    relay_uploads: BTreeSet<UploadId>,
     catalogue_pending: bool,
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
@@ -870,6 +885,7 @@ impl Session {
             relayed: BTreeMap::new(),
             forwarded: BTreeMap::new(),
             forwarded_catalogue: BTreeMap::new(),
+            relay_uploads: BTreeSet::new(),
             catalogue_pending: false,
         }
     }
@@ -2898,6 +2914,7 @@ impl Inner {
                 image,
             );
         }
+        client.relay_uploads = self.load_relay_uploads()?;
         self.client = Some(client);
         let recovery = self.check_initialization_recovery();
         self.client
@@ -2951,6 +2968,8 @@ impl Client {
     fn new(node: [u8; 16]) -> Self {
         Client {
             initialization_recovery_error: None,
+            relay_uploads: BTreeMap::new(),
+            relay_finished: BTreeSet::new(),
             node,
             connection: 0,
             upstream_schema: None,
@@ -3085,6 +3104,9 @@ impl Db {
         }
         let asked = std::mem::take(&mut client.requested);
         client.wanted.extend(asked);
+        for upload in client.relay_uploads.values_mut() {
+            upload.sent = false;
+        }
         client.connection += 1;
         Upstream(client.connection)
     }
@@ -3808,19 +3830,44 @@ impl Db {
             .conn
             .execute_batch("SAVEPOINT sync_tick")
             .map_err(storage)?;
-        let capture_pending = self.inner.borrow().catalogue_capture_pending.get();
-        let applied = self.client_apply();
-        let inner = self.inner.borrow();
-        if applied.is_ok() {
-            inner
+        let (capture_pending, known, persisted_known) = {
+            let inner = self.inner.borrow();
+            let client = inner.client.as_ref().expect("client");
+            (
+                inner.catalogue_capture_pending.get(),
+                client.known,
+                client.persisted_known,
+            )
+        };
+        let applied = self.client_apply().and_then(|()| {
+            self.inner
+                .borrow()
                 .conn
                 .execute_batch("RELEASE sync_tick")
-                .map_err(storage)?;
-        } else {
-            inner.rollback_savepoint("sync_tick").map_err(storage)?;
-            inner.catalogue_capture_pending.set(capture_pending);
-        }
-        drop(inner);
+                .map_err(storage)
+        });
+        let ready = {
+            let mut inner = self.inner.borrow_mut();
+            if applied.is_err() {
+                inner.rollback_savepoint("sync_tick").map_err(storage)?;
+                inner.catalogue_capture_pending.set(capture_pending);
+            }
+            let client = inner.client.as_mut().expect("client");
+            let finished = std::mem::take(&mut client.relay_finished);
+            let ready = !finished.is_empty();
+            for id in finished {
+                if applied.is_ok() {
+                    client.relay_uploads.remove(&id);
+                } else if let Some(upload) = client.relay_uploads.get_mut(&id) {
+                    upload.sent = false;
+                }
+            }
+            if applied.is_err() {
+                client.known = known;
+                client.persisted_known = persisted_known;
+            }
+            ready
+        };
         applied?;
         self.notify();
         let arrived = {
@@ -3832,6 +3879,9 @@ impl Db {
             self.inner.borrow().retry_awaiting();
         }
         self.flush_settled();
+        if ready {
+            self.server_tick()?;
+        }
         self.client_send()
     }
 
@@ -3864,6 +3914,33 @@ impl Db {
             // Rows install without their chunks: a chunked cell carries the
             // sort key its indexes need.
             while let Some(message) = queue.pop_front() {
+                let message = match message {
+                    SyncMessage::Fate {
+                        tx,
+                        through,
+                        result,
+                    } => {
+                        let client = inner.client.as_ref().expect("client");
+                        if client.relay_uploads.keys().any(|(_, time)| *time == tx) {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "unqualified write fate is ambiguous on a relay",
+                            ));
+                        }
+                        let node = client
+                            .pending
+                            .iter()
+                            .find(|pending| pending.tx == tx)
+                            .map_or(client.node, |pending| pending.node);
+                        SyncMessage::FateV1 {
+                            node,
+                            tx,
+                            through,
+                            result,
+                        }
+                    }
+                    other => other,
+                };
                 match message {
                     SyncMessage::Rows { images } => {
                         let names = inner.owner.clone();
@@ -4035,21 +4112,46 @@ impl Db {
                             *remote.refused.borrow_mut() = Some(error);
                         }
                     }
-                    SyncMessage::Fate {
+                    SyncMessage::FateV1 {
+                        node,
                         tx,
                         through,
                         result,
                     } => {
-                        let accepted = result.is_ok();
-                        if accepted {
-                            inner.keep_unlisted_own(tx, through)?;
+                        if through >= LOCAL_BASE {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "write fate has an optimistic authority sequence",
+                            ));
                         }
+                        let id = (node, tx);
                         let client = inner.client.as_ref().expect("client");
-                        let node = client
+                        if client.relay_finished.contains(&id) {
+                            continue;
+                        }
+                        let relayed = client.relay_uploads.contains_key(&id);
+                        let own = client
                             .pending
                             .iter()
-                            .find(|p| p.tx == tx)
-                            .map_or(client.node, |p| p.node);
+                            .any(|pending| pending.node == node && pending.tx == tx);
+                        // Unknown or repeated receipts cannot manufacture a write.
+                        if !relayed && !own {
+                            continue;
+                        }
+                        let accepted = result.is_ok();
+                        if own && accepted {
+                            inner.keep_unlisted_own(tx, through)?;
+                        }
+                        if relayed {
+                            // Track attempted receipts too: a storage failure before
+                            // fate insertion must leave this unit ready to resend.
+                            inner
+                                .client
+                                .as_mut()
+                                .expect("client")
+                                .relay_finished
+                                .insert(id);
+                        }
                         inner
                             .conn
                             .execute_batch("SAVEPOINT jazz_write_fate")
@@ -4059,7 +4161,13 @@ impl Db {
                             .and_then(|()| {
                                 inner.record_settled(node, tx, accepted.then_some(through))
                             })
-                            .and_then(|()| inner.forget_pending(tx));
+                            .and_then(|()| {
+                                if relayed {
+                                    inner.finish_relay_upload(id)
+                                } else {
+                                    inner.forget_pending(tx)
+                                }
+                            });
                         if let Err(error) = persisted {
                             inner
                                 .rollback_savepoint("jazz_write_fate")
@@ -4072,15 +4180,19 @@ impl Db {
                             .map_err(storage)?;
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
-                        client.pending.retain(|p| p.tx != tx);
-                        client.sent.retain(
-                            |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
-                        );
-                        client.fates.insert(tx, result.map_err(from_wire_error));
-                        if let Some(locators) = client.pushed.remove(&tx) {
-                            crate::large::mark_pushed(&inner.conn, &locators)?;
+                        if own {
+                            client
+                                .pending
+                                .retain(|pending| pending.node != node || pending.tx != tx);
+                            client
+                                .sent
+                                .retain(|message| relay::upload_id(message) != Some(id));
+                            client.fates.insert(tx, result.map_err(from_wire_error));
+                            if let Some(locators) = client.pushed.remove(&tx) {
+                                crate::large::mark_pushed(&inner.conn, &locators)?;
+                            }
+                            rebase = true;
                         }
-                        rebase = true;
                     }
                     other => return Err(unsupported(format!("client received {other:?}"))),
                 }
@@ -4120,6 +4232,34 @@ impl Db {
         if client.transport.is_none() {
             return Ok(());
         }
+        let client = inner.client.as_ref().expect("client");
+        let mut relayed = client
+            .relay_uploads
+            .iter()
+            .filter(|(_, upload)| !upload.sent)
+            .map(|(id, upload)| (*id, upload.order, upload.schema, upload.message.clone()))
+            .collect::<Vec<_>>();
+        relayed.sort_by_key(|(_, order, _, _)| *order);
+        let upstream = client.upstream_schema;
+        let mut forwarded = Vec::new();
+        for (_, _, schema, message) in &relayed {
+            if Some(*schema) != upstream {
+                return Err(unsupported(
+                    "recovering relay uploads under a different upstream schema",
+                ));
+            }
+            forwarded.extend(inner.relay_pushes(message)?);
+            forwarded.push(message.clone());
+        }
+        let pushes = inner
+            .client
+            .as_ref()
+            .expect("client")
+            .unsent
+            .iter()
+            .map(|commit| inner.pushes_for(commit))
+            .collect::<Result<Vec<_>, _>>()?;
+        let client = inner.client.as_mut().expect("client");
         let mut out = std::mem::take(&mut client.outbox);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
@@ -4133,11 +4273,10 @@ impl Db {
         }
         let commits = std::mem::take(&mut client.unsent);
         // Each commit's new large-value nodes go ahead of it.
-        let mut pushes = Vec::with_capacity(commits.len());
-        for commit in &commits {
-            pushes.push(inner.pushes_for(commit)?);
-        }
         let client = inner.client.as_mut().expect("client");
+        for (id, _, _, _) in relayed {
+            client.relay_uploads.get_mut(&id).expect("queued").sent = true;
+        }
         let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
             if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { tx: a, .. }, SyncMessage::Commit { tx: b, .. }) if a == b)) {
@@ -4153,6 +4292,7 @@ impl Db {
             out.extend(batches);
             out.push(commit);
         }
+        out.extend(forwarded);
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
         let mut out = out.into_iter();
@@ -4487,6 +4627,7 @@ impl Db {
         }
         self.progress_scoped_fetches();
         self.progress_catalogue_fetches();
+        self.progress_relay_uploads()?;
         self.notify();
         let mut inner = self.inner.borrow_mut();
         // A relay's optimistic sequence is not an authority cut. Even its
@@ -5665,6 +5806,28 @@ impl Db {
                 session,
                 updated_at,
             } => {
+                if self.is_client() {
+                    let request = SyncMessage::Commit {
+                        node,
+                        tx,
+                        kind,
+                        ops,
+                        author,
+                        session,
+                        updated_at,
+                    };
+                    if let Err(error) = db.forward_upload(index, policy, request) {
+                        let mut inner = self.inner.borrow_mut();
+                        let through = inner.client.as_ref().expect("relay").known;
+                        inner.sessions[index].outbox.push(SyncMessage::FateV1 {
+                            node,
+                            tx,
+                            through,
+                            result: Err(wire_error(&error)),
+                        });
+                    }
+                    return Ok(());
+                }
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
@@ -5726,7 +5889,8 @@ impl Db {
                     );
                 }
                 session.touched.extend(rows);
-                session.outbox.push(SyncMessage::Fate {
+                session.outbox.push(SyncMessage::FateV1 {
+                    node,
                     tx,
                     through,
                     result,

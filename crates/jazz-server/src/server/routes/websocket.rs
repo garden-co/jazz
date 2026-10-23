@@ -3604,7 +3604,9 @@ mod tests {
                     .borrow_mut()
                     .drain(..)
                     .filter_map(|message| {
-                        if let SyncMessage::Fate { tx, .. } = message {
+                        if let SyncMessage::Fate { tx, .. } | SyncMessage::FateV1 { tx, .. } =
+                            message
+                        {
                             Some(tx)
                         } else {
                             None
