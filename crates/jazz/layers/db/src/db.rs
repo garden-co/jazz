@@ -311,7 +311,7 @@ impl SubscriptionStream {
             }
             // The opening lists rows whose large values are complete: while
             // their chunks may still arrive, it waits for them.
-            if gate.may_still_wait()
+            if (gate.wait_for_owner || gate.may_still_wait())
                 && self
                     .group
                     .upgrade()
@@ -426,6 +426,8 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    scheduler: Option<Rc<dyn TickScheduler>>,
+    read_deadlines: Vec<Weak<web_time::Instant>>,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Clients this store serves.
@@ -939,6 +941,8 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                scheduler: None,
+                read_deadlines: Vec::new(),
                 authority: false,
                 sessions: Vec::new(),
                 since_tick: Vec::new(),
@@ -1009,6 +1013,8 @@ impl Db {
         let mut inner = self.inner();
         inner.fan.collect();
         inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+        drop(inner);
+        self.schedule_read_deadlines();
         Ok(())
     }
 
@@ -1210,36 +1216,48 @@ impl Db {
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
+        let foreground = self.inner().non_durable;
         let gate = match (&remote, self.link_hint()) {
             (Some((answered, _, global)), Some(hint)) => {
-                let deadline = match (opts.tier, &opts.first_load) {
-                    (ReadTier::Remote, _) => Some(None),
-                    _ if self.inner().non_durable => Some(None),
-                    (_, FirstLoad::WaitForRemote { timeout_ms })
-                        if *timeout_ms > 0 && sync::may_wait(hint.get()) =>
-                    {
-                        Some(Some(
-                            web_time::Instant::now()
-                                + std::time::Duration::from_millis(*timeout_ms),
-                        ))
-                    }
-                    _ => None,
+                let remote_wait = match &opts.first_load {
+                    FirstLoad::WaitForRemote { timeout_ms } => *timeout_ms,
+                    _ => 0,
                 };
-                let live = hint.get().hint == RemoteLinkHint::Live;
-                deadline.map(|deadline| sync::Gate {
-                    answered: answered.clone(),
-                    global: global.clone(),
-                    hint,
-                    live,
-                    deadline,
-                })
+                let strict = opts.tier == ReadTier::Remote;
+                let wait_for_remote = strict || (remote_wait > 0 && sync::may_wait(hint.get()));
+                if strict || foreground || wait_for_remote {
+                    let deadline = (!strict && wait_for_remote).then(|| {
+                        web_time::Instant::now() + std::time::Duration::from_millis(remote_wait)
+                    });
+                    Some(sync::Gate {
+                        answered: answered.clone(),
+                        global: global.clone(),
+                        live: hint.get().hint == RemoteLinkHint::Live,
+                        hint,
+                        deadline,
+                        wait_for_owner: foreground,
+                        require_global: foreground && wait_for_remote,
+                        _wake: self.read_deadline(deadline),
+                        _attempt_wake: self.read_attempt_deadline(),
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         };
         let include_deleted = read.include_deleted;
         let mut inner = self.inner();
-        let (queue, group) = inner.subscribe_member(prepared, identity, read, settled)?;
-        Ok(SubscriptionStream {
+        let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
+            Ok(member) => member,
+            Err(error) => {
+                if remote.is_some() {
+                    inner.release_remote(&prepared.query, &prepared.binding, include_deleted);
+                }
+                return Err(error);
+            }
+        };
+        let stream = SubscriptionStream {
             queue,
             dropped: inner.fan.dropped.clone(),
             gate,
@@ -1253,7 +1271,10 @@ impl Db {
                     include_deleted,
                 )
             }),
-        })
+        };
+        drop(inner);
+        self.schedule_pending_tick();
+        Ok(stream)
     }
 
     /// A row's provenance as Jazz's row metadata spells it: created at, by
@@ -4035,6 +4056,11 @@ impl Inner {
 
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
+        if self.non_durable {
+            return Err(unsupported(
+                "writes from a non-durable foreground through its storage owner",
+            ));
+        }
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
