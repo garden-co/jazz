@@ -2400,7 +2400,7 @@ where
             && query.flat_join.is_none()
             && query.array_subqueries.is_empty()
         {
-            normalize_public_current_rows(table_schema, &mut rows)?;
+            normalize_public_current_rows(query, table_schema, &mut rows)?;
         }
         Ok(rows)
     }
@@ -5175,6 +5175,7 @@ fn sort_query_default_rows(rows: &mut [CurrentRow]) {
 /// may retain physical schema/provenance fields while resolving a row, whereas
 /// subscriptions are emitted from the public app-row terminal directly.
 fn normalize_public_current_rows(
+    query: &crate::query::Query,
     table: &TableSchema,
     rows: &mut [CurrentRow],
 ) -> Result<(), Error> {
