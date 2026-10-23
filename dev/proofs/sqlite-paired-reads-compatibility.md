@@ -112,6 +112,7 @@ Upgrade all SQLite peers together. Tags 21–23 are not negotiated, and older
 binaries cannot decode them. A newer replica with no accepted proof cannot infer
 it from legacy Origins or a local receipt. Downgrade and mixed-version deployment
 are unsupported; no compatibility with retired Groove or earlier unreleased
-E2EE schemas is claimed. Catalogue identity/coverage and browser SDK storage
-admission are separate runtime boundaries, so these scoped checks do not qualify
-the full browser E2EE runtime.
+E2EE schemas is claimed. Catalogue identity/coverage is covered separately in
+`sqlite-catalogue-compatibility.md`. Catalogue policy intrinsics and browser SDK
+storage admission remain separate boundaries, so these scoped checks do not
+qualify the full browser E2EE runtime.

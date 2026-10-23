@@ -392,8 +392,7 @@ fn json_or_null(value: JsValue) -> Result<serde_json::Value, JsValue> {
     Ok(json(value)?.unwrap_or(serde_json::Value::Null))
 }
 
-/// The error a binding call fails with for an engine feature the SQLite
-/// engine does not have yet.
+/// Report an engine feature the SQLite binding does not support yet.
 fn not_supported(what: &str) -> JsValue {
     host_error(binding_host::not_supported(what))
 }
@@ -1243,21 +1242,24 @@ impl WasmDb {
         })
     }
 
-    /// Accepted catalogue identities require the E2EE SQLite catalogue port.
+    /// Cached authority-issued identity in the owner or fixed schema view.
     #[wasm_bindgen(js_name = tableIdentity)]
-    pub fn table_identity(&self, _table: String) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported("E2EE accepted table identities"))
+    pub fn table_identity(&self, table: String) -> Result<js_sys::Promise, JsValue> {
+        let bytes = self.binding()?.table_identity(&table).map_err(host_error)?;
+        Ok(future_to_promise(async move { bytes_to_js(bytes) }))
     }
 
     #[wasm_bindgen(js_name = columnIdentity)]
     pub fn column_identity(
         &self,
-        _table: String,
-        _column: String,
+        table: String,
+        column: String,
     ) -> Result<js_sys::Promise, JsValue> {
-        self.open_inner()?;
-        Err(not_supported("E2EE accepted column identities"))
+        let bytes = self
+            .binding()?
+            .column_identity(&table, &column)
+            .map_err(host_error)?;
+        Ok(future_to_promise(async move { bytes_to_js(bytes) }))
     }
 
     /// Register a typed schema view backed by this same runtime owner.
@@ -1345,16 +1347,19 @@ impl WasmDb {
         wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
     }
 
-    /// Accepted catalogue coverage requires the E2EE SQLite catalogue port.
+    /// Fresh authority catalogue coverage, separate from cached identity reads.
     #[wasm_bindgen(js_name = coverCatalogue)]
     pub fn cover_catalogue(
         &self,
-        _table: String,
-        _author: Option<Vec<u8>>,
-        _claims: JsValue,
+        table: String,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
     ) -> Result<JsValue, JsValue> {
-        self.open_inner()?;
-        Err(not_supported("E2EE accepted catalogue coverage"))
+        let read = self
+            .binding()?
+            .cover_catalogue(table, author.as_deref(), json(claims)?)
+            .map_err(host_error)?;
+        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
     }
 
     /// Accepted content and its transaction evidence from one serializable
