@@ -182,7 +182,7 @@ impl Ctx<'_> {
                         FROM _jazz_settled AS s WHERE s.seq = v._seq)";
         let transaction = match self.history_origin {
             Some(node) => format!(
-                "COALESCE({recorded}, (SELECT unhex(printf('%016x', l.tx) || hex(l.node)) FROM _jazz_local_commits_v1 l WHERE l.seq=v._seq), unhex(printf('%016x', v._seq) || '{}'))",
+                "COALESCE({recorded}, (SELECT unhex(printf('%016x', l.tx) || hex(l.node)) FROM _jazz_local_commits_v1 l WHERE l.seq=v._seq), (SELECT unhex(printf('%016x', o.tx) || hex(o.node)) FROM _jazz_owner_positions_v1 o WHERE o.seq=v._seq), unhex(printf('%016x', v._seq) || '{}'))",
                 hex(&node)
             ),
             None => {

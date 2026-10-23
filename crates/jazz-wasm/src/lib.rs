@@ -1702,11 +1702,46 @@ impl WasmDb {
 
     /// Mark an in-memory foreground whose local-first reads must first receive
     /// its storage owner's cache. Authority waits remain separately qualified.
-    /// Writes remain unsupported until worker forwarding and durability are ported.
+    /// New writes require the private owner's subject- and schema-bound reply.
     #[wasm_bindgen(js_name = setNonDurableClient)]
     pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
         self.open_inner()?.binding.db.set_non_durable_client();
         Ok(())
+    }
+
+    /// Admit this authenticated replica as the private owner of one subject's
+    /// durable browser store, before accepting any foreground peers.
+    #[wasm_bindgen(js_name = setScopeIsolatedStorageOwner)]
+    pub fn set_scope_isolated_storage_owner(&self) -> Result<(), JsValue> {
+        self.open_inner()?
+            .binding
+            .db
+            .set_scope_isolated_storage_owner()
+            .map_err(to_js_error)
+    }
+
+    /// Resolve when the current worker connection supports private recovery.
+    /// This acknowledgement does not require a connection to the authority.
+    #[wasm_bindgen(js_name = waitForStorageOwner)]
+    pub fn wait_for_storage_owner(&self) -> Result<js_sys::Promise, JsValue> {
+        let inner = self.open_inner()?;
+        let progress = inner.binding.hooks.progress.clone();
+        Ok(future_to_promise(progress.parked(async move {
+            let mut waiting = Box::pin(inner.binding.db.wait_for_storage_owner());
+            std::future::poll_fn(|cx| {
+                if inner.host.closed.get() {
+                    return Poll::Ready(Err(JsValue::from_str(
+                        "storage owner admission cancelled by close",
+                    )));
+                }
+                waiting
+                    .as_mut()
+                    .poll(cx)
+                    .map(|result| result.map_err(to_js_error))
+            })
+            .await?;
+            Ok(JsValue::UNDEFINED)
+        })))
     }
 
     /// Report what the host knows about the path to the authoritative server
@@ -1823,6 +1858,7 @@ impl WasmDb {
         if owns_runtime {
             inner.binding.close_initializations();
             inner.host.closed.set(true);
+            inner.binding.hooks.progress.wake_all();
         }
         future_to_promise(async move {
             if owns_runtime {

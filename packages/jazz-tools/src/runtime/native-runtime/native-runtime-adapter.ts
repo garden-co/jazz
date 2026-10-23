@@ -459,6 +459,8 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  setScopeIsolatedStorageOwner?(): void;
+  waitForStorageOwner?(): Promise<void>;
   /** Exact wire features compiled into the native artifact backing this DB. */
   wireFeatures?(): number;
   setLargeValueStagingPolicy?(
@@ -1134,6 +1136,14 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     if (opts?.owner) return;
+    if (this.scopeIsolatedRelay) {
+      if (!this.db.setScopeIsolatedStorageOwner) {
+        throw new Error(
+          "Native runtime lacks private storage-owner recovery; rebuild its bindings",
+        );
+      }
+      this.db.setScopeIsolatedStorageOwner();
+    }
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Native runtime requires db.setTickScheduler");
     }
@@ -1264,6 +1274,16 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setNonDurableClient();
     this.nonDurableClient = true;
+  }
+
+  /** Wait for the current worker's recovery acknowledgement, independent of the server. */
+  async waitForStorageOwner(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForStorageOwner();
+    if (!this.nonDurableClient) return;
+    if (!this.db.waitForStorageOwner) {
+      throw new Error("Native runtime lacks private storage-owner admission; rebuild its bindings");
+    }
+    await this.db.waitForStorageOwner();
   }
 
   /** @internal Return the native HLC high-water for a foreground lease handoff. */

@@ -62,9 +62,9 @@ use crate::values::{
 pub use accepted::{AcceptedContent, AcceptedRow, BindingSettledRead};
 pub use sync::{
     Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, OwnerDurabilityBarrier,
-    QueryAttachment, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
-    SyncMessage, Transport, TransportError, Upstream, WireError, WireTransport,
-    WireTransportAdapter, duplex,
+    OwnerFrozenBaseV1, OwnerInputBaseV1, QueryAttachment, RelationSnapshot, RemoteLinkHint,
+    SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream,
+    WireError, WireTransport, WireTransportAdapter, duplex,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -448,6 +448,8 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    scope_isolated_owner: bool,
+    owner_projection_error: Option<Error>,
     deferred_owner_durability: bool,
     retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
@@ -871,6 +873,17 @@ impl Db {
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        conn.execute_batch(sync::OWNER_DDL).map_err(storage)?;
+        let scope_owner = sync::stored_owner_subject(&conn)?;
+        if scope_owner.is_some_and(|subject| subject != config.identity.author) {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "scope-isolated storage belongs to another subject",
+            ));
+        }
+        if scope_owner.is_some() {
+            sync::check_owner_open_schema(&conn, config.schema.version_id())?;
+        }
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
@@ -984,6 +997,8 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                scope_isolated_owner: false,
+                owner_projection_error: None,
                 deferred_owner_durability: false,
                 retired: false,
                 scheduler: None,
@@ -1003,6 +1018,9 @@ impl Db {
             if inner.client.is_some() {
                 inner.seq = inner.seq.max(LOCAL_BASE);
             }
+        }
+        if scope_owner.is_some() {
+            db.set_scope_isolated_storage_owner()?;
         }
         Ok(db)
     }
@@ -1035,7 +1053,14 @@ impl Db {
     /// its own and its subscribers', report `DurabilityTier::Global`. A
     /// store without the role (a relay with no upstream) settles at `Local`.
     pub fn set_authority(&self) {
-        self.inner.borrow_mut().authority = true;
+        let mut inner = self.inner.borrow_mut();
+        if inner.scope_isolated_owner {
+            inner.owner_projection_error = Some(unsupported(
+                "promoting a scope-isolated storage owner to authority",
+            ));
+            return;
+        }
+        inner.authority = true;
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -1617,11 +1642,8 @@ impl Db {
     ) -> Result<(T, TxReceipt), Error> {
         {
             let mut inner = self.inner();
-            if inner.non_durable {
-                return Err(unsupported(
-                    "commits from a non-durable foreground through its storage owner",
-                ));
-            }
+            inner.require_foreground_writes("commits")?;
+            inner.require_owner_subject(author)?;
             if inner.tx.is_some() {
                 return Err(unsupported("nested transactions"));
             }
@@ -1764,6 +1786,7 @@ impl Db {
         {
             let mut inner = self.inner();
             let version = schema.version_id();
+            inner.require_owner_schema_change(version)?;
             let mut defaults = BTreeMap::new();
             for lens in lenses.iter().filter(|lens| lens.target == version) {
                 defaults.extend(LensEffects::of(lens)?.defaults);
@@ -1809,6 +1832,15 @@ impl Db {
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &target)?;
             if make_current {
+                if inner.scope_isolated_owner {
+                    inner
+                        .conn
+                        .execute(
+                            "UPDATE _jazz_owner_scope_v1 SET schema_id=?1 WHERE singleton=1",
+                            [version.as_bytes().as_slice()],
+                        )
+                        .map_err(storage)?;
+                }
                 inner.owner = Rc::new(target);
             }
             if !inner
@@ -1985,6 +2017,7 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
+        self.require_owner_subject(identity.unwrap_or(self.identity.author))?;
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         self.require_catalogue_schema(schema)?;
@@ -2214,16 +2247,15 @@ impl Inner {
             .collect()
     }
 
-    /// The versions of the rows a read returns, its relations' rows
-    /// included: what a serializable read set compares at commit.
-    pub(crate) fn read_versions(
+    /// Root rows and relation children in the read set's stable traversal order.
+    fn read_rows(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
-    ) -> Result<Vec<(RowUuid, u64)>, Error> {
+    ) -> Result<Vec<CurrentRow>, Error> {
         let roots = self.run(prepared, identity, read)?;
-        let mut out = versions(&roots);
+        let mut out = roots.clone();
         if !prepared.query.array_subqueries.is_empty() {
             for row in roots {
                 let node = self.node(
@@ -2233,10 +2265,21 @@ impl Inner {
                     &prepared.query.array_subqueries,
                     row,
                 )?;
-                child_versions(&node, &mut out);
+                child_read_rows(&node, &mut out);
             }
         }
         Ok(out)
+    }
+
+    /// The versions of the rows a read returns, its relations' rows included.
+    pub(crate) fn read_versions(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<Vec<(RowUuid, u64)>, Error> {
+        self.read_rows(prepared, identity, read)
+            .map(|rows| versions(&rows))
     }
 
     fn node(
@@ -2254,6 +2297,7 @@ impl Inner {
             } else {
                 self.cell(table, row.id, &array.outer_column)?
             };
+            self.require_owner_subject(identity.unwrap_or(self.identity.author))?;
             let (policy, claims) = self.read_sessions(prepared, identity);
             let compiled = Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
                 .with_catalogue(self)
@@ -4043,6 +4087,9 @@ struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
     rows: Vec<(RowUuid, u64)>,
+    /// Publication aliases may move, or retain their number while replay changes
+    /// a counter. The observed content distinguishes those two cases.
+    content: Vec<[u8; 32]>,
 }
 
 fn conflict(message: impl Into<String>) -> Error {
@@ -4053,16 +4100,46 @@ fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, u64)> {
     rows.iter().map(|row| (row.id, row.seq)).collect()
 }
 
-/// The versions of a relation tree's child rows, depth first.
-fn child_versions(node: &ResultNode, out: &mut Vec<(RowUuid, u64)>) {
+/// Root rows precede each relation tree's child rows, depth first.
+fn child_read_rows(node: &ResultNode, out: &mut Vec<CurrentRow>) {
     for relation in node.relations.values() {
         if let ResultRelation::Array(children) = relation {
             for child in children {
-                out.push((child.row.id, child.row.seq));
-                child_versions(child, out);
+                out.push(child.row.clone());
+                child_read_rows(child, out);
             }
         }
     }
+}
+
+/// jazz.sqlite.serializable-read-content.v1: BLAKE3 derive-key over the
+/// versioned postcard preimage pinned by sqlite_owner_read_content_v1.json.
+/// Numeric publication aliases are deliberately excluded; original history
+/// identities, result occurrences, deletion and every projected cell remain.
+fn read_content(row: &CurrentRow) -> Result<[u8; 32], Error> {
+    let version = |version: crate::values::SourceVersion| (version.0, *version.1.as_bytes());
+    let joined = row
+        .joined
+        .iter()
+        .map(|joined| (*joined.row.as_bytes(), joined.version.map(version)))
+        .collect::<Vec<_>>();
+    let bytes = postcard::to_allocvec(&(
+        row.table.as_ref(),
+        row.id.as_bytes(),
+        row.deleted,
+        row.cells.as_ref(),
+        joined,
+        row.version.map(version),
+    ))
+    .map_err(|error| Error::new(ErrorCode::Storage, error.to_string()))?;
+    Ok(blake3::derive_key(
+        "jazz.sqlite.serializable-read-content.v1",
+        &bytes,
+    ))
+}
+
+fn read_contents(rows: &[CurrentRow]) -> Result<Vec<[u8; 32]>, Error> {
+    rows.iter().map(read_content).collect()
 }
 
 impl StagedOp {
@@ -4185,15 +4262,28 @@ impl Inner {
 
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
+        self.require_foreground_writes("writes")?;
         if self.non_durable {
-            return Err(unsupported(
-                "writes from a non-durable foreground through its storage owner",
-            ));
+            // Refuse shapes the owner recovery envelope cannot reconstruct,
+            // before minting an optimistic write or durable upload.
+            self.frozen_coordinates(std::slice::from_ref(op))?;
         }
+        self.apply_replayed_as(op, who, seq)
+    }
+
+    /// Internal replay of a previously admitted unit. Public staging still
+    /// enters apply_as and requires a qualified private-owner connection.
+    fn apply_replayed_as(
+        &mut self,
+        op: &StagedOp,
+        who: Who,
+        seq: u64,
+    ) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
         };
+        self.require_owner_subject(author)?;
         let (last_seq, last_at) = self.last_stamp;
         let at = if seq == last_seq {
             last_at
@@ -4536,13 +4626,18 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
-                    let changed = now.len() != read.rows.len()
-                        || now.iter().zip(&read.rows).any(|(now, then)| {
-                            now.0 != then.0
-                                || (now.1 != then.1
-                                    && !(own.contains(&then.1) && now.1 < LOCAL_BASE))
-                        });
+                    let current = inner.read_rows(&read.prepared, batch.reader(), &spec)?;
+                    let now = versions(&current);
+                    let mut changed =
+                        now.len() != read.rows.len() || read_contents(&current)? != read.content;
+                    for (now, then) in now.iter().zip(&read.rows) {
+                        let same_version = now.1 == then.1
+                            || (own.contains(&then.1) && now.1 < LOCAL_BASE)
+                            || (now.1 >= LOCAL_BASE
+                                && then.1 >= LOCAL_BASE
+                                && inner.local_origin(now.1)? == inner.local_origin(then.1)?);
+                        changed |= now.0 != then.0 || !same_version;
+                    }
                     if changed {
                         return Err(conflict(
                             "a row read by the transaction changed since its snapshot",
@@ -4550,25 +4645,52 @@ impl Db {
                     }
                 }
             }
-            let reads = reads
-                .iter()
-                .map(|read| sync::WireRead {
-                    query: read.prepared.query.clone(),
-                    binding: read.prepared.binding.clone(),
-                    include_deleted: read.include_deleted,
-                    rows: read
-                        .rows
-                        .iter()
-                        .map(|(row, seq)| (*row.0.as_bytes(), *seq))
-                        .collect(),
-                })
-                .collect();
+            let content = reads.iter().map(|read| read.content.clone()).collect();
+            let reads = {
+                let inner = self.inner();
+                let positions = own
+                    .iter()
+                    .map(|&position| {
+                        inner
+                            .local_origin(position)
+                            .map(|id| ((*id.node.as_bytes(), id.time.0), position))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                reads
+                    .iter()
+                    .map(|read| {
+                        let rows = read
+                            .rows
+                            .iter()
+                            .map(|(row, seq)| {
+                                let position = if *seq >= LOCAL_BASE {
+                                    let id = inner.local_origin(*seq)?;
+                                    positions
+                                        .get(&(*id.node.as_bytes(), id.time.0))
+                                        .copied()
+                                        .unwrap_or(*seq)
+                                } else {
+                                    *seq
+                                };
+                                Ok((*row.as_bytes(), position))
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        Ok(sync::WireRead {
+                            query: read.prepared.query.clone(),
+                            binding: read.prepared.binding.clone(),
+                            include_deleted: read.include_deleted,
+                            rows,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?
+            };
             return self.commit_ops_reserved(
                 batch,
                 sync::Kind::Serializable {
                     snapshot: *snapshot,
                     reads,
                     own: own.clone(),
+                    content,
                 },
                 reservation,
             );
@@ -4621,11 +4743,7 @@ impl Db {
         kind: sync::Kind,
         reservation: Option<ReservedTxId>,
     ) -> Result<TxReceipt, Error> {
-        if self.inner().non_durable {
-            return Err(unsupported(
-                "commits from a non-durable foreground through its storage owner",
-            ));
-        }
+        self.inner().require_foreground_writes("commits")?;
         let ops = &batch.ops;
         let seq = {
             let mut inner = self.inner();
@@ -4797,7 +4915,9 @@ impl Db {
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = inner.read_versions(prepared, batch.reader(), &read)?;
+        let observed = inner.read_rows(prepared, batch.reader(), &read)?;
+        let rows = versions(&observed);
+        let content = read_contents(&observed)?;
         let prepared = if prepared.request_claims.is_none() {
             let author = batch.reader().unwrap_or(inner.identity.author);
             prepared.clone().with_identity_claims(
@@ -4816,6 +4936,7 @@ impl Db {
                 prepared: prepared.clone(),
                 include_deleted,
                 rows,
+                content,
             });
         }
         Ok(())
