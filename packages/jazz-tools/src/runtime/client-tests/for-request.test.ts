@@ -124,7 +124,7 @@ describe("JazzClient runtime helpers", () => {
       backendSecret: "test-backend-secret",
     });
 
-    const transactionId = client.beginTransaction("exclusive");
+    const transactionId = client.beginTransaction("serializable");
     client.insertInternal(
       "todos",
       { done: { type: "Boolean", value: false } },

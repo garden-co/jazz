@@ -589,7 +589,7 @@ async function largeValueCell(name, sv, writer, reader) {
 }
 
 /**
- * Exclusive transactions from a `cv` client against an `sv` server: reads and
+ * Serializable transactions from a `cv` client against an `sv` server: reads and
  * updates commit while their rows are unchanged and conflict once another
  * client changed them. A new server rejects an old client's reads that match
  * rows and its updates of existing rows; inserts without reads still commit.
@@ -636,7 +636,7 @@ async function exclusiveCell(name, sv, cv) {
       },
       { fatal: true },
     );
-    // Runs one exclusive transaction on A; `between` runs after its reads and
+    // Runs one serializable transaction on A; `between` runs after its reads and
     // writes, before it commits.
     const exclusive = async (label, steps, expected, between) => {
       await check(name, label, async () => {
@@ -649,7 +649,7 @@ async function exclusiveCell(name, sv, cv) {
       });
     };
     const accepted = { outcome: "accepted" };
-    const conflict = { outcome: "rejected", code: "exclusive_conflict" };
+    const conflict = { outcome: "rejected", code: "serialization_conflict" };
     const edit = (id) => async () => {
       await B.call("one", { id, tier: "remote" });
       await B.call("update", { id, values: { body: "changed-by-b" }, wait: "global" });

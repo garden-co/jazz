@@ -40,7 +40,7 @@ MUST lower to a groove graph whose terminal rows describe:
 The peer state machine consumes that terminal stream, updates its per-peer
 shipped/result indexes, and emits `ViewUpdate`s. It MAY deduplicate already
 shipped complete transaction payloads into
-`peer_payload_inventory.complete_tx_payloads`. View-complete exclusive payloads
+`peer_payload_inventory.complete_tx_payloads`. View-complete serializable payloads
 are coverage facts for the maintained subscription view only; they do not become
 complete transaction payload refs. The peer state machine MUST NOT answer a live
 subscription by running an independent semantic scan.
@@ -657,7 +657,7 @@ Window limitations:
 - root `limit`/`offset` windows without explicit `order_by` are supported by
   injecting the ch. 6 default ascending row-id order before lowering through
   `TopBy`; this applies to both prepared bindings and policy-routed maintained
-  views. Explicit order keys break ties by row id in the last key's direction (ch. 6).
+  views. Explicit order keys retain ascending row id as their stable tie-break.
 - The same rule applies to every non-recursive relation-local window, including
   an `array_subquery`: without child `order_by`, each parent/correlation group
   is ordered by ascending child row id before its child-local `offset` and
@@ -678,9 +678,9 @@ Window limitations:
 Maintained error debt after a supported maintained path fails:
 
 - some maintained-view delta cases still require conservative handling for
-  replacement witnesses and unsupported exclusive sibling cases. Exclusive
+  replacement witnesses and unsupported serializable sibling cases. Serializable
   transaction deltas are not a broad full-recompute class: maintained views may
-  ship view-scoped partial bundles when only some writes in an exclusive
+  ship view-scoped partial bundles when only some writes in a serializable
   transaction match the maintained view;
 - `current_rows_update` is not yet fully represented as the same maintained
   query-subscription abstraction for every role.

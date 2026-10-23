@@ -19,18 +19,18 @@ export function writeErrorCode(error: unknown): string | undefined {
 /**
  * Codes that mean another transaction won the race: read again and retry.
  * A conflict found locally is `transaction_conflict`; one found by the
- * authority is `exclusive_conflict`; a write whose earlier transaction lost is
+ * authority is `serialization_conflict`; a write whose earlier transaction lost is
  * `cascade_rejected`. Callers bound their retries, because a cascade can also
  * follow a rejection that won't clear.
  */
 const retryableConflicts = new Set([
   "transaction_conflict",
-  "exclusive_conflict",
+  "serialization_conflict",
   "cascade_rejected",
 ]);
 
-/** Whether an exclusive transaction lost to a concurrent write and can be retried. */
-export function isExclusiveConflict(error: unknown) {
+/** Whether a serializable transaction lost to a concurrent write and can be retried. */
+export function isSerializationConflict(error: unknown) {
   return retryableConflicts.has(writeErrorCode(error) ?? "");
 }
 
