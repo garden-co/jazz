@@ -66,21 +66,36 @@ impl Session {
         }
     }
 
-    /// `session.<path>` as a value, or `None` when the session has none.
+    /// `session.<path>` as a value, or `None` when the session has none
+    /// (or holds an explicit null there).
     pub fn resolve(&self, path: &[String]) -> Option<Value> {
+        self.resolve_raw(path).and_then(unwrap_nullable)
+    }
+
+    /// `session.<path>` as held: an explicit null claim is
+    /// `Some(Nullable(None))`, a missing path `None`. Claim paths walk
+    /// nested claim objects by literal segments.
+    fn resolve_raw(&self, path: &[String]) -> Option<Value> {
         self.used.set(true);
-        let path: Vec<&str> = path.iter().map(String::as_str).collect();
-        let value = match path.as_slice() {
+        let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+        Some(match parts.as_slice() {
             ["user", "identity", "subject"] => Value::String(self.subject.clone()?),
             ["user", "identity", "issuer"] => Value::String(self.issuer.clone()?),
             ["user", "account"] => Value::Uuid(self.account?),
-            ["claims", name] => self
-                .claims
-                .get(&crate::query::provider_claim_key(name))?
-                .clone(),
+            ["claims", _, ..] => {
+                jazz_model::model::policy_claims::policy_claim_at_path(&self.claims, path)?
+            }
             _ => return None,
-        };
-        unwrap_nullable(value)
+        })
+    }
+
+    /// `session.<path> IS NULL`: an explicit null. A missing claim path is
+    /// not null (it is absent); a missing user part is.
+    pub fn is_null(&self, path: &[String]) -> bool {
+        match self.resolve_raw(path) {
+            Some(value) => unwrap_nullable(value).is_none(),
+            None => path.first().map(String::as_str) != Some("claims"),
+        }
     }
 
     pub fn claim(&self, key: &str) -> Option<Value> {
@@ -226,6 +241,9 @@ pub struct Ctx<'a> {
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
     pub history_origin: Option<[u8; 16]>,
+    /// Read the server's view on a replica: root rows the server stopped
+    /// listing for it (`_jazz_revoked`) are left out.
+    pub members_only: bool,
     next_alias: usize,
 }
 
@@ -300,8 +318,23 @@ impl<'a> Ctx<'a> {
             cut: None,
             preps: Vec::new(),
             history_origin: None,
+            members_only: false,
             next_alias: 0,
         }
+    }
+
+    pub fn with_members_only(mut self, members_only: bool) -> Self {
+        self.members_only = members_only;
+        self
+    }
+
+    /// The row at `alias` is one the server still lists for this replica.
+    fn listed(&mut self, table: &Table, alias: &str) -> String {
+        let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
+        format!(
+            "NOT EXISTS (SELECT 1 FROM _jazz_revoked AS r WHERE r.t = {stored} \
+             AND r.id = {alias}.id AND r.k = {alias}._b)"
+        )
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -466,6 +499,7 @@ impl<'a> Ctx<'a> {
         query: &Query,
         aggregate: &crate::query::AggregateQuery,
         table: &Table,
+        from: &str,
         alias: &str,
         wheres: &[String],
     ) -> Result<Compiled, Error> {
@@ -524,10 +558,23 @@ impl<'a> Ctx<'a> {
                         ValueType::U64,
                     ),
                 },
-                F::Avg => (
-                    format!("AVG({})", input(&output.column)?.0),
-                    ValueType::Nullable(Box::new(ValueType::F64)),
-                ),
+                F::Avg => {
+                    // SQLite's AVG divides a sum, which overflows to
+                    // infinity for large finite inputs; then the inputs,
+                    // scaled exactly by a power of two, average instead.
+                    let column = input(&output.column)?.0;
+                    (
+                        format!(
+                            "(CASE WHEN COUNT({column}) = 0 THEN NULL \
+                             WHEN abs(AVG({column})) <= {max:e} THEN AVG({column}) \
+                             ELSE AVG({column} * {down:e}) * {up:e} END)",
+                            max = f64::MAX,
+                            down = 2f64.powi(-128),
+                            up = 2f64.powi(128),
+                        ),
+                        ValueType::Nullable(Box::new(ValueType::F64)),
+                    )
+                }
                 F::Sum | F::Min | F::Max => {
                     let (column, ty) = input(&output.column)?;
                     let name = match output.function {
@@ -577,10 +624,9 @@ impl<'a> Ctx<'a> {
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let sql = format!(
-            "SELECT {key}, 0, 0, {} FROM {} AS {alias} WHERE {}{group_by}{order} \
+            "SELECT {key}, 0, 0, {} FROM {from} AS {alias} WHERE {}{group_by}{order} \
              LIMIT {limit} OFFSET {offset}",
             outputs.join(", "),
-            self.source(table)?,
             and(wheres),
         );
         Ok(Compiled {
@@ -641,6 +687,9 @@ impl<'a> Ctx<'a> {
         if !include_deleted {
             wheres.push(format!("{alias}._del = 0"));
         }
+        if self.members_only {
+            wheres.push(self.listed(table, alias));
+        }
         for filter in &query.filters {
             wheres.push(self.predicate(filter, table, alias)?);
         }
@@ -671,52 +720,8 @@ impl<'a> Ctx<'a> {
         }
         for array in &query.array_subqueries {
             self.validate_array(array)?;
-            if array.requirement == ArraySubqueryRequirement::Optional {
-                continue;
-            }
-            let child = self.table(&array.table)?;
-            let c = self.alias("c");
-            let outer = column_sql(table, alias, &array.outer_column)?;
-            let mut conds = vec![format!("{c}._del = 0")];
-            for filter in &array.filters {
-                conds.push(self.predicate(filter, child, &c)?);
-            }
-            let source = self.source(child)?;
-            if is_array(table, &array.outer_column) {
-                // A forward array relation: one child per element, in the
-                // array's order and with its duplicates.
-                let r = self.alias("r");
-                conds.push(format!(
-                    "{} = {}",
-                    column_sql(child, &c, &array.inner_column)?,
-                    array_element_id(&r)
-                ));
-                let matched = format!(
-                    "SELECT 1 FROM json_each({outer}) AS {r} JOIN {source} AS {c} ON {}",
-                    conds.join(" AND ")
-                );
-                wheres.push(match array.requirement {
-                    ArraySubqueryRequirement::AtLeastOne => format!("EXISTS ({matched})"),
-                    _ => {
-                        format!("((SELECT count(*) FROM ({matched})) = json_array_length({outer}))")
-                    }
-                });
-                continue;
-            }
-            if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
-                return Err(unsupported(
-                    "cardinality-matching requirements on scalar relations on SQLite",
-                ));
-            }
-            conds.push(format!(
-                "{} = {outer}",
-                column_sql(child, &c, &array.inner_column)?
-            ));
-            wheres.push(format!(
-                "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
-                conds.join(" AND ")
-            ));
         }
+        self.array_requirements(table, alias, &query.array_subqueries, &mut wheres)?;
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(table, alias, session)?);
         }
@@ -726,7 +731,8 @@ impl<'a> Ctx<'a> {
                     "aggregates with selections or array subqueries on SQLite",
                 ));
             }
-            return self.compile_aggregate(query, aggregate, table, alias, &wheres);
+            let from = self.source(table)?;
+            return self.compile_aggregate(query, aggregate, table, &from, alias, &wheres);
         }
         let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
         let columns = projection
@@ -958,6 +964,11 @@ impl<'a> Ctx<'a> {
                 wheres.push(self.read_policy(&source.table, &source.alias, session)?);
             }
         }
+        if self.members_only {
+            for source in sources.iter().filter(|source| !source.history) {
+                wheres.push(self.listed(&source.table, &source.alias));
+            }
+        }
         let version = |source: &FlatSource| match source.history {
             true => format!(
                 "{}.{}",
@@ -1045,6 +1056,63 @@ impl<'a> Ctx<'a> {
         ))
     }
 
+    /// The conditions a row of `table` (as `alias`) meets for its required
+    /// array relations: a parent whose required relation is missing rows is
+    /// left out, at the root or nested.
+    fn array_requirements(
+        &mut self,
+        table: &'a Table,
+        alias: &str,
+        arrays: &[ArraySubquery],
+        wheres: &mut Vec<String>,
+    ) -> Result<(), Error> {
+        for array in arrays {
+            if array.requirement == ArraySubqueryRequirement::Optional {
+                continue;
+            }
+            let child = self.table(&array.table)?;
+            let c = self.alias("c");
+            let outer = column_sql(table, alias, &array.outer_column)?;
+            let mut conds = vec![format!("{c}._del = 0")];
+            for filter in &array.filters {
+                conds.push(self.predicate(filter, child, &c)?);
+            }
+            let source = self.source(child)?;
+            if is_array(table, &array.outer_column) {
+                // A forward array relation: one child per element, in the
+                // array's order and with its duplicates.
+                let r = self.alias("r");
+                conds.push(format!(
+                    "{} = {}",
+                    column_sql(child, &c, &array.inner_column)?,
+                    array_element_id(&r)
+                ));
+                let matched = format!(
+                    "SELECT 1 FROM json_each({outer}) AS {r} JOIN {source} AS {c} ON {}",
+                    conds.join(" AND ")
+                );
+                wheres.push(match array.requirement {
+                    ArraySubqueryRequirement::AtLeastOne => format!("EXISTS ({matched})"),
+                    _ => {
+                        format!("((SELECT count(*) FROM ({matched})) = json_array_length({outer}))")
+                    }
+                });
+                continue;
+            }
+            if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
+                return Err(unsupported(
+                    "cardinality-matching requirements on scalar relations on SQLite",
+                ));
+            }
+            conds.push(correlate(child, &c, &array.inner_column, &outer)?);
+            wheres.push(format!(
+                "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
+                conds.join(" AND ")
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_array(&mut self, array: &ArraySubquery) -> Result<(), Error> {
         let child = self.table(&array.table)?;
         column_sql(child, "c", &array.inner_column)?;
@@ -1081,14 +1149,12 @@ impl<'a> Ctx<'a> {
         };
         let mut wheres = vec![
             format!("{alias}._del = 0"),
-            format!(
-                "{} = {correlated}",
-                column_sql(child, alias, &array.inner_column)?
-            ),
+            correlate(child, alias, &array.inner_column, &correlated)?,
         ];
         for filter in &array.filters {
             wheres.push(self.predicate(filter, child, alias)?);
         }
+        self.array_requirements(child, alias, &array.nested_arrays, &mut wheres)?;
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(child, alias, session)?);
         }
@@ -1366,6 +1432,11 @@ impl<'a> Ctx<'a> {
             Predicate::Gt(l, r) => self.cmp2(CmpOp::Gt, l, r, table, alias)?,
             Predicate::Gte(l, r) => self.cmp2(CmpOp::Ge, l, r, table, alias)?,
             Predicate::In(left, options) => {
+                if let Operand::Column(column) = left {
+                    for option in options {
+                        check_candidate(table, column, option)?;
+                    }
+                }
                 let left = self.operand(left, table, alias)?;
                 let options = options
                     .iter()
@@ -1374,6 +1445,9 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             Predicate::Contains(l, r) => {
+                if let Operand::Column(column) = l {
+                    check_haystack(table, column)?;
+                }
                 let array = matches!(l, Operand::Column(column) if is_array(table, column));
                 let l = self.operand(l, table, alias)?;
                 let r = self.operand(r, table, alias)?;
@@ -1574,7 +1648,7 @@ impl<'a> Ctx<'a> {
             PolicyExpr::IsNotNull { column } => {
                 format!("({} IS NOT NULL)", column_sql(table, alias, column)?)
             }
-            PolicyExpr::SessionIsNull { path } => bool_sql(session.resolve(path).is_none()),
+            PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
             PolicyExpr::SessionIsNotNull { path } => bool_sql(session.resolve(path).is_some()),
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
@@ -1617,8 +1691,26 @@ impl<'a> Ctx<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
-            PolicyExpr::SessionContains { .. } => {
-                return Err(unsupported("session-side CONTAINS policies on SQLite"));
+            // Both sides are known at compile time: an array claim holds the
+            // value, or a text claim contains it.
+            PolicyExpr::SessionContains { path, value } => {
+                let needle = public_value(value)?;
+                let same = |a: &Value, b: &Value| match (a, b) {
+                    (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
+                        u.to_string() == *s
+                    }
+                    (a, b) => a == b,
+                };
+                bool_sql(match session.resolve(path) {
+                    Some(Value::Array(items)) => items.iter().any(|item| {
+                        unwrap_nullable(item.clone()).is_some_and(|i| same(&i, &needle))
+                    }),
+                    Some(Value::String(text)) => match &needle {
+                        Value::String(part) => text.contains(part.as_str()),
+                        _ => false,
+                    },
+                    _ => false,
+                })
             }
             // Policy EXISTS reads its table as raw evidence: the dependency
             // table's own policy is not composed in (INV-RLS-21).
@@ -1635,7 +1727,12 @@ impl<'a> Ctx<'a> {
                     self.source(target)?
                 )
             }
-            PolicyExpr::ExistsRel { rel } => self.exists_rel(rel, table, alias, session)?,
+            // The relation's outer row is the row under check, also inside
+            // an EXISTS over another table (as `__jazz_outer_row` is).
+            PolicyExpr::ExistsRel { rel } => {
+                let (table, alias) = outer.unwrap_or((table, alias));
+                self.exists_rel(rel, table, alias, session)?
+            }
             PolicyExpr::Inherits {
                 operation,
                 via_column,
@@ -1682,10 +1779,11 @@ impl<'a> Ctx<'a> {
                         self.policy_expr(policy, source, &s, None, session, depth - 1)?
                     }
                 };
+                // An array reference grants when it lists the row's id.
                 format!(
-                    "EXISTS (SELECT 1 FROM {} AS {s} WHERE {} = {alias}.id AND {s}._del = 0 AND {inner})",
+                    "EXISTS (SELECT 1 FROM {} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
                     self.source(source)?,
-                    column_sql(source, &s, via_column)?
+                    correlate(source, &s, via_column, &format!("{alias}.id"))?
                 )
             }
         })
@@ -1796,7 +1894,20 @@ impl<'a> Ctx<'a> {
                     frontier: Some(format!("{g}.id")),
                     ..*scope
                 };
-                let step = self.relation(step, &step_scope)?;
+                let mut step = self.relation(step, &step_scope)?;
+                // A step reaches rows of the seed's table: when it projects
+                // no id, the reached row is the last such source (a hop
+                // joined after the edge it walks).
+                if step.id.is_none()
+                    && let Some(table) = seed.from.first().and_then(|src| src.table.as_ref())
+                    && let Some(reached) = step
+                        .from
+                        .iter()
+                        .rev()
+                        .find(|src| src.table.as_ref() == Some(table))
+                {
+                    step.id = Some(format!("{}.id", reached.alias));
+                }
                 let (max, guard) = match bound {
                     RecursionBound::MaxDepth(depth) => (*depth, false),
                     RecursionBound::Fixpoint => (FIXPOINT_GUARD, true),
@@ -2095,6 +2206,107 @@ fn array_element_id(element: &str) -> String {
     format!("unhex(replace({element}.value, '-', ''))")
 }
 
+/// What a value or column type is, for operand type checks: numbers of
+/// any width compare with each other, a UUID with its string spelling.
+#[derive(PartialEq, Debug)]
+enum Kind {
+    Number,
+    Text,
+    Bool,
+    Uuid,
+    Array,
+    Bytes,
+    Other,
+}
+
+fn type_kind(ty: &ValueType) -> Kind {
+    match ty {
+        ValueType::Nullable(inner) => type_kind(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64 => Kind::Number,
+        ValueType::String => Kind::Text,
+        ValueType::Bool => Kind::Bool,
+        ValueType::Uuid => Kind::Uuid,
+        ValueType::Array(_) => Kind::Array,
+        ValueType::Bytes => Kind::Bytes,
+        _ => Kind::Other,
+    }
+}
+
+fn value_kind(value: &Value) -> Option<Kind> {
+    Some(match value {
+        Value::Nullable(None) => return None,
+        Value::Nullable(Some(inner)) => return value_kind(inner),
+        Value::U8(_)
+        | Value::U16(_)
+        | Value::U32(_)
+        | Value::U64(_)
+        | Value::U48(_)
+        | Value::I32(_)
+        | Value::I64(_)
+        | Value::F64(_) => Kind::Number,
+        Value::String(_) => Kind::Text,
+        Value::Bool(_) => Kind::Bool,
+        Value::Uuid(_) => Kind::Uuid,
+        Value::Array(_) => Kind::Array,
+        Value::Bytes(_) => Kind::Bytes,
+        _ => Kind::Other,
+    })
+}
+
+fn value_type_name(value: &Value) -> String {
+    match value {
+        Value::Nullable(Some(inner)) => value_type_name(inner),
+        value => format!("{value:?}")
+            .split(['(', ' ', '{'])
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    }
+}
+
+/// An `in` literal must be a whole value of the column's type: a scalar
+/// is no candidate for an array column (that is `contains`).
+fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), Error> {
+    let (Operand::Literal(value), Some(declared)) = (option, table.column(column)) else {
+        return Ok(());
+    };
+    let (want, Some(got)) = (type_kind(&declared.ty), value_kind(value)) else {
+        return Ok(());
+    };
+    let compatible = want == got
+        || want == Kind::Other
+        || got == Kind::Other
+        || (want == Kind::Uuid && got == Kind::Text);
+    if compatible {
+        return Ok(());
+    }
+    Err(query_error(format!(
+        "in candidate for column {column} has type {}, but the column has type {:?}",
+        value_type_name(value),
+        declared.ty
+    )))
+}
+
+/// `contains` searches text, bytes or an array.
+fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
+    let Some(declared) = table.column(column) else {
+        return Ok(());
+    };
+    match type_kind(&declared.ty) {
+        Kind::Text | Kind::Bytes | Kind::Array | Kind::Other => Ok(()),
+        _ => Err(query_error(format!(
+            "operand type mismatch: contains on {column}, which has type {:?}",
+            declared.ty
+        ))),
+    }
+}
+
 /// Whether `column` is a UUID column (nullable or not).
 fn is_uuid(table: &Table, column: &str) -> bool {
     table.column(column).is_some_and(|column| match &column.ty {
@@ -2104,7 +2316,22 @@ fn is_uuid(table: &Table, column: &str) -> bool {
 }
 
 /// Whether `column` is an array column (nullable or not).
-fn is_array(table: &Table, column: &str) -> bool {
+/// A child row of `table` at `alias` correlates with `value` by `column`:
+/// equal to it, or for an array column (a reverse array relation),
+/// holding it.
+fn correlate(table: &Table, alias: &str, column: &str, value: &str) -> Result<String, Error> {
+    let sql = column_sql(table, alias, column)?;
+    if is_array(table, column) {
+        let e = format!("{alias}_e");
+        return Ok(format!(
+            "EXISTS (SELECT 1 FROM json_each({sql}) AS {e} WHERE {} = {value})",
+            array_element_id(&e)
+        ));
+    }
+    Ok(format!("{sql} = {value}"))
+}
+
+pub(crate) fn is_array(table: &Table, column: &str) -> bool {
     let Some(column) = table.column(column) else {
         return false;
     };
@@ -2723,12 +2950,9 @@ impl Ctx<'_> {
                 }
             }
         }
-        let tie = match order.last().map(|key| key.direction) {
-            Some(OrderDirection::Desc) => "DESC",
-            _ => "ASC",
-        };
-        keys.push(format!("{alias}.id {tie}"));
-        ranked.push(format!("{alias}.id {tie}"));
+        // Ties break by ascending row id, whatever the keys' directions.
+        keys.push(format!("{alias}.id ASC"));
+        ranked.push(format!("{alias}.id ASC"));
         Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
     }
 }

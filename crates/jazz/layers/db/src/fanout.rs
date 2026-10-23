@@ -32,8 +32,12 @@ struct GroupKey {
     renames: String,
     sql: String,
     params: String,
-    /// Set only when the SQL depends on the identity's session.
+    /// Set only when the SQL depends on the identity's session (array
+    /// relations, read as the identity, always may).
     identity: Option<String>,
+    /// The array relations nested in each row: queries that differ only
+    /// in them compile to the same root SQL.
+    relations: String,
 }
 
 struct Member {
@@ -83,6 +87,16 @@ pub(super) struct Group {
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    /// Whether the last run waits on large-value chunks still to arrive.
+    pub(super) fn awaiting(&self) -> bool {
+        self.awaiting
+    }
+
+    /// The root table's stored name.
+    pub(super) fn root(&self) -> &str {
+        &self.root
+    }
+
     /// The query this group answers.
     pub(super) fn query(&self) -> &Query {
         &self.prepared.query
@@ -232,8 +246,9 @@ impl Fanout {
                 {
                     member.told.set(true);
                     let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
-                    if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+                    if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                         *settled = true;
+                        *tier = member.settled.tier();
                     }
                     queue.borrow_mut().push_back(event);
                 }
@@ -256,7 +271,9 @@ impl Inner {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
-            identity: session_used.then(|| format!("{identity:?}")),
+            identity: (session_used || !prepared.query.array_subqueries.is_empty())
+                .then(|| format!("{identity:?}")),
+            relations: format!("{:?}", prepared.query.array_subqueries),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -266,10 +283,15 @@ impl Inner {
             settled: settled.clone(),
             told: std::cell::Cell::new(now),
         };
+        let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
             let mut event = opening(rows);
-            if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+            if let SubscriptionEvent::Delta {
+                settled, tier: t, ..
+            } = &mut event
+            {
                 *settled = now;
+                *t = tier;
             }
             event
         };
@@ -390,6 +412,7 @@ impl Inner {
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
+            .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -649,6 +672,15 @@ impl Inner {
             .collect();
         for (gid, group) in groups {
             let mut group = group.borrow_mut();
+            // A schema the current one governs (a sync session's) takes the
+            // policies of whichever schema is current now.
+            if reset
+                && let Some(pinned) = &group.prepared.schema
+                && pinned.policies_from.is_some()
+                && let Some(governed) = self.governed(pinned.jazz.version_id())
+            {
+                group.prepared.schema = Some(governed);
+            }
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
             let watches = self
@@ -917,13 +949,7 @@ impl Inner {
         projected: bool,
         rows: &[CurrentRow],
     ) -> Option<Result<Vec<SortKey>, Error>> {
-        // Same tie-break as the compiled ORDER BY: id in the last key's
-        // direction.
-        let tie_desc = matches!(
-            order.last().map(|by| by.direction),
-            Some(crate::query::OrderDirection::Desc)
-        );
-        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
+        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), false);
         if projected {
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
@@ -1178,8 +1204,9 @@ impl Group {
         for member in &self.members {
             if let Some(queue) = member.queue.upgrade() {
                 let mut event = event.clone();
-                if let SubscriptionEvent::Delta { settled, .. } = &mut event {
+                if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
                     *settled = member.settled.get();
+                    *tier = member.settled.tier();
                     member.told.set(*settled);
                 }
                 queue.borrow_mut().push_back(event);
@@ -1205,6 +1232,7 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()
+        && !read.members_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
 }
@@ -1282,6 +1310,13 @@ fn row_key(row: &CurrentRow) -> RowKey {
 }
 
 /// The keyed diff of two results, or `None` when nothing changed.
+/// A row with the same cells at a newer version (a same-value write: its
+/// metadata moved). A pending local version settling as the server's is
+/// the same write, not a new one.
+fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
+    prior.seq != row.seq && !(prior.seq >= crate::db::LOCAL_BASE && row.seq < crate::db::LOCAL_BASE)
+}
+
 fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
     let old: HashMap<RowKey, (usize, &CurrentRow)> = before
         .iter()
@@ -1302,6 +1337,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
             Some((previous, prior))
                 if prior.cells != row.cells
                     || prior.deleted != row.deleted
+                    || new_version(prior, row)
                     || moved.contains(&row_key(row)) =>
             {
                 updated.push(SubscriptionOutputRow {

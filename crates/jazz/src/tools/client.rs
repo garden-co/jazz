@@ -123,6 +123,8 @@ struct State {
     /// upstream starts it with its first subscription; until then its
     /// calls tick inline, so it needs no `LocalSet`.
     driven: bool,
+    /// Failed upstream connect attempts so far, and the last one's error.
+    connect_failures: (u64, Option<String>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -229,7 +231,14 @@ impl Shared {
                         removed,
                         settled,
                         ..
-                    } => match forwarder.delta(&self.schema, reset, added, updated, removed) {
+                    } => match forwarder.delta(
+                        &self.schema,
+                        &self.db,
+                        reset,
+                        added,
+                        updated,
+                        removed,
+                    ) {
                         // Not yet settled at the tier the subscription asked for.
                         Ok(delta) => SubscriptionStreamItem::Delta(OrderedRowDelta {
                             pending: !settled || forwarder.unsettleable,
@@ -261,6 +270,7 @@ impl Forwarder {
     fn delta(
         &mut self,
         schema: &Schema,
+        db: &Db,
         reset: bool,
         added_rows: Vec<SubscriptionOutputRow>,
         updated_rows: Vec<SubscriptionOutputRow>,
@@ -269,6 +279,7 @@ impl Forwarder {
         let decoder = Decoder {
             schema,
             query: &self.query,
+            db: Some(db),
         };
         let mut delta = OrderedRowDelta::default();
         if reset {
@@ -303,7 +314,13 @@ impl Forwarder {
                     && held.table() == row.table()
                     && held.joined_rows() == row.joined_rows()
             });
-            let changed = held.is_none_or(|at| self.rows[at].row != row.row);
+            // A row that only moved, or got a new version with the same
+            // shown cells, carries no payload: they are what it was
+            // delivered with.
+            let changed = held.is_none_or(|at| {
+                let before = &self.rows[at].row;
+                before.is_deleted() != row.row.is_deleted() || !before.cells().eq(row.row.cells())
+            });
             if let Some(at) = held {
                 self.rows.remove(at);
             }
@@ -395,6 +412,11 @@ async fn keep_upstream(
                         tracing::debug!(%error, "jazz client upstream connect failed");
                         if let Some(shared) = shared.upgrade() {
                             shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
+                            let mut state = shared.state();
+                            let failures = state.connect_failures.0 + 1;
+                            state.connect_failures = (failures, Some(error.to_string()));
+                            drop(state);
+                            shared.tick_soon();
                         }
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(RECONNECT_MAX_DELAY);
@@ -875,17 +897,35 @@ impl JazzClient {
             let prepared = self.prepare(&read)?;
             let session = self.session_identity()?;
             let db = self.db()?;
-            crate::db::block_on(async {
-                match session {
-                    Some(author) => db.all_for_identity(&prepared, opts, author).await,
-                    None => db.all(&prepared, opts).await,
-                }
-            })
-            .map_err(|error| JazzError::Query(error.to_string()))?
+            let read_local = || {
+                crate::db::block_on(async {
+                    let roots = match &session {
+                        Some(author) => {
+                            db.all_for_identity(&prepared, opts.clone(), author.clone())
+                                .await
+                        }
+                        None => db.all(&prepared, opts.clone()).await,
+                    }?;
+                    // Array relations nest in their parents' cells, as a
+                    // subscription's rows carry them.
+                    db.nest_relations(&prepared, roots)
+                })
+            };
+            // A row whose large values are still being fetched answers once
+            // their chunks arrive, while the upstream that will send them is
+            // connected.
+            self.shared
+                .until(|| match read_local() {
+                    Err(error) if error.is_missing_chunks() && db.awaiting_chunks() => None,
+                    result => Some(result),
+                })
+                .await?
+                .map_err(|error| JazzError::Query(error.to_string()))?
         };
         Decoder {
             schema: &self.shared.schema,
             query: &query,
+            db: None,
         }
         .results(&rows)
     }
@@ -1397,13 +1437,30 @@ impl JazzClient {
     /// Let the keeper open a fresh link for the preserved client state and
     /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        if !self.shared.upstream_paused.send_replace(false) {
+        let (failed, attached) = {
+            let state = self.shared.state.borrow();
+            (state.connect_failures.0, state.upstream.is_some())
+        };
+        // Neither detached nor reconnecting: nothing to reattach.
+        if !self.shared.upstream_paused.send_replace(false) && attached {
             return Ok(false);
         }
+        // The first attempt either attaches or fails; the keeper retries
+        // after a failure on its own.
         self.shared
-            .until(|| self.shared.state.borrow().upstream.is_some().then_some(()))
-            .await?;
-        Ok(true)
+            .until(|| {
+                let state = self.shared.state.borrow();
+                if state.upstream.is_some() {
+                    return Some(Ok(true));
+                }
+                match &state.connect_failures {
+                    (n, error) if *n > failed => Some(Err(JazzError::Connection(
+                        error.clone().unwrap_or_default(),
+                    ))),
+                    _ => None,
+                }
+            })
+            .await?
     }
 }
 
@@ -1769,6 +1826,9 @@ fn core_to_public_value_for_column_type(
 struct Decoder<'a> {
     schema: &'a Schema,
     query: &'a Query,
+    /// Where a delivered row's provenance is read when the query does not
+    /// project it.
+    db: Option<&'a Db>,
 }
 
 impl Decoder<'_> {
@@ -1900,6 +1960,31 @@ impl Decoder<'_> {
             .collect()
     }
 
+    /// A delivered row's provenance: its projected magic columns, or the
+    /// stored row's stamps.
+    fn provenance(&self, row: &CurrentRow) -> Result<crate::model::metadata::RowProvenance> {
+        let projected = provenance(row);
+        let Some(db) = self.db.filter(|_| projected.created_by == "jazz:unknown") else {
+            return Ok(projected);
+        };
+        Ok(
+            match db
+                .row_provenance(row.table(), row.row_uuid())
+                .map_err(|error| JazzError::Query(error.to_string()))?
+            {
+                Some((created_at, created_by, updated_at, updated_by)) => {
+                    crate::model::metadata::RowProvenance {
+                        created_by,
+                        created_at,
+                        updated_by,
+                        updated_at,
+                    }
+                }
+                None => projected,
+            },
+        )
+    }
+
     fn subscription_row(&self, row: &SubscriptionOutputRow) -> Result<Row> {
         let record = crate::binding_codec::row_record(&row.row)
             .map_err(|error| JazzError::Query(format!("encode subscription row: {error}")))?;
@@ -1907,7 +1992,7 @@ impl Decoder<'_> {
             self.key(&row.row)?,
             record.raw().to_vec(),
             TransactionId([0; 16]),
-            provenance(&row.row),
+            self.provenance(&row.row)?,
         );
         #[cfg(feature = "testing")]
         let public = public.with_fields(self.values(&row.row)?);

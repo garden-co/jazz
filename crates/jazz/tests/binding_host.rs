@@ -9,7 +9,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ReadOpts, ReadTier, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
@@ -225,6 +225,96 @@ fn writes_transactions_and_attribution_go_through_one_binding() {
     assert!(
         argument(db.begin_transaction(tx, "optimistic", None, None))
             .contains("unknown transaction kind")
+    );
+}
+
+#[test]
+fn a_staged_write_refused_for_its_rows_state_rejects_the_commit() {
+    let db = open(0xa2);
+    let row = RowUuid::from_bytes([0x42; 16]);
+    for kind in ["mergeable", "serializable"] {
+        let tx = &OpenTransactionId::new().to_string();
+        db.begin_transaction(tx, kind, None, None).unwrap();
+        // Patching nothing is fine for a stored row but cannot create one:
+        // the call stages, and the commit carries the refusal.
+        db.upsert_in_transaction(tx, "notes", &row.to_bytes(), &empty_cells(), &none())
+            .unwrap();
+        db.insert_in_transaction(tx, "notes", &title("kept out"), &none())
+            .unwrap();
+        let commit = db.commit_transaction(tx, Some(kind)).unwrap();
+        let refusal = commit.rejected.expect("the commit is rejected");
+        assert!(refusal.is_apply_time_rejection(), "{refusal:?}");
+        assert!(refusal.message.contains("missing required field `title`"));
+        assert!(titles(&db).is_empty(), "no staged write applies");
+        assert!(
+            db.commit_transaction(tx, Some(kind)).is_err(),
+            "the transaction is closed"
+        );
+    }
+
+    // A rolled back transaction forgets its refusal.
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    db.upsert_in_transaction(tx, "notes", &row.to_bytes(), &empty_cells(), &none())
+        .unwrap();
+    db.rollback_transaction(tx).unwrap();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    db.insert_in_transaction(tx, "notes", &title("after"), &none())
+        .unwrap();
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db), ["after"]);
+}
+
+#[test]
+fn restoring_a_live_row_is_rejected_through_its_receipt() {
+    let db = open(0xa3);
+    let live = db.insert("notes", &title("live"), &none()).unwrap();
+    let receipt = db
+        .restore("notes", &live.row_id.to_bytes(), &title("again"), &none())
+        .unwrap();
+    let refusal = receipt.rejected.expect("the restore is rejected");
+    assert!(refusal.is_apply_time_rejection(), "{refusal:?}");
+    assert_eq!(
+        refusal.message,
+        format!("row not deleted: {}", live.row_id.0)
+    );
+    assert_eq!(titles(&db), ["live"]);
+}
+
+#[test]
+fn a_row_changed_after_an_exclusive_read_rejects_the_commit() {
+    let db = open(0xa4);
+    let read = db.insert("notes", &title("read"), &none()).unwrap();
+    let other = db.insert("notes", &title("other"), &none()).unwrap();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "exclusive", None, None).unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes").filter(jazz::query::eq(
+        jazz::query::col("id"),
+        jazz::query::lit(Value::Uuid(read.row_id.0)),
+    )))
+    .unwrap();
+    block_on(db.all(query, &none(), Some(tx), None, None).unwrap()).unwrap();
+    db.update("notes", &read.row_id.to_bytes(), &title("changed"), &none())
+        .unwrap();
+    db.update_in_transaction(
+        tx,
+        "notes",
+        &other.row_id.to_bytes(),
+        &title("staged"),
+        &none(),
+    )
+    .unwrap();
+    let commit = db.commit_transaction(tx, Some("exclusive")).unwrap();
+    let conflict = commit.rejected.expect("the commit is rejected");
+    assert_eq!(
+        conflict.code,
+        ErrorCode::TransactionConflict,
+        "{conflict:?}"
+    );
+    assert_eq!(
+        titles(&db),
+        ["changed", "other"],
+        "the staged write is not applied"
     );
 }
 

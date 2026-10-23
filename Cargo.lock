@@ -2102,6 +2102,7 @@ dependencies = [
  "jazz-native-transport",
  "jazz-server",
  "jsonwebtoken",
+ "postcard",
  "reqwest",
  "serde",
  "serde_json",

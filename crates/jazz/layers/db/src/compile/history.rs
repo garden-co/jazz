@@ -39,8 +39,23 @@ impl Ctx<'_> {
         {
             return Err(unsupported("joins or relationships in history queries"));
         }
-        if query.aggregate.is_some() {
-            return Err(unsupported("aggregates over history"));
+        if let Some(aggregate) = &query.aggregate {
+            let metadata = |column: &str| {
+                HistoryMetadataColumn::ALL
+                    .iter()
+                    .any(|m| m.name() == column)
+            };
+            let reads_metadata = aggregate.group_by.as_deref().is_some_and(metadata)
+                || aggregate
+                    .aggregates
+                    .iter()
+                    .any(|output| output.column.as_deref().is_some_and(metadata));
+            if reads_metadata {
+                return Err(query_error(
+                    "unsupported relation query: Reading aggregates over history metadata is \
+                     not supported in history queries yet",
+                ));
+            }
         }
         let Some(bound) = query.filters.iter().find_map(bounding_id) else {
             return Err(unsupported(
@@ -71,6 +86,10 @@ impl Ctx<'_> {
         let mut wheres = Vec::new();
         for filter in &query.filters {
             wheres.push(self.predicate(filter, versions, alias)?);
+        }
+        if let Some(aggregate) = &query.aggregate {
+            // Every listed version contributes, current or superseded.
+            return self.compile_aggregate(query, aggregate, versions, &source, alias, &wheres);
         }
         let (order, ranked_order) = self.order_sql(versions, alias, &query.order_by)?;
         // Versions of one row share its id: their seq orders them.
@@ -214,6 +233,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty,
             default: None,
             json: false,
+            merge: Default::default(),
         });
     }
     // Every version reads its current row's deletion (see
@@ -225,6 +245,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            merge: Default::default(),
         });
     }
     versions

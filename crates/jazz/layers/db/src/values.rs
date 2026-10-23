@@ -311,6 +311,8 @@ pub struct Column {
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
+    /// How concurrent writes to the column merge at the authority.
+    pub merge: crate::schema::MergeStrategy,
 }
 
 impl Column {
@@ -449,6 +451,7 @@ fn stored_provenance_columns() -> Vec<Column> {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            merge: Default::default(),
         })
         .collect()
 }
@@ -477,6 +480,7 @@ fn provenance_columns() -> Vec<Column> {
             })),
             default: None,
             json: false,
+            merge: Default::default(),
         })
         .collect()
 }
@@ -584,6 +588,11 @@ impl Schema {
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: format!("{:?}", column.large_value_kind) == "Json",
+                    merge: table
+                        .merge_strategies
+                        .get(&column.name)
+                        .copied()
+                        .unwrap_or_default(),
                 })
                 .collect();
             let mut indexes: Vec<Vec<String>> = table
@@ -774,6 +783,7 @@ impl Table {
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
                     json: false,
+                    merge: Default::default(),
                 })
                 .collect(),
             references: BTreeMap::new(),
@@ -889,7 +899,48 @@ pub(crate) fn branch_key(values: &BTreeMap<String, crate::protocol::BranchColumn
     key
 }
 
+/// The branch columns of a branch key, as [`branch_key`] encoded them.
+fn branch_key_values(key: &[u8]) -> BTreeMap<String, crate::protocol::BranchColumnValue> {
+    let mut values = BTreeMap::new();
+    let mut rest = key;
+    let take = |rest: &mut &[u8]| -> Option<Vec<u8>> {
+        let len = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+        let bytes = rest.get(4..4 + len)?.to_vec();
+        *rest = &rest[4 + len..];
+        Some(bytes)
+    };
+    while !rest.is_empty() {
+        let (Some(name), Some(value)) = (take(&mut rest), take(&mut rest)) else {
+            break;
+        };
+        values.insert(
+            String::from_utf8_lossy(&name).into_owned(),
+            crate::protocol::BranchColumnValue(value),
+        );
+    }
+    values
+}
+
 impl Table {
+    /// The branch key a row under `key` would move to if `cells` were
+    /// written over it: its branch columns, those in `cells` replaced.
+    pub(crate) fn branch_key_after(&self, key: &[u8], cells: &BTreeMap<String, Value>) -> Vec<u8> {
+        let mut values = branch_key_values(key);
+        for column in &self.branch_by {
+            if let Some(value) = cells.get(column) {
+                let mut value = value.clone();
+                while let Value::Nullable(Some(inner)) = value {
+                    value = *inner;
+                }
+                values.insert(
+                    column.clone(),
+                    crate::protocol::BranchColumnValue::from(value),
+                );
+            }
+        }
+        branch_key(&values)
+    }
+
     /// The branch key a row with these cells lives under.
     pub(crate) fn row_branch_key(&self, cells: &BTreeMap<String, Value>) -> Vec<u8> {
         let mut values = BTreeMap::new();
@@ -1095,7 +1146,9 @@ impl ResultNode {
 
 /// One relation's children as records under a shared descriptor. A field
 /// is nullable when its declared type is, or when any child left it
-/// unwritten.
+/// unwritten. A nested relation's type is its siblings' widest: an empty
+/// relation names no fields, and a child's own unwritten cells widen only
+/// its records, so each child's value is re-encoded under the shared type.
 fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Error> {
     let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
     if let Some(first) = children.first() {
@@ -1103,10 +1156,26 @@ fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Err
             let unwritten = children
                 .iter()
                 .any(|child| child.cells.get(index).is_some_and(|(_, v)| v.is_none()));
+            // A nested relation's records: the type its non-empty values share.
+            let mut shared: Option<ValueType> = None;
+            for child in children
+                .iter()
+                .filter(|child| !relation_is_empty(child, index))
+            {
+                if let (Some((_, Some(Value::Array(_)))), Some(own)) =
+                    (child.cells.get(index), child.types.get(index))
+                {
+                    shared = Some(match shared {
+                        None => own.clone(),
+                        Some(ty) => widen(&ty, own)?,
+                    });
+                }
+            }
+            let ty = shared.unwrap_or_else(|| ty.clone());
             let ty = match ty {
-                ValueType::Nullable(_) => ty.clone(),
-                _ if unwritten => ValueType::Nullable(Box::new(ty.clone())),
-                _ => ty.clone(),
+                ValueType::Nullable(_) => ty,
+                _ if unwritten => ValueType::Nullable(Box::new(ty)),
+                _ => ty,
             };
             fields.push((name.to_owned(), ty));
         }
@@ -1122,12 +1191,9 @@ fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Err
         }
         let mut record = vec![Value::Uuid(child.id.0)];
         for ((_, value), (_, ty)) in child.cells.iter().zip(&fields[1..]) {
-            record.push(match (value, ty) {
-                (None, _) => Value::Nullable(None),
-                (Some(value), ValueType::Nullable(_)) if !matches!(value, Value::Nullable(_)) => {
-                    Value::Nullable(Some(Box::new(value.clone())))
-                }
-                (Some(value), _) => value.clone(),
+            record.push(match value {
+                None => Value::Nullable(None),
+                Some(value) => coerce(value, ty)?,
             });
         }
         let raw = descriptor
@@ -1136,4 +1202,93 @@ fn child_records(children: &[CurrentRow]) -> Result<(ValueType, Vec<Value>), Err
         values.push(Value::Record(OwnedRecord::new(raw, descriptor)));
     }
     Ok((ValueType::Record(Box::new(descriptor)), values))
+}
+
+/// Whether a child's cell at `index` is an empty nested relation.
+fn relation_is_empty(child: &CurrentRow, index: usize) -> bool {
+    matches!(child.cells.get(index), Some((_, Some(Value::Array(items)))) if items.is_empty())
+}
+
+/// The narrowest type both relation types' values fit: nullable if either
+/// is, record fields widened pairwise.
+fn widen(a: &ValueType, b: &ValueType) -> Result<ValueType, Error> {
+    if a == b {
+        return Ok(a.clone());
+    }
+    Ok(match (a, b) {
+        (ValueType::Nullable(x), ValueType::Nullable(y)) => {
+            ValueType::Nullable(Box::new(widen(x, y)?))
+        }
+        (ValueType::Nullable(x), y) | (y, ValueType::Nullable(x)) => {
+            ValueType::Nullable(Box::new(widen(x, y)?))
+        }
+        (ValueType::Array(x), ValueType::Array(y)) => ValueType::Array(Box::new(widen(x, y)?)),
+        (ValueType::Record(x), ValueType::Record(y))
+            if x.fields().len() == y.fields().len()
+                && x.fields()
+                    .iter()
+                    .zip(y.fields())
+                    .all(|(f, g)| f.name == g.name) =>
+        {
+            let fields = x
+                .fields()
+                .iter()
+                .zip(y.fields())
+                .map(|(f, g)| {
+                    Ok((
+                        f.name.clone().unwrap_or_default(),
+                        widen(&f.value_type, &g.value_type)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            ValueType::Record(Box::new(RecordDescriptor::new(fields)))
+        }
+        // An empty relation's records name only their row id.
+        (ValueType::Record(x), other @ ValueType::Record(_))
+        | (other @ ValueType::Record(_), ValueType::Record(x))
+            if x.fields().len() == 1 =>
+        {
+            other.clone()
+        }
+        _ => {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation children with different projections",
+            ));
+        }
+    })
+}
+
+/// `value` re-encoded as `ty`, a type [`widen`] produced from its own.
+fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
+    Ok(match (value, ty) {
+        (Value::Nullable(None), _) => Value::Nullable(None),
+        (Value::Nullable(Some(inner)), ValueType::Nullable(t)) => {
+            Value::Nullable(Some(Box::new(coerce(inner, t)?)))
+        }
+        (value, ValueType::Nullable(t)) => Value::Nullable(Some(Box::new(coerce(value, t)?))),
+        (Value::Array(items), ValueType::Array(t)) => Value::Array(
+            items
+                .iter()
+                .map(|item| coerce(item, t))
+                .collect::<Result<_, _>>()?,
+        ),
+        (Value::Record(record), ValueType::Record(descriptor))
+            if record.descriptor() != descriptor.as_ref() =>
+        {
+            let values = record.to_values().map_err(|error| {
+                Error::new(ErrorCode::Query, format!("relation record: {error}"))
+            })?;
+            let values = values
+                .iter()
+                .zip(descriptor.fields())
+                .map(|(value, field)| coerce(value, &field.value_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            let raw = descriptor.create(&values).map_err(|error| {
+                Error::new(ErrorCode::Query, format!("relation record: {error}"))
+            })?;
+            Value::Record(OwnedRecord::new(raw, **descriptor))
+        }
+        (value, _) => value.clone(),
+    })
 }
