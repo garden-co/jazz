@@ -4580,6 +4580,17 @@ impl TxRef<'_> {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_as(prepared, include_deleted, None).await
+    }
+
+    /// As [`Self::all_prepared_with`], seeing only what `identity`'s read
+    /// policies let it see (`None`: everything).
+    pub async fn all_prepared_as(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
         // answers and the authority's validation decides).
@@ -4658,14 +4669,14 @@ impl TxRef<'_> {
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
             let roots = inner.run(
                 prepared,
-                None,
+                identity,
                 &ReadSpec {
                     include_deleted,
                     cut,
                     ..ReadSpec::default()
                 },
             )?;
-            inner.nest_relations(prepared, None, roots)
+            inner.nest_relations(prepared, identity, roots)
         })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)
