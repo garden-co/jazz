@@ -311,7 +311,6 @@ pub(crate) async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) 
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
-        storage_factory: None,
     };
 
     let client = JazzClient::connect(context)

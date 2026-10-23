@@ -4,12 +4,12 @@
 
 jazz separates the decision to accept a write from the question of how widely
 that write has propagated. A transaction is either an eventually consistent
-write (`mergeable`) or a serializable write (`exclusive`). Its state is tracked
+write (`mergeable`) or a serializable write (`serializable`). Its state is tracked
 on two independent axes: **fate**, the authority's verdict on the transaction,
 and **durability tier**, the extent to which the transaction has settled.
 
 This chapter defines that vocabulary, then specifies the lifecycle shared by
-both transaction kinds, the durability model, authority admission, exclusive
+both transaction kinds, the durability model, authority admission, serializable
 validation, and rejection handling. It builds on ch. 2 for identity and storage,
 and it supplies the transaction rules used by ch. 4 (which versions enter
 history) and ch. 8 (the wire protocol).
@@ -17,7 +17,7 @@ history) and ch. 8 (the wire protocol).
 Invariant digest:
 
 - `INV-TX-1`: A transaction MUST NOT expose `open` writes to ordinary reads or subscriptions before commit.
-- `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
+- `INV-TX-2`: Committing a serializable transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose `Transaction.n_total_writes` does not equal the delivered version count MUST be rejected by the fate authority as `RejectionReason::MalformedCommit(...)` and MUST NOT ingest version rows.
 - `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as `Error::ConflictingCommitUnit`.
 - `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
@@ -28,16 +28,16 @@ Invariant digest:
 - `INV-TX-10`: Applying a fate update MUST NOT move `global_time` backward and MUST update `durability` only monotonically upward.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; the accepted transaction, global-current maintenance, and core `committed_global_time` MUST become durable atomically before publication, and the fate MUST report `DurabilityTier::Global`.
 - `INV-TX-12`: Local durability MUST NOT imply upstream survival; committed local transactions that have not reached an upstream tier MAY be lost if local storage is destroyed.
-- `INV-TX-13`: An exclusive transaction MUST capture the highest authority-committed `GlobalTime` known to its node as `base_snapshot.global_base`. On a history-complete core this is also the complete local-history frontier; on a partial client it is a remote history coordinate, and cold reads MUST hydrate through the authority at that frozen snapshot.
-- `INV-TX-14`: Exclusive snapshot reads MUST remain stable after later commits and MUST record the read version (including deletion-register versions when deleted) or an absent read.
-- `INV-TX-15`: Reads inside an exclusive transaction MUST observe that transaction's own pending writes.
-- `INV-TX-16`: Exclusive authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
-- `INV-TX-17`: Exclusive authority validation MUST reject when an absent row read has become globally present.
-- `INV-TX-18`: Exclusive authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. An aggregate predicate read MUST carry the canonical `jazz.aggregate-read-result.v1` result it observed and no row proofs for the rows it consumed; the authority MUST re-run the aggregate as the transaction's permission subject and conflict iff the result's bytes differ, and MUST reject an aggregate read with a missing or non-canonical result, or a result on a non-aggregate read, as `MalformedCommit`. An exclusive aggregate read after the transaction's first write MUST fail with `UnsupportedExclusiveRead`, because the authority's re-run does not include the transaction's own writes. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
-- `INV-TX-19`: Exclusive predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
-- `INV-TX-20`: Exclusive write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
+- `INV-TX-13`: A serializable transaction MUST capture the highest authority-committed `GlobalTime` known to its node as `base_snapshot.global_base`. On a history-complete core this is also the complete local-history frontier; on a partial client it is a remote history coordinate, and cold reads MUST hydrate through the authority at that frozen snapshot.
+- `INV-TX-14`: Serializable snapshot reads MUST remain stable after later commits and MUST record the read version (including deletion-register versions when deleted) or an absent read.
+- `INV-TX-15`: Reads inside a serializable transaction MUST observe that transaction's own pending writes.
+- `INV-TX-16`: Serializable authority validation MUST reject when any recorded row read is no longer the globally current content/deletion read version.
+- `INV-TX-17`: Serializable authority validation MUST reject when an absent row read has become globally present.
+- `INV-TX-18`: Serializable authority validation MUST reject predicate phantoms against the rows the transaction proved it read: every row the predicate returns now, evaluated as the transaction's permission subject, MUST carry a current row proof in the commit, and a proved row the predicate returned at `base_snapshot.global_base` but no longer returns MUST conflict. An aggregate predicate read MUST carry the canonical `jazz.aggregate-read-result.v1` result it observed and no row proofs for the rows it consumed; the authority MUST re-run the aggregate as the transaction's permission subject and conflict iff the result's bytes differ, and MUST reject an aggregate read with a missing or non-canonical result, or a result on a non-aggregate read, as `MalformedCommit`. A serializable aggregate read after the transaction's first write MUST fail with `UnsupportedSerializableRead`, because the authority's re-run does not include the transaction's own writes. Every non-root source a query reads (joined, included or correlated table) MUST be recorded as a predicate read with a proof for each row the reader can see there: its narrowed read (the source under its own filters, restricted by a reverse join chain to rows correlating with parent rows that pass their own filters up to the root) when the source correlates back to the root through key equalities, otherwise its whole table; tables consulted only by read policies are not recorded.
+- `INV-TX-19`: Serializable predicate validation MUST be sensitive to `binding_id`/`binding_values` and MUST use the inline query shape without requiring prior shape registration.
+- `INV-TX-20`: Serializable write validation MUST be first-committer-wins: each written version's current global winner in that version's own content/deletion layer MUST equal the single recorded parent, or absence when no parent is recorded. Row and predicate read validation remains against the observed visible content/deletion state (`INV-TX-16/17/18`); a version parent is not that read precondition.
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
-- `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
+- `INV-TX-22`: Downstream incomplete serializable bundles MUST be stored but remain invisible for subscription views whose required serializable payload is incomplete; they MAY become visible for a maintained subscription view once that view's required serializable versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenTransactionId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `TransactionId`; only successful commit transitions `OpenTransactionId` to `TransactionId`.
 - `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and ahead-current cleanup MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or peer broadcast; reopen MUST either recover the entire unit or suppress it. Once persistence has completed, or a local publication has transferred to the node-owned ordered persistence queue, observer refresh failure MUST NOT be reported as commit failure.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
@@ -50,7 +50,7 @@ Transactions are named, classified, judged, and tracked for durability with the
 following terms:
 
 - `TxId { time: TxTime, node: NodeUuid }` (ch. 2) names a transaction.
-- `TxKind` is `Mergeable` or `Exclusive`.
+- `TxKind` is `Mergeable` or `Serializable` (the serializable kind keeps its internal name for now).
 - `Fate` is `Pending`, `Accepted`, or `Rejected(RejectionReason)`.
 - `DurabilityTier` is `None`, `Local`, or `Global` — separate from fate.
 - `OpenTransactionId` is a caller-generated UUIDv7 naming runtime-local mutable work. It
@@ -87,7 +87,7 @@ successful commit. A worker command queue therefore carries complete commands
 with the caller's `OpenTransactionId`; it does not allocate or translate a second
 worker-local handle.
 
-An empty exclusive batch is a valid atomic commit and therefore produces a
+An empty serializable batch is a valid atomic commit and therefore produces a
 `TransactionId`. An empty mergeable transaction has no committed unit in the mergeable
 history representation, so commit rejects it explicitly and leaves the
 `OpenTransactionId` open for rollback; callers must not receive a fabricated
@@ -97,8 +97,8 @@ The word "atomic" has two relevant meanings here, and the distinction matters.
 Upstream, the commit is atomic because it syncs as one idempotent message and the
 authority decides the unit as a whole. Downstream, visibility depends on the
 maintained subscription view. Rows from a mergeable transaction may surface
-independently. Rows from an exclusive transaction are view-atomic: a receiver may
-ingest a partial exclusive payload, but a subscription result may expose rows from
+independently. Rows from a serializable transaction are view-atomic: a receiver may
+ingest a partial serializable payload, but a subscription result may expose rows from
 that transaction only once the payload required for that specific view is
 complete. Other versions from the same transaction may arrive later, or never be
 visible to that view (`INV-TX-22`, ch. 8). In this chapter, "atomic sync unit"
@@ -221,9 +221,9 @@ reconciles concurrent heads, and records Global durability with a GlobalTime.
 Reconnecting and replaying the same commit returns its existing outcome when
 its immutable payload matches; local persistence does not bypass admission.
 
-### 3.5 Exclusive transactions
+### 3.5 Serializable transactions
 
-Exclusive transactions are the serializable write path. Each one evaluates
+Serializable transactions are the write path with serializable isolation. Each one evaluates
 against a fixed `Snapshot { owner, global_base, local_base, dots }`. On a
 history-complete core, `global_base` is the core's atomically committed global
 time (`INV-TX-13`). A partial client has no node-wide global possession
@@ -235,7 +235,7 @@ Together these values define the snapshot's _coverage_: the exact set of
 versions it can see. The full snapshot model is ch. 5.
 
 Serializable validation depends on knowing which reads influenced the result,
-so an exclusive transaction records the read set it relied on. A _shape_ is a
+so a serializable transaction records the read set it relied on. A _shape_ is a
 content-addressed query graph, and a _binding_ is its concrete parameter values
 (ch. 6); a `PredicateRead` records both so validation can re-run the exact query.
 While the transaction is open, a point read records either
@@ -244,13 +244,13 @@ While the transaction is open, a point read records either
 binding_id, binding_values }` carrying the inline shape. Snapshot reads stay
 stable after later commits and observe the transaction's own pending writes
 (`INV-TX-14`, `INV-TX-15`).
-An explicit-id `insert` is create-only in an exclusive transaction: it performs
+An explicit-id `insert` is create-only in a serializable transaction: it performs
 the same authoritative point read as `upsert` (recording the `RowRead` or
 `AbsentRead`) and rejects rather than replacing a visible, deleted, or
 already-staged target (ch. 13, `INV-API-36`).
 
-Commit closes the exclusive transaction and makes its writes syncable.
-`commit_exclusive` mints the `TxId`, stores the writes locally as
+Commit closes the serializable transaction and makes its writes syncable.
+`commit_serializable` mints the `TxId`, stores the writes locally as
 `Pending`/`Local`, and emits one commit unit. Until that point, the writes remain
 invisible outside the transaction (`INV-TX-2`).
 
@@ -283,7 +283,7 @@ established (ch. 13, `INV-API-28`).
 After prerequisites are present, the authority rejects units that violate
 clock-skew limits. Mergeable transactions carry no read set, version parents
 or causal dependency graph: a caller that needs "only if I observed X" uses
-an exclusive transaction and its read set (§3.7).
+a serializable transaction and its read set (§3.7).
 
 Core orders accepted writes by the seq it assigns, not by the writer's clock,
 and it does not reject a write because the writer's clock is behind: each
@@ -292,22 +292,22 @@ accepted write applies over what Core accepted before it (`INV-TX-6`, ch. 4
 history can tell whether the write was made over the row's latest accepted
 image. No clock takes part in a merge. A unit whose `physical_ms` is more than
 `SKEW_TOLERANCE_MS` (~30 seconds) ahead of the authority's clock is rejected as
-`ClientClockTooFarAhead` (`INV-TX-7`), and no visible version rows remain. Write-policy authorization (ch. 7) and, for exclusive units, the
+`ClientClockTooFarAhead` (`INV-TX-7`), and no visible version rows remain. Write-policy authorization (ch. 7) and, for serializable units, the
 validation of §3.7 follow. Only after those checks pass does the authority
 assign a new `GlobalTime` and emit the accept fate.
 
-### 3.7 Exclusive validation (serializability)
+### 3.7 Serializable validation
 
-Exclusive serializability comes from validating the assumptions captured by the
-transaction's read set. For an exclusive unit, the authority re-checks the
+Serializability comes from validating the assumptions captured by the
+transaction's read set. For a serializable unit, the authority re-checks the
 recorded reads against current global state:
 
 - a recorded **row read** must still be the globally-current visible
-  content/deletion version, or the unit is rejected as `ExclusiveConflict`
+  content/deletion version, or the unit is rejected as `SerializationConflict`
   (`INV-TX-16`): reading visible content `C` conflicts if a later deletion
   `D` hides `C`, even though `C` remains the content-register winner. This is
   separate from a write's own-layer CAS below and is covered by
-  `exclusive_row_read_conflicts_when_a_later_delete_hides_the_content`;
+  `serializable_row_read_conflicts_when_a_later_delete_hides_the_content`;
 - an **absent read** must still be absent (`INV-TX-17`);
 - a **predicate read** must not have gained or lost rows relative to what the
   transaction actually read (`INV-TX-18`). A transaction proves each row a
@@ -318,7 +318,7 @@ recorded reads against current global state:
   returns left the result through another row and also conflicts. The base
   snapshot is not trusted for anything else: a partial client may have read
   offline or from a replica that never held every row below its base, so it
-  can prepare an exclusive transaction offline and commit it later while its
+  can prepare a serializable transaction offline and commit it later while its
   reads still hold. An aggregate read records only the result it observed
   (`jazz.aggregate-read-result.v1`: one entry per output group, each the
   group's public output cells as typed Groove values, sorted) and is
@@ -345,10 +345,10 @@ recorded reads against current global state:
   access inherited from a parent row,
   a read of deleted root rows, or any source of a query with policy
   branches, a flat join or a retained relation tree) fails with an error
-  naming the read pattern as not supported in exclusive transactions yet;
+  naming the read pattern as not supported in serializable transactions yet;
   it is never recorded as a read of the whole table. When the reader's read policy
   filters a source, its read runs as the reader and proves only the rows it
-  can see. A partial node's online exclusive read hydrates each source's
+  can see. A partial node's online serializable read hydrates each source's
   read at its snapshot, so rows it never received do not make the read
   conflict; offline, such a read conflicts if the replica lacks a row the
   reader can see there. The tables a read policy
@@ -375,9 +375,9 @@ recorded reads against current global state:
   Deletion visibility does not erase `C`: an atomic content replacement plus
   restore from that deleted snapshot parents content `C` and deletion `D`
   independently.
-  `exclusive_delete_compares_the_deletion_register_not_content` proves this
+  `serializable_delete_compares_the_deletion_register_not_content` proves this
   first-delete path,
-  `exclusive_replacement_and_restore_parent_their_own_registers` proves the
+  `serializable_replacement_and_restore_parent_their_own_registers` proves the
   two-register atomic restore path, while
   `known_parent_must_match_exact_row_coordinate_and_layer` proves cross-row
   and cross-layer parent encodings are rejected.
@@ -411,7 +411,7 @@ Point-read and absent-read records carry a table name but no schema ID.
 Authority validation accepts that name only when all retained mappings for it
 identify the same physical table. This supports unambiguous renames.
 An unknown name, or a name reused for a different physical table, rejects the
-transaction as `ExclusiveConflict`; neither case may be treated as evidence
+transaction as `SerializationConflict`; neither case may be treated as evidence
 that a row is absent. Supporting ambiguous name reuse would require additional
 read-set identity information.
 
@@ -535,7 +535,7 @@ The former batch specs are now interpreted through this chapter's transaction
 vocabulary. The old "direct batch" is the ordinary mergeable commit path:
 local work is grouped under one `TxId`, syncs as one commit unit, and receives an
 authority fate plus durability observations. The old "transactional batch" maps
-to explicit exclusive or future authority-decided multi-row work: staged writes
+to explicit serializable or future authority-decided multi-row work: staged writes
 are not ordinary visible state until commit and authority acceptance.
 
 Replayable reconciliation is part of the transaction contract rather than a

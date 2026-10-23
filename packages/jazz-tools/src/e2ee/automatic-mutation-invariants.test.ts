@@ -106,7 +106,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
   const { app, db, account } = fixture;
   let observer: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    const initial = db.beginExclusiveTransaction();
+    const initial = db.beginSerializableTransaction();
     await Promise.resolve();
     expect(await initial.all(app.events, { tier: "local-first" })).toEqual([]);
     const project = initial.insert(app.projects, { title: "First scope" });
@@ -190,7 +190,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
 
     // Also exercise transaction input snapshots with an already accepted scope;
     // the initial transaction above takes the newly prepared space-key path.
-    const existing = db.beginExclusiveTransaction();
+    const existing = db.beginSerializableTransaction();
     const existingInput = new Uint8Array([55, 66]);
     const preview = existing.insert(app.notes, {
       projectId: project.id,
@@ -237,7 +237,7 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
     });
     expect({ reads, updates }).toEqual(startupStoreAccesses);
 
-    const exclusive = observer.beginExclusiveTransaction();
+    const exclusive = observer.beginSerializableTransaction();
     try {
       expect(await exclusive.one(plain, { tier: "remote" })).toEqual({
         id: write.value.id,
@@ -258,7 +258,7 @@ it("anchors encrypted application snapshots at public begin rather than the firs
   const { app, db } = fixture;
   try {
     const before = db.insert(app.events, { message: "Before begin" }).value;
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     try {
       db.insert(app.events, { message: "After begin" });
       expect(await tx.all(app.events, { tier: "local-first" })).toEqual([before]);
@@ -279,7 +279,7 @@ it("uses the public begin snapshot for a cold initial recipient", async () => {
     await db.insert(app.events, { message: "Recipient enrolment precedes this snapshot" }).wait({
       tier: "global",
     });
-    const coldTx = db.beginExclusiveTransaction();
+    const coldTx = db.beginSerializableTransaction();
     const coldProject = coldTx.insert(
       app.projects,
       { title: "Cold recipient scope" },

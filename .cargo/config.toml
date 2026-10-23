@@ -4,3 +4,10 @@
 # variable replaces this, so set the flag there as well when using one.
 [target.'cfg(target_os = "linux")']
 rustflags = ["-C", "force-frame-pointers=yes"]
+
+# sqlite-wasm-rs compiles SQLite for wasm32-unknown-unknown against its own
+# bundled libc headers. Some clang builds (e.g. Ubuntu 22.04's) also search the
+# host's /usr/include for that target, and the host glibc headers then fail to
+# find their multiarch parts. Keep wasm C builds to clang's builtin headers.
+[env]
+CFLAGS_wasm32_unknown_unknown = "-nostdlibinc"

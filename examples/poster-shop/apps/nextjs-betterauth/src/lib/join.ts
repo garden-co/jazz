@@ -9,7 +9,7 @@ export type RedeemResult = "joined" | "already-member" | "invalid";
 
 /**
  * Redeem an invite for the signed-in account, following the invite-links
- * recipe. Runs server-side on a backend-authority `db`. One exclusive
+ * recipe. Runs server-side on a backend-authority `db`. One serializable
  * transaction reads the private invite, checks for an existing membership,
  * inserts the new one and consumes a single-use invite, so two simultaneous
  * redeems of a single-use link cannot both succeed. Checking membership first
@@ -23,7 +23,7 @@ export async function redeemInvite(
 ): Promise<RedeemResult> {
   const memberAuthor = authorForSession(accountId);
   return await withBoundedConflictRetry(async () => {
-    const write = await db.exclusiveTransaction(async (tx): Promise<RedeemResult> => {
+    const write = await db.serializableTransaction(async (tx): Promise<RedeemResult> => {
       const existing = await tx.one(app.canvasMembers.where({ canvasId, memberAuthor }));
       if (existing) return "already-member";
       const invite = await tx.one(app.canvasInvites.where({ canvasId, token }));

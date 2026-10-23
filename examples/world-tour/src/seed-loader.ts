@@ -16,8 +16,8 @@ export function newInviteCode(): string {
 /**
  * Creates the demo band on an empty server.
  *
- * The band insert runs in an exclusive transaction with the fixed DEMO_BAND_ID, and
- * an exclusive insert with an explicit id is create-only: when two first visitors
+ * The band insert runs in a serializable transaction with the fixed DEMO_BAND_ID, and
+ * a serializable insert with an explicit id is create-only: when two first visitors
  * race, the server commits one band and rejects the other, whose app then shows
  * the winner's tour. The same rejection happens if the demo band was ever deleted,
  * so an empty server whose demo band is gone stays empty. Resolves to false when
@@ -39,7 +39,7 @@ export async function claimDemoBand(
 ): Promise<boolean> {
   const fixture = buildTourFixture({ seed: DEFAULT_SEED, start: new Date() });
   try {
-    const claim = await db.exclusiveTransaction((tx) =>
+    const claim = await db.serializableTransaction((tx) =>
       tx.insert(app.bands, { name: fixture.bandName, ownerId: userId }, { id: DEMO_BAND_ID }),
     );
     await claim.wait();

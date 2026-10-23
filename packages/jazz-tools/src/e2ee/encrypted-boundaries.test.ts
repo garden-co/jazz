@@ -133,7 +133,7 @@ it("automatically isolates private device records and keeps group, space and row
     ).rejects.toThrow(/permission/i);
     expect(await creator.e2ee.explain({ groupId: group.id })).toEqual({ state: "ready" });
 
-    const tx = creator.beginExclusiveTransaction();
+    const tx = creator.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Project" });
     const note = tx.insert(app.notes, {
       projectId: project.id,

@@ -2071,7 +2071,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const session = sessionFromWriteContext(sessionJson);
     this.applySessionClaims(session);
-    // The native core binds an exclusive transaction's identity at begin. Keep
+    // The native core binds a serializable transaction's identity at begin. Keep
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
     const identity = this.trustedWriteIdentity(session);
@@ -2224,7 +2224,10 @@ export class NativeRuntimeAdapter implements Runtime {
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-    if (settlementMetadata && (pendingTx?.kind !== "exclusive" || !this.db.allSettlementMetadata))
+    if (
+      settlementMetadata &&
+      (pendingTx?.kind !== "serializable" || !this.db.allSettlementMetadata)
+    )
       throw new Error("E2EE settlement reads require a supported exclusive transaction");
     // The Rust serialized-query boundary rejects relation reads in transactions.
     if (settlementMetadata && queryHasArraySubqueries(coreQueryJson))
@@ -2306,14 +2309,11 @@ export class NativeRuntimeAdapter implements Runtime {
   ): number {
     assertSupportedReadOptions(tier, optionsJson);
     this.noteFirstLoadWait(optionsJson);
-    if (queryIncludesDeleted(queryJson)) {
-      throw new Error("Native runtime does not support include_deleted subscriptions yet");
-    }
     const session = readSession(sessionJson);
     const readContext = this.nativeReadContext(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const handle = this.nextSubscriptionId++;
-    const opts = readOptions(tier, false, optionsJson);
+    const opts = readOptions(tier, queryIncludesDeleted(queryJson), optionsJson);
     this.subscriptions.set(handle, {
       openingAbort: new AbortController(),
       reading: false,
@@ -2685,7 +2685,7 @@ export class NativeRuntimeAdapter implements Runtime {
   nativeUpstreamConfigured(): boolean {
     if (this !== this.ownerRuntime) return this.ownerRuntime.nativeUpstreamConfigured();
     // Configured authority remains configured during explicit disconnect;
-    // exclusive confirmation must wait for it rather than settle locally.
+    // serializable confirmation must wait for it rather than settle locally.
     return this.db.nativeConnectionStatus?.().configured === true;
   }
 
@@ -3351,9 +3351,9 @@ export class NativeRuntimeAdapter implements Runtime {
     pending: PendingTx,
     identity: Uint8Array | undefined,
   ): void {
-    if (pending.kind === "exclusive") {
+    if (pending.kind === "serializable") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
-        throw new Error("Native runtime exclusive transaction cannot mix write identities");
+        throw new Error("Native runtime serializable transaction cannot mix write identities");
       }
       return;
     }
@@ -5026,7 +5026,7 @@ function outputColumnsForTable(
         ? ({
             name: columnName,
             column_type: magicType,
-            nullable: false,
+            nullable: columnName === "$deletedAt" || columnName.startsWith("$deletedBy"),
           } satisfies ColumnDescriptor)
         : undefined;
     })
@@ -5103,11 +5103,11 @@ function rejectedWaitError(
 }
 
 /**
- * A queued exclusive commit that fails its local serializability check settles
+ * A queued serializable commit that fails its local serializability check settles
  * its reserved transaction with core `TransactionConflict`. Surface it as the
  * same structured rejection an authority rejection produces, keeping the
  * `transaction_conflict` code so callers can tell a local conflict from an
- * authority `exclusive_conflict`.
+ * authority `serialization_conflict`.
  */
 function transactionConflictRejection(
   transactionId: TxId,
@@ -5215,7 +5215,7 @@ function contextualError(context: string, error: unknown): Error {
 
 function rejectionCode(message: string): string {
   if (message.includes("AuthorizationDenied")) return "permission_denied";
-  if (message.includes("ExclusiveConflict")) return "exclusive_conflict";
+  if (message.includes("SerializationConflict")) return "serialization_conflict";
   if (message.includes("CausalityViolation")) return "causality_violation";
   if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
   if (message.includes("Cascade")) return "cascade_rejected";
@@ -5230,7 +5230,7 @@ function rejectionCode(message: string): string {
  */
 const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
   permission_denied: "Write rejected by server authorization",
-  exclusive_conflict: "Exclusive transaction conflicted with another write",
+  serialization_conflict: "Serializable transaction conflicted with another write",
   causality_violation: "Transaction violated causal ordering",
   client_clock_too_far_ahead: "Client clock is too far ahead",
   cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",

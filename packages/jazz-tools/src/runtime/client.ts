@@ -553,9 +553,9 @@ interface TimestampOverrideOptions {
  * Selects the transaction semantics used for grouped writes.
  *
  * - `mergeable`: eventually-consistent writes that merge with concurrent writes.
- * - `exclusive`: serializable writes that are validated as one unit by the authority.
+ * - `serializable`: serializable writes that are validated as one unit by the authority.
  */
-export type TransactionKind = "mergeable" | "exclusive";
+export type TransactionKind = "mergeable" | "serializable";
 
 export type TransactionFate =
   | {
@@ -935,12 +935,12 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 }
 
 /**
- * Returned by explicitly-committed exclusive transactions.
+ * Returned by explicitly-committed serializable transactions.
  *
  * Pass `{ tier: "global" }` to require an authoritative receipt even without
  * a configured upstream. Omitting options preserves offline local durability.
  */
-export class ExclusiveWriteHandle extends WriteHandle<void> {
+export class SerializableWriteHandle extends WriteHandle<void> {
   /**
    * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
    * `"edge"` now waits for `"global"`.
@@ -954,7 +954,7 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
    */
   override wait(options?: { tier: DurabilityTier }): Promise<void>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<void> {
-    await this.client().waitForExclusiveTransaction(
+    await this.client().waitForSerializableTransaction(
       await this.txId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
@@ -962,9 +962,9 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
 }
 
 /**
- * Returned by auto-committed exclusive transactions.
+ * Returned by auto-committed serializable transactions.
  */
-export class ExclusiveWriteResult<T> extends WriteResult<T> {
+export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
    * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
    * `"edge"` now waits for `"global"`.
@@ -979,17 +979,17 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
    */
   override wait(options?: { tier: DurabilityTier }): Promise<T>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<T> {
-    await this.client().waitForExclusiveTransaction(
+    await this.client().waitForSerializableTransaction(
       await this.txId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
     return this.value;
   }
 
-  override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
+  override mapValue<U>(transformValue: (value: T) => U): SerializableWriteResult<U> {
     return copyWriteWaitReadiness(
       this,
-      new ExclusiveWriteResult(transformValue(this.value), this.txId, this.client()),
+      new SerializableWriteResult(transformValue(this.value), this.txId, this.client()),
     );
   }
 }
@@ -2139,7 +2139,7 @@ export class JazzClient {
   }
 
   /** @internal */
-  async waitForExclusiveTransaction(txId: TxId, requiredTier?: DurabilityTier): Promise<void> {
+  async waitForSerializableTransaction(txId: TxId, requiredTier?: DurabilityTier): Promise<void> {
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
     await this.waitForTransaction(txId, requiredTier ?? (hasAuthority ? "global" : "local"));

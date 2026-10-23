@@ -109,7 +109,7 @@ function transportSnapshot(db: TestDb, runtimeClient: AuthTestRuntimeClient) {
   const hasCookie = config.cookieSession !== undefined;
   return {
     mode: hasJwt ? "bearer" : "cookie",
-    exclusive: { hasJwt, hasCookie },
+    serializable: { hasJwt, hasCookie },
     claimVersion: hasJwt ? jwtClaimVersion(config.jwtToken) : config.cookieSession?.claims.version,
     forwarded: {
       bearer: runtimeClient.updateAuthToken.mock.calls.length,
@@ -684,25 +684,25 @@ describe("Db auth state", () => {
     expect(snapshots).toEqual([
       {
         mode: "bearer",
-        exclusive: { hasJwt: true, hasCookie: false },
+        serializable: { hasJwt: true, hasCookie: false },
         claimVersion: "A",
         forwarded: { bearer: 0, cookie: 0 },
       },
       {
         mode: "cookie",
-        exclusive: { hasJwt: false, hasCookie: true },
+        serializable: { hasJwt: false, hasCookie: true },
         claimVersion: "B",
         forwarded: { bearer: 0, cookie: 1 },
       },
       {
         mode: "bearer",
-        exclusive: { hasJwt: true, hasCookie: false },
+        serializable: { hasJwt: true, hasCookie: false },
         claimVersion: "C",
         forwarded: { bearer: 1, cookie: 1 },
       },
       {
         mode: "cookie",
-        exclusive: { hasJwt: false, hasCookie: true },
+        serializable: { hasJwt: false, hasCookie: true },
         claimVersion: "D",
         forwarded: { bearer: 1, cookie: 2 },
       },
@@ -812,7 +812,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toBe(beforeState);
     expect(transportSnapshot(db, runtimeClient)).toMatchObject({
       mode: beforeTransport.mode,
-      exclusive: beforeTransport.exclusive,
+      serializable: beforeTransport.serializable,
       claimVersion: beforeTransport.claimVersion,
     });
     expect(getDbInternalSession(db)).toBe(beforeInternalSession);
@@ -824,7 +824,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState().session?.claims.version).toBe("C");
     expect(transportSnapshot(db, runtimeClient)).toEqual({
       mode: "cookie",
-      exclusive: { hasJwt: false, hasCookie: true },
+      serializable: { hasJwt: false, hasCookie: true },
       claimVersion: "C",
       forwarded: { bearer: 0, cookie: 2 },
     });

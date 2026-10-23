@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, except maintained unordered `limit(1)` with offset `0` which MAY lower through groove `ArgMinBy` over `row_uuid`, and maintained ordered windows or ordered suffixes which MUST lower through groove `TopBy`.
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
-- `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
+- `INV-LOWER-16`: Serializable predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
 - `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable or non-integer columns.
 - `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.
@@ -434,7 +434,7 @@ requires source-aware reachable lowering. These staged source gaps must not
 create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
 parameter predicates until supported.
 
-### 14.5 Sync views & exclusive validation → groove
+### 14.5 Sync views & serializable validation → groove
 
 #### Structured app-output terminal
 
@@ -484,7 +484,7 @@ view update from current query rows is migration/oracle debt governed by ch. 16,
 not an alternate production engine (`INV-LOWER-14`). Whole-table current-row
 views are the normal table-rooted row-set shape, not a separate current-row
 serving engine (`INV-LOWER-15`). Result-set ids stay separate from version
-payloads via per-peer dedup (ch. 8). Exclusive predicate validation compares
+payloads via per-peer dedup (ch. 8). Serializable predicate validation compares
 predicate-output-set terminal facts for the shape+binding at
 `base_snapshot.global_base` against now (degenerate whole-table predicates use
 the global-currency-changed probe) (`INV-LOWER-16`, ch. 3).

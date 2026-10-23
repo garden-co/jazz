@@ -61,7 +61,7 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
       },
     });
 
-    const setup = db.beginExclusiveTransaction();
+    const setup = db.beginSerializableTransaction();
     const baseProject = setup.insert(app.projects, { title: "Base scope" });
     const headProject = setup.insert(app.projects, { title: "Staged head scope" });
     await setup.commit().wait({ tier: "global" });

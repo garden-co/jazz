@@ -303,7 +303,7 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         opts.tier = binding_args::read_tier(&tier)?;
     }
     if let Some(include_deleted) = options.get("include_deleted")? {
-        opts.include_deleted =
+        opts.read_view.include_deleted =
             O::boolean(&include_deleted).ok_or("include_deleted must be a boolean")?;
     }
     if let Some(wait) = options.get("first_load_remote_wait_ms")? {
@@ -595,6 +595,9 @@ pub struct Write {
     pub tx_id: TransactionId,
     /// The local commit seq, for [`Binding::wait_for`].
     pub seq: u64,
+    /// Why the write was refused when it applied, if it was: its waits
+    /// fail with this, and nothing was committed.
+    pub rejected: Option<Error>,
 }
 
 // ---- the binding ------------------------------------------------------------------
@@ -609,6 +612,9 @@ pub struct Binding {
     node: NodeUuid,
     author: AuthorSubject,
     trusted_backend: bool,
+    /// Open transactions a staged write was refused in for its row's
+    /// state: the transaction's commit reports the first such refusal.
+    refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
 }
 
 impl Binding {
@@ -620,6 +626,7 @@ impl Binding {
             node: identity.node,
             author: identity.author,
             trusted_backend,
+            refused: Rc::default(),
         }
     }
 
@@ -670,10 +677,27 @@ impl Binding {
         }
     }
 
+    /// A write's receipt. A refusal decided by the row's stored state (see
+    /// [`Error::is_apply_time_rejection`]) is an apply-time rejection:
+    /// the call returns a receipt for a rejected transaction, and the
+    /// host reports it through the write's waits.
     fn write(&self, write: Result<WriteHandle, Error>) -> HostResult<Write> {
-        let write = write?;
+        let write = match write {
+            Err(error) if error.is_apply_time_rejection() => return self.rejected(error),
+            write => write?,
+        };
         self.hooks.after_write();
         self.receipt(write.row_uuid(), write.mergeable_tx_id())
+    }
+
+    fn rejected(&self, error: Error) -> HostResult<Write> {
+        // Rejected transactions take ids from the top of this node's range,
+        // which commits (counted from the bottom) never reach.
+        static REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut write = self.receipt(RowUuid::from_bytes([0; 16]), u64::MAX - n)?;
+        write.rejected = Some(error);
+        Ok(write)
     }
 
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
@@ -684,6 +708,7 @@ impl Binding {
             row_id,
             tx_id: TransactionId::from_committed_tx(tx_id),
             seq,
+            rejected: None,
         })
     }
 
@@ -803,17 +828,46 @@ impl Binding {
     /// Commit an owner-wide transaction (`kind` defaults to mergeable).
     pub fn commit_transaction(&self, id: &str, kind: Option<&str>) -> HostResult<Write> {
         let id = open_transaction(id)?;
-        let receipt = match TransactionKind::parse(kind.unwrap_or("mergeable"))? {
+        let kind = TransactionKind::parse(kind.unwrap_or("mergeable"))?;
+        if let Some(error) = self.refused.borrow_mut().remove(&id) {
+            self.db.abandon_transaction_handle(id)?;
+            return self.rejected(error);
+        }
+        let receipt = match kind {
             TransactionKind::Mergeable => block_on(self.db.commit_mergeable_handle(id)),
             TransactionKind::Serializable => block_on(self.db.commit_serializable_handle(id)),
-        }?;
+        };
+        // A conflict is the commit's outcome, reported through its receipt
+        // as the authority's verdict on a replica's commit is.
+        let receipt = match receipt {
+            Err(error) if error.code == ErrorCode::TransactionConflict => {
+                return self.rejected(error);
+            }
+            receipt => receipt?,
+        };
         self.hooks.after_write();
         self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)
     }
 
     /// Roll back an open transaction.
     pub fn rollback_transaction(&self, id: &str) -> HostResult<()> {
-        Ok(self.db.abandon_transaction_handle(open_transaction(id)?)?)
+        let id = open_transaction(id)?;
+        self.refused.borrow_mut().remove(&id);
+        Ok(self.db.abandon_transaction_handle(id)?)
+    }
+
+    /// A staged write's outcome. Like a direct write's (see
+    /// [`Self::write`]), a refusal decided by the row's stored state is not
+    /// the call's error: the transaction stays open and its commit is
+    /// rejected with the first such refusal.
+    fn staged(&self, id: OpenTransactionId, staged: Result<WriteHandle, Error>) -> HostResult<()> {
+        match staged {
+            Err(error) if error.is_apply_time_rejection() => {
+                self.refused.borrow_mut().entry(id).or_insert(error);
+                Ok(())
+            }
+            staged => staged.map(drop).map_err(Into::into),
+        }
     }
 
     /// Stage an insert; returns the row id.
@@ -826,8 +880,11 @@ impl Binding {
     ) -> HostResult<RowUuid> {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
-        let options = insert_options(options)?;
-        Ok(block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options))?.row_uuid())
+        let mut options = insert_options(options)?;
+        let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
+        let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
+        self.staged(id, staged)?;
+        Ok(row)
     }
 
     /// Stage an update.
@@ -843,12 +900,12 @@ impl Binding {
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
         let options = update_options(options)?;
-        block_on(
+        let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
                 .update(table, row, patch, options),
-        )?;
-        Ok(())
+        );
+        self.staged(id, staged)
     }
 
     /// Stage an upsert.
@@ -864,12 +921,12 @@ impl Binding {
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
         let options = upsert_options(options)?;
-        block_on(
+        let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
                 .upsert(table, row, cells, options),
-        )?;
-        Ok(())
+        );
+        self.staged(id, staged)
     }
 
     /// Stage a delete.
@@ -883,8 +940,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let options = delete_options(options)?;
-        block_on(self.db.mergeable_tx_ref(id).delete(table, row, options))?;
-        Ok(())
+        let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
+        self.staged(id, staged)
     }
 
     /// Stage partial large-value updates; they read the row with the
@@ -907,12 +964,12 @@ impl Binding {
                 .transpose()?,
             ..Default::default()
         };
-        block_on(
+        let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
                 .update_with_large_value_mutations(table, row, patch, mutations, options),
-        )?;
-        Ok(())
+        );
+        self.staged(id, staged)
     }
 
     /// Stage an undelete of `row` with `cells`.
@@ -928,12 +985,13 @@ impl Binding {
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
         let options = restore_options(options)?;
-        block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .restore(table, row, Some(cells), options),
-        )?;
-        Ok(())
+        let staged = block_on(self.db.mergeable_tx_ref(id).restore(
+            table,
+            row,
+            Some(cells),
+            options,
+        ));
+        self.staged(id, staged)
     }
 
     // ---- reads ----
@@ -947,11 +1005,8 @@ impl Binding {
             jazz_model::query::lit(Value::Uuid(row.0)),
         ));
         let prepared = self.db.prepare_query(&query)?;
-        let opts = ReadOpts {
-            tier: ReadTier::LocalOnly,
-            include_deleted: true,
-            ..ReadOpts::default()
-        };
+        let mut opts = ReadOpts::for_read_tier(ReadTier::LocalOnly);
+        opts.read_view.include_deleted = true;
         let rows = block_on(self.db.all(&prepared, opts))?;
         Ok(crate::binding_codec::encode_rows(&rows)?)
     }
@@ -1100,6 +1155,17 @@ impl Binding {
             db.wait_for_transaction(seq, tier).await?;
             Ok(())
         })))
+    }
+
+    /// Resolve once `write` reached `tier`; fail at once with its
+    /// rejection, if it was rejected.
+    pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        if let Some(error) = &write.rejected {
+            binding_args::durability_tier(tier)?;
+            let error = error.clone();
+            return Ok(Box::pin(async move { Err(HostError::Engine(error)) }));
+        }
+        self.wait_for(write.seq, tier)
     }
 
     /// Resolve once every local write so far reached the server. Local
