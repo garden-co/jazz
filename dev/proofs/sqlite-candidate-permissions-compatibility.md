@@ -1,0 +1,101 @@
+# SQLite same-unit creation permissions
+
+The SQLite authority now evaluates positive INSERT policies containing
+`ExistsIncludingCreated`. For example, a transaction can create a parent and
+child together when the parent has an independent permission grant. The parent
+need not be staged first. An ungrounded self-reference or mutual cycle cannot
+manufacture permission, and rejecting any required check rejects the whole unit.
+
+## Permission contract
+
+The ordinary write executor captures each selected permission and its exact root
+image, including UPDATE USING, UPDATE WITH CHECK and provenance checks. The
+checker uses the authenticated session; a row's claimed author is not a grant.
+At E17, deferred compilation retains the accepted catalogue identity provider;
+reserved table-identity paths cannot fall back to caller claims. At E14 and
+above, the origin-mapped serializable variant also receives the same proof,
+including transactions following a sealed initialization.
+
+The same executor handles authority-local session transactions and ordinary
+serializable uploads. Existing trusted backend attribution admission remains in
+force. Replicas keep optimistic writes, with authority settlement deciding fate.
+
+Only a coordinate absent from current storage on every branch can become a new
+witness. It must have exactly one INSERT or absent UPSERT in the complete
+serializable unit and belong to an unbranched table. Tombstones, updates,
+restores, branched rows and multiply written coordinates cannot supply new
+witnesses. SQLite's existing serializable conflict validation, indexed absence
+lookup and enclosing savepoint keep absence and publication atomic. A mergeable
+unit can use accepted evidence or an independent grant, but cannot use its new
+rows as witnesses.
+
+Each new row earns its own selected permissions before it becomes evidence.
+The checker computes a least fixed point from independently authorised seeds.
+It performs this proof twice, starting from no new witnesses each time: once
+against the accepted baseline and once against the resulting state. The proof
+orders may differ. Removing or demoting an accepted grant in the same unit must
+still leave a valid final proof. Intermediate writes retain their own selected
+root images and checks.
+
+Each source occurrence keeps its own mode. Ordinary EXISTS and unmarked nested
+sources see accepted rows only; marked sources add independently authorised
+creates. Accepted witnesses remain visible alongside those creates. Merely
+having a marker in another operation's policy cannot turn ordinary updates into
+mutual grants. Schema admission still rejects negative and non-INSERT markers.
+Caller-supplied query candidate-source flags do not acquire this private scope.
+
+While staging a local transaction, SELECT dependencies use the accepted baseline.
+An unproved membership cannot unlock an existing secret before commit. Provisional
+reads requiring large-value preprocessing return a typed unsupported error.
+
+## Bounded work and large values
+
+Each unit has a 16,384-step proof/dependency budget, including repeated checks
+and scoped preprocessing. Exhausting it rejects the whole unit. There is no
+unbounded retry or unchecked remainder.
+
+Every policy dependency requires a mandatory scalar declared-reference
+correlation. Each current-source UNION arm contains that key filter and uses a
+leading index. Baseline history is driven by this unit's publication sequence,
+then looked up by exact coordinate; it never starts from all accepted rows.
+Uncorrelated dependency sources, relation helpers and inherited policies in
+these scoped units return an explicit unsupported error. Reverse references
+into branched tables also require an unavailable branch-bound index shape and
+are refused.
+
+String and byte comparisons prepare only exact root and related dependency
+cells, including historical images used by the baseline proof. Dependency
+lookups require a mandatory scalar declared-reference correlation. They stop at
+the remaining budget rather than enumerating a whole large-value column. A
+corrupted unrelated chunked value cannot poison an independent proof. Equal
+chunked values compare by logical content; a common prefix is not equality.
+
+Large-value preprocessing through uncorrelated dependencies, relation helpers or
+inheritance is explicitly unsupported. Branch-view dependencies and branch moves in a marked-schema unit are
+also explicitly unsupported. These errors identify the unsupported pattern;
+they do not fall back to loading unrelated data.
+
+## Storage and wire compatibility
+
+This port changes no durable encoding, query/catalogue encoding or wire layout.
+The existing `ExistsIncludingCreated` policy representation and serializable
+commit framing remain unchanged. No client-supplied proof is trusted or stored:
+the authority reconstructs the proof from its own transaction and session.
+
+Two connection-local TEMP tables, `_jazz_candidate_created_v1` and
+`_jazz_candidate_qualified_v1`, contain only `(stored table name, raw row UUID)`
+keys. They are cleared between units and phases, share the enclosing savepoint,
+and are absent from durable storage and uploads. Large-value comparison scratch
+uses the existing format and is cleared before leaving its savepoint. Failure
+cannot leave a qualified witness available to the next transaction.
+
+Deploy the SQLite stack together. An older authority still rejects this policy
+shape, so new application transactions cannot rely on it during a mixed-version
+rollout. No retired engine or unreleased E2EE migration guarantee is added.
+
+The core contracts in `sqlite_candidates.rs` cover allowed and denied graphs,
+occurrence isolation, selected operation checks, both proof phases, provisional
+reads, chunked comparisons and rollback. Real Chromium tests exercise both an
+authenticated wire upload and an authority-local session through the public WASM
+binding. These checks qualify the permission primitive; they do not qualify the
+complete encrypted application, browser worker, native binding or journal flow.

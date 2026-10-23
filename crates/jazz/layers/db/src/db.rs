@@ -48,6 +48,8 @@ mod initialization;
 pub use initialization::{InitializationSeal, InitializationTransactionStatus, ReservedTxId};
 #[path = "accepted.rs"]
 mod accepted;
+#[path = "candidates.rs"]
+mod candidates;
 #[path = "sync.rs"]
 pub(crate) mod sync;
 pub use crate::names::LensEffects;
@@ -387,6 +389,8 @@ struct Inner {
     catalogue_cache_required: bool,
     /// Shared by every view; observation moves the capture once.
     catalogue_capture_pending: std::cell::Cell<bool>,
+    candidate_checks: RefCell<Option<Vec<candidates::DeferredCheck>>>,
+    candidate_read_evidence: Option<crate::compile::CandidateEvidence>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -911,6 +915,7 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        conn.execute_batch(candidates::TEMP_DDL).map_err(storage)?;
         conn.execute_batch(accepted::ACCEPTED_DDL)
             .map_err(storage)?;
         conn.execute_batch(catalogue::DDL).map_err(storage)?;
@@ -944,6 +949,8 @@ impl Db {
                 conn,
                 catalogue_cache_required,
                 catalogue_capture_pending: std::cell::Cell::new(true),
+                candidate_checks: RefCell::new(None),
+                candidate_read_evidence: None,
                 chunks,
                 pending_nodes: Vec::new(),
                 derived: Vec::new(),
@@ -1472,7 +1479,10 @@ impl Db {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
                 inner.pending_nodes.extend(edits.pending_nodes);
-                let applied = inner.apply_as(&op, who, seq);
+                let unit = [(inner.schema.clone(), op.clone())];
+                let applied = inner.candidate_unit(&unit, seq, false, false, |inner| {
+                    inner.apply_as(&op, who, seq)
+                });
                 inner.clear_derived();
                 applied
             })?;
@@ -1950,13 +1960,20 @@ impl Inner {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         self.require_catalogue_schema(schema)?;
-        Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
+        let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
+            .with_candidate_evidence(self.candidate_read_evidence)
             .with_catalogue(self)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
             .with_members_only(read.members_only)
-            .compile_query(&prepared.query, read.include_deleted)
+            .compile_query(&prepared.query, read.include_deleted)?;
+        if self.candidate_read_evidence.is_some() && !compiled.preps.is_empty() {
+            return Err(unsupported(
+                "provisional reads requiring large-value preprocessing in candidate authorization units",
+            ));
+        }
+        Ok(compiled)
     }
 
     /// The node history reads name this store's own commits by: set on the
@@ -2426,7 +2443,8 @@ impl Inner {
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
             .with_catalogue(self)
-            .with_cut(cut);
+            .with_cut(cut)
+            .with_candidate_evidence(self.candidate_read_evidence);
         let condition = policy(&mut ctx)?;
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
@@ -2524,6 +2542,9 @@ impl Inner {
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
+        if self.defer_candidate_check(table, row, key, author, table.policy(operation))? {
+            return Ok(true);
+        }
         let session = self.session(author);
         self.holds(table, row, key, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
@@ -2538,6 +2559,9 @@ impl Inner {
         author: AuthorSubject,
         clause: Option<&crate::tools::PolicyExpr>,
     ) -> Result<bool, Error> {
+        if self.defer_candidate_check(table, row, key, author, clause)? {
+            return Ok(true);
+        }
         let session = self.session(author);
         self.holds(table, row, key, |ctx| {
             ctx.policy_clause(clause, table, "a", &session)
@@ -3290,6 +3314,13 @@ impl Inner {
         // statement's snapshot: a same-table EXISTS compares the new row
         // with the old one, not with itself.
         if let Some(author) = self.checked(who)
+            && !self.defer_candidate_check(
+                table,
+                row,
+                &key,
+                author,
+                table.policies.update.with_check.as_ref(),
+            )?
             && !{
                 let session = self.session(author);
                 let before = Some(Cut::at(seq.saturating_sub(1)));
@@ -4576,8 +4607,11 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
+            let serializable = matches!(batch.kind, BatchKind::Serializable { .. });
             let applied = inner
-                .apply_with_edits(ops, &batch.edits, 0, seq)
+                .candidate_unit(ops, seq, serializable, false, |inner| {
+                    inner.apply_with_edits(ops, &batch.edits, 0, seq)
+                })
                 .and_then(|()| inner.record_local_commit(seq, reservation, inner.identity.author))
                 .and_then(|()| inner.record_issued_seq(seq));
             if let Err(error) = applied {
@@ -4637,9 +4671,10 @@ impl Db {
             .execute_batch("SAVEPOINT overlay")
             .map_err(storage)?;
         let mark = inner.changed.borrow().len();
-        let result = inner
-            .apply_with_edits(&ops, &edits, checked, own)
-            .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
+        let result = inner.candidate_unit(&ops, own, snapshot.is_some(), true, |inner| {
+            inner.apply_with_edits(&ops, &edits, checked, own)?;
+            read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+        });
         inner.rollback_savepoint("overlay").map_err(storage)?;
         inner.changed.borrow_mut().truncate(mark);
         result
