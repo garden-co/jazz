@@ -61,9 +61,10 @@ use crate::values::{
 };
 pub use accepted::{AcceptedContent, AcceptedRow, BindingSettledRead};
 pub use sync::{
-    Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, QueryAttachment,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
+    Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, OwnerDurabilityBarrier,
+    QueryAttachment, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
+    SyncMessage, Transport, TransportError, Upstream, WireError, WireTransport,
+    WireTransportAdapter, duplex,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -447,6 +448,8 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    deferred_owner_durability: bool,
+    retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
     read_deadlines: Vec<Weak<web_time::Instant>>,
     /// The global authority: what it settles is durable at `Global`.
@@ -981,6 +984,8 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                deferred_owner_durability: false,
+                retired: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
                 authority: false,
@@ -1052,6 +1057,11 @@ impl Db {
 
     pub async fn tick(&self) -> Result<(), Error> {
         self.sync_tick()?;
+        let deferred = self.inner().deferred_owner_durability;
+        if !deferred && let Some(barrier) = self.prepare_owner_durability()? {
+            self.confirm_owner_durability(barrier)?;
+            self.flush_owner_durability()?;
+        }
         let mut inner = self.inner();
         inner.fan.collect();
         inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
@@ -1091,13 +1101,15 @@ impl Db {
     /// authorizer also expires statements already in the preparation cache.
     /// This is a one-way runtime fence, not a stored application policy.
     pub fn retire_storage_owner(&self) -> Result<(), Error> {
-        let inner = self.inner();
+        let mut inner = self.inner();
         inner
             .conn
             .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
                 rusqlite::hooks::Authorization::Deny
             }))
-            .map_err(storage)
+            .map_err(storage)?;
+        inner.retired = true;
+        Ok(())
     }
 
     // ---- preparation ----------------------------------------------------
