@@ -43,7 +43,8 @@ The core now implements its tick-scheduler hook. Pending reads retain transient
 deadline guards, including the connection-attempt boundary. Every tick re-arms
 the next deadline because hosts may retain only their earliest timer. Cancelling
 an earlier read cannot strand a later one. Completed or cancelled reads stop
-retaining their guards.
+retaining their guards. Restarting a connection attempt re-arms its new boundary
+after an older queued timer fires; link-hint changes also request a host tick.
 
 WASM uses the SDK's existing `after:<milliseconds>` wake string alongside
 `immediate`, `deferred` and `after-current-turn`. Callbacks run outside database

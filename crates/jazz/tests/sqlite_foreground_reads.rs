@@ -614,3 +614,44 @@ fn foreground_writes_fail_without_publishing_or_claiming_durability() {
             .is_empty()
     );
 }
+
+/// Alice's host restarts connection establishment while an older timer is still
+/// queued. Its next tick must arm the new attempt boundary, not the long read wait.
+#[test]
+fn restarted_attempt_rearms_after_the_hosts_older_timer() {
+    let owner = open(2, false);
+    insert(&owner, "cached");
+    let tab = open(1, false);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Attempting);
+    connect(&tab, &owner);
+    let scheduler = Rc::new(Earliest::default());
+    tab.set_tick_scheduler(Some(scheduler.clone()));
+    let mut stream = subscribe(&tab, opts(60_000));
+    for _ in 0..3 {
+        turn(&[&tab, &owner, &tab]);
+    }
+    let original = scheduler.0.borrow().expect("first attempt wake");
+    std::thread::sleep(
+        original.saturating_duration_since(Instant::now()) + Duration::from_millis(20),
+    );
+    tab.set_remote_link_hint(RemoteLinkHint::Attempting);
+    assert!(scheduler.0.borrow_mut().take().unwrap() <= Instant::now());
+    block_on(tab.tick()).unwrap();
+    let next = scheduler
+        .0
+        .borrow_mut()
+        .take()
+        .expect("restarted attempt wake");
+    assert!(next > Instant::now());
+    assert!(
+        next.saturating_duration_since(Instant::now())
+            <= jazz::db::REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(10)
+    );
+    assert!(stream.try_next_event().is_none());
+    tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    assert_eq!(
+        opening(&mut stream, &[&tab, &owner, &tab]),
+        (vec!["cached".into()], DurabilityTier::Local)
+    );
+}
