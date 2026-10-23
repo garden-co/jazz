@@ -40,6 +40,7 @@ uuid = { version = "1", features = ["v5"], optional = true }
 zstd = { version = "0.13.3", optional = true }
 
 [dev-dependencies]
+postcard = { version = "1.1.3", features = ["alloc"] }
 
 [[test]]
 name = "all"

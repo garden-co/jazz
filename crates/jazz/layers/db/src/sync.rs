@@ -3521,7 +3521,15 @@ impl Db {
                 inbound.into()
             };
             let mut inbound: VecDeque<SyncMessage> = inbound.into();
+            // Writes held back by the ingress limit, in order. Reads and
+            // other messages that change no rows overtake them, so a client
+            // uploading a large value can still read.
+            let mut held: VecDeque<SyncMessage> = VecDeque::new();
             while let Some(message) = inbound.pop_front() {
+                if !held.is_empty() && !overtakes_writes(&message) {
+                    held.push_back(message);
+                    continue;
+                }
                 if let SyncMessage::PushChunks { nodes } = &message {
                     let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
                     let mut inner = self.inner.borrow_mut();
@@ -3539,9 +3547,8 @@ impl Db {
                     if session.ingress.1 > 0
                         && (session.ingress.1 + bytes) as u64 > policy.incoming_bytes_per_window
                     {
-                        inbound.push_front(message);
-                        session.backlog = inbound;
-                        break;
+                        held.push_back(message);
+                        continue;
                     }
                     session.ingress.1 += bytes;
                 }
@@ -3550,10 +3557,11 @@ impl Db {
                 // under another version would expose rows it may not read
                 // that way.
                 if !matches!(message, SyncMessage::Schema { .. }) {
-                    let mut inner = self.inner.borrow_mut();
+                    let inner = self.inner.borrow_mut();
                     if inner.session_unadmitted(index) {
                         inbound.push_front(message);
-                        inner.sessions[index].backlog = inbound;
+                        held.extend(inbound);
+                        inbound = VecDeque::new();
                         break;
                     }
                 }
@@ -3576,6 +3584,9 @@ impl Db {
                     }
                     (Err(error), None) => return Err(error),
                 }
+            }
+            if !held.is_empty() {
+                self.inner.borrow_mut().sessions[index].backlog = held;
             }
         }
         self.notify();
@@ -4649,6 +4660,18 @@ fn owned_table<'a>(schema: &'a Schema, stored: &str) -> Result<&'a Table, Error>
     schema
         .by_stored(stored)
         .ok_or_else(|| query_error(format!("unknown table {stored}")))
+}
+
+/// Whether a client message may be served ahead of the writes the ingress
+/// limit holds back: it reads or declares interest, and writes no rows.
+fn overtakes_writes(message: &SyncMessage) -> bool {
+    matches!(
+        message,
+        SyncMessage::Subscribe { .. }
+            | SyncMessage::Unsubscribe { .. }
+            | SyncMessage::Fetch { .. }
+            | SyncMessage::Advise { .. }
+    )
 }
 
 // ---- names on the wire ------------------------------------------------------
