@@ -351,7 +351,8 @@ pub enum SyncMessage {
     /// that seq; its opening ships only rows changed after it.
     /// `include_deleted`: the result also lists deleted rows (the root's),
     /// which ship as their deleted current versions.
-    /// `local`: served from a relay's store alone, without its upstream
+    /// `tier`: how far the subscription reaches, as for `Fetch`: a relay
+    /// serves a LocalOnly one from its store alone, without its upstream
     /// (a non-durable foreground's LocalOnly read). An authority's store
     /// is the answer either way.
     Subscribe {
@@ -360,7 +361,7 @@ pub enum SyncMessage {
         binding: BTreeMap<String, Value>,
         since: Option<u64>,
         include_deleted: bool,
-        local: bool,
+        tier: ReadTier,
     },
     Unsubscribe {
         id: u64,
@@ -527,8 +528,8 @@ pub(crate) struct Remote {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
-    /// Served from the relay's store alone (see `SyncMessage::Subscribe`).
-    local: bool,
+    /// How far it reaches (see `SyncMessage::Subscribe`).
+    tier: ReadTier,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// Whether the last answer was the global authority's.
     pub(crate) global: Rc<StdCell<bool>>,
@@ -620,9 +621,9 @@ fn remote_key(
     query: &Query,
     binding: &BTreeMap<String, Value>,
     include_deleted: bool,
-    local: bool,
+    tier: ReadTier,
 ) -> String {
-    format!("{query:?}{binding:?}{include_deleted}{local}")
+    format!("{query:?}{binding:?}{include_deleted}{tier:?}")
 }
 
 /// Whether a read may wait for the server: a live link needs the own
@@ -2528,7 +2529,7 @@ impl Db {
                     binding: r.binding.clone(),
                     since: r.through,
                     include_deleted: r.include_deleted,
-                    local: r.local,
+                    tier: r.tier,
                 }
             })
             .collect();
@@ -2780,7 +2781,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
-        local: bool,
+        tier: ReadTier,
     ) -> Option<(
         Rc<StdCell<bool>>,
         Rc<RefCell<Option<Error>>>,
@@ -2789,7 +2790,7 @@ impl Db {
         let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
-        let key = remote_key(&query, &prepared.binding, include_deleted, local);
+        let key = remote_key(&query, &prepared.binding, include_deleted, tier);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some((
@@ -2809,7 +2810,7 @@ impl Db {
             binding: prepared.binding.clone(),
             since: None,
             include_deleted,
-            local,
+            tier,
         });
         client.remote.insert(
             key.clone(),
@@ -2819,7 +2820,7 @@ impl Db {
                 query: query.into_owned(),
                 binding: prepared.binding.clone(),
                 include_deleted,
-                local,
+                tier,
                 answered: answered.clone(),
                 refused: refused.clone(),
                 global: global.clone(),
@@ -2836,11 +2837,11 @@ impl Db {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
-        local: bool,
+        tier: ReadTier,
     ) {
         self.inner
             .borrow_mut()
-            .release_remote(query, binding, include_deleted, local);
+            .release_remote(query, binding, include_deleted, tier);
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -2856,12 +2857,12 @@ impl Inner {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
-        local: bool,
+        tier: ReadTier,
     ) {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = remote_key(&remote_query(query), binding, include_deleted, local);
+        let key = remote_key(&remote_query(query), binding, include_deleted, tier);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -3763,7 +3764,7 @@ impl Db {
         let dropped = inner.fan.dropped.clone();
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
             for (query, binding, include_deleted) in session.close(&dropped) {
-                inner.release_remote(&query, &binding, include_deleted, false);
+                inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
             }
             inner.forget_relayed(subscriber.0);
         }
@@ -4282,7 +4283,7 @@ impl Db {
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
                     for (query, binding, include_deleted) in released {
-                        inner.release_remote(&query, &binding, include_deleted, false);
+                        inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
                     }
                     inner.forget_relayed(index);
                     break;
@@ -4354,8 +4355,9 @@ impl Db {
                 binding,
                 since,
                 include_deleted,
-                local,
+                tier,
             } => {
+                let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = query.limit.is_some() || query.offset > 0;
                 // A relay serves what its upstream lists, settled once the
@@ -4370,7 +4372,7 @@ impl Db {
                     .as_ref()
                     .map(|client| may_wait(client.hint.get()));
                 let attached = if upstream.is_some() && !local {
-                    db.attach_remote(&prepared, include_deleted, false)
+                    db.attach_remote(&prepared, include_deleted, ReadTier::Remote)
                 } else {
                     None
                 };
@@ -4407,7 +4409,7 @@ impl Db {
                             &prepared.query,
                             &prepared.binding,
                             include_deleted,
-                            false,
+                            ReadTier::Remote,
                         ),
                     }
                 }
@@ -4488,7 +4490,7 @@ impl Db {
                 if let Some((query, binding, include_deleted)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
-                    inner.release_remote(&query, &binding, include_deleted, false);
+                    inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
                 }
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
