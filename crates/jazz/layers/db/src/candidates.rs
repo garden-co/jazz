@@ -298,6 +298,7 @@ impl Inner {
                     &check.root,
                     clause,
                     scope,
+                    crate::compile::DEFAULT_INHERITS_DEPTH,
                     budget,
                     &mut inputs,
                 )?;
@@ -324,18 +325,24 @@ impl Inner {
         root: &[(String, Sql)],
         policy: &PolicyExpr,
         scope: CandidateEvidence,
+        depth: usize,
         budget: &mut usize,
         inputs: &mut Vec<PolicyInput>,
     ) -> Result<(), Error> {
         charge(budget, 1)?;
-        match policy {
+        // Match the compiler's inheritance depth and operation selection. An
+        // inherited UPDATE capability uses USING, even for an immutable root
+        // whose own WITH CHECK refuses all actual updates.
+        let (target, column, parent, condition, created, next_depth) = match policy {
             PolicyExpr::And(items) | PolicyExpr::Or(items) => {
                 for item in items {
-                    self.candidate_inputs(schema, table, root, item, scope, budget, inputs)?;
+                    self.candidate_inputs(schema, table, root, item, scope, depth, budget, inputs)?;
                 }
+                return Ok(());
             }
             PolicyExpr::Not(item) => {
-                self.candidate_inputs(schema, table, root, item, scope, budget, inputs)?
+                return self
+                    .candidate_inputs(schema, table, root, item, scope, depth, budget, inputs);
             }
             PolicyExpr::Exists {
                 table: target,
@@ -346,65 +353,127 @@ impl Inner {
                 condition,
             } => {
                 let target = schema.table(target)?;
-                let (column,parent)=crate::compile::candidate_correlation(condition,table,target).ok_or_else(||unsupported("large-value candidate permission dependencies without a scalar declared-reference correlation"))?;
-                let value = root
-                    .iter()
-                    .find(|(name, _)| name == table.stored_name(parent))
-                    .map(|(_, v)| v)
-                    .ok_or_else(|| {
-                        unsupported("candidate permission correlation absent from its root image")
-                    })?;
-                if matches!(value, Sql::Null) {
+                let (column,parent)=crate::compile::candidate_correlation(condition,table,target)
+                    .ok_or_else(||unsupported("large-value candidate permission dependencies without a scalar declared-reference correlation"))?;
+                (
+                    target,
+                    column,
+                    parent,
+                    condition.as_ref(),
+                    matches!(policy, PolicyExpr::ExistsIncludingCreated { .. }),
+                    depth,
+                )
+            }
+            PolicyExpr::Inherits {
+                operation,
+                via_column,
+                max_depth,
+            } => {
+                let depth = max_depth.unwrap_or(depth).min(depth);
+                if depth == 0 {
                     return Ok(());
                 }
-                let claims = Session::default();
-                let binding = BTreeMap::new();
-                let mut ctx =
-                    Ctx::new(schema, None, &claims, &binding).with_candidate_evidence(Some(scope));
-                ctx.params.push(value.clone());
-                let bound = format!("?{}", ctx.params.len());
-                let source = ctx.candidate_source(
-                    target,
-                    matches!(policy, PolicyExpr::ExistsIncludingCreated { .. }),
-                    column,
-                    &bound,
-                )?;
-                let params = ctx.params;
-                let sql = format!("SELECT * FROM {source} LIMIT {}", *budget + 1);
-                let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-                let names = statement
-                    .column_names()
-                    .iter()
-                    .map(|name| (*name).to_owned())
-                    .collect::<Vec<_>>();
-                let matches = statement
-                    .query_map(params_from_iter(params.iter()), |row| {
-                        names
-                            .iter()
-                            .enumerate()
-                            .map(|(i, name)| row.get::<_, Sql>(i).map(|v| (name.clone(), v)))
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                    .map_err(storage)?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(storage)?;
-                drop(statement);
-                for found in matches {
-                    charge(budget, 1 + found.len())?;
-                    self.candidate_inputs(
-                        schema, target, &found, condition, scope, budget, inputs,
-                    )?;
-                    inputs.push((target.stored.clone(), found));
+                if crate::compile::is_array(table, via_column) {
+                    return Err(unsupported(
+                        "array-reference inheritance in candidate authorization units",
+                    ));
                 }
+                let name = table.references.get(via_column).ok_or_else(|| {
+                    unsupported(
+                        "inheritance without a declared reference in candidate authorization units",
+                    )
+                })?;
+                let target = schema.table(name)?;
+                let Some(condition) = target.policy(*operation) else {
+                    return Ok(());
+                };
+                (
+                    target,
+                    "id",
+                    via_column.as_str(),
+                    condition,
+                    false,
+                    depth - 1,
+                )
             }
-            PolicyExpr::ExistsRel { .. }
-            | PolicyExpr::Inherits { .. }
-            | PolicyExpr::InheritsReferencing { .. } => {
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => {
+                let depth = max_depth.unwrap_or(depth).min(depth);
+                if depth == 0 {
+                    return Ok(());
+                }
+                let target = schema.table(source_table)?;
+                if crate::compile::is_array(target, via_column) {
+                    return Err(unsupported(
+                        "array-reference inheritance in candidate authorization units",
+                    ));
+                }
+                let Some(condition) = target.policy(*operation) else {
+                    return Ok(());
+                };
+                (
+                    target,
+                    via_column.as_str(),
+                    "id",
+                    condition,
+                    false,
+                    depth - 1,
+                )
+            }
+            PolicyExpr::ExistsRel { .. } => {
                 return Err(unsupported(
-                    "large-value candidate permission preprocessing through relations or inheritance",
+                    "large-value candidate permission preprocessing through relation helpers",
                 ));
             }
-            _ => {}
+            _ => return Ok(()),
+        };
+        let value = root
+            .iter()
+            .find(|(name, _)| name == table.stored_name(parent))
+            .map(|(_, v)| v)
+            .ok_or_else(|| {
+                unsupported("candidate permission correlation absent from its root image")
+            })?;
+        if matches!(value, Sql::Null) {
+            return Ok(());
+        }
+        let claims = Session::default();
+        let binding = BTreeMap::new();
+        let mut ctx =
+            Ctx::new(schema, None, &claims, &binding).with_candidate_evidence(Some(scope));
+        ctx.params.push(value.clone());
+        let bound = format!("?{}", ctx.params.len());
+        let source = ctx.candidate_source(target, created, column, &bound)?;
+        let params = ctx.params;
+        let sql = format!("SELECT * FROM {source} WHERE _del=0 LIMIT {}", *budget + 1);
+        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+        let names = statement
+            .column_names()
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        let matches = statement
+            .query_map(params_from_iter(params.iter()), |row| {
+                names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| row.get::<_, Sql>(i).map(|v| (name.clone(), v)))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        drop(statement);
+        for found in matches {
+            charge(budget, 1 + found.len())?;
+            self.candidate_inputs(
+                schema, target, &found, condition, scope, next_depth, budget, inputs,
+            )?;
+            inputs.push((target.stored.clone(), found));
         }
         Ok(())
     }
