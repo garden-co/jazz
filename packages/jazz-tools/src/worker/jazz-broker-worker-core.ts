@@ -352,6 +352,7 @@ async function openPhysicalDatabaseOwner(
   let pageStore: IndexedDbPageStore | null = null;
   try {
     pageStore = await IndexedDbPageStore.open(dbName, {
+      format: "sqlite",
       owner: storageOwner,
       epoch,
       runtimeSources,
@@ -373,8 +374,11 @@ async function openPhysicalDatabaseOwner(
     );
     return owner;
   } catch (error) {
-    await pageStore?.close();
-    await epoch.release();
+    try {
+      await pageStore?.close();
+    } finally {
+      await epoch.release();
+    }
     throw error;
   }
 }
@@ -389,12 +393,15 @@ async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
       } finally {
         owner.disposeInvalidation?.();
         owner.disposeInvalidation = null;
-        await owner.pageStore.close();
-        await owner.epoch.release();
-        if (pendingRuntimeOwnerRetirements.get(dbName) === owner) {
-          pendingRuntimeOwnerRetirements.delete(dbName);
+        try {
+          await owner.pageStore.close();
+        } finally {
+          await owner.epoch.release();
+          if (pendingRuntimeOwnerRetirements.get(dbName) === owner) {
+            pendingRuntimeOwnerRetirements.delete(dbName);
+          }
+          physicalDatabaseOwners.delete(dbName);
         }
-        physicalDatabaseOwners.delete(dbName);
       }
     })();
   }
@@ -1165,24 +1172,26 @@ async function initialize(context: RuntimeContext): Promise<void> {
         "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
       );
     }
-    unownedDb = proof
-      ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
-          context.pageStore,
-          schema,
-          config,
-          proof.token,
-          proof.appId,
-          proof.claimedAuthor,
-          physicalOwner.storageOwner,
-          cachedCatalogue,
-        )
-      : await wasmModule.WasmDb.openBrowser(
-          context.pageStore,
-          schema,
-          config,
-          physicalOwner.storageOwner,
-          cachedCatalogue,
-        );
+    unownedDb = await context.pageStore.openSqliteRuntime(async (storage) =>
+      proof
+        ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+            storage,
+            schema,
+            config,
+            proof.token,
+            proof.appId,
+            proof.claimedAuthor,
+            physicalOwner.storageOwner,
+            cachedCatalogue,
+          )
+        : await wasmModule.WasmDb.openBrowser(
+            storage,
+            schema,
+            config,
+            physicalOwner.storageOwner,
+            cachedCatalogue,
+          ),
+    );
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -1237,6 +1246,13 @@ async function initialize(context: RuntimeContext): Promise<void> {
       await unownedDb?.close();
     } catch {
       // The initialisation error is the actionable failure.
+    }
+    try {
+      // A lease may keep this physical owner alive after initialization fails.
+      // Retire its failed runtime before a later context retries admission.
+      await context.pageStore?.retireTreeOwnership();
+    } catch {
+      // Preserve the initialization error after fencing the failed runtime.
     }
     try {
       cleanupFailedContext(context);
