@@ -954,13 +954,16 @@ impl Owner {
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
     ) {
-        if identity != AuthorSubject::SYSTEM {
-            self.db.set_identity_claims(identity, claims);
-        }
+        let claims = (identity != AuthorSubject::SYSTEM).then(|| {
+            self.db.set_identity_claims(identity, claims.clone());
+            claims
+        });
         let queues = Rc::new(SessionQueues::default());
-        let subscriber = self
-            .db
-            .accept_subscriber(Box::new(SessionTransport(Rc::clone(&queues))), identity);
+        let subscriber = self.db.accept_subscriber_with_claims(
+            Box::new(SessionTransport(Rc::clone(&queues))),
+            identity,
+            claims,
+        );
         self.sessions.insert(
             session,
             OwnerSession {

@@ -574,6 +574,10 @@ impl SettledBy {
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
     identity: AuthorSubject,
+    /// This connection's own claims. Two sessions of one identity may hold
+    /// different claims (two tokens), so its reads and writes evaluate
+    /// policies with these, not the identity's latest.
+    claims: Option<BTreeMap<String, Value>>,
     /// Per client subscription: its queue, its group, whether it is
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
@@ -622,6 +626,7 @@ impl Session {
         Self {
             transport,
             identity,
+            claims: None,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             stale: Vec::new(),
@@ -732,6 +737,14 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
 /// an aggregate its input rows (its filters and traversals, every column,
 /// no window), which the client aggregates as it would local rows.
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
+    // A window past an offset is only right over the rows before it too:
+    // the replica holds the whole prefix and applies the offset itself.
+    if query.aggregate.is_none() && query.offset > 0 {
+        let mut prefix = query.clone();
+        prefix.limit = query.limit.map(|limit| limit + query.offset);
+        prefix.offset = 0;
+        return std::borrow::Cow::Owned(prefix);
+    }
     if query.aggregate.is_none() {
         return std::borrow::Cow::Borrowed(query);
     }
@@ -3080,6 +3093,18 @@ impl Inner {
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
     /// schema (also for a version this store has not admitted).
+    /// Whether session `index` declared a schema version this store has
+    /// not admitted.
+    fn session_unadmitted(&self, index: usize) -> bool {
+        self.sessions[index].version.is_some_and(|version| {
+            version != self.owner.jazz.version_id()
+                && !self
+                    .admitted
+                    .iter()
+                    .any(|admitted| admitted.version_id() == version)
+        })
+    }
+
     pub(crate) fn session_schema(&mut self, index: usize) -> Option<Rc<Schema>> {
         let version = self.sessions[index].version?;
         if version == self.owner.jazz.version_id() {
@@ -3136,8 +3161,20 @@ impl Db {
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
     ) -> SubscriberId {
+        self.accept_subscriber_with_claims(transport, identity, None)
+    }
+
+    /// [`Self::accept_subscriber`] for a connection that authenticated
+    /// with its own claims.
+    pub fn accept_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: Option<BTreeMap<String, Value>>,
+    ) -> SubscriberId {
         let mut inner = self.inner.borrow_mut();
-        let session = Session::new(transport, identity);
+        let mut session = Session::new(transport, identity);
+        session.claims = claims;
         if let Some(index) = inner.sessions.iter().position(|session| !session.open) {
             inner.sessions[index] = session;
             return SubscriberId(index);
@@ -3230,6 +3267,18 @@ impl Db {
                         break;
                     }
                     session.ingress.1 += bytes;
+                }
+                // A session on a schema version this server has not
+                // admitted (a draft awaiting its lens) waits: serving it
+                // under another version would expose rows it may not read
+                // that way.
+                if !matches!(message, SyncMessage::Schema { .. }) {
+                    let mut inner = self.inner.borrow_mut();
+                    if inner.session_unadmitted(index) {
+                        inbound.push_front(message);
+                        inner.sessions[index].backlog = inbound;
+                        break;
+                    }
                 }
                 self.serve(index, message)?;
             }
@@ -3605,7 +3654,41 @@ impl Db {
     }
 
     fn serve(&self, index: usize, message: SyncMessage) -> Result<(), Error> {
+        let (identity, claims) = {
+            let inner = self.inner.borrow();
+            let session = &inner.sessions[index];
+            (session.identity, session.claims.clone())
+        };
+        let Some(claims) = claims.filter(|_| identity != AuthorSubject::SYSTEM) else {
+            return self.serve_as(index, message, None);
+        };
+        // The session's claims stand for its identity's while it is served.
+        let previous = self
+            .inner
+            .borrow_mut()
+            .claims
+            .insert(identity, claims.clone());
+        let result = self.serve_as(index, message, Some(claims));
+        let mut inner = self.inner.borrow_mut();
+        match previous {
+            Some(previous) => inner.claims.insert(identity, previous),
+            None => inner.claims.remove(&identity),
+        };
+        result
+    }
+
+    fn serve_as(
+        &self,
+        index: usize,
+        message: SyncMessage,
+        claims: Option<BTreeMap<String, Value>>,
+    ) -> Result<(), Error> {
         let identity = self.inner.borrow().sessions[index].identity;
+        // A subscription's group keeps the session's claims for later runs.
+        let with_claims = |prepared: PreparedQuery| match &claims {
+            Some(claims) => prepared.with_identity_claims(identity, claims.clone()),
+            None => prepared,
+        };
         let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
         // Queries, writes and held rows name tables and columns as the
         // client's schema version does.
@@ -3624,7 +3707,7 @@ impl Db {
                 since,
                 include_deleted,
             } => {
-                let prepared = db.prepare_query_bound(&query, binding)?;
+                let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = query.limit.is_some() || query.offset > 0;
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
@@ -3727,7 +3810,7 @@ impl Db {
                 at,
                 include_deleted,
             } => {
-                let prepared = db.prepare_query_bound(&query, binding)?;
+                let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let mut inner = db.inner();
                 // A history read ships versions of its source table.
                 let history = history_source_table(&query.table);

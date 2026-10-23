@@ -66,21 +66,36 @@ impl Session {
         }
     }
 
-    /// `session.<path>` as a value, or `None` when the session has none.
+    /// `session.<path>` as a value, or `None` when the session has none
+    /// (or holds an explicit null there).
     pub fn resolve(&self, path: &[String]) -> Option<Value> {
+        self.resolve_raw(path).and_then(unwrap_nullable)
+    }
+
+    /// `session.<path>` as held: an explicit null claim is
+    /// `Some(Nullable(None))`, a missing path `None`. Claim paths walk
+    /// nested claim objects by literal segments.
+    fn resolve_raw(&self, path: &[String]) -> Option<Value> {
         self.used.set(true);
-        let path: Vec<&str> = path.iter().map(String::as_str).collect();
-        let value = match path.as_slice() {
+        let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+        Some(match parts.as_slice() {
             ["user", "identity", "subject"] => Value::String(self.subject.clone()?),
             ["user", "identity", "issuer"] => Value::String(self.issuer.clone()?),
             ["user", "account"] => Value::Uuid(self.account?),
-            ["claims", name] => self
-                .claims
-                .get(&crate::query::provider_claim_key(name))?
-                .clone(),
+            ["claims", _, ..] => {
+                jazz_model::model::policy_claims::policy_claim_at_path(&self.claims, path)?
+            }
             _ => return None,
-        };
-        unwrap_nullable(value)
+        })
+    }
+
+    /// `session.<path> IS NULL`: an explicit null. A missing claim path is
+    /// not null (it is absent); a missing user part is.
+    pub fn is_null(&self, path: &[String]) -> bool {
+        match self.resolve_raw(path) {
+            Some(value) => unwrap_nullable(value).is_none(),
+            None => path.first().map(String::as_str) != Some("claims"),
+        }
     }
 
     pub fn claim(&self, key: &str) -> Option<Value> {
@@ -1590,7 +1605,7 @@ impl<'a> Ctx<'a> {
             PolicyExpr::IsNotNull { column } => {
                 format!("({} IS NOT NULL)", column_sql(table, alias, column)?)
             }
-            PolicyExpr::SessionIsNull { path } => bool_sql(session.resolve(path).is_none()),
+            PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
             PolicyExpr::SessionIsNotNull { path } => bool_sql(session.resolve(path).is_some()),
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
@@ -1633,8 +1648,26 @@ impl<'a> Ctx<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.in_list(left, options)?
             }
-            PolicyExpr::SessionContains { .. } => {
-                return Err(unsupported("session-side CONTAINS policies on SQLite"));
+            // Both sides are known at compile time: an array claim holds the
+            // value, or a text claim contains it.
+            PolicyExpr::SessionContains { path, value } => {
+                let needle = public_value(value)?;
+                let same = |a: &Value, b: &Value| match (a, b) {
+                    (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
+                        u.to_string() == *s
+                    }
+                    (a, b) => a == b,
+                };
+                bool_sql(match session.resolve(path) {
+                    Some(Value::Array(items)) => items.iter().any(|item| {
+                        unwrap_nullable(item.clone()).is_some_and(|i| same(&i, &needle))
+                    }),
+                    Some(Value::String(text)) => match &needle {
+                        Value::String(part) => text.contains(part.as_str()),
+                        _ => false,
+                    },
+                    _ => false,
+                })
             }
             // Policy EXISTS reads its table as raw evidence: the dependency
             // table's own policy is not composed in (INV-RLS-21).
