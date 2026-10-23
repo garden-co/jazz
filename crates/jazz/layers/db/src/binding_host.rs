@@ -191,7 +191,10 @@ pub fn claims(author: AuthorSubject, claims: serde_json::Value) -> HostResult<Ce
 
 // ---- options -------------------------------------------------------------------------
 
-fn write_identity<O: HostObject>(options: &O) -> HostResult<WriteIdentity> {
+/// Resolves author bytes to the subject a write or read runs as.
+type AuthorOf<'a> = &'a dyn Fn(&[u8]) -> HostResult<AuthorSubject>;
+
+fn write_identity<O: HostObject>(options: &O, author: AuthorOf<'_>) -> HostResult<WriteIdentity> {
     match (options.get("author")?, options.get("attribution")?) {
         (Some(_), Some(_)) => {
             Err("write identity cannot contain both author and attribution".into())
@@ -233,12 +236,19 @@ fn branch_view_target<O: HostObject>(options: &O) -> HostResult<crate::db::Write
 
 /// `{ rowId?, author?, attribution?, branch?, updatedAtMs? }`.
 pub fn insert_options<O: HostObject>(options: &O) -> HostResult<InsertOptions> {
+    insert_options_as(options, &author)
+}
+
+fn insert_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<InsertOptions> {
     Ok(InsertOptions {
         row_id: options
             .get("rowId")?
             .map(|row| row_uuid(&O::bytes(&row)?))
             .transpose()?,
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -246,8 +256,15 @@ pub fn insert_options<O: HostObject>(options: &O) -> HostResult<InsertOptions> {
 
 /// `{ author?, attribution?, head?, base?, updatedAtMs? }`.
 pub fn update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
+    update_options_as(options, &author)
+}
+
+fn update_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<UpdateOptions> {
     Ok(UpdateOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: branch_view_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -256,6 +273,13 @@ pub fn update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
 /// As [`update_options`]; the removed `branch` field is rejected even when
 /// `undefined`, so untyped callers cannot write to the root by accident.
 pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
+    upsert_options_as(options, &author)
+}
+
+fn upsert_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<UpsertOptions> {
     if options.has("branch")? {
         return Err(
             "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view"
@@ -263,7 +287,7 @@ pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
         );
     }
     Ok(UpsertOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: branch_view_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -271,7 +295,14 @@ pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
 
 /// As [`update_options`].
 pub fn delete_options<O: HostObject>(options: &O) -> HostResult<DeleteOptions> {
-    let options = update_options(options)?;
+    delete_options_as(options, &author)
+}
+
+fn delete_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<DeleteOptions> {
+    let options = update_options_as(options, author)?;
     Ok(DeleteOptions {
         identity: options.identity,
         target: options.target,
@@ -281,8 +312,15 @@ pub fn delete_options<O: HostObject>(options: &O) -> HostResult<DeleteOptions> {
 
 /// As [`insert_options`] without a row id.
 pub fn restore_options<O: HostObject>(options: &O) -> HostResult<RestoreOptions> {
+    restore_options_as(options, &author)
+}
+
+fn restore_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<RestoreOptions> {
     Ok(RestoreOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -364,8 +402,8 @@ pub struct OpenConfig {
     pub identity: OpenIdentity,
     /// Seed for deterministic row ids (tests).
     pub row_id_seed: Option<u64>,
-    /// Open as an authority keeping full history. Every SQLite store keeps
-    /// full history, so this opens normally.
+    /// A Groove replica knob: keep full history. Every SQLite store keeps
+    /// full history, so this opens normally (not as an authority).
     pub history_complete: bool,
     /// A Groove persistence knob: SQLite commits each applied batch, so it
     /// is accepted and has nothing to configure.
@@ -444,6 +482,17 @@ pub fn verify_self_signed(
     )?)
 }
 
+/// The account-bound local-first author `proof` proves `claimed_author` is.
+fn verify_local_first(proof: &SelfSignedProof, claimed_author: &str) -> HostResult<AuthorSubject> {
+    let author = verify_self_signed(&proof.token, &proof.app_id, claimed_author)?;
+    if author.principal_parts().0 != AuthorSubject::LOCAL_FIRST_ISSUER
+        || author.account_id().is_none()
+    {
+        return Err("session admission requires an account-bound local-first proof".into());
+    }
+    Ok(author)
+}
+
 /// The identity `config` opens with under `how`, checked; and whether the
 /// runtime is a trusted backend.
 pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(DbIdentity, bool)> {
@@ -484,13 +533,20 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
     }
 }
 
-/// Open an in-memory database.
-pub async fn open_memory(db_config: DbConfig, config: &OpenConfig) -> Result<Db, Error> {
-    if config.history_complete {
-        Db::open_history_complete(db_config).await
-    } else {
-        Db::open(db_config).await
-    }
+/// Open an in-memory database. `history_complete` needs nothing: every
+/// SQLite store keeps full history.
+pub async fn open_memory(db_config: DbConfig, _config: &OpenConfig) -> Result<Db, Error> {
+    Db::open(db_config).await
+}
+
+/// Open a durable store in the SQLite file at `path` (see [`open_memory`]).
+pub async fn open_file(
+    db_config: DbConfig,
+    _config: &OpenConfig,
+    path: &std::path::Path,
+    options: crate::db::FileOptions,
+) -> Result<Db, Error> {
+    Db::open_at(db_config, path, options).await
 }
 
 // ---- progress ------------------------------------------------------------------------
@@ -615,11 +671,29 @@ pub struct Binding {
     /// Open transactions a staged write was refused in for its row's
     /// state: the transaction's commit reports the first such refusal.
     refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
+    /// Local-first accounts a backend admitted (see
+    /// [`Binding::admit_local_first_session`]), by canonical author.
+    admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+}
+
+/// A Jazz self-signed proof of a local-first account.
+#[derive(Clone)]
+struct SelfSignedProof {
+    token: String,
+    app_id: String,
 }
 
 impl Binding {
     /// Bind `db`, opened as `identity`.
+    /// Unless `db` is the authority, it is a replica from the start: what
+    /// it writes before its upstream connects is uploaded once it does.
     pub fn new(db: Db, identity: DbIdentity, trusted_backend: bool) -> Self {
+        if !db.is_authority() {
+            db.become_replica();
+        }
+        if !trusted_backend {
+            db.keep_sessions_local();
+        }
         Self {
             db: Rc::new(db),
             hooks: Rc::default(),
@@ -627,6 +701,47 @@ impl Binding {
             author: identity.author,
             trusted_backend,
             refused: Rc::default(),
+            admitted: Rc::default(),
+        }
+    }
+
+    /// Let this backend runtime write and read as the local-first account
+    /// `claimed_author`, proven by `token`. Raw author bytes never name a
+    /// Jazz-reserved identity otherwise. The admission covers this runtime
+    /// and its schema views; the proof is checked again at every use, so an
+    /// expired one stops admitting.
+    pub fn admit_local_first_session(
+        &self,
+        token: &str,
+        app_id: &str,
+        claimed_author: &str,
+    ) -> HostResult<()> {
+        self.require_trusted_backend()?;
+        let proof = SelfSignedProof {
+            token: token.to_owned(),
+            app_id: app_id.to_owned(),
+        };
+        verify_local_first(&proof, claimed_author)?;
+        self.admitted
+            .borrow_mut()
+            .insert(claimed_author.to_owned(), proof);
+        Ok(())
+    }
+
+    /// The subject `bytes` (canonical author JSON) names: an ordinary
+    /// author, or a local-first account this backend admitted.
+    fn author_of(&self, bytes: &[u8]) -> HostResult<AuthorSubject> {
+        match author(bytes) {
+            Ok(author) => Ok(author),
+            Err(error) => {
+                let admitted = std::str::from_utf8(bytes).ok().and_then(|canonical| {
+                    Some((canonical, self.admitted.borrow().get(canonical)?.clone()))
+                });
+                match admitted {
+                    Some((canonical, proof)) => verify_local_first(&proof, canonical),
+                    None => Err(error),
+                }
+            }
         }
     }
 
@@ -671,7 +786,7 @@ impl Binding {
     /// the database's own.
     fn read_author(&self, author: Option<&[u8]>) -> HostResult<Option<AuthorSubject>> {
         match author {
-            Some(bytes) => Ok(Some(self::author(bytes)?)),
+            Some(bytes) => Ok(Some(self.author_of(bytes)?)),
             None if self.trusted_backend => Ok(Some(AuthorSubject::SYSTEM)),
             None => Ok(None),
         }
@@ -720,7 +835,7 @@ impl Binding {
         options: &O,
     ) -> HostResult<Write> {
         let cells = decode_cells(cells)?;
-        let mut options = insert_options(options)?;
+        let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.insert(table, cells, options)))
     }
@@ -735,7 +850,7 @@ impl Binding {
     ) -> HostResult<Write> {
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let mut options = update_options(options)?;
+        let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.update(table, row, patch, options)))
     }
@@ -770,9 +885,11 @@ impl Binding {
         cells: &[u8],
         options: &O,
     ) -> HostResult<Write> {
+        // The removed `branch` option is refused before any payload is read,
+        // so a malformed row cannot mask it.
+        let mut options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let mut options = upsert_options(options)?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.upsert(table, row, cells, options)))
     }
@@ -780,24 +897,24 @@ impl Binding {
     /// Delete `row`.
     pub fn delete<O: HostObject>(&self, table: &str, row: &[u8], options: &O) -> HostResult<Write> {
         let row = row_uuid(row)?;
-        let mut options = delete_options(options)?;
+        let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.delete(table, row, options)))
     }
 
-    /// Undelete `row` with `cells`.
+    /// Undelete `row`, with `cells` or (`None`) the values it was deleted with.
     pub fn restore<O: HostObject>(
         &self,
         table: &str,
         row: &[u8],
-        cells: &[u8],
+        cells: Option<&[u8]>,
         options: &O,
     ) -> HostResult<Write> {
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
-        let mut options = restore_options(options)?;
+        let cells = cells.map(decode_cells).transpose()?;
+        let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
-        self.write(block_on(self.db.restore(table, row, Some(cells), options)))
+        self.write(block_on(self.db.restore(table, row, cells, options)))
     }
 
     // ---- transactions ----
@@ -880,7 +997,7 @@ impl Binding {
     ) -> HostResult<RowUuid> {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
-        let mut options = insert_options(options)?;
+        let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
         let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
         let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
         self.staged(id, staged)?;
@@ -899,7 +1016,7 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let options = update_options(options)?;
+        let options = update_options_as(options, &|bytes| self.author_of(bytes))?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -917,10 +1034,10 @@ impl Binding {
         cells: &[u8],
         options: &O,
     ) -> HostResult<()> {
+        let options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let options = upsert_options(options)?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -939,7 +1056,7 @@ impl Binding {
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let options = delete_options(options)?;
+        let options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
         let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
         self.staged(id, staged)
     }
@@ -978,19 +1095,18 @@ impl Binding {
         id: &str,
         table: &str,
         row: &[u8],
-        cells: &[u8],
+        cells: Option<&[u8]>,
         options: &O,
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
-        let options = restore_options(options)?;
-        let staged = block_on(self.db.mergeable_tx_ref(id).restore(
-            table,
-            row,
-            Some(cells),
-            options,
-        ));
+        let cells = cells.map(decode_cells).transpose()?;
+        let options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
+        let staged = block_on(
+            self.db
+                .mergeable_tx_ref(id)
+                .restore(table, row, cells, options),
+        );
         self.staged(id, staged)
     }
 
@@ -1103,7 +1219,7 @@ impl Binding {
 
     /// Bind correlation claims to `author` (a served identity).
     pub fn set_identity_claims(&self, author: &[u8], claims: serde_json::Value) -> HostResult<()> {
-        let author = self::author(author)?;
+        let author = self.author_of(author)?;
         let claims = self::claims(author, claims)?;
         self.db.set_identity_claims(author, claims);
         self.hooks.progress.wake_all();
@@ -1244,10 +1360,10 @@ impl Binding {
                     "streaming mutation identity cannot contain both author and attribution".into(),
                 );
             }
-            (Some(bytes), None) => WriteIdentity::Session(self::author(bytes)?),
+            (Some(bytes), None) => WriteIdentity::Session(self.author_of(bytes)?),
             (None, Some(bytes)) => {
                 self.require_trusted_backend()?;
-                WriteIdentity::Attribution(self::author(bytes)?)
+                WriteIdentity::Attribution(self.author_of(bytes)?)
             }
             (None, None) => WriteIdentity::Database,
         };
