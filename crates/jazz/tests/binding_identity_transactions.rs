@@ -39,24 +39,22 @@ fn open(node: u8, backend: bool, path: Option<&Path>) -> Binding {
     open_with_policy(node, backend, path, policy)
 }
 
+fn file_table(policy: PolicyExpr) -> TableSchemaBuilder {
+    TableSchemaBuilder::new("files")
+        .column("owner", ColumnType::Text)
+        .nullable_column("payload", ColumnType::Bytea)
+        .nullable_column("parent", ColumnType::Uuid)
+        .policies(
+            TablePolicies::new()
+                .with_select(policy.clone())
+                .with_insert(policy.clone())
+                .with_update(Some(policy.clone()), policy)
+                .with_delete(PolicyExpr::True),
+        )
+}
+
 fn open_with_policy(node: u8, backend: bool, path: Option<&Path>, policy: PolicyExpr) -> Binding {
-    let schema = common::compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("files")
-                    .column("owner", ColumnType::Text)
-                    .nullable_column("payload", ColumnType::Bytea)
-                    .nullable_column("parent", ColumnType::Uuid)
-                    .policies(
-                        TablePolicies::new()
-                            .with_select(policy.clone())
-                            .with_insert(policy.clone())
-                            .with_update(Some(policy.clone()), policy)
-                            .with_delete(PolicyExpr::True),
-                    ),
-            )
-            .build(),
-    );
+    let schema = common::compile_schema(&SchemaBuilder::new().table(file_table(policy)).build());
     let id = identity(
         node,
         if backend {
@@ -1414,11 +1412,11 @@ fn scoped_remote_answers_exclude_stale_and_pending_rows_and_preserve_windows() {
 }
 
 /// A peer can bypass the SDK's shape checks, so raw wire requests exercise the
-/// authority boundary: Alice's nested/cross-row evidence and relay reads reject
-/// explicitly; malformed authors reject without closing the serving connection.
+/// authority boundary: Alice's nested/cross-row evidence rejects explicitly;
+/// malformed authors reject without closing the serving connection.
 #[test]
-fn scoped_wire_requests_reject_unported_shapes_relays_and_malformed_authors() {
-    for kind in ["nested", "evidence", "relay", "malformed", "forged-system"] {
+fn scoped_wire_requests_reject_unported_shapes_and_malformed_authors() {
+    for kind in ["nested", "evidence", "malformed", "forged-system"] {
         let policy = if kind == "evidence" {
             PolicyExpr::Exists {
                 table: "files".into(),
@@ -1431,7 +1429,6 @@ fn scoped_wire_requests_reject_unported_shapes_relays_and_malformed_authors() {
             )
         };
         let authority = open_with_policy(37, true, None, policy);
-        let _up = (kind == "relay").then(|| authority.connect_upstream());
         let down = authority.accept_subscriber(
             if kind == "forged-system" {
                 author("alice")
@@ -1577,4 +1574,453 @@ fn scoped_remote_reads_preserve_deleted_rows_and_fail_without_authority() {
     let error = core_error(block_on(remote_as(&backend, query, "alice", None)).unwrap_err());
     assert_eq!(error.code, ErrorCode::NotObserved);
     assert!(error.message.contains("no available authority"));
+}
+
+fn pump_network(links: &[(&Link, &Link)]) {
+    for (up, down) in links {
+        down.receive(up.take_outbound());
+        up.receive(down.take_outbound());
+        block_on(down.binding().tick()).unwrap();
+        block_on(up.binding().tick()).unwrap();
+    }
+}
+
+fn drive_network<T>(links: &[(&Link, &Link)], future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..200 {
+        if let Poll::Ready(result) = future.as_mut().poll(&mut cx) {
+            return result;
+        }
+        pump_network(links);
+    }
+    panic!("relayed operation did not settle");
+}
+
+fn scoped_request(id: u64, name: &str) -> Vec<u8> {
+    postcard::to_allocvec(&jazz::db::SyncMessage::ScopedFetchV1 {
+        id,
+        query: Query::from("files"),
+        binding: BTreeMap::new(),
+        author: author(name).canonical().to_owned(),
+        claims: BTreeMap::new(),
+        include_deleted: false,
+    })
+    .unwrap()
+}
+
+/// Two backend connections can reuse local request IDs while Alice's different
+/// claims traverse two trusted relays independently. Pagination applies once.
+/// alice/bob requests -> relay -> relay -> authority -> exact scoped rows
+#[test]
+fn scoped_reads_cross_multiple_relays_with_isolated_claims_and_windows() {
+    let policy = || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
+    let authority = open_with_policy(50, true, None, policy());
+    for (id, owner) in [(1, "alice"), (2, "alice"), (3, "bob"), (4, "mallory")] {
+        authority
+            .insert("files", &cells(owner), &json!({"rowId": vec![id;16]}))
+            .unwrap();
+    }
+    let outer = open_with_policy(51, true, None, policy());
+    let inner = open_with_policy(52, true, None, policy());
+    let alice = open_with_policy(53, true, None, policy());
+    let bob = open_with_policy(54, true, None, policy());
+    let a = alice.connect_upstream();
+    let ad = outer.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let b = bob.connect_upstream();
+    let bd = outer.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let ou = outer.connect_upstream();
+    let od = inner.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let iu = inner.connect_upstream();
+    let id = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let links = [(&a, &ad), (&b, &bd), (&ou, &od), (&iu, &id)];
+    let query = Query::from("files").order_by("id", jazz::query::OrderDirection::Asc);
+    let mut ar = remote_as(
+        &alice,
+        query.clone().offset(1).limit(1),
+        "alice",
+        Some(json!({"owner":"alice"})),
+    );
+    let mut br = remote_as(&bob, query.clone(), "alice", Some(json!({"owner":"bob"})));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(ar.as_mut().poll(&mut cx).is_pending());
+    assert!(br.as_mut().poll(&mut cx).is_pending());
+    for (future, expected, owner) in [(br, 3, "bob"), (ar, 2, "alice")] {
+        let rows = decode_read(&drive_network(&links, future).unwrap(), false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].row_id, RowUuid::from_bytes([expected; 16]));
+        assert_eq!(rows[0].cells["owner"], Value::String(owner.into()));
+    }
+    assert_eq!(rows(&alice).len(), 1);
+    assert_eq!(rows(&bob).len(), 1);
+    assert_eq!(rows(&outer).len(), 2);
+    assert_eq!(rows(&inner).len(), 2);
+    authority
+        .update("files", &[2; 16], &cells("bob"), &json!({}))
+        .unwrap();
+    let rows = decode_read(
+        &drive_network(
+            &links,
+            remote_as(&alice, query, "alice", Some(json!({"owner":"alice"}))),
+        )
+        .unwrap(),
+        false,
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_id, RowUuid::from_bytes([1; 16]));
+}
+
+/// An ordinary Alice connection at any hop cannot delegate Bob or replacement
+/// claims. Every upstream refusal reaches the original backend without rows.
+#[test]
+fn scoped_relay_reads_require_trusted_connections_at_every_hop() {
+    for untrusted in 0..3 {
+        let authority = open(55, true, None);
+        authority
+            .insert("files", &cells("bob"), &json!({"rowId":vec![1;16]}))
+            .unwrap();
+        let inner = open(56, true, None);
+        let outer = open(57, true, None);
+        let backend = open(58, true, None);
+        let id = |hop| {
+            if hop == untrusted {
+                author("alice")
+            } else {
+                AuthorSubject::SYSTEM
+            }
+        };
+        let a = backend.connect_upstream();
+        let ad = outer.accept_subscriber(id(0), BTreeMap::new());
+        let b = outer.connect_upstream();
+        let bd = inner.accept_subscriber(id(1), BTreeMap::new());
+        let c = inner.connect_upstream();
+        let cd = authority.accept_subscriber(id(2), BTreeMap::new());
+        let error = core_error(
+            drive_network(
+                &[(&a, &ad), (&b, &bd), (&c, &cd)],
+                remote_as(
+                    &backend,
+                    Query::from("files"),
+                    "bob",
+                    Some(json!({"owner":"bob"})),
+                ),
+            )
+            .unwrap_err(),
+        );
+        assert_eq!(error.code, ErrorCode::WriteRejected);
+        assert!(error.message.contains("trusted backend connection"));
+        assert!(rows(&backend).is_empty());
+        assert!(rows(&outer).is_empty());
+        assert!(rows(&inner).is_empty());
+    }
+}
+
+/// Alice receives the authority's original snapshot even if Bob's update reaches
+/// the relay before it emits that answer. A delayed optimistic relay write is
+/// excluded. Raw frame timing is necessary to put the update ahead of delivery.
+#[test]
+fn scoped_relay_answers_preserve_authority_cuts_and_exclude_pending_rows() {
+    let authority = open(59, true, None);
+    authority
+        .insert("files", &cells("alice"), &json!({"rowId":vec![1;16]}))
+        .unwrap();
+    let relay = open(60, true, None);
+    let backend = open(61, true, None);
+    let up = backend.connect_upstream();
+    let down = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let ru = relay.connect_upstream();
+    let rd = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let links = [(&up, &down), (&ru, &rd)];
+    for _ in 0..4 {
+        pump_network(&links);
+    }
+    relay
+        .insert("files", &cells("alice"), &json!({"rowId":vec![9;16]}))
+        .unwrap();
+    let mut read = remote_as(&backend, Query::from("files"), "alice", None);
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    block_on(backend.tick()).unwrap();
+    down.receive(up.take_outbound());
+    block_on(relay.tick()).unwrap();
+    // Delay the relay's upload while letting the read overtake it.
+    rd.receive(ru.take_outbound().into_iter().filter(|frame| {
+        !matches!(
+            postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+            jazz::db::SyncMessage::Commit { .. }
+        )
+    }));
+    block_on(authority.tick()).unwrap();
+    authority
+        .update("files", &[1; 16], &cells("bob"), &json!({}))
+        .unwrap();
+    block_on(authority.tick()).unwrap();
+    ru.receive(rd.take_outbound());
+    block_on(relay.tick()).unwrap();
+    let visible = decode_read(&drive_network(&links, read).unwrap(), false);
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].row_id, RowUuid::from_bytes([1; 16]));
+    assert_eq!(visible[0].cells["owner"], Value::String("alice".into()));
+    assert!(
+        decode_read(
+            &drive_network(
+                &links,
+                remote_as(&backend, Query::from("files"), "alice", None)
+            )
+            .unwrap(),
+            false
+        )
+        .is_empty()
+    );
+    authority.delete("files", &[1; 16], &json!({})).unwrap();
+    let bob = author("bob");
+    let read = backend
+        .all(
+            postcard::to_allocvec(&Query::from("files")).unwrap(),
+            &json!({"tier":"remote","include_deleted":true}),
+            None,
+            Some(bob.canonical().as_bytes()),
+            None,
+        )
+        .unwrap();
+    let deleted = decode_read(&drive_network(&links, read).unwrap(), false);
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].cells["owner"], Value::String("bob".into()));
+}
+
+/// A disconnected Alice downstream cannot deliver a late answer into Bob's
+/// replacement slot, even when Bob reuses its request ID. Raw requests let the
+/// test disconnect precisely after forwarding but before the authority answers.
+#[test]
+fn scoped_relay_disconnect_drops_late_answers_before_session_reuse() {
+    let authority = open(62, true, None);
+    for (id, owner) in [(1, "alice"), (2, "bob")] {
+        authority
+            .insert("files", &cells(owner), &json!({"rowId":vec![id;16]}))
+            .unwrap();
+    }
+    let relay = open(63, true, None);
+    let ru = relay.connect_upstream();
+    let rd = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let mut old = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    old.receive([scoped_request(41, "alice")]);
+    block_on(relay.tick()).unwrap();
+    let late = ru.take_outbound();
+    assert!(old.close());
+    let new = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    rd.receive(late);
+    block_on(authority.tick()).unwrap();
+    ru.receive(rd.take_outbound());
+    block_on(relay.tick()).unwrap();
+    block_on(relay.tick()).unwrap();
+    assert!(new.take_outbound().is_empty());
+    new.receive([scoped_request(41, "bob")]);
+    let mut messages = Vec::new();
+    for _ in 0..20 {
+        pump_network(&[(&ru, &rd)]);
+        messages.extend(
+            new.take_outbound()
+                .into_iter()
+                .map(|f| postcard::from_bytes::<jazz::db::SyncMessage>(&f).unwrap()),
+        );
+        if messages
+            .iter()
+            .any(|m| matches!(m, jazz::db::SyncMessage::Answer { id: 41, .. }))
+        {
+            break;
+        }
+    }
+    assert!(messages.iter().any(
+        |m| matches!(m,jazz::db::SyncMessage::Answer {id:41,rows,..} if rows == &vec![[2;16]])
+    ));
+    for message in messages {
+        if let jazz::db::SyncMessage::Rows { images } = message {
+            assert!(images.iter().all(|image| image.id == [2; 16]));
+        }
+    }
+}
+
+/// Alice's pending read fails when the relay loses or replaces its upstream.
+/// The old request is never replayed; after a reconnect, a fresh read succeeds.
+#[test]
+fn scoped_relay_reads_fail_on_upstream_loss_and_recover_with_fresh_requests() {
+    for reconnect in [false, true] {
+        let authority = open(64, true, None);
+        authority
+            .insert("files", &cells("alice"), &json!({"rowId":vec![1;16]}))
+            .unwrap();
+        let relay = open(65, true, None);
+        let backend = open(66, true, None);
+        let up = backend.connect_upstream();
+        let down = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+        let mut ru = relay.connect_upstream();
+        let rd = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+        let mut read = remote_as(&backend, Query::from("files"), "alice", None);
+        assert!(
+            read.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        block_on(backend.tick()).unwrap();
+        down.receive(up.take_outbound());
+        block_on(relay.tick()).unwrap();
+        // Hold the old outbound request, so no authority has answered it.
+        let _old_frames = ru.take_outbound();
+        if reconnect {
+            ru = relay.connect_upstream();
+        } else {
+            assert!(ru.close());
+        }
+        let error = core_error(drive(&up, &down, read).unwrap_err());
+        assert_eq!(error.code, ErrorCode::NotObserved);
+        block_on(relay.tick()).unwrap();
+        let frames = ru.take_outbound();
+        assert!(!frames.iter().any(|frame| matches!(
+            postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+            jazz::db::SyncMessage::ScopedFetchV1 { .. }
+        )));
+        if !reconnect {
+            ru = relay.connect_upstream();
+        } else {
+            rd.receive(frames);
+        }
+        let visible = decode_read(
+            &drive_network(
+                &[(&up, &down), (&ru, &rd)],
+                remote_as(&backend, Query::from("files"), "alice", None),
+            )
+            .unwrap(),
+            false,
+        );
+        assert_eq!(visible.len(), 1);
+    }
+}
+
+/// Alice's request cannot be reinterpreted if the downstream changes its schema
+/// while an authority answer is pending. A raw handshake models that peer race.
+#[test]
+fn scoped_relay_reads_reject_schema_changes_while_pending() {
+    let relay = open(67, true, None);
+    let _up = relay.connect_upstream();
+    let down = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    down.receive([scoped_request(41, "alice")]);
+    block_on(relay.tick()).unwrap();
+    down.receive([postcard::to_allocvec(&jazz::db::SyncMessage::Schema {
+        version: [0x99; 16],
+    })
+    .unwrap()]);
+    block_on(relay.tick()).unwrap();
+    let messages: Vec<jazz::db::SyncMessage> = down
+        .take_outbound()
+        .into_iter()
+        .map(|f| postcard::from_bytes(&f).unwrap())
+        .collect();
+    assert!(messages.iter().any(|m| matches!(
+        m,
+        jazz::db::SyncMessage::Refused {
+            id: 41,
+            code: ErrorCode::NotObserved,
+            ..
+        }
+    )));
+    assert!(!messages.iter().any(|m| matches!(
+        m,
+        jazz::db::SyncMessage::Rows { .. } | jazz::db::SyncMessage::Answer { .. }
+    )));
+}
+
+/// An admitted old Alice schema cannot be forwarded under the relay's new
+/// schema. Both versions remain valid locally; delegation rejects before fetch.
+#[test]
+fn scoped_relay_reads_reject_cross_version_forwarding() {
+    let relay = open(68, true, None);
+    let backend = open(69, true, None);
+    let old_schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(file_table(PolicyExpr::eq_session(
+                "owner",
+                vec!["user".into(), "identity".into(), "subject".into()],
+            )))
+            .build(),
+    );
+    let new_schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(file_table(PolicyExpr::eq_session(
+                "owner",
+                vec!["user".into(), "identity".into(), "subject".into()],
+            )))
+            .table(TableSchemaBuilder::new("extra").policies(common::allow_all_policies()))
+            .build(),
+    );
+    assert_ne!(old_schema.version_id(), new_schema.version_id());
+    block_on(relay.db.activate_schema(new_schema)).unwrap();
+    let _old_view = block_on(relay.db.register_schema_view(old_schema)).unwrap();
+    let ru = relay.connect_upstream();
+    let up = backend.connect_upstream();
+    let down = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    let error = core_error(
+        drive(
+            &up,
+            &down,
+            remote_as(&backend, Query::from("files"), "alice", None),
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(error.message.contains("different schema versions"));
+    assert!(!ru.take_outbound().iter().any(|frame| matches!(
+        postcard::from_bytes::<jazz::db::SyncMessage>(frame).unwrap(),
+        jazz::db::SyncMessage::ScopedFetchV1 { .. }
+    )));
+}
+
+/// Alice's new-schema request cannot use a relay connection opened under the old
+/// schema. Reconnecting sends the new declaration before forwarding the request.
+#[test]
+fn scoped_relay_schema_activation_requires_a_new_upstream_handshake() {
+    let relay = open(70, true, None);
+    let old_up = relay.connect_upstream();
+    let schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(file_table(PolicyExpr::True))
+            .table(TableSchemaBuilder::new("extra").policies(common::allow_all_policies()))
+            .build(),
+    );
+    block_on(relay.db.activate_schema(schema.clone())).unwrap();
+    let down = relay.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+    down.receive([scoped_request(41, "alice")]);
+    block_on(relay.tick()).unwrap();
+    let messages: Vec<jazz::db::SyncMessage> = down
+        .take_outbound()
+        .into_iter()
+        .map(|f| postcard::from_bytes(&f).unwrap())
+        .collect();
+    assert!(messages.iter().any(|m|matches!(m,jazz::db::SyncMessage::Refused {id:41,code:ErrorCode::Query,message} if message.contains("without upstream reconnect"))));
+    assert!(!old_up.take_outbound().iter().any(|f| matches!(
+        postcard::from_bytes::<jazz::db::SyncMessage>(f).unwrap(),
+        jazz::db::SyncMessage::ScopedFetchV1 { .. }
+    )));
+    let new_up = relay.connect_upstream();
+    down.receive([scoped_request(42, "alice")]);
+    block_on(relay.tick()).unwrap();
+    let messages: Vec<jazz::db::SyncMessage> = new_up
+        .take_outbound()
+        .into_iter()
+        .map(|f| postcard::from_bytes(&f).unwrap())
+        .collect();
+    assert!(
+        matches!(&messages[0],jazz::db::SyncMessage::Schema {version} if version == schema.version_id().as_bytes())
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, jazz::db::SyncMessage::ScopedFetchV1 { .. }))
+    );
+    assert!(
+        down.take_outbound().is_empty(),
+        "the relay still waits for the authority"
+    );
 }
