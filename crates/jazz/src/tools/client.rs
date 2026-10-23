@@ -312,8 +312,9 @@ impl Forwarder {
                     && held.table() == row.table()
                     && held.joined_rows() == row.joined_rows()
             });
-            // A row that only moved carries no payload: its shown cells are
-            // what it was delivered with.
+            // A row that only moved, or got a new version with the same
+            // shown cells, carries no payload: they are what it was
+            // delivered with.
             let changed = held.is_none_or(|at| {
                 let before = &self.rows[at].row;
                 before.is_deleted() != row.row.is_deleted() || !before.cells().eq(row.row.cells())

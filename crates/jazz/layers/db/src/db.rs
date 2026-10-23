@@ -283,6 +283,16 @@ impl SubscriptionStream {
             if !gate.open() {
                 return None;
             }
+            // The opening lists rows whose large values are complete: while
+            // their chunks may still arrive, it waits for them.
+            if gate.may_still_wait()
+                && self
+                    .group
+                    .upgrade()
+                    .is_some_and(|group| group.borrow().awaiting())
+            {
+                return None;
+            }
             let settled = gate.answered.get();
             self.gate = None;
             self.queue.borrow_mut().clear();
@@ -625,6 +635,81 @@ fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error
     )
 }
 
+/// A relation facade query (hopTo, gather, match), as clients send it: the
+/// ordinary query it stands for, the way Jazz's validation normalizes it.
+/// Unions and projections that rename or narrow the output are not
+/// supported yet. `None` when the query is not a relation query.
+fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, Error> {
+    use crate::query::{RelationProjectExpr, RelationRowIdRef};
+    let Some(relation) = &query.relation else {
+        return Ok(None);
+    };
+    let not_yet = |what: &str| crate::values::unsupported(what.to_owned());
+    if crate::query::relation_union_parts(&relation.rel).is_some() {
+        return Err(not_yet("union relation queries"));
+    }
+    let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
+    let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
+    if resolved.table != query.table {
+        return Err(crate::values::query_error(
+            "relation query output table does not match its Query envelope",
+        ));
+    }
+    let has_ordinary_clauses = !query.filters.is_empty()
+        || !query.joins.is_empty()
+        || query.flat_join.is_some()
+        || !query.policy_branches.is_empty()
+        || !query.reachable.is_empty()
+        || !query.inherits.is_empty()
+        || !query.includes.is_empty()
+        || !query.order_by.is_empty()
+        || query.aggregate.is_some()
+        || query.limit.is_some()
+        || query.offset != 0;
+    if has_ordinary_clauses {
+        return Err(crate::values::query_error(
+            "relation query cannot be combined with ordinary query clauses",
+        ));
+    }
+    if let Some(columns) =
+        crate::query::relation_output_projection_if_present(relation).map_err(relation_error)?
+    {
+        let (scope, _) =
+            crate::query::relation_output_projection(relation).map_err(relation_error)?;
+        let table = schema.table(&resolved.table)?;
+        let mut projected = BTreeSet::new();
+        let identity = columns.iter().all(|column| {
+            let same = match &column.expr {
+                RelationProjectExpr::RowId(RelationRowIdRef::Current) => column.alias == "id",
+                RelationProjectExpr::Column(reference) => {
+                    reference.scope.as_deref() == Some(scope.as_str())
+                        && reference.column == column.alias
+                }
+                RelationProjectExpr::RowId(_) => false,
+            };
+            if same && column.alias != "id" {
+                projected.insert(column.alias.as_str());
+            }
+            same
+        });
+        let full = identity
+            && projected.len() == table.columns.len()
+            && table
+                .columns
+                .iter()
+                .all(|column| projected.contains(column.name.as_str()));
+        if !full {
+            return Err(not_yet(
+                "relation projections that rename or narrow the output columns",
+            ));
+        }
+    }
+    resolved.array_subqueries = query.array_subqueries.clone();
+    resolved.select = query.select.clone();
+    resolved.relation = None;
+    Ok(Some(resolved))
+}
+
 /// The reason a policy rejects a write, leading its message (the code
 /// stays `WriteRejected`): authority rejections are reported by it.
 pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
@@ -923,6 +1008,8 @@ impl Db {
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let inner = self.inner();
+        let normalized = normalize_relation(query, &inner.schema)?;
+        let query = normalized.as_ref().unwrap_or(query);
         // Validate: tables, columns, parameters, supported forms. Read
         // options are not known yet: validate the widest read (deleted rows
         // included, so their metadata columns are accepted).
@@ -3167,8 +3254,9 @@ impl Inner {
             Some(false),
             content.is_some(),
         )?;
+        // A restore writes an existing row back: the UPDATE policy decides.
         if let Some(author) = self.checked(who)
-            && !self.check(table, row, &key, author, Operation::Insert)?
+            && !self.check(table, row, &key, author, Operation::Update)?
         {
             return Err(denied("RESTORE policy denied the restored row"));
         }
