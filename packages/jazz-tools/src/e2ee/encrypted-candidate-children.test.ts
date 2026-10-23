@@ -103,7 +103,7 @@ async function createFixture() {
     clients.push(reader);
     await owner.e2ee.devices.list();
     await reader.e2ee.devices.list();
-    const tx = owner.beginExclusiveTransaction();
+    const tx = owner.beginSerializableTransaction();
     const shared = tx.insert(app.projects, { title: "Shared" });
     const privateProject = tx.insert(app.projects, { title: "Private" });
     const match = tx.insert(app.notes, { projectId: shared.id, title: "Wanted" });

@@ -74,7 +74,7 @@ it("refuses second-device and missing-journal founders without changing the dura
     sessions.push(owner);
     const { account, client } = owner.getSnapshot();
     const founder = client!.db;
-    const tx = founder.beginExclusiveTransaction();
+    const tx = founder.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Original offline founder" });
     const notes = Array.from({ length: 3 }, () =>
       tx.insert(app.notes, {
@@ -88,7 +88,7 @@ it("refuses second-device and missing-journal founders without changing the dura
     const originalTxId = await commit.txId;
     // A later transaction borrows the same provisional root without claiming
     // that it is globally accepted. Exercise its batch recheck while offline.
-    const existing = founder.beginExclusiveTransaction();
+    const existing = founder.beginSerializableTransaction();
     notes.push(
       ...Array.from({ length: 2 }, () =>
         existing.insert(app.notes, {
@@ -98,7 +98,7 @@ it("refuses second-device and missing-journal founders without changing the dura
       ),
     );
     await existing.commit().wait({ tier: "local" });
-    const updates = founder.beginExclusiveTransaction();
+    const updates = founder.beginSerializableTransaction();
     for (const row of notes) {
       updates.update(app.notes, row.id, { body: `${row.body} updated offline` });
     }
@@ -248,7 +248,7 @@ it("resumes the exact pending founder journal after importing into the same dura
     const { account, client } = owner.getSnapshot();
     expect(await accountGeneratedHere(account!)).toBe(true);
     const founder = client!.db;
-    const tx = founder.beginExclusiveTransaction();
+    const tx = founder.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Pending founder space" });
     const note = tx.insert(app.notes, {
       projectId: project.id,
@@ -340,7 +340,7 @@ it("never turns a provisional author's sealed envelope into recipient membership
       )
       .wait({ tier: "global" });
     await owner.disconnect();
-    const tx = owner.beginExclusiveTransaction();
+    const tx = owner.beginSerializableTransaction();
     const project = tx.insert(
       app.projects,
       { title: "Recipient only" },

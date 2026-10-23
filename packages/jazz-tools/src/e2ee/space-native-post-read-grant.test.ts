@@ -85,7 +85,7 @@ it("grants a native space after reading its encrypted rows", async () => {
     expect(otherId).not.toBe(sessions[0]!.getSnapshot().account!.id);
     await owner.e2ee.devices.list();
     await other.e2ee.devices.list();
-    const tx = owner.beginExclusiveTransaction();
+    const tx = owner.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "History measurement" });
     const expected = Array.from({ length: 2 }, (_, position) =>
       tx.insert(app.notes, { projectId: project.id, title: "Wanted", position }),

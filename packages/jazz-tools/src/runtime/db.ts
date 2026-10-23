@@ -58,8 +58,8 @@ import type {
 } from "../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
-  ExclusiveWriteHandle,
-  ExclusiveWriteResult,
+  SerializableWriteHandle,
+  SerializableWriteResult,
   WriteResult,
   JazzClient,
   withTransactionAdmission,
@@ -1634,12 +1634,12 @@ function deriveStreamingInsertBranch(
 
 export type { TransactionKind } from "./client.js";
 
-type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "exclusive"
-  ? ExclusiveWriteHandle
+type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "serializable"
+  ? SerializableWriteHandle
   : WriteHandle;
 
-type TransactionWriteResult<TResult, TKind extends TransactionKind> = TKind extends "exclusive"
-  ? ExclusiveWriteResult<TResult>
+type TransactionWriteResult<TResult, TKind extends TransactionKind> = TKind extends "serializable"
+  ? SerializableWriteResult<TResult>
   : WriteResult<TResult>;
 
 type RunInTransactionResult<TResult, TKind extends TransactionKind> = Promise<
@@ -1681,8 +1681,11 @@ function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
   txId: TxId | Promise<TxId>,
   client: JazzClient,
 ): TransactionWriteResult<TResult, TKind> {
-  if (transaction.kind === "exclusive") {
-    return new ExclusiveWriteResult(value, txId, client) as TransactionWriteResult<TResult, TKind>;
+  if (transaction.kind === "serializable") {
+    return new SerializableWriteResult(value, txId, client) as TransactionWriteResult<
+      TResult,
+      TKind
+    >;
   }
 
   return new WriteResult(value, txId, client) as TransactionWriteResult<TResult, TKind>;
@@ -1808,7 +1811,7 @@ type EncryptedInsertBatch = {
 };
 
 /**
- * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
+ * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
   private readonly pendingReads = new Set<Promise<unknown>>();
@@ -1923,7 +1926,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         id,
         Promise.all(journals.map((journal) => journal.completion())).then(() => {}),
       );
-      await ownerClient.waitForExclusiveTransaction(id, "local");
+      await ownerClient.waitForSerializableTransaction(id, "local");
       for (const journal of journals) await journal.local();
       return id;
     };
@@ -1960,8 +1963,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     };
     // Observe completion without delaying application waits on the transaction ID.
     void txId.then(finishCommit, finishCommit);
-    if (this.kind === "exclusive") {
-      return new ExclusiveWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
+    if (this.kind === "serializable") {
+      return new SerializableWriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
     }
     return new WriteHandle(txId, ownerClient) as TransactionCommitHandle<TKind>;
   }
@@ -2051,7 +2054,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       id ? { ...options, id } : options,
     );
     const captureAbsence =
-      this.kind === "exclusive" && this.e2ee && encryptedSchemas.has(table._schema);
+      this.kind === "serializable" && this.e2ee && encryptedSchemas.has(table._schema);
     let row: ReturnType<typeof client.previewInsertInternal> | undefined;
     const stage = () => {
       if (captureAbsence) {
@@ -2083,7 +2086,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       if (initialisesSpace) {
         const initPreparation = prepareInitialSpaceForTransaction(
           this.e2ee!.db,
-          this as Transaction<"exclusive">,
+          this as Transaction<"serializable">,
           table,
           id!,
           (secret, root) => this.retainInitialSpaceKey(secret, root),
@@ -2114,7 +2117,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   private prepareScopeCreation(): void {
-    if (this.kind !== "exclusive" || !this.e2ee)
+    if (this.kind !== "serializable" || !this.e2ee)
       throw new Error("E2EE scope creation requires an authenticated exclusive transaction");
     this.mayInitialiseSpace = true;
   }
@@ -2245,7 +2248,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             openTransactionId,
           );
         } else {
-          if (this.kind === "exclusive")
+          if (this.kind === "serializable")
             await io.recordInitializationInsertAbsence(table._table, preview.id);
           io.insertInternal(
             table._table,
@@ -2383,7 +2386,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         scope,
         identifier,
         async (secret, root, source) => {
-          if (source === "provisional" || this.kind === "exclusive") {
+          if (source === "provisional" || this.kind === "serializable") {
             const rootQuery = new TypedTableQueryBuilder("__e2ee_spaces", scope._schema)
               .where({ id: root.id })
               .select("id");
@@ -2409,7 +2412,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       )
         throw error;
       const prepared =
-        this.kind === "exclusive" ? preparedTransactionScope(binding, io) : undefined;
+        this.kind === "serializable" ? preparedTransactionScope(binding, io) : undefined;
       if (prepared) initializationScopes.set(prepared, this);
       if (
         !(await prepareMissingSpaceWrite(
@@ -2534,7 +2537,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       const binding = this.requireBinding("upsert");
       const { openTransactionId, session, attribution } = binding;
       const preparation = prepareDbTransaction(
-        this as Transaction<"exclusive">,
+        this as Transaction<"serializable">,
         async (scope, io) => {
           const query = new TypedTableQueryBuilder(table._table, table._schema)
             .includeDeleted()
@@ -2937,7 +2940,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             value: await encryptCell(db, table, id, name, updates[name]!, secret, root),
           };
         }
-        if (creating && this.kind === "exclusive")
+        if (creating && this.kind === "serializable")
           await io.recordInitializationInsertAbsence(table._table, id);
         write();
         this.encryptedScopes.set(
@@ -3075,8 +3078,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     propagation?: "local-only",
     snapshotAtBegin = propagation === "local-only",
   ): Promise<{ rows: T[]; settlements: RowSettlement[] }> {
-    if (this.kind !== "exclusive")
-      throw new Error("E2EE settlement reads require an exclusive transaction");
+    if (this.kind !== "serializable")
+      throw new Error("E2EE settlement reads require a serializable transaction");
     const reading = (async () => {
       const { rows, settlements } = await this.readAll(
         query,
@@ -3155,7 +3158,7 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
 
 /** @internal Typed operations needed by E2EE metadata preparation, not a public transaction surface. */
 export type E2eeTransactionScope = Pick<
-  TransactionScope<"exclusive">,
+  TransactionScope<"serializable">,
   "kind" | "all" | "one" | "insert" | "upsert" | "allSettledForE2ee"
 >;
 
@@ -3505,10 +3508,10 @@ async function readTransactionRows<T>(
 const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
 
 /** @internal Lifecycle work must not wait for the enrolment it implements. */
-export function exclusiveE2eeTransaction<TResult>(
+export function serializableE2eeTransaction<TResult>(
   db: Db,
-  callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
-): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
+  callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
+): Promise<SerializableWriteResult<Awaited<TResult>>> {
   const transaction = beginDbTransactionAfter(db, async () => {});
   return runInTransaction(
     transaction,
@@ -3520,10 +3523,10 @@ export function exclusiveE2eeTransaction<TResult>(
 export function beginDbTransactionAfter(
   db: Db,
   prepare: () => Promise<void>,
-): Transaction<"exclusive"> {
+): Transaction<"serializable"> {
   transactionAdmission.set(db, prepare);
   try {
-    return db.beginExclusiveTransaction();
+    return db.beginSerializableTransaction();
   } finally {
     transactionAdmission.delete(db);
   }
@@ -3531,11 +3534,11 @@ export function beginDbTransactionAfter(
 
 /** @internal Register before returning; the outer commit drains this work. */
 export function prepareDbTransaction(
-  transaction: Transaction<"exclusive">,
+  transaction: Transaction<"serializable">,
   prepare: (scope: E2eeTransactionScope, io: TransactionPreparationIO) => Promise<void>,
 ): Promise<void> {
-  if (transaction.kind !== "exclusive")
-    throw new Error("E2EE initialisation requires an exclusive transaction");
+  if (transaction.kind !== "serializable")
+    throw new Error("E2EE initialisation requires a serializable transaction");
   transaction.openTransactionId(); // Check admission before registering asynchronous work.
   const binding = getDbTxHandleBinding(transaction, "prepare");
   const { ownerClient, openTransactionId } = binding;
@@ -3552,7 +3555,7 @@ function preparedTransactionScope(
 ): E2eeTransactionScope {
   const { openTransactionId, session, attribution } = binding;
   const scope: E2eeTransactionScope = {
-    kind: "exclusive",
+    kind: "serializable",
     upsert(table, id, data, options) {
       binding.resolveClient(table._schema);
       const values = writeRecord("Upsert", table, data);
@@ -4023,7 +4026,7 @@ export class Db {
             throw new Error(
               "Encrypted branch first-use is unsupported; initialise the space with a root-target write first",
             );
-          const exclusive = this.createTransaction("exclusive", context);
+          const exclusive = this.createTransaction("serializable", context);
           client.bindTransactionWait(
             getDbTxHandleBinding(exclusive, "retry").openTransactionId,
             result.txId,
@@ -4352,7 +4355,7 @@ export class Db {
     const encryption = encryptedSchemas.get(table._schema);
     if (encryption?.scopes.has(table._table) || encryption?.tables.has(table._table)) {
       return this.preparedWrite(
-        encryption.scopes.has(table._table) ? "exclusive" : "mergeable",
+        encryption.scopes.has(table._table) ? "serializable" : "mergeable",
         client,
         (tx) => tx.insert(table, data, options),
         true,
@@ -4403,7 +4406,7 @@ export class Db {
    */
   async streamingTransaction<TResult>(
     callback: (plan: StreamingWritePlan) => TResult | Promise<TResult>,
-  ): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
+  ): Promise<SerializableWriteResult<Awaited<TResult>>> {
     const context = this.getAccessContext();
     type Declaration = {
       table: TableProxy<any, any>;
@@ -4746,7 +4749,7 @@ export class Db {
       await prepareGroup(0);
       for (const entry of streams)
         if (!entry.staged) await stage(entry, entry.stream!.source, entry.values);
-      const transaction = this.createTransaction("exclusive", context);
+      const transaction = this.createTransaction("serializable", context);
       const seeds = new Map<WasmSchema, Map<string, InitialSpaceSeed>>();
       for (const group of groups) {
         if (!group.plan!.initialSeed) continue;
@@ -5063,7 +5066,7 @@ export class Db {
     const encryption = encryptedSchemas.get(table._schema);
     if (encryption?.scopes.has(table._table) || encryption?.tables.has(table._table)) {
       return this.preparedWrite(
-        encryption.scopes.has(table._table) ? "exclusive" : "mergeable",
+        encryption.scopes.has(table._table) ? "serializable" : "mergeable",
         client,
         (tx) => tx.upsert(table, id, data, options),
         true,
@@ -5315,9 +5318,9 @@ export class Db {
     const configuredSchema = e2eeSchemaForDb(this);
     const ownerClient =
       this.getCurrentClient() ?? (configuredSchema ? this.getClient(configuredSchema) : null);
-    if (kind === "exclusive" && !ownerClient) {
+    if (kind === "serializable" && !ownerClient) {
       throw new Error(
-        "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+        "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
     const e2ee =
@@ -5377,14 +5380,14 @@ export class Db {
   }
 
   /**
-   * Begin an exclusive transaction for writes that need serializable validation by the authority.
+   * Begin a serializable transaction for writes that need serializable validation by the authority.
    *
    * Use {@link Transaction.commit} to commit the transaction.
    *
-   * Prefer using {@link Db.exclusiveTransaction} when an explicit commit is not required.
+   * Prefer using {@link Db.serializableTransaction} when an explicit commit is not required.
    */
-  beginExclusiveTransaction(): Transaction<"exclusive"> {
-    return this.createTransaction("exclusive");
+  beginSerializableTransaction(): Transaction<"serializable"> {
+    return this.createTransaction("serializable");
   }
 
   /**
@@ -5404,14 +5407,14 @@ export class Db {
   }
 
   /**
-   * Run {@link callback} inside an exclusive transaction and commit it once the callback returns.
+   * Run {@link callback} inside a serializable transaction and commit it once the callback returns.
    *
    * @returns a write result containing the result of the callback
    */
-  exclusiveTransaction<TResult>(
-    callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
-  ): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
-    const transaction = this.beginExclusiveTransaction();
+  serializableTransaction<TResult>(
+    callback: (tx: TransactionScope<"serializable">) => TResult | Promise<TResult>,
+  ): Promise<SerializableWriteResult<Awaited<TResult>>> {
+    const transaction = this.beginSerializableTransaction();
     return runInTransaction(
       transaction,
       callback,

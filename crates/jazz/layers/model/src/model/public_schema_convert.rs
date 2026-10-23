@@ -405,7 +405,9 @@ fn column_type_for_operand(
     }
     match column {
         "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
-        "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
+        "$createdAt" | "$updatedAt" | "$deletedAt" => {
+            Some(TypedLiteralTarget::Core(GrooveColumnType::U64))
+        }
         _ => column_target(column_types, table, column).cloned(),
     }
 }

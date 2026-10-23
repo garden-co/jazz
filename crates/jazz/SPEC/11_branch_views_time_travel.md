@@ -400,7 +400,7 @@ This descriptor is neither a version parent nor a transaction read set, CAS
 condition, history edge, or contribution-merge dependency. It therefore does
 not park on source history, create cross-branch causality, or make the source
 currentness a serializability condition beyond the authority's one-time
-admission check. Root/head-local mutations and exclusive transactions continue
+admission check. Root/head-local mutations and serializable transactions continue
 to use their ordinary existing validation paths.
 
 For example, when `R` is inherited from `Main` and an update is requested in

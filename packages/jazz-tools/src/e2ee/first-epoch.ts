@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import {
   beginDbTransactionAfter,
   prepareDbTransaction,
@@ -75,7 +75,7 @@ export async function firstAccountEpoch(
     assertOpen();
     try {
       const proposal = mayCreate
-        ? await exclusiveE2eeTransaction(db, async (tx) => {
+        ? await serializableE2eeTransaction(db, async (tx) => {
             const existing = await tx.one(identities.where({ id: accountId }), {
               tier: "local-first",
             });

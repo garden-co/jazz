@@ -314,7 +314,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 serde_json::from_value::<ResultKey>(serde_json::json!(unsupported)).is_err(),
                 "unknown ResultKey wire versions fail closed"
             );
-            let tx = client.begin_transaction().expect("begin exclusive tx");
+            let tx = client.begin_transaction().expect("begin serializable tx");
             tx.insert(
                 "todos",
                 row_input!("title" => "staged", "bucket" => "shared", "done" => true),
@@ -324,11 +324,11 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
                 .await
             else {
-                panic!("exclusive transactions reject flat join reads");
+                panic!("serializable transactions reject flat join reads");
             };
             assert!(
                 error.to_string().contains(
-                    "Reading a flat join of `todos` with `todos` is not supported in exclusive transactions yet"
+                    "Reading a flat join of `todos` with `todos` is not supported in serializable transactions yet"
                 ),
                 "unexpected error: {error}"
             );

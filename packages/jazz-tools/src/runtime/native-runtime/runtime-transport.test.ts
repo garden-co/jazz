@@ -254,7 +254,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("surfaces a native local exclusive conflict as PersistedWriteRejectedError", async () => {
+  it("surfaces a native local serializable conflict as PersistedWriteRejectedError", async () => {
     const conflictedWrite = {
       ...fakeWrite(),
       wait: async () => {
@@ -281,7 +281,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     const openTransactionId = runtime.beginTransaction(
-      "exclusive",
+      "serializable",
       "00000000-0000-0000-0000-000000000013" as never,
     );
     const txId = runtime.commitTransaction(openTransactionId);
@@ -297,7 +297,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       appId: "test-app",
       schema: {},
     });
-    const error = await client.waitForExclusiveTransaction(txId).then(
+    const error = await client.waitForSerializableTransaction(txId).then(
       () => undefined,
       (caught: unknown) => caught,
     );
@@ -3341,7 +3341,7 @@ function fakeDb<T extends object>(
   db: T,
 ): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
   type FakeOpenBatch = {
-    kind: "mergeable" | "exclusive";
+    kind: "mergeable" | "serializable";
     author?: Uint8Array;
   };
   const implementation = db as T & {

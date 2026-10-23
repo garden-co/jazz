@@ -61,7 +61,7 @@ it.each(["explicit", "default"] as const)(
       };
       db = await createDb(config);
       expect(await db.e2ee.devices.list()).toEqual([expect.objectContaining({ state: "active" })]);
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Browser project" });
       const note = tx.insert(app.notes, {
         projectId: project.id,

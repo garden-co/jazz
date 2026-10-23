@@ -76,7 +76,7 @@ it.each(["read", "write"] as const)(
       reader = await createDb(readerConfig);
       await owner.e2ee.devices.list();
       await reader.e2ee.devices.list();
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Shared project" },

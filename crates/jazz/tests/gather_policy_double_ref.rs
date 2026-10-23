@@ -240,7 +240,6 @@ fn insert(db: &Db, table: &str, id: RowUuid, cells: Vec<(&str, Value)>) {
 fn local_opts() -> ReadOpts {
     ReadOpts {
         tier: ReadTier::LocalOnly,
-        include_deleted: false,
         ..ReadOpts::default()
     }
 }

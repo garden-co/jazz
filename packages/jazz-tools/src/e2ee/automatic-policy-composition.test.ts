@@ -89,7 +89,7 @@ it("preserves explicit administration rules and encrypted mutations when composi
 
     await db.e2ee.devices.list();
 
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Automatic space" });
     const note = tx.insert(app.notes, {
       projectId: project.id,

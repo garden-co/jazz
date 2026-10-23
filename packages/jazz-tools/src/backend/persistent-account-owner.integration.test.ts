@@ -56,7 +56,7 @@ it("reopens an admitted external account and settles its exact locally published
     await first.db.insert(app.notes, { text: "authenticated warm-up" }).wait({ tier: "global" });
     await first.db.disconnect();
     const client = runtimeClient(first.db);
-    const open = client.beginTransaction("exclusive");
+    const open = client.beginTransaction("serializable");
     const rowId = randomUUID();
     await client.prepareTransaction(open, async (io) => {
       await io.recordInitializationInsertAbsence("notes", rowId);

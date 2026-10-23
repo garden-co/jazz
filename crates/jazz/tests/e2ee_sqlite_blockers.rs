@@ -148,3 +148,112 @@ fn catalogue_identity_intrinsics_cannot_be_spoofed_as_claims() {
         );
     }
 }
+
+/// Alice may read ordinary nested EXISTS sources, but neither an outer nor an
+/// inner join may silently treat candidate-created evidence as accepted rows.
+#[test]
+fn nested_candidate_sources_remain_explicitly_unsupported() {
+    let schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("parents").policies(common::allow_all_policies()))
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent", "parents")
+                    .policies(common::allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("leaves")
+                    .fk_column("child", "children")
+                    .policies(common::allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x78; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let leaf = Query::from("children")
+        .join_via("leaves", "child", [])
+        .joins
+        .remove(0);
+    let ordinary =
+        Query::from("parents").join_via_with_nested_joins("children", "parent", [], [leaf]);
+    let prepared = db.prepare_query(&ordinary).unwrap();
+    assert!(
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .is_empty()
+    );
+    for nested in [false, true] {
+        let mut candidate = ordinary.clone();
+        let join = if nested {
+            &mut candidate.joins[0].nested_joins[0]
+        } else {
+            &mut candidate.joins[0]
+        };
+        join.source_mode = jazz::query::CandidateSourceMode::IncludeAuthorizedCreatedV1;
+        let error = db
+            .prepare_query(&candidate)
+            .and_then(|prepared| block_on(db.all(&prepared, ReadOpts::default())))
+            .expect_err("candidate-created joins need their independent authorization port");
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(error.message.contains("candidate-created"), "{error}");
+    }
+}
+
+/// Mallory cannot make absent catalogue metadata authorize reads through a
+/// session-null predicate; reserved paths fail before ordinary claim semantics.
+#[test]
+fn catalogue_identity_null_predicates_cannot_authorize_rows() {
+    let path = vec![
+        "__jazz_table_identity_v1".to_owned(),
+        "documents".to_owned(),
+    ];
+    for policy in [
+        PolicyExpr::SessionIsNull { path: path.clone() },
+        PolicyExpr::Not(Box::new(PolicyExpr::SessionIsNotNull { path })),
+    ] {
+        let schema = common::compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("documents")
+                        .column("body", ColumnType::Text)
+                        .policies(TablePolicies::new().with_select(policy)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x79; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        block_on(db.insert(
+            "documents",
+            BTreeMap::from([(
+                "body".to_owned(),
+                Value::String("Alice's private note".to_owned()),
+            )]),
+            Default::default(),
+        ))
+        .unwrap();
+        let prepared = db.prepare_query(&Query::from("documents")).unwrap();
+        let error = block_on(db.all_for_identity(
+            &prepared,
+            ReadOpts::default(),
+            AuthorSubject::for_test_bytes([0x7a; 16]),
+        ))
+        .expect_err("an unavailable catalogue intrinsic must not act like a null claim");
+        assert_eq!(error.code, ErrorCode::Query);
+        assert!(
+            error.message.contains("CatalogueTableIdentityV1"),
+            "{error}"
+        );
+    }
+}

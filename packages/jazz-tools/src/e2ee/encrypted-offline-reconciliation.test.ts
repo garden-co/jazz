@@ -38,7 +38,7 @@ it.each(["ordinary owner read", "owner reconnect"])(
       clients.push(reader);
       await owner.e2ee.devices.list();
       await reader.e2ee.devices.list();
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Shared initial space" },
@@ -127,7 +127,7 @@ it("keeps accepted space access while a removal is pending and after Jazz reject
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Rejected removal" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Accepted data" });
     await tx.commit().wait({ tier: "global" });
@@ -248,7 +248,7 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
     const reader = await createDb({ ...bob, e2ee: { app, store: store() } });
     clients.push(reader);
     await reader.e2ee.devices.list();
-    const tx = owner.beginExclusiveTransaction();
+    const tx = owner.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Rejected addition" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Owner only" });
     await tx.commit().wait({ tier: "global" });

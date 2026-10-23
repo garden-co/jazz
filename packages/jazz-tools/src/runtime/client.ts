@@ -587,9 +587,9 @@ interface TimestampOverrideOptions {
  * Selects the transaction semantics used for grouped writes.
  *
  * - `mergeable`: eventually-consistent writes that merge with concurrent writes.
- * - `exclusive`: serializable writes that are validated as one unit by the authority.
+ * - `serializable`: serializable writes that are validated as one unit by the authority.
  */
-export type TransactionKind = "mergeable" | "exclusive";
+export type TransactionKind = "mergeable" | "serializable";
 
 export type TransactionFate =
   | {
@@ -915,9 +915,12 @@ export class WriteHandle<T = void, WaitResult = void> {
   readonly #client: JazzClient;
   readonly value: T;
   readonly txId: Promise<TxId>;
+  // Keep known IDs immediate; pending IDs must register waits before they settle.
+  protected readonly originalTxId: TxId | Promise<TxId>;
 
   constructor(txId: TxId | Promise<TxId>, client: JazzClient, value = undefined as T) {
     this.value = value;
+    this.originalTxId = txId;
     this.txId = Promise.resolve(txId);
     // Fire-and-forget callers may wait later, or never. Observe rejection now
     // without replacing txId: a later wait must still receive the original error.
@@ -971,12 +974,12 @@ export class WriteResult<T> extends WriteHandle<T, T> {
 }
 
 /**
- * Returned by explicitly-committed exclusive transactions.
+ * Returned by explicitly-committed serializable transactions.
  *
  * Pass `{ tier: "global" }` to require an authoritative receipt even without
  * a configured upstream. Omitting options preserves offline local durability.
  */
-export class ExclusiveWriteHandle extends WriteHandle<void> {
+export class SerializableWriteHandle extends WriteHandle<void> {
   /**
    * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
    * `"edge"` now waits for `"global"`.
@@ -990,17 +993,17 @@ export class ExclusiveWriteHandle extends WriteHandle<void> {
    */
   override wait(options?: { tier: DurabilityTier }): Promise<void>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<void> {
-    await this.client().waitForExclusiveTransaction(
-      this.txId,
+    await this.client().waitForSerializableTransaction(
+      this.originalTxId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
   }
 }
 
 /**
- * Returned by auto-committed exclusive transactions.
+ * Returned by auto-committed serializable transactions.
  */
-export class ExclusiveWriteResult<T> extends WriteResult<T> {
+export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
    * @deprecated The "edge" tier was removed in alpha.57. Use `"global"`;
    * `"edge"` now waits for `"global"`.
@@ -1015,17 +1018,17 @@ export class ExclusiveWriteResult<T> extends WriteResult<T> {
    */
   override wait(options?: { tier: DurabilityTier }): Promise<T>;
   override async wait(options?: { tier: DurabilityTier | "edge" }): Promise<T> {
-    await this.client().waitForExclusiveTransaction(
-      this.txId,
+    await this.client().waitForSerializableTransaction(
+      this.originalTxId,
       options === undefined ? undefined : resolveWriteWaitTier(options.tier),
     );
     return this.value;
   }
 
-  override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
+  override mapValue<U>(transformValue: (value: T) => U): SerializableWriteResult<U> {
     return copyWriteWaitReadiness(
       this,
-      new ExclusiveWriteResult(transformValue(this.value), this.txId, this.client()),
+      new SerializableWriteResult(transformValue(this.value), this.txId, this.client()),
     );
   }
 }
@@ -2383,7 +2386,7 @@ export class JazzClient {
   }
 
   /** @internal */
-  async waitForExclusiveTransaction(
+  async waitForSerializableTransaction(
     txId: TxId | Promise<TxId>,
     requiredTier?: DurabilityTier,
   ): Promise<void> {

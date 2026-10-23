@@ -354,10 +354,13 @@ fn nullable(column: &crate::values::Column, value: Value) -> Value {
     }
 }
 
-fn identity_of(inner: &Inner, identity: WriteIdentity) -> Option<AuthorSubject> {
+/// The session an edit's read of the current cell is checked as: a
+/// trusted session's, or none for local staging, which (like every local
+/// write) the authority checks on upload.
+fn identity_of(identity: WriteIdentity) -> Option<AuthorSubject> {
     match who(identity) {
         Who::Session(author) => Some(author),
-        Who::Local | Who::Attributed(_) => inner.reader(),
+        Who::Local | Who::Attributed(_) => None,
     }
 }
 
@@ -501,7 +504,7 @@ impl Db {
         let value = {
             let mut inner = self.inner();
             let (col, cell) =
-                inner.physical_cell(table, row, column, identity_of(&inner, opts.identity))?;
+                inner.physical_cell(table, row, column, identity_of(opts.identity))?;
             let value = inner.edited(table, &col, cell, edit)?;
             nullable(&col, value)
         };
@@ -526,7 +529,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let lowered = {
             let mut inner = self.inner();
-            let identity = identity_of(&inner, opts.identity);
+            let identity = identity_of(opts.identity);
             inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
         };
         if let Err(error) = lowered {
@@ -901,7 +904,7 @@ impl Db {
             return Err(schema_error("staged streaming requires a root-view target"));
         }
         if matches!(identity, WriteIdentity::Attribution(_)) {
-            self.inner().require_attribution_authority()?;
+            self.inner().require_attribution_backend()?;
         }
         if cells.contains_key(column) {
             return Err(rejected(
@@ -979,7 +982,7 @@ impl Db {
                     "staged streaming attachment to a mergeable transaction",
                 ));
             }
-            if batch.identity != pending.op.identity() {
+            if Some(batch.identity) != pending.op.identity() {
                 return Err(rejected(
                     "staged upload identity differs from its transaction",
                 ));
@@ -1364,7 +1367,7 @@ impl TxRef<'_> {
             if opts.identity != WriteIdentity::Database && opts.identity != batch.identity {
                 return Err(rejected("write identity differs from its transaction"));
             }
-            let identity = identity_of(inner, batch.identity);
+            let identity = identity_of(batch.identity);
             let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
             let edits = crate::db::LargeEdits {
                 derived: std::mem::take(&mut inner.derived),

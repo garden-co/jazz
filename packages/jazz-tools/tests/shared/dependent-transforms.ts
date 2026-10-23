@@ -74,7 +74,7 @@ export function testDependentTransforms(create: () => Promise<Db>) {
       const pending = db.update(app.products, product.id, { price: 2 });
       const basket = db.insert(app.baskets, { product: product.id });
       expect(basket.value.product).toBe(product.id);
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       tx.update(app.baskets, basket.value.id, { product: product.id });
       await expect(tx.one(app.products.where({ id: product.id }))).resolves.toMatchObject({
         price: 2,

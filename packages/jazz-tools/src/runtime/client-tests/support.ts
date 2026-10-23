@@ -55,7 +55,7 @@ export function mockMutation(txId = "00000000000070008000000000000001"): Mutatio
 }
 
 export const runtimeTransactionRecordStubs = {
-  beginTransaction: (_kind: "mergeable" | "exclusive", id: OpenTransactionId) => id,
+  beginTransaction: (_kind: "mergeable" | "serializable", id: OpenTransactionId) => id,
   upsert: () => mockMutation("upsert-transaction-id"),
   commitTransaction: () => testTxId("committed-batch"),
   waitForTransaction: async () => {},

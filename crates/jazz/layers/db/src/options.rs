@@ -122,8 +122,6 @@ pub enum ReadTier {
 pub struct ReadOpts {
     /// Read semantics.
     pub tier: ReadTier,
-    /// Include current rows that are deleted.
-    pub include_deleted: bool,
     /// Semantic read view to evaluate against.
     pub read_view: ReadViewSpec,
     /// What to do with an unsettled opening. Host read-option state only; an
@@ -136,7 +134,6 @@ impl Default for ReadOpts {
     fn default() -> Self {
         Self {
             tier: ReadTier::LocalFirst,
-            include_deleted: false,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
         }
@@ -154,9 +151,7 @@ impl ReadOpts {
 
     /// Evaluate the query as a live head branch composed over an optional base.
     pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
-        self.read_view = ReadViewSpec {
-            source: ReadViewSourceSpec::BranchView { head, base },
-        };
+        self.read_view.source = ReadViewSourceSpec::BranchView { head, base };
         self
     }
 }

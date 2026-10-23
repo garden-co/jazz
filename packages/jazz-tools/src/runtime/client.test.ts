@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   JazzClient,
-  ExclusiveWriteHandle,
+  SerializableWriteHandle,
   WriteResult,
   WriteHandle,
   setWriteWaitReadiness,
@@ -1000,6 +1000,50 @@ describe("JazzClient runtime transaction waits", () => {
     ).resolves.toBeUndefined();
 
     expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "global");
+  });
+
+  it("registers a pending serializable wait before its transaction ID resolves", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.waitForTransaction = vi.fn(async (txId: TxId | Promise<TxId>) => {
+      await txId;
+    });
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    let commit!: (txId: TxId) => void;
+    const pending = new Promise<TxId>((resolve) => {
+      commit = resolve;
+    });
+    const handle = new SerializableWriteHandle(pending, client);
+    const completed = vi.fn();
+    const waiting = handle.wait().then(completed);
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith(pending, "global");
+    await Promise.resolve();
+    expect(completed).not.toHaveBeenCalled();
+    commit("transaction-pending" as TxId);
+    await waiting;
+    expect(completed).toHaveBeenCalledOnce();
+  });
+
+  it("waits for connected serializable transactions at the global tier", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const handle = new SerializableWriteHandle("transaction-serializable" as TxId, client);
+
+    await expect(handle.wait()).resolves.toBeUndefined();
+
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "global");
+  });
+
+  it("waits for local-only serializable transactions at the local tier", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      serverUrl: undefined,
+    });
+    const handle = new SerializableWriteHandle("transaction-serializable" as TxId, client);
+
+    await expect(handle.wait()).resolves.toBeUndefined();
+
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "local");
   });
 
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {
