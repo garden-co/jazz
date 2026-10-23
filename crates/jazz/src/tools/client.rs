@@ -312,7 +312,12 @@ impl Forwarder {
                     && held.table() == row.table()
                     && held.joined_rows() == row.joined_rows()
             });
-            let changed = held.is_none_or(|at| self.rows[at].row != row.row);
+            // A row that only moved carries no payload: its shown cells are
+            // what it was delivered with.
+            let changed = held.is_none_or(|at| {
+                let before = &self.rows[at].row;
+                before.is_deleted() != row.row.is_deleted() || !before.cells().eq(row.row.cells())
+            });
             if let Some(at) = held {
                 self.rows.remove(at);
             }
