@@ -802,8 +802,8 @@ impl Binding {
 
     // ---- transactions ----
 
-    /// Begin one owner-wide transaction. Serializable authority batches may
-    /// bind an authenticated session or explicit backend provenance.
+    /// Begin one owner-wide transaction, optionally bound to an authenticated
+    /// session or explicit backend provenance. Replica admission stays upstream.
     pub fn begin_transaction(
         &self,
         id: &str,
@@ -826,8 +826,11 @@ impl Binding {
             (TransactionKind::Mergeable, WriteIdentity::Database) => {
                 block_on(self.db.begin_mergeable(id))?
             }
-            (TransactionKind::Mergeable, _) => {
-                return Err(not_supported("identity-bound mergeable transactions"));
+            (TransactionKind::Mergeable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_mergeable_for_identity(id, author))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_mergeable_for_attribution(id, author))?
             }
             (TransactionKind::Serializable, WriteIdentity::Database) => {
                 block_on(self.db.begin_serializable(id))?
