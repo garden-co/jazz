@@ -905,6 +905,724 @@ fn unbounded_dependency_sources_are_refused_explicitly() {
     assert!(rows(&f.bob).is_empty());
 }
 
+fn inherited(operation: jazz::tools::Operation, depth: Option<usize>) -> PolicyExpr {
+    PolicyExpr::Inherits {
+        operation,
+        via_column: "parent".into(),
+        max_depth: depth,
+    }
+}
+fn marker_only() -> PolicyExpr {
+    PolicyExpr::exists_including_created(
+        "nodes",
+        PolicyExpr::and(vec![outer("id", "parent"), PolicyExpr::False]),
+    )
+}
+fn inherited_schema(
+    dependent: PolicyExpr,
+    select: PolicyExpr,
+    using: PolicyExpr,
+    with_check: PolicyExpr,
+) -> jazz::schema::JazzSchema {
+    common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("nodes")
+                    .fk_column("parent", "nodes")
+                    .column("scope", ColumnType::Text)
+                    .column("seed", ColumnType::Boolean)
+                    .column("allowed", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(select)
+                            .with_insert(PolicyExpr::or(vec![
+                                PolicyExpr::eq_literal("seed", jazz::tools::Value::Boolean(true)),
+                                dependent,
+                                marker_only(),
+                            ]))
+                            .with_update(Some(using), with_check),
+                    ),
+            )
+            .build(),
+    )
+}
+fn fixture_schema(schema: jazz::schema::JazzSchema) -> Fixture {
+    let alice = open(schema.clone(), 1, false);
+    alice.set_remote_link_hint(RemoteLinkHint::NoServer);
+    Fixture {
+        alice,
+        bob: open(schema, 2, true),
+    }
+}
+fn allowed() -> PolicyExpr {
+    PolicyExpr::eq_literal("allowed", jazz::tools::Value::Boolean(true))
+}
+
+/// Alice inherits Bob's accepted UPDATE capability, not its WITH CHECK. An
+/// immutable parent can grant child creation while its own edit still rejects.
+#[test]
+fn inherited_update_uses_using_without_requiring_parent_mutability() {
+    let f = fixture_schema(inherited_schema(
+        inherited(jazz::tools::Operation::Update, None),
+        PolicyExpr::True,
+        allowed(),
+        PolicyExpr::False,
+    ));
+    let seed = f.commit(&[(10, cells(10, true, true, "parent"))], false);
+    f.connect();
+    f.settle(seed).unwrap();
+    let child = f.commit(&[(1, cells(10, false, false, "child"))], true);
+    f.settle(child).unwrap();
+    let edit = f.commit(&[(10, cells(10, true, true, "changed"))], true);
+    assert!(f.settle(edit).is_err());
+    assert_eq!(
+        rows(&f.bob),
+        vec![(row(1), "child".into()), (row(10), "parent".into())]
+    );
+}
+
+/// A newly permitted parent is still not an accepted inherited grant. Alice's
+/// unmarked inheritance cannot borrow a marked occurrence's candidate source.
+#[test]
+fn newly_authorized_parent_cannot_supply_inherited_evidence() {
+    let f = fixture_schema(inherited_schema(
+        inherited(jazz::tools::Operation::Update, None),
+        PolicyExpr::True,
+        allowed(),
+        PolicyExpr::True,
+    ));
+    let tx = f.commit(
+        &[
+            (1, cells(10, false, false, "child")),
+            (10, cells(10, true, true, "parent")),
+        ],
+        true,
+    );
+    f.connect();
+    assert!(f.settle(tx).is_err());
+    assert!(rows(&f.bob).is_empty());
+}
+
+/// Revoking Bob's accepted capability is allowed by itself, but Alice cannot
+/// use the revoked grant to publish a dependent child in the same unit.
+#[test]
+fn inherited_grants_must_survive_the_final_state() {
+    for child in [false, true] {
+        let f = fixture_schema(inherited_schema(
+            inherited(jazz::tools::Operation::Update, None),
+            PolicyExpr::True,
+            allowed(),
+            PolicyExpr::True,
+        ));
+        let seed = f.commit(&[(10, cells(10, true, true, "parent"))], false);
+        f.connect();
+        f.settle(seed).unwrap();
+        let mut values = vec![(10, cells(10, true, false, "revoked"))];
+        if child {
+            values.insert(0, (1, cells(10, false, false, "child")));
+        }
+        let tx = f.commit(&values, true);
+        assert_eq!(f.settle(tx).is_ok(), !child);
+        assert_eq!(
+            rows(&f.bob),
+            vec![(row(10), if child { "parent" } else { "revoked" }.into())]
+        );
+    }
+}
+
+/// Nested inherited permission checks prepare both sides of related chunked
+/// string comparisons. Sharing a long prefix cannot grant Mallory permission.
+#[test]
+fn inherited_nested_large_value_comparisons_keep_exact_dependencies() {
+    let prefix = "a".repeat(70 * 1024);
+    for matching in [true, false] {
+        let f = fixture_schema(inherited_schema(
+            inherited(jazz::tools::Operation::Update, None),
+            PolicyExpr::True,
+            parent(false),
+            PolicyExpr::True,
+        ));
+        let seed = f.commit(
+            &[
+                (10, cells(20, true, false, &format!("{prefix}x"))),
+                (
+                    20,
+                    cells(
+                        20,
+                        true,
+                        false,
+                        &format!("{prefix}{}", if matching { "x" } else { "y" }),
+                    ),
+                ),
+            ],
+            false,
+        );
+        f.connect();
+        f.settle(seed).unwrap();
+        let tx = f.commit(&[(1, cells(10, false, false, "child"))], true);
+        assert_eq!(f.settle(tx).is_ok(), matching);
+        assert_eq!(rows(&f.bob).len(), if matching { 3 } else { 2 });
+    }
+}
+
+/// Alice's inherited SELECT follows the same explicit recursion bound in SQL
+/// and large-value preparation. Zero/one hop cannot reach the two-hop grant.
+#[test]
+fn inheritance_depth_limits_match_during_large_value_preparation() {
+    let value = "a".repeat(70 * 1024);
+    for depth in [0, 1, 2] {
+        let select = PolicyExpr::or(vec![
+            PolicyExpr::and(vec![
+                allowed(),
+                PolicyExpr::eq_literal("scope", jazz::tools::Value::Text(value.clone())),
+            ]),
+            inherited(jazz::tools::Operation::Select, None),
+        ]);
+        let f = fixture_schema(inherited_schema(
+            inherited(jazz::tools::Operation::Select, Some(depth)),
+            select,
+            PolicyExpr::True,
+            PolicyExpr::True,
+        ));
+        let seed = f.commit(
+            &[
+                (10, cells(20, true, false, &value)),
+                (20, cells(20, true, true, &value)),
+            ],
+            false,
+        );
+        f.connect();
+        f.settle(seed).unwrap();
+        let tx = f.commit(&[(1, cells(10, false, false, "child"))], true);
+        assert_eq!(f.settle(tx).is_ok(), depth == 2);
+        assert_eq!(rows(&f.bob).len(), if depth == 2 { 3 } else { 2 });
+    }
+}
+
+/// A provisional grant cannot unlock Bob's secret through inherited SELECT.
+/// After the independent grant commits, Alice can read the secret normally.
+#[test]
+fn staged_inherited_grants_do_not_unlock_existing_secrets() {
+    let public = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("nodes")
+                .fk_column("parent", "nodes")
+                .column("scope", ColumnType::Text)
+                .column("seed", ColumnType::Boolean)
+                .column("allowed", ColumnType::Boolean)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(allowed())
+                        .with_insert(insert(parent(true))),
+                ),
+        )
+        .table(
+            TableSchemaBuilder::new("secrets")
+                .fk_column("parent", "nodes")
+                .column("text", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(inherited(jazz::tools::Operation::Select, None)),
+                ),
+        )
+        .build();
+    let bob = open(common::compile_schema(&public), 2, true);
+    block_on(bob.insert(
+        "secrets",
+        BTreeMap::from([
+            ("parent".into(), Value::Uuid(row(10).0)),
+            ("text".into(), Value::String("private".into())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    let id = OpenTransactionId::new();
+    block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
+    block_on(bob.serializable_tx_ref(id).upsert(
+        "nodes",
+        row(10),
+        cells(10, true, true, "room"),
+        Default::default(),
+    ))
+    .unwrap();
+    let query = bob.prepare_query(&Query::from("secrets")).unwrap();
+    assert!(
+        block_on(bob.serializable_tx_ref(id).all_prepared(&query))
+            .unwrap()
+            .is_empty()
+    );
+    block_on(bob.commit_serializable_handle(id)).unwrap();
+    assert_eq!(
+        block_on(bob.all_for_identity(&query, ReadOpts::default(), author("alice")))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+// This public-builder graph follows compileSpaceAdministration's structure:
+// immutable roots <- reverse UPDATE grants from administration rows; a first
+// grant has a separate marked root lookup, while later lifecycle rows inherit.
+fn managed_permission_schema(
+    mutable_admin: bool,
+    independent_admin: bool,
+    cap_scope: Option<&str>,
+) -> jazz::schema::JazzSchema {
+    let owns = PolicyExpr::eq_session(
+        "owner",
+        vec!["user".into(), "identity".into(), "subject".into()],
+    );
+    let capability = PolicyExpr::and(vec![
+        owns.clone(),
+        cap_scope.map_or(PolicyExpr::True, |scope| {
+            PolicyExpr::eq_literal("scope", jazz::tools::Value::Text(scope.into()))
+        }),
+    ]);
+    let source = PolicyExpr::InheritsReferencing {
+        operation: jazz::tools::Operation::Update,
+        source_table: "admins".into(),
+        via_column: "parent".into(),
+        max_depth: None,
+    };
+    let root = PolicyExpr::exists_including_created(
+        "nodes",
+        PolicyExpr::and(vec![
+            outer("id", "parent"),
+            outer("scope", "scope"),
+            PolicyExpr::eq_session("$createdBy", vec!["user".into()]),
+        ]),
+    );
+    let initial = PolicyExpr::exists_including_created(
+        "nodes",
+        PolicyExpr::and(vec![
+            outer("id", "parent"),
+            outer("scope", "scope"),
+            outer("initialGrant", "id"),
+            PolicyExpr::eq_session("$createdBy", vec!["user".into()]),
+        ]),
+    );
+    common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("nodes")
+                    .fk_column("parent", "nodes")
+                    .fk_column("initialGrant", "grants")
+                    .column("scope", ColumnType::Text)
+                    .column("seed", ColumnType::Boolean)
+                    .column("allowed", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::eq_literal(
+                                "seed",
+                                jazz::tools::Value::Boolean(true),
+                            ))
+                            .with_update(Some(source), PolicyExpr::False),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("admins")
+                    .fk_column("parent", "nodes")
+                    .column("scope", ColumnType::Text)
+                    .column("owner", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(if independent_admin {
+                                PolicyExpr::True
+                            } else {
+                                PolicyExpr::and(vec![owns, root])
+                            })
+                            .with_update(
+                                Some(capability),
+                                if mutable_admin {
+                                    PolicyExpr::True
+                                } else {
+                                    PolicyExpr::False
+                                },
+                            ),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("grants")
+                    .fk_column("parent", "nodes")
+                    .column("scope", ColumnType::Text)
+                    .column("operation", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::or(vec![
+                                inherited(jazz::tools::Operation::Update, None),
+                                PolicyExpr::and(vec![
+                                    PolicyExpr::eq_literal(
+                                        "operation",
+                                        jazz::tools::Value::Text("add".into()),
+                                    ),
+                                    initial,
+                                ]),
+                            ])),
+                    ),
+            )
+            .build(),
+    )
+}
+fn root_cells(scope: &str) -> BTreeMap<String, Value> {
+    let mut values = cells(1, true, true, scope);
+    values.insert("initialGrant".into(), Value::Uuid(row(3).0));
+    values
+}
+fn admin_cells(parent: u128, scope: &str, owner: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("parent".into(), Value::Uuid(row(parent).0)),
+        ("scope".into(), Value::String(scope.into())),
+        ("owner".into(), Value::String(owner.into())),
+    ])
+}
+fn grant_cells(parent: u128, scope: &str, operation: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("parent".into(), Value::Uuid(row(parent).0)),
+        ("scope".into(), Value::String(scope.into())),
+        ("operation".into(), Value::String(operation.into())),
+    ])
+}
+fn named_commit(db: &Db, values: &[(&str, u128, BTreeMap<String, Value>)]) -> u64 {
+    let id = OpenTransactionId::new();
+    block_on(db.begin_serializable(id)).unwrap();
+    for (table, row_id, value) in values {
+        block_on(db.serializable_tx_ref(id).upsert(
+            table,
+            row(*row_id),
+            value.clone(),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    block_on(db.commit_serializable_handle(id)).unwrap().0
+}
+fn table_count(db: &Db, table: &str) -> usize {
+    let query = db.prepare_query(&Query::from(table)).unwrap();
+    block_on(db.all(&query, ReadOpts::default())).unwrap().len()
+}
+fn founder(f: &Fixture, scope: &str) -> u64 {
+    named_commit(
+        &f.alice,
+        &[
+            ("grants", 3, grant_cells(1, scope, "add")),
+            ("admins", 2, admin_cells(1, scope, "alice")),
+            ("nodes", 1, root_cells(scope)),
+        ],
+    )
+}
+
+/// Alice's founder unit uses the generated space-policy shape: the first grant
+/// and administration row may precede their immutable root. The inherited OR
+/// arm must stay accepted-only while the marked initial-grant arm proves them.
+#[test]
+fn founder_graph_combines_marked_creation_with_inherited_alternatives() {
+    for scope in ["room".to_owned(), "a".repeat(70 * 1024)] {
+        let f = fixture_schema(managed_permission_schema(false, false, None));
+        let tx = founder(&f, &scope);
+        f.connect();
+        f.settle(tx).unwrap();
+        for table in ["nodes", "admins", "grants"] {
+            assert_eq!(table_count(&f.bob, table), 1);
+        }
+    }
+}
+
+/// Alice cannot substitute another initial grant and rely on the newly
+/// created administration row to supply an inherited UPDATE grant instead.
+#[test]
+fn founder_cannot_borrow_new_reverse_grants_for_the_wrong_initial_row() {
+    let f = fixture_schema(managed_permission_schema(false, false, None));
+    let tx = named_commit(
+        &f.alice,
+        &[
+            ("grants", 4, grant_cells(1, "room", "add")),
+            ("admins", 2, admin_cells(1, "room", "alice")),
+            ("nodes", 1, root_cells("room")),
+        ],
+    );
+    f.connect();
+    assert!(f.settle(tx).is_err());
+    for table in ["nodes", "admins", "grants"] {
+        assert_eq!(table_count(&f.bob, table), 0);
+    }
+}
+
+/// Once Bob accepts Alice's founder graph, later lifecycle rows inherit through
+/// the immutable root and its reverse administration grant. Mallory cannot use it.
+#[test]
+fn accepted_forward_and_reverse_grants_authorize_only_their_session() {
+    let f = fixture_schema(managed_permission_schema(false, false, None));
+    let tx = founder(&f, "room");
+    f.connect();
+    f.settle(tx).unwrap();
+    let next = named_commit(&f.alice, &[("grants", 4, grant_cells(1, "room", "rotate"))]);
+    f.settle(next).unwrap();
+    let id = OpenTransactionId::new();
+    block_on(f.bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
+    block_on(f.bob.serializable_tx_ref(id).upsert(
+        "grants",
+        row(5),
+        grant_cells(1, "room", "rotate"),
+        Default::default(),
+    ))
+    .unwrap();
+    assert!(block_on(f.bob.commit_serializable_handle(id)).is_err());
+    assert_eq!(table_count(&f.bob, "grants"), 2);
+}
+
+/// A reverse grant created by an independently allowed INSERT remains excluded
+/// from inheritance until it settles in a separate transaction.
+#[test]
+fn new_reverse_grants_become_inherited_evidence_only_after_acceptance() {
+    let f = fixture_schema(managed_permission_schema(false, true, None));
+    let tx = named_commit(&f.alice, &[("nodes", 1, root_cells("room"))]);
+    f.connect();
+    f.settle(tx).unwrap();
+    let tx = named_commit(
+        &f.alice,
+        &[
+            ("admins", 2, admin_cells(1, "room", "alice")),
+            ("grants", 4, grant_cells(1, "room", "rotate")),
+        ],
+    );
+    assert!(f.settle(tx).is_err());
+    assert_eq!(table_count(&f.bob, "admins"), 0);
+    let admin = named_commit(&f.alice, &[("admins", 2, admin_cells(1, "room", "alice"))]);
+    f.settle(admin).unwrap();
+    let grant = named_commit(&f.alice, &[("grants", 4, grant_cells(1, "room", "rotate"))]);
+    f.settle(grant).unwrap();
+    assert_eq!(table_count(&f.bob, "grants"), 1);
+}
+
+/// Demoting Alice's reverse administration grant is allowed on its own. Adding
+/// a dependent lifecycle write to that unit fails final-state revalidation.
+#[test]
+fn reverse_grant_revocation_invalidates_dependent_lifecycle_writes() {
+    for dependent in [false, true] {
+        let f = fixture_schema(managed_permission_schema(true, false, None));
+        let tx = founder(&f, "room");
+        f.connect();
+        f.settle(tx).unwrap();
+        let mut values = vec![("admins", 2, admin_cells(1, "room", "bob"))];
+        if dependent {
+            values.insert(0, ("grants", 4, grant_cells(1, "room", "rotate")));
+        }
+        let tx = named_commit(&f.alice, &values);
+        assert_eq!(f.settle(tx).is_ok(), !dependent);
+        assert_eq!(table_count(&f.bob, "grants"), 1);
+        let next = named_commit(&f.alice, &[("grants", 5, grant_cells(1, "room", "rotate"))]);
+        assert_eq!(f.settle(next).is_ok(), dependent);
+    }
+}
+
+/// Reverse inheritance prepares the accepted administration row's exact large
+/// scope. A changed suffix cannot satisfy the expected scope through a common prefix.
+#[test]
+fn reverse_inherited_large_values_use_exact_scoped_preparation() {
+    let scope = format!("{}x", "a".repeat(70 * 1024));
+    let fake = format!("{}y", "a".repeat(70 * 1024));
+    for matching in [true, false] {
+        let f = fixture_schema(managed_permission_schema(false, true, Some(&scope)));
+        let tx = named_commit(
+            &f.alice,
+            &[
+                ("nodes", 1, root_cells(&scope)),
+                (
+                    "admins",
+                    2,
+                    admin_cells(1, if matching { &scope } else { &fake }, "alice"),
+                ),
+            ],
+        );
+        f.connect();
+        f.settle(tx).unwrap();
+        let tx = named_commit(&f.alice, &[("grants", 4, grant_cells(1, &scope, "rotate"))]);
+        assert_eq!(f.settle(tx).is_ok(), matching);
+    }
+}
+
+/// A marked and an ordinary EXISTS may both use the same accepted parent.
+/// Standalone baseline preparation must bind only SQL parameters it uses.
+#[test]
+fn marked_and_unmarked_large_comparisons_share_accepted_parent_evidence() {
+    let f = Fixture::new(insert(PolicyExpr::and(vec![parent(true), parent(false)])));
+    let scope = "a".repeat(70 * 1024);
+    let seed = f.commit(&[(10, cells(10, true, true, &scope))], false);
+    f.connect();
+    f.settle(seed).unwrap();
+    let child = f.commit(&[(1, cells(10, false, true, &scope))], true);
+    f.settle(child).unwrap();
+    assert_eq!(rows(&f.bob).len(), 2);
+}
+
+/// Array-backed reverse inheritance cannot silently use scalar equality or
+/// scan unrelated arrays in a candidate proof. Alice gets an exact refusal.
+#[test]
+fn array_inherited_sources_remain_explicitly_unsupported() {
+    let reverse = PolicyExpr::InheritsReferencing {
+        operation: jazz::tools::Operation::Update,
+        source_table: "owners".into(),
+        via_column: "parents".into(),
+        max_depth: None,
+    };
+    let public = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("nodes")
+                .fk_column("parent", "nodes")
+                .column("scope", ColumnType::Text)
+                .column("seed", ColumnType::Boolean)
+                .column("allowed", ColumnType::Boolean)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::or(vec![reverse, marker_only()])),
+                ),
+        )
+        .table(
+            TableSchemaBuilder::new("owners")
+                .array_fk_column("parents", "nodes")
+                .policies(
+                    TablePolicies::new().with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                ),
+        )
+        .build();
+    let f = fixture_schema(common::compile_schema(&public));
+    block_on(f.bob.insert(
+        "owners",
+        BTreeMap::from([("parents".into(), Value::Array(vec![Value::Uuid(row(1).0)]))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx = f.commit(&[(1, cells(1, false, true, "room"))], true);
+    f.connect();
+    let error = f.settle(tx).unwrap_err();
+    assert!(
+        error.message.contains("array-reference inheritance"),
+        "{error}"
+    );
+    assert!(rows(&f.bob).is_empty());
+}
+
+/// An accepted row's INSERT policy cannot launder newly created evidence
+/// through inheritance. Bob rejects Alice's entire unit at that boundary.
+#[test]
+fn inheritance_cannot_expose_a_targets_creation_aware_insert_policy() {
+    let public = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("nodes")
+                .fk_column("parent", "nodes")
+                .column("scope", ColumnType::Text)
+                .column("seed", ColumnType::Boolean)
+                .column("allowed", ColumnType::Boolean)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(insert(parent(true))),
+                ),
+        )
+        .table(
+            TableSchemaBuilder::new("leases")
+                .fk_column("parent", "nodes")
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(inherited(jazz::tools::Operation::Insert, None)),
+                ),
+        )
+        .build();
+    let f = fixture_schema(common::compile_schema(&public));
+    block_on(f.bob.upsert(
+        "nodes",
+        row(10),
+        cells(11, false, true, "room"),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx = named_commit(
+        &f.alice,
+        &[
+            ("nodes", 11, cells(11, true, true, "room")),
+            (
+                "leases",
+                1,
+                BTreeMap::from([("parent".into(), Value::Uuid(row(10).0))]),
+            ),
+        ],
+    );
+    f.connect();
+    let error = f.settle(tx).unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("ExistsIncludingCreated through inherited permission policies"),
+        "{error}"
+    );
+    assert_eq!(rows(&f.bob), vec![(row(10), "room".into())]);
+    assert_eq!(table_count(&f.bob, "leases"), 0);
+}
+
+/// Updating both dependency rows to matching large values cannot manufacture a
+/// baseline inherited grant. Bob compares both historical operands exactly;
+/// Alice's whole unit succeeds only if the grant already existed and survives.
+#[test]
+fn inherited_large_grants_use_historical_values_before_same_unit_updates() {
+    let public = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("nodes")
+                .fk_column("parent", "nodes")
+                .column("scope", ColumnType::Text)
+                .column("seed", ColumnType::Boolean)
+                .column("allowed", ColumnType::Boolean)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(PolicyExpr::True)
+                        .with_insert(PolicyExpr::or(vec![
+                            PolicyExpr::eq_literal("seed", jazz::tools::Value::Boolean(true)),
+                            inherited(jazz::tools::Operation::Delete, None),
+                            marker_only(),
+                        ]))
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                        .with_delete(parent(false)),
+                ),
+        )
+        .build();
+    let prefix = "a".repeat(70 * 1024);
+    let old = format!("{prefix}old");
+    let bad = format!("{prefix}bad");
+    let new = format!("{prefix}new");
+    for existed in [true, false] {
+        let f = fixture_schema(common::compile_schema(&public));
+        let seed = f.commit(
+            &[
+                (10, cells(20, true, true, &old)),
+                (20, cells(20, true, true, if existed { &old } else { &bad })),
+            ],
+            false,
+        );
+        f.connect();
+        f.settle(seed).unwrap();
+        let tx = f.commit(
+            &[
+                (1, cells(10, false, true, "child")),
+                (10, cells(20, true, true, &new)),
+                (20, cells(20, true, true, &new)),
+            ],
+            true,
+        );
+        assert_eq!(f.settle(tx).is_ok(), existed);
+        assert_eq!(rows(&f.bob).len(), if existed { 3 } else { 2 });
+        if !existed {
+            assert_eq!(
+                rows(&f.bob),
+                vec![(row(10), old.clone()), (row(20), bad.clone())]
+            );
+        }
+    }
+}
+
 /// Alice seals a same-unit founder graph, then creates another graph against
 /// that publication. Bob checks both the sealed unit and the later serializable
 /// upload carrying the reservation-to-publication origin map.
