@@ -351,12 +351,16 @@ pub enum SyncMessage {
     /// that seq; its opening ships only rows changed after it.
     /// `include_deleted`: the result also lists deleted rows (the root's),
     /// which ship as their deleted current versions.
+    /// `local`: served from a relay's store alone, without its upstream
+    /// (a non-durable foreground's LocalOnly read). An authority's store
+    /// is the answer either way.
     Subscribe {
         id: u64,
         query: Query,
         binding: BTreeMap<String, Value>,
         since: Option<u64>,
         include_deleted: bool,
+        local: bool,
     },
     Unsubscribe {
         id: u64,
@@ -523,6 +527,8 @@ pub(crate) struct Remote {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
+    /// Served from the relay's store alone (see `SyncMessage::Subscribe`).
+    local: bool,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// Whether the last answer was the global authority's.
     pub(crate) global: Rc<StdCell<bool>>,
@@ -610,8 +616,13 @@ struct RelayedFetch {
     message: SyncMessage,
 }
 
-fn remote_key(query: &Query, binding: &BTreeMap<String, Value>, include_deleted: bool) -> String {
-    format!("{query:?}{binding:?}{include_deleted}")
+fn remote_key(
+    query: &Query,
+    binding: &BTreeMap<String, Value>,
+    include_deleted: bool,
+    local: bool,
+) -> String {
+    format!("{query:?}{binding:?}{include_deleted}{local}")
 }
 
 /// Whether a read may wait for the server: a live link needs the own
@@ -636,12 +647,19 @@ pub(crate) struct Gate {
     pub(crate) live: bool,
     /// `None`: wait for the server however long (the Remote tier).
     pub(crate) deadline: Option<Instant>,
+    /// A non-durable foreground's local read: its relay answers from its
+    /// store whatever the relay's own path to the server, so it waits
+    /// while the link to the relay is attached.
+    pub(crate) relay_view: bool,
 }
 
 impl Gate {
     /// Whether the read may keep waiting: its deadline has not passed and
     /// the link may still answer.
     pub(crate) fn may_still_wait(&self) -> bool {
+        if self.relay_view {
+            return !self.hint.get().detached;
+        }
         self.deadline
             .is_none_or(|deadline| Instant::now() < deadline)
             && may_wait(self.hint.get())
@@ -652,6 +670,9 @@ impl Gate {
             return true;
         }
         let link = self.hint.get();
+        if self.relay_view {
+            return link.detached;
+        }
         match self.deadline {
             None => false,
             Some(deadline) => {
@@ -2480,6 +2501,7 @@ impl Db {
                     binding: r.binding.clone(),
                     since: r.through,
                     include_deleted: r.include_deleted,
+                    local: r.local,
                 }
             })
             .collect();
@@ -2731,6 +2753,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
+        local: bool,
     ) -> Option<(
         Rc<StdCell<bool>>,
         Rc<RefCell<Option<Error>>>,
@@ -2739,7 +2762,7 @@ impl Db {
         let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
-        let key = remote_key(&query, &prepared.binding, include_deleted);
+        let key = remote_key(&query, &prepared.binding, include_deleted, local);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some((
@@ -2759,6 +2782,7 @@ impl Db {
             binding: prepared.binding.clone(),
             since: None,
             include_deleted,
+            local,
         });
         client.remote.insert(
             key.clone(),
@@ -2768,6 +2792,7 @@ impl Db {
                 query: query.into_owned(),
                 binding: prepared.binding.clone(),
                 include_deleted,
+                local,
                 answered: answered.clone(),
                 refused: refused.clone(),
                 global: global.clone(),
@@ -2784,10 +2809,11 @@ impl Db {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
+        local: bool,
     ) {
         self.inner
             .borrow_mut()
-            .release_remote(query, binding, include_deleted);
+            .release_remote(query, binding, include_deleted, local);
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -2803,11 +2829,12 @@ impl Inner {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
+        local: bool,
     ) {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = remote_key(&remote_query(query), binding, include_deleted);
+        let key = remote_key(&remote_query(query), binding, include_deleted, local);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -2838,14 +2865,20 @@ impl Db {
         deadline: Option<Instant>,
         coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<Option<u64>, Error> {
+        // A non-durable foreground's relay answers a local read from its
+        // store whatever its own path to the server: the read waits for it
+        // while connected to it.
+        let answerable = |inner: &Inner| {
+            let client = inner.client.as_ref().expect("client");
+            may_wait(client.hint.get())
+                || (inner.non_durable && tier != ReadTier::Remote && client.transport.is_some())
+        };
         let id = {
             let mut inner = self.inner.borrow_mut();
-            let Some(client) = inner.client.as_mut() else {
-                return Ok(None);
-            };
-            if !may_wait(client.hint.get()) {
+            if inner.client.is_none() || !answerable(&inner) {
                 return Ok(None);
             }
+            let client = inner.client.as_mut().expect("client");
             let id = client.next_id;
             client.next_id += 1;
             client.answers.insert(id, None);
@@ -2861,12 +2894,13 @@ impl Db {
         };
         poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
+            let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
             if let Some(Some(_)) = client.answers.get(&id) {
                 let answer = client.answers.remove(&id).flatten().expect("answered");
                 return Poll::Ready(answer.map(|(through, _)| Some(through)));
             }
-            if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
+            if !answerable || deadline.is_some_and(|d| Instant::now() >= d) {
                 client.answers.remove(&id);
                 return Poll::Ready(Ok(None));
             }
@@ -3685,7 +3719,7 @@ impl Db {
         let dropped = inner.fan.dropped.clone();
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
             for (query, binding, include_deleted) in session.close(&dropped) {
-                inner.release_remote(&query, &binding, include_deleted);
+                inner.release_remote(&query, &binding, include_deleted, false);
             }
             inner.forget_relayed(subscriber.0);
         }
@@ -4204,7 +4238,7 @@ impl Db {
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
                     for (query, binding, include_deleted) in released {
-                        inner.release_remote(&query, &binding, include_deleted);
+                        inner.release_remote(&query, &binding, include_deleted, false);
                     }
                     inner.forget_relayed(index);
                     break;
@@ -4276,6 +4310,7 @@ impl Db {
                 binding,
                 since,
                 include_deleted,
+                local,
             } => {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = query.limit.is_some() || query.offset > 0;
@@ -4288,8 +4323,8 @@ impl Db {
                     .client
                     .as_ref()
                     .is_some_and(|client| may_wait(client.hint.get()));
-                let relayed = if upstream {
-                    db.attach_remote(&prepared, include_deleted)
+                let relayed = if upstream && !local {
+                    db.attach_remote(&prepared, include_deleted, false)
                 } else {
                     None
                 };
@@ -4325,6 +4360,7 @@ impl Db {
                             &prepared.query,
                             &prepared.binding,
                             include_deleted,
+                            false,
                         ),
                     }
                 }
@@ -4405,7 +4441,7 @@ impl Db {
                 if let Some((query, binding, include_deleted)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
-                    inner.release_remote(&query, &binding, include_deleted);
+                    inner.release_remote(&query, &binding, include_deleted, false);
                 }
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();

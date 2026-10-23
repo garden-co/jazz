@@ -829,3 +829,42 @@ fn a_tabs_local_reads_are_its_workers_store() {
     pump(&links);
     assert_eq!(read("local-only"), 2);
 }
+
+#[test]
+fn a_tab_reads_its_workers_store_when_the_worker_has_no_server() {
+    let worker = open(0xaa);
+    let tab_binding = open(0xab);
+    let (tab, up, down) = tab_over(&worker, tab_binding);
+    // The tab hears the worker's own path to the server: there is none.
+    tab.set_remote_link_hint("none").unwrap();
+    let links = [(&up, &down)];
+    worker.insert("notes", &title("worker's"), &none()).unwrap();
+
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    for tier in ["local-only", "local-first"] {
+        let read = tab
+            .all(query.clone(), &json!({ "tier": tier }), None, None, None)
+            .unwrap();
+        let rows = jazz::binding_codec::decode_rows(&drive(&links, read).unwrap()).unwrap();
+        assert_eq!(
+            rows.iter().map(|batch| batch.rows.len()).sum::<usize>(),
+            1,
+            "{tier}"
+        );
+
+        let mut stream = tab
+            .subscribe(&query, &json!({ "tier": tier }), None, None)
+            .unwrap();
+        let opening =
+            binding_host::event_chunk(drive(&links, tab.next_event(&mut stream))).unwrap();
+        let EventChunk::Delta { delta, .. } = opening else {
+            panic!("expected an opening, got {opening:?}");
+        };
+        let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+        assert_eq!(
+            added.iter().map(|batch| batch.rows.len()).sum::<usize>(),
+            1,
+            "{tier}"
+        );
+    }
+}
