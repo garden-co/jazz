@@ -210,3 +210,58 @@ async fn server_holds_scoped_accepted_and_catalogue_reads_until_permissions() {
     runtime.close(session);
     runtime.shutdown().await.unwrap();
 }
+
+/// Mallory's malformed lineage declaration must not reach the live catalogue
+/// or disk; Bob can subsequently publish the valid rename and reopen the server.
+#[tokio::test]
+async fn rejected_publication_does_not_poison_the_durable_catalogue() {
+    use jazz::protocol::{LensOp, MigrationLens, TableLens};
+    let source = schema();
+    let target = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("tasks").column("body", ColumnType::Text))
+            .build(),
+    )
+    .unwrap();
+    let lens = MigrationLens::new(
+        source.version_id(),
+        target.version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "tasks".into(),
+            ops: vec![LensOp::RenameColumn {
+                from: "text".into(),
+                to: "body".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let storage = StorageConfig::data_dir(dir.path());
+    let runtime = ServerRuntimeHandle::start_with_storage(source.clone(), storage.clone()).unwrap();
+    let before = runtime.trusted_catalogue_snapshot().await.unwrap();
+    assert!(
+        runtime
+            .publish_schema_with_lens(target.clone(), lens.clone(), vec![], vec!["ghost".into()])
+            .await
+            .is_err()
+    );
+    assert_eq!(runtime.trusted_catalogue_snapshot().await.unwrap(), before);
+    runtime.shutdown().await.unwrap();
+    let runtime = ServerRuntimeHandle::start_with_storage(source.clone(), storage.clone()).unwrap();
+    assert_eq!(runtime.trusted_catalogue_snapshot().await.unwrap(), before);
+    runtime
+        .publish_schema_with_lens(target.clone(), lens, vec![], vec![])
+        .await
+        .unwrap();
+    let after = runtime.trusted_catalogue_snapshot().await.unwrap();
+    assert_eq!(after.lineages.len(), 1);
+    assert_eq!(
+        after.lineages[0].1.physical_identities.tables["tasks"].id,
+        before.genesis_physical_identities.tables["notes"].id
+    );
+    runtime.shutdown().await.unwrap();
+    let runtime = ServerRuntimeHandle::start_with_storage(source, storage).unwrap();
+    assert_eq!(runtime.trusted_catalogue_snapshot().await.unwrap(), after);
+    runtime.shutdown().await.unwrap();
+}

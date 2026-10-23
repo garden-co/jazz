@@ -753,10 +753,13 @@ impl Catalogue {
                 .max()
                 .unwrap_or(0)
                 + 1;
-            self.snapshot.lineages.push((sequence, publication));
-            self.snapshot
-                .schemas
-                .push(SchemaVersion::new(schema.clone()));
+            // Validate before mutating the live catalogue or its sidecar: a
+            // rejected declaration must not poison publication or restart.
+            let mut candidate = self.snapshot.clone();
+            candidate.lineages.push((sequence, publication));
+            candidate.schemas.push(SchemaVersion::new(schema.clone()));
+            Db::validate_catalogue_snapshot(&candidate).map_err(|error| error.to_string())?;
+            self.snapshot = candidate;
         }
         self.admit_lens(id, lens.clone());
         self.lenses.insert(lens.id);
