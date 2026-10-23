@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import publishedAlpha54Corpus from "../../fixtures/published-alpha54-browser-jazz-corpus.json?raw";
 import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
+import admissionGolden from "../../fixtures/browser-storage-admission-v1.json";
 import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
@@ -25,6 +26,7 @@ import {
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
+  INDEXEDDB_STORAGE_ADMISSION_KEY,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
@@ -397,11 +399,26 @@ describe("browser Jazz storage compatibility corpus", () => {
       rawWhileReopened,
       rawAfterReadOnlyInspection,
     );
-    // The corpus is already in this build's layout, so a read-only open has no
-    // upgrade to perform: every page, metadata record and manifest entry must
-    // come back byte-identical, apart from the opaque lease token checked above.
+    // Epoch-one admission changes only the manifest and its exact JSA1
+    // receipt. Every page, B-tree metadata record and owner record stays
+    // byte-identical, apart from the opaque lease token checked above.
+    const expectedAfterAdmission = {
+      ...rawBeforeReadOnlyInspection,
+      [INDEXEDDB_STORAGE_MANIFEST_STORE]: JSON.stringify(
+        [
+          ...rawManifest(rawBeforeReadOnlyInspection).filter(
+            ([key]) => key !== INDEXEDDB_STORAGE_MANIFEST_KEY,
+          ),
+          [INDEXEDDB_STORAGE_MANIFEST_KEY, INDEXEDDB_STORAGE_MANIFEST],
+          [
+            INDEXEDDB_STORAGE_ADMISSION_KEY,
+            Array.from(admissionGolden.completed.match(/../g)!, (byte) => parseInt(byte, 16)),
+          ],
+        ].sort(([left], [right]) => String(left).localeCompare(String(right))),
+      ),
+    };
     expect(normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)).toEqual(
-      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection),
+      normalizeRuntimeLeaseRecords(expectedAfterAdmission),
     );
 
     // A second read-only open must also preserve the complete raw receipt,
@@ -587,23 +604,22 @@ describe("browser Jazz storage compatibility corpus", () => {
   }, 90_000);
 
   it("rejects the historical retired-result codec profile without rewriting its pages", async () => {
-    const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
-    const dbName = uniqueDbName("browser-storage-retired-profile");
-    const config = await persistentConfig(
-      dbName,
-      "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-      server,
-    );
-    const bootstrap = await openPersistentDb(config);
-    const physicalDbName = await trackPhysicalDatabase(dbName);
-    await bootstrap.shutdown();
-    openDbs.splice(openDbs.indexOf(bootstrap), 1);
-    await sleep(100);
     const historical = JSON.parse(historicalCorpus) as Record<string, string>;
+    const owner = rawManifest(historical).find(
+      ([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
+    )![1] as string;
+    // This retired corpus predates account-scoped runtime identities. Supply
+    // its exact stored owner to exercise codec admission, not namespace denial.
+    const physicalDbName = uniqueDbName("browser-storage-retired-profile");
+    databaseNames.add(physicalDbName);
     await installRawRecords(physicalDbName, historical);
     await expect(
-      withTimeout(createDb(config), 5_000, "retired profile open did not reject"),
-    ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+      withTimeout(
+        IndexedDbPageStore.open(physicalDbName, { owner }),
+        5_000,
+        "retired profile open did not reject",
+      ),
+    ).rejects.toThrow();
     expect(await rawRecords(physicalDbName)).toEqual(historical);
   }, 30_000);
 
@@ -631,9 +647,8 @@ describe("browser Jazz storage compatibility corpus", () => {
     );
     await db.shutdown();
     cleanup.untrack(db);
-    await sleep(100);
 
-    await replaceManifest(physicalDbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
+    await replaceManifest(physicalDbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 99 });
     const rawBeforeRejectedRead = await rawRecords(physicalDbName);
     // Schema selection is lazy, but persistent construction must first obtain
     // a foreground-node lease. Its worker opens the physical root before it
@@ -883,14 +898,17 @@ async function installRawRecords(name: string, records: Record<string, string>):
   ];
   const transaction = database.transaction(names, "readwrite");
   for (const storeName of names) {
+    transaction.objectStore(storeName).clear();
     for (const [key, value] of JSON.parse(records[storeName] ?? "[]") as [IDBValidKey, unknown][]) {
       transaction
         .objectStore(storeName)
         .put(
-          restoreStructuredCloneValue(
-            value,
-            storeName === INDEXEDDB_BTREE_PAGES_STORE || key === "replica-node-v1",
-          ),
+          key === INDEXEDDB_STORAGE_ADMISSION_KEY
+            ? Uint8Array.from(value as number[])
+            : restoreStructuredCloneValue(
+                value,
+                storeName === INDEXEDDB_BTREE_PAGES_STORE || key === "replica-node-v1",
+              ),
           key,
         );
     }

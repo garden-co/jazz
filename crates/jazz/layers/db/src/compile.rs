@@ -1204,6 +1204,9 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
+        if join.source_mode != crate::query::CandidateSourceMode::AcceptedOnly {
+            return Err(unsupported("candidate-created join sources on SQLite"));
+        }
         let target = self.table(&join.table)?;
         let j = self.alias("j");
         let mut conds = vec![format!("{j}._del = 0")];
@@ -1714,6 +1717,11 @@ impl<'a> Ctx<'a> {
             }
             // Policy EXISTS reads its table as raw evidence: the dependency
             // table's own policy is not composed in (INV-RLS-21).
+            PolicyExpr::ExistsIncludingCreated { .. } => {
+                return Err(unsupported(
+                    "ExistsIncludingCreated permission checks on SQLite",
+                ));
+            }
             PolicyExpr::Exists {
                 table: target,
                 condition,

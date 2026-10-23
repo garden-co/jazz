@@ -40,6 +40,7 @@ export function mapPolicyExpr(expr: PolicyExpr, leaf: PolicyLeafMappers): WasmPo
         values: expr.values.map((value) => leaf.literal(value)),
       };
     case "Exists":
+    case "ExistsIncludingCreated":
       return { ...expr, condition: map(expr.condition) };
     case "ExistsRel":
       return { type: "ExistsRel", rel: leaf.rel(expr.rel) };

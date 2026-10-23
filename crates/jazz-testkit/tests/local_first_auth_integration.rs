@@ -76,7 +76,6 @@ fn local_first_context(
     ctx.backend_secret = None;
     ctx.admin_secret = None;
     ctx.storage = storage;
-    if storage == ClientStorage::Persistent {}
     ctx
 }
 

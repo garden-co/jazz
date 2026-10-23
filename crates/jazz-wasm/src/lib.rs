@@ -1119,6 +1119,18 @@ impl WasmDb {
         )
     }
 
+    /// The retired Groove epoch admission protocol is not a SQLite admission.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = preflightBrowserEpochOne)]
+    pub async fn preflight_browser_epoch_one(_page_store: JsValue) -> Result<(), JsValue> {
+        Err(not_supported("Groove browser epoch admission on SQLite"))
+    }
+
+    #[wasm_bindgen(js_name = __browserStorageAdmissionReceipt)]
+    pub fn browser_storage_admission_receipt(_completed: bool) -> Result<Vec<u8>, JsValue> {
+        Err(not_supported("Groove browser epoch admission on SQLite"))
+    }
+
     /// Open the durable store a browser worker owns. `storage` selects the
     /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string }`
     /// (IndexedDB when omitted; see [`browser`]). The default file is named

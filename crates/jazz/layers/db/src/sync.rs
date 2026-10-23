@@ -5084,6 +5084,7 @@ fn depends_on_row_id(policy: &PolicyExpr) -> bool {
         PolicyExpr::Inherits { via_column, .. } => via_column == "id",
         PolicyExpr::InheritsReferencing { .. }
         | PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsIncludingCreated { .. }
         | PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().any(depends_on_row_id),
         PolicyExpr::Not(item) => depends_on_row_id(item),
