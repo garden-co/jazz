@@ -407,3 +407,75 @@ fn a_failed_link_releases_a_held_opening_before_its_timeout() {
     assert!(reset && !settled);
     assert_eq!(rows, all_rows());
 }
+
+/// A Remote read must be covered by the server: once the caller's budget is
+/// spent with the server silent it fails with `NotObserved` rather than
+/// waiting forever or answering from the cache. Within budget it answers.
+///
+/// ```text
+/// alice (cache a..j) ══ server, silent ─ budget spent ─► NotObserved
+/// alice (cache a..j) ══ server answers ─────────────────► a..j
+/// ```
+#[test]
+fn a_remote_read_fails_once_its_coverage_budget_is_spent_unanswered() {
+    let server = seeded_server();
+    let alice = warm_client(0x76, &server);
+    let remote = ReadOpts {
+        tier: jazz::db::ReadTier::Remote,
+        ..ReadOpts::default()
+    };
+    let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let turns = std::cell::Cell::new(0);
+    let read = alice.all_serialized_query(
+        &bytes,
+        remote.clone(),
+        None,
+        None,
+        None,
+        true,
+        || turns.get() >= 5,
+        |attachment| alice.detach_query(attachment),
+    );
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    let error = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            break result.expect_err("an unanswered Remote read fails");
+        }
+        assert!(turns.get() < 10, "the read outlived its budget");
+        turns.set(turns.get() + 1);
+        turn(&alice, None);
+    };
+    assert_eq!(error.code, jazz::db::ErrorCode::NotObserved);
+    assert!(
+        error
+            .message
+            .contains("Timed out waiting for query coverage")
+    );
+
+    // With the server answering, the same budget is not reached.
+    let read = alice.all_serialized_query(
+        &bytes,
+        remote,
+        None,
+        None,
+        None,
+        true,
+        || false,
+        |attachment| alice.detach_query(attachment),
+    );
+    let mut read = pin!(read);
+    let mut rows = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            match result.expect("an answered Remote read") {
+                SerializedReadResult::Rows(rows) => {
+                    break rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+                }
+                SerializedReadResult::Relation(_) => panic!("items is a row query"),
+            }
+        }
+        turn(&alice, Some(&server));
+    };
+    rows.sort();
+    assert_eq!(rows, all_rows());
+}
