@@ -4348,7 +4348,7 @@ impl Db {
                                 )
                             });
                             let result =
-                                db.authorize_commit(who, policy, kind, ops, updated_at, (node, tx));
+                                db.authorize_commit(who, kind, ops, updated_at, (node, tx));
                             if let Some((author, previous)) = previous {
                                 let mut inner = self.inner.borrow_mut();
                                 match previous {
@@ -4448,19 +4448,24 @@ impl Db {
         Ok(())
     }
 
-    /// Validate (serializable) and apply one uploaded commit as `identity`.
+    /// Validate (serializable) and apply one uploaded commit as `who`.
     /// Returns the rows the client must hear about either way: the rows it
     /// wrote, so a rejected client rebases onto the authority's versions.
     #[allow(clippy::type_complexity)]
     fn authorize_commit(
         &self,
         who: Who,
-        identity: Option<AuthorSubject>,
         kind: WireKind,
         ops: Vec<WireOp>,
         updated_at: Option<u64>,
         origin: ([u8; 16], u64),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
+        // A trusted backend's session batch validates reads under the same
+        // session as its writes, not under the transport's SYSTEM privilege.
+        let identity = match who {
+            Who::Session(author) => Some(author),
+            Who::Local | Who::Attributed(_) => None,
+        };
         let mut ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>()
         {
             Ok(ops) => ops,
