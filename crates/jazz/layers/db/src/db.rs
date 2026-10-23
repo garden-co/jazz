@@ -250,6 +250,8 @@ pub struct SubscriptionStream {
     /// A withheld opening, released as one reset of the current rows.
     gate: Option<sync::Gate>,
     group: Weak<RefCell<fanout::Group>>,
+    /// Why the server refused the remote read, once it has; reported once.
+    refused: Option<Rc<RefCell<Option<Error>>>>,
     /// The remote attachment to release on drop.
     remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>, bool)>,
 }
@@ -265,6 +267,15 @@ impl Drop for SubscriptionStream {
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
+        let reason = self
+            .refused
+            .as_ref()
+            .and_then(|refused| refused.borrow().as_ref().map(Error::to_string));
+        if let Some(reason) = reason {
+            self.refused = None;
+            self.gate = None;
+            return Some(SubscriptionEvent::Rejected { reason });
+        }
         if let Some(gate) = &self.gate {
             if !gate.open() {
                 return None;
@@ -596,6 +607,19 @@ impl Error {
     pub fn is_missing_chunks(&self) -> bool {
         crate::large::is_missing(self)
     }
+}
+
+/// An update of a row this replica does not hold: a missing observation,
+/// not a read-policy decision.
+fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error {
+    Error::new(
+        ErrorCode::NotObserved,
+        format!(
+            "{operation} on table {table} needs the current row, but row {} is not loaded \
+             locally; read or subscribe to the row before updating it",
+            row.0
+        ),
+    )
 }
 
 /// The reason a policy rejects a write, leading its message (the code
@@ -1020,12 +1044,12 @@ impl Db {
             None
         };
         let settled = match (&remote, client) {
-            (Some(answered), _) => sync::SettledBy::Remote(answered.clone()),
+            (Some((answered, _)), _) => sync::SettledBy::Remote(answered.clone()),
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always,
         };
         let gate = match (&remote, self.link_hint()) {
-            (Some(answered), Some(hint)) => {
+            (Some((answered, _)), Some(hint)) => {
                 let deadline = match (opts.tier, &opts.first_load) {
                     (ReadTier::Remote, _) => Some(None),
                     (_, FirstLoad::WaitForRemote { timeout_ms })
@@ -1056,6 +1080,7 @@ impl Db {
             dropped: inner.fan.dropped.clone(),
             gate,
             group,
+            refused: remote.as_ref().map(|(_, refused)| refused.clone()),
             remote: remote.map(|_| {
                 (
                     self.inner.clone(),
@@ -2912,10 +2937,11 @@ impl Inner {
                 cells.extend(branch);
                 return self.insert(table_name, cells, Some(row), &Target::Root, who, seq);
             }
-            // A replica may not hold the row (it may not even be allowed
-            // to read it): the write goes to the authority, which decides.
+            // An update stages against the row's current cells, so a
+            // replica must hold it. Saying so discloses nothing: the answer
+            // is the same whether or not the row exists elsewhere.
             Located::Absent { .. } if self.client.is_some() => {
-                return Ok(WriteHandle { row, seq });
+                return Err(update_target_not_loaded(verb, table_name, row));
             }
             Located::Absent { .. } if !upsert => {
                 return Err(rejected(format!(
@@ -4329,7 +4355,7 @@ impl TxRef<'_> {
         {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
-            let through = self.db.fetch(prepared, at, false, None).await;
+            let through = self.db.fetch(prepared, at, false, None).await?;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
