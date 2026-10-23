@@ -590,6 +590,14 @@ impl Error {
     }
 }
 
+impl Error {
+    /// Whether a read needs large-value chunks this replica has requested
+    /// from upstream but not received yet.
+    pub fn is_missing_chunks(&self) -> bool {
+        crate::large::is_missing(self)
+    }
+}
+
 /// The reason a policy rejects a write, leading its message (the code
 /// stays `WriteRejected`): authority rejections are reported by it.
 pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
@@ -1211,8 +1219,12 @@ impl Db {
         self.with_upload(|| {
             let table = op.table().to_owned();
             let handle = self.write(&table, |inner, seq| {
+                let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
-                inner.apply_as(&op, who, seq)
+                inner.pending_nodes.extend(edits.pending_nodes);
+                let applied = inner.apply_as(&op, who, seq);
+                inner.clear_derived();
+                applied
             })?;
             self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
             Ok(handle)
@@ -2463,6 +2475,49 @@ impl Inner {
             Some(cell) => from_sql(&column.ty, cell.as_ref(), &self.chunks),
             None => Ok(None),
         }
+    }
+
+    /// Chunk a write's string, JSON and bytes cells above the inline
+    /// threshold once, up front: each becomes a reference to its prepared
+    /// tree, which the returned edits carry until the write applies. The
+    /// write then travels (to the authority, in a pending upload, through
+    /// every overlay replay) as that reference instead of the whole value,
+    /// and its nodes are pushed as chunks ahead of it.
+    pub(crate) fn chunk_large_cells(&self, op: &mut StagedOp) -> Result<LargeEdits, Error> {
+        let mut edits = LargeEdits::default();
+        let (table_name, cells) = match op {
+            StagedOp::Insert(t, c, _)
+            | StagedOp::Update(t, _, c, _)
+            | StagedOp::Upsert(t, _, c, _) => (t.clone(), c),
+            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), c),
+            _ => return Ok(edits),
+        };
+        let schema = self.schema.clone();
+        let table = schema.table(&table_name)?;
+        for column in &table.columns {
+            if !crate::large::large_capable(column) {
+                continue;
+            }
+            let Some(mut value) = cells.get_mut(&column.name) else {
+                continue;
+            };
+            while let Value::Nullable(Some(inner)) = value {
+                value = inner;
+            }
+            let logical = match &*value {
+                Value::String(text) => text.as_bytes(),
+                Value::Bytes(bytes) => bytes.as_slice(),
+                _ => continue,
+            };
+            if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES {
+                continue;
+            }
+            let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
+                .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
+            *value = Value::Large(Box::new(prepared.value_ref.clone()));
+            edits.pending_nodes.push(prepared);
+        }
+        Ok(edits)
     }
 
     /// Turn a write's counter cells from the values it sets into the
@@ -4037,7 +4092,11 @@ impl Db {
         result
     }
 
-    fn stage(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
+    fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
+        self.stage_with_edits(id, op, LargeEdits::default())
+    }
+
+    fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
         // A counter write's change is from what the transaction sees.
         self.in_overlay(id, None, |inner, _| inner.counter_deltas(&mut op))?;
         // Validate against the overlay now, so errors surface at the call.
@@ -4058,11 +4117,13 @@ impl Db {
     pub(crate) fn stage_with_edits(
         &self,
         id: OpenTransactionId,
-        op: StagedOp,
-        edits: LargeEdits,
+        mut op: StagedOp,
+        mut edits: LargeEdits,
     ) -> Result<(), Error> {
         let marks = {
             let mut inner = self.inner();
+            let chunked = inner.chunk_large_cells(&mut op)?;
+            edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
                 .batches
                 .get_mut(&id)
@@ -4072,7 +4133,7 @@ impl Db {
             batch.edits.pending_nodes.extend(edits.pending_nodes);
             marks
         };
-        let staged = self.stage(id, op);
+        let staged = self.stage_op(id, op);
         if staged.is_err()
             && let Some(batch) = self.inner().batches.get_mut(&id)
         {

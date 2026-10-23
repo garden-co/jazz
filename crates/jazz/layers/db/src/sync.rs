@@ -305,8 +305,14 @@ impl WireChunk {
     }
 }
 
-/// Encoded node bytes per `PushChunks` or `Chunks` message.
-const CHUNK_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// Encoded node bytes per `PushChunks` or `Chunks` message: a batch is
+/// flushed once it reaches this, so with one more node at most and the
+/// message's framing it still fits one wire frame.
+const CHUNK_BATCH_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES / 2;
+const _: () = assert!(
+    CHUNK_BATCH_BYTES + jazz_types::large_values::MAX_ENCODED_NODE_BYTES + 64 * 1024
+        <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
+);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
@@ -2168,12 +2174,17 @@ impl Db {
                     .map(|image| (table.clone(), *row.0.as_bytes(), key.clone(), image.seq))
             })
             .collect();
+        // Commits, their chunk pushes and chunk requests a full queue held
+        // back are sent again below from what is still owed.
         client.outbox.retain(|m| {
             !matches!(
                 m,
                 SyncMessage::Subscribe { .. }
                     | SyncMessage::Hold { .. }
                     | SyncMessage::Schema { .. }
+                    | SyncMessage::Commit { .. }
+                    | SyncMessage::PushChunks { .. }
+                    | SyncMessage::ChunkRequests { .. }
             )
         });
         let version = *inner.owner.jazz.version_id().as_bytes();
@@ -2589,6 +2600,17 @@ impl Db {
         Ok(())
     }
 
+    /// Whether chunks this replica requested may still arrive: it is
+    /// connected to an upstream that may answer, with requests outstanding.
+    pub fn awaiting_chunks(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.client.as_ref().is_some_and(|client| {
+            client.transport.is_some()
+                && may_wait(client.hint.get())
+                && !(client.requested.is_empty() && client.wanted.is_empty())
+        })
+    }
+
     /// Ask the upstream authority whether `action` would be allowed for
     /// this replica's session; wait with [`Db::permission_advice`]. Without
     /// a connected upstream the answer is `Unknown`: a replica's own policy
@@ -2949,10 +2971,20 @@ impl Db {
             out.extend(batches);
             out.push(commit);
         }
-        for message in out {
-            transport
-                .send(message)
-                .map_err(|e| Error::new(ErrorCode::Storage, format!("{e:?}")))?;
+        // A full outbound queue keeps the rest, in order, for the flush its
+        // drain wakes.
+        let mut out = out.into_iter();
+        while let Some(message) = out.next() {
+            match transport.send(message.clone()) {
+                Ok(()) => {}
+                Err(TransportError::Backpressure) => {
+                    let mut held: Vec<SyncMessage> = std::iter::once(message).chain(out).collect();
+                    held.append(&mut client.outbox);
+                    client.outbox = held;
+                    break;
+                }
+                Err(e) => return Err(Error::new(ErrorCode::Storage, format!("{e:?}"))),
+            }
         }
         Ok(())
     }

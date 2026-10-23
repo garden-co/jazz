@@ -884,13 +884,27 @@ impl JazzClient {
             let prepared = self.prepare(&read)?;
             let session = self.session_identity()?;
             let db = self.db()?;
-            crate::db::block_on(async {
-                match session {
-                    Some(author) => db.all_for_identity(&prepared, opts, author).await,
-                    None => db.all(&prepared, opts).await,
-                }
-            })
-            .map_err(|error| JazzError::Query(error.to_string()))?
+            let read_local = || {
+                crate::db::block_on(async {
+                    match &session {
+                        Some(author) => {
+                            db.all_for_identity(&prepared, opts.clone(), author.clone())
+                                .await
+                        }
+                        None => db.all(&prepared, opts.clone()).await,
+                    }
+                })
+            };
+            // A row whose large values are still being fetched answers once
+            // their chunks arrive, while the upstream that will send them is
+            // connected.
+            self.shared
+                .until(|| match read_local() {
+                    Err(error) if error.is_missing_chunks() && db.awaiting_chunks() => None,
+                    result => Some(result),
+                })
+                .await?
+                .map_err(|error| JazzError::Query(error.to_string()))?
         };
         Decoder {
             schema: &self.shared.schema,
