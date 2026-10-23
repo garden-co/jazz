@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => {
   const telemetryDisposers: Mock[] = [];
   const pageStores: Array<{
     close: Mock;
+    openSqliteRuntime: Mock;
     destroyUnderOwner: Mock;
     claimBrowserWorkerEpoch: Mock;
     retireTreeOwnership: Mock;
@@ -94,6 +95,10 @@ const mocks = vi.hoisted(() => {
         replicaNode.fill(pageStores.length + 3);
         const pageStore = {
           close: vi.fn(),
+          openSqliteRuntime: vi.fn(
+            async (open: (storage: unknown) => Promise<unknown>): Promise<unknown> =>
+              open(pageStore),
+          ),
           destroyUnderOwner: vi.fn(async () => undefined),
           claimBrowserWorkerEpoch: vi.fn(async () => undefined),
           retireTreeOwnership: vi.fn(async () => undefined),
@@ -1908,6 +1913,9 @@ describe("broker worker context initialization", () => {
       replicaNode.fill(17);
       const pageStore = {
         close: vi.fn(),
+        openSqliteRuntime: vi.fn(
+          async (open: (storage: unknown) => Promise<unknown>): Promise<unknown> => open(pageStore),
+        ),
         destroyUnderOwner: vi.fn(async () => undefined),
         claimBrowserWorkerEpoch: vi.fn(async () => undefined),
         retireTreeOwnership: vi.fn(async () => undefined),

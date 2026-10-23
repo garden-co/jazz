@@ -1084,6 +1084,21 @@ impl Db {
         self.tick().await
     }
 
+    /// Revoke the owner connection before its external storage lease is
+    /// released. Retained views, streams or transports may still own Db clones;
+    /// none may read or write this file after retirement. Installing SQLite's
+    /// authorizer also expires statements already in the preparation cache.
+    /// This is a one-way runtime fence, not a stored application policy.
+    pub fn retire_storage_owner(&self) -> Result<(), Error> {
+        let inner = self.inner();
+        inner
+            .conn
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Deny
+            }))
+            .map_err(storage)
+    }
+
     // ---- preparation ----------------------------------------------------
 
     /// Diagnostics: the compiled SQL of a read and SQLite's query plan for
