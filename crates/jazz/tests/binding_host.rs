@@ -215,7 +215,7 @@ fn writes_transactions_and_attribution_go_through_one_binding() {
         tx,
         "notes",
         &first.row_id.to_bytes(),
-        &title("back"),
+        Some(&title("back")),
         &none(),
     )
     .unwrap();
@@ -270,7 +270,12 @@ fn restoring_a_live_row_is_rejected_through_its_receipt() {
     let db = open(0xa3);
     let live = db.insert("notes", &title("live"), &none()).unwrap();
     let receipt = db
-        .restore("notes", &live.row_id.to_bytes(), &title("again"), &none())
+        .restore(
+            "notes",
+            &live.row_id.to_bytes(),
+            Some(&title("again")),
+            &none(),
+        )
         .unwrap();
     let refusal = receipt.rejected.expect("the restore is rejected");
     assert!(refusal.is_apply_time_rejection(), "{refusal:?}");
@@ -385,6 +390,18 @@ fn two_bindings_sync_over_frames_the_host_carries() {
     let mut upstream = upstream;
     assert!(upstream.close());
     assert!(!upstream.close());
+}
+
+#[test]
+fn a_write_made_before_the_upstream_connects_uploads_once_it_does() {
+    let server = authority();
+    let client = open(0xa1);
+    let write = client.insert("notes", &title("offline"), &none()).unwrap();
+    let upstream = client.connect_upstream();
+    let subscriber = server.accept_subscriber(client.author(), Default::default());
+    let links = [(&upstream, &subscriber)];
+    drive(&links, client.wait_for(write.seq, "global").unwrap()).unwrap();
+    assert_eq!(titles(&server), ["offline"]);
 }
 
 #[test]
@@ -510,4 +527,82 @@ fn a_relation_read_nests_each_relation_in_its_parents_cells() {
             (Value::String("without".to_owned()), vec![]),
         ]
     );
+}
+
+/// A local-first account's proof for app `app`, and the canonical author it
+/// proves.
+fn local_first_proof(seed: u8, app: &str) -> (String, String) {
+    use jazz::identity::{LOCAL_FIRST_ISSUER, derive_user_id, mint_jazz_self_signed_token};
+    let seed = [seed; 32];
+    let token = mint_jazz_self_signed_token(&seed, LOCAL_FIRST_ISSUER, app, 600).unwrap();
+    let user = derive_user_id(&seed).to_string();
+    let app = jazz::app_id::AppId::from_name(app);
+    let author = AuthorSubject::reserved(LOCAL_FIRST_ISSUER, &user)
+        .unwrap()
+        .with_account(jazz::account_registry::local_first_account_id(
+            *app.uuid(),
+            &user,
+        ));
+    (token, author.canonical().to_owned())
+}
+
+#[test]
+fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
+    let backend = authority();
+    let (token, author) = local_first_proof(7, "app");
+    let as_account = json!({ "author": author.as_bytes() });
+
+    // Raw author bytes never name a Jazz-reserved identity on their own.
+    argument(backend.insert("notes", &title("before"), &as_account));
+
+    backend
+        .admit_local_first_session(&token, "app", &author)
+        .unwrap();
+    let write = backend
+        .insert("notes", &title("after"), &as_account)
+        .unwrap();
+    assert!(write.rejected.is_none());
+    assert_eq!(titles(&backend), ["after"]);
+
+    // Only a backend admits, and only the author its proof derives.
+    let (other_token, other_author) = local_first_proof(8, "app");
+    argument(open(1).admit_local_first_session(&other_token, "app", &other_author));
+    argument(backend.admit_local_first_session(&other_token, "app", &author));
+    argument(backend.admit_local_first_session(&token, "other-app", &author));
+}
+
+#[test]
+fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
+    use jazz::db::{Image, SyncCell, SyncMessage, encode_frames};
+    let image = |n: u8| Image {
+        table: "todos".into(),
+        id: [n; 16],
+        key: Vec::new(),
+        seq: 1,
+        deleted: false,
+        content: true,
+        cells: vec![("title".into(), SyncCell::Text(vec![b'x'; 300 * 1024]))],
+    };
+    let images: Vec<Image> = (0..20).map(image).collect();
+    let frames = encode_frames(SyncMessage::Rows {
+        images: images.clone(),
+    })
+    .unwrap();
+    assert!(frames.len() > 1);
+    let limit = jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
+    let mut ids = Vec::new();
+    for frame in frames {
+        assert!(frame.len() < limit);
+        match postcard::from_bytes::<SyncMessage>(&frame).unwrap() {
+            SyncMessage::Rows { images } => ids.extend(images.into_iter().map(|i| i.id)),
+            other => panic!("expected rows, got {other:?}"),
+        }
+    }
+    assert_eq!(ids, images.iter().map(|i| i.id).collect::<Vec<_>>());
+    // A message that fits stays one frame.
+    let one = encode_frames(SyncMessage::Rows {
+        images: vec![image(1)],
+    })
+    .unwrap();
+    assert_eq!(one.len(), 1);
 }

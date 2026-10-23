@@ -965,15 +965,16 @@ impl WasmDb {
         &self,
         table: String,
         row_id: Vec<u8>,
-        cells: Vec<u8>,
+        cells: Option<Vec<u8>>,
         options: JsValue,
     ) -> Result<WasmWrite, JsValue> {
         let inner = self.open_inner()?;
-        inner.write(
-            inner
-                .binding
-                .restore(&table, &row_id, &cells, &self::options(options)),
-        )
+        inner.write(inner.binding.restore(
+            &table,
+            &row_id,
+            cells.as_deref(),
+            &self::options(options),
+        ))
     }
 
     #[wasm_bindgen(js_name = restoreInTransaction)]
@@ -982,7 +983,7 @@ impl WasmDb {
         open_transaction_id: String,
         table: String,
         row_id: Vec<u8>,
-        cells: Vec<u8>,
+        cells: Option<Vec<u8>>,
         options: JsValue,
     ) -> Result<(), JsValue> {
         self.binding()?
@@ -990,7 +991,7 @@ impl WasmDb {
                 &open_transaction_id,
                 &table,
                 &row_id,
-                &cells,
+                cells.as_deref(),
                 &self::options(options),
             )
             .map_err(host_error)
@@ -1477,14 +1478,15 @@ impl WasmDb {
         )))
     }
 
-    /// Connect after the carrier accepted the server Hello. The session
-    /// context (authority endpoints, negotiated features) has no counterpart
-    /// on SQLite's sync, so this is [`Self::connect_upstream`].
+    /// Connect after the carrier accepted the server Hello. Negotiated
+    /// features must be compiled in; the rest of the session context
+    /// (authority endpoints, epochs) has no counterpart on SQLite's sync, so
+    /// this is otherwise [`Self::connect_upstream`].
     #[wasm_bindgen(js_name = connectUpstreamWithSession)]
     pub fn connect_upstream_with_session(
         &self,
         _protocol_version: u16,
-        _features: u32,
+        features: u32,
         remote_node: Vec<u8>,
         _remote_epoch: u64,
         local_node: Vec<u8>,
@@ -1496,6 +1498,12 @@ impl WasmDb {
         let _: [u8; 16] = local_node
             .try_into()
             .map_err(|_| JsValue::from_str("local peer identity must be 16 bytes"))?;
+        let unsupported = u64::from(features) & !jazz::wire::current_wire_features();
+        if unsupported != 0 {
+            return Err(JsValue::from_str(&format!(
+                "server negotiated wire features {features:#x}, but this WASM binding was not compiled with {unsupported:#x}"
+            )));
+        }
         self.connect_upstream()
     }
 

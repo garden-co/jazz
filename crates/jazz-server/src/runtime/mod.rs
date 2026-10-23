@@ -1065,10 +1065,10 @@ impl Owner {
             while session.egress.load(Ordering::Acquire) + bytes < SESSION_QUEUE_BUDGET
                 && let Some(message) = outbound.pop_front()
             {
-                match postcard::to_allocvec(&message) {
-                    Ok(frame) => {
-                        bytes += frame.len();
-                        frames.push(frame);
+                match jazz::db::encode_frames(message) {
+                    Ok(encoded) => {
+                        bytes += encoded.iter().map(Vec::len).sum::<usize>();
+                        frames.extend(encoded);
                     }
                     Err(error) => {
                         tracing::error!(%error, "encode outbound sync message");
