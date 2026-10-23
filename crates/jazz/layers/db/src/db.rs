@@ -3977,6 +3977,11 @@ impl Db {
         Ok(())
     }
 
+    /// A fresh row id from this database's id source.
+    pub fn next_row_id(&self) -> RowUuid {
+        self.inner().ids.next_row_id()
+    }
+
     pub fn mergeable_tx_ref(&self, id: OpenTransactionId) -> TxRef<'_> {
         TxRef { db: self, id }
     }

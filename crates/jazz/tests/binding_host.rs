@@ -229,6 +229,43 @@ fn writes_transactions_and_attribution_go_through_one_binding() {
 }
 
 #[test]
+fn a_staged_write_refused_for_its_rows_state_rejects_the_commit() {
+    let db = open(0xa2);
+    let row = RowUuid::from_bytes([0x42; 16]);
+    for kind in ["mergeable", "serializable"] {
+        let tx = &OpenTransactionId::new().to_string();
+        db.begin_transaction(tx, kind, None, None).unwrap();
+        // Patching nothing is fine for a stored row but cannot create one:
+        // the call stages, and the commit carries the refusal.
+        db.upsert_in_transaction(tx, "notes", &row.to_bytes(), &empty_cells(), &none())
+            .unwrap();
+        db.insert_in_transaction(tx, "notes", &title("kept out"), &none())
+            .unwrap();
+        let commit = db.commit_transaction(tx, Some(kind)).unwrap();
+        let refusal = commit.rejected.expect("the commit is rejected");
+        assert!(refusal.is_apply_time_rejection(), "{refusal:?}");
+        assert!(refusal.message.contains("missing required field `title`"));
+        assert!(titles(&db).is_empty(), "no staged write applies");
+        assert!(
+            db.commit_transaction(tx, Some(kind)).is_err(),
+            "the transaction is closed"
+        );
+    }
+
+    // A rolled back transaction forgets its refusal.
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    db.upsert_in_transaction(tx, "notes", &row.to_bytes(), &empty_cells(), &none())
+        .unwrap();
+    db.rollback_transaction(tx).unwrap();
+    db.begin_transaction(tx, "mergeable", None, None).unwrap();
+    db.insert_in_transaction(tx, "notes", &title("after"), &none())
+        .unwrap();
+    assert!(db.commit_transaction(tx, None).unwrap().rejected.is_none());
+    assert_eq!(titles(&db), ["after"]);
+}
+
+#[test]
 fn two_bindings_sync_over_frames_the_host_carries() {
     let server = authority();
     let client = open(0xa1);

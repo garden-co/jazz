@@ -612,6 +612,9 @@ pub struct Binding {
     node: NodeUuid,
     author: AuthorSubject,
     trusted_backend: bool,
+    /// Open transactions a staged write was refused in for its row's
+    /// state: the transaction's commit reports the first such refusal.
+    refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
 }
 
 impl Binding {
@@ -623,6 +626,7 @@ impl Binding {
             node: identity.node,
             author: identity.author,
             trusted_backend,
+            refused: Rc::default(),
         }
     }
 
@@ -824,7 +828,12 @@ impl Binding {
     /// Commit an owner-wide transaction (`kind` defaults to mergeable).
     pub fn commit_transaction(&self, id: &str, kind: Option<&str>) -> HostResult<Write> {
         let id = open_transaction(id)?;
-        let receipt = match TransactionKind::parse(kind.unwrap_or("mergeable"))? {
+        let kind = TransactionKind::parse(kind.unwrap_or("mergeable"))?;
+        if let Some(error) = self.refused.borrow_mut().remove(&id) {
+            self.db.abandon_transaction_handle(id)?;
+            return self.rejected(error);
+        }
+        let receipt = match kind {
             TransactionKind::Mergeable => block_on(self.db.commit_mergeable_handle(id)),
             TransactionKind::Serializable => block_on(self.db.commit_serializable_handle(id)),
         }?;
@@ -834,7 +843,23 @@ impl Binding {
 
     /// Roll back an open transaction.
     pub fn rollback_transaction(&self, id: &str) -> HostResult<()> {
-        Ok(self.db.abandon_transaction_handle(open_transaction(id)?)?)
+        let id = open_transaction(id)?;
+        self.refused.borrow_mut().remove(&id);
+        Ok(self.db.abandon_transaction_handle(id)?)
+    }
+
+    /// A staged write's outcome. Like a direct write's (see
+    /// [`Self::write`]), a refusal decided by the row's stored state is not
+    /// the call's error: the transaction stays open and its commit is
+    /// rejected with the first such refusal.
+    fn staged(&self, id: OpenTransactionId, staged: Result<WriteHandle, Error>) -> HostResult<()> {
+        match staged {
+            Err(error) if error.is_apply_time_rejection() => {
+                self.refused.borrow_mut().entry(id).or_insert(error);
+                Ok(())
+            }
+            staged => staged.map(drop).map_err(Into::into),
+        }
     }
 
     /// Stage an insert; returns the row id.
@@ -847,8 +872,11 @@ impl Binding {
     ) -> HostResult<RowUuid> {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
-        let options = insert_options(options)?;
-        Ok(block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options))?.row_uuid())
+        let mut options = insert_options(options)?;
+        let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
+        let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
+        self.staged(id, staged)?;
+        Ok(row)
     }
 
     /// Stage an update.
@@ -864,12 +892,12 @@ impl Binding {
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
         let options = update_options(options)?;
-        block_on(
+        let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
                 .update(table, row, patch, options),
-        )?;
-        Ok(())
+        );
+        self.staged(id, staged)
     }
 
     /// Stage an upsert.
@@ -885,12 +913,12 @@ impl Binding {
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
         let options = upsert_options(options)?;
-        block_on(
+        let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
                 .upsert(table, row, cells, options),
-        )?;
-        Ok(())
+        );
+        self.staged(id, staged)
     }
 
     /// Stage a delete.
@@ -904,8 +932,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let options = delete_options(options)?;
-        block_on(self.db.mergeable_tx_ref(id).delete(table, row, options))?;
-        Ok(())
+        let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
+        self.staged(id, staged)
     }
 
     /// Stage partial large-value updates; they read the row with the
@@ -928,12 +956,12 @@ impl Binding {
                 .transpose()?,
             ..Default::default()
         };
-        block_on(
+        let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
                 .update_with_large_value_mutations(table, row, patch, mutations, options),
-        )?;
-        Ok(())
+        );
+        self.staged(id, staged)
     }
 
     /// Stage an undelete of `row` with `cells`.
@@ -949,12 +977,13 @@ impl Binding {
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
         let options = restore_options(options)?;
-        block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .restore(table, row, Some(cells), options),
-        )?;
-        Ok(())
+        let staged = block_on(self.db.mergeable_tx_ref(id).restore(
+            table,
+            row,
+            Some(cells),
+            options,
+        ));
+        self.staged(id, staged)
     }
 
     // ---- reads ----
