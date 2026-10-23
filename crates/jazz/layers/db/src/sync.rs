@@ -3779,7 +3779,10 @@ impl Db {
             return PermissionAdvice::Unknown;
         }
         let mark = inner.changed.borrow().len();
-        let applied = inner.apply_as(&op, who, seq).map(drop);
+        let unit = [(inner.schema.clone(), op.clone())];
+        let applied = inner.candidate_unit(&unit, seq, false, false, |inner| {
+            inner.apply_as(&op, who, seq).map(drop)
+        });
         let undone = inner.rollback_savepoint("advise");
         inner.changed.borrow_mut().truncate(mark);
         match (applied, undone) {
@@ -5949,9 +5952,19 @@ impl Db {
                 .execute_batch("SAVEPOINT upload")
                 .map_err(|e| (storage(e), Vec::new()))?;
             let mark = inner.changed.borrow().len();
-            let applied = ops
+            let unit = ops
                 .iter()
-                .try_for_each(|op| inner.apply_as(op, who, seq).map(drop));
+                .cloned()
+                .map(|op| (inner.schema.clone(), op))
+                .collect::<Vec<_>>();
+            let serializable = matches!(
+                kind,
+                WireKind::Serializable { .. } | WireKind::SerializableOriginsV1 { .. }
+            );
+            let applied = inner.candidate_unit(&unit, seq, serializable, false, |inner| {
+                ops.iter()
+                    .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
+            });
             if let Err(error) = applied {
                 inner
                     .rollback_savepoint("upload")
