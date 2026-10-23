@@ -84,7 +84,7 @@ it("converts encrypted data to a new table and space with an equality index", as
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
     const rows = await db.all(newApp.notes.where({ projectId: project.id }), { tier: "remote" });
     expect(rows).toEqual([{ id: source.id, projectId: project.id, title: "Re-encrypt this note" }]);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const destination = tx.insert(newApp.projects, { title: "Destination space" });
     for (const row of rows) {
       tx.insert(newApp.indexedNotes, { projectId: destination.id, title: row.title });
@@ -209,7 +209,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
       tier: "remote",
     });
     expect(rows).toEqual([{ id: source.id, projectId: project.id, title: "Convert this note" }]);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     for (const row of rows) {
       tx.insert(newApp.notes, { projectId: row.projectId, title: row.title });
     }
@@ -242,7 +242,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
       tier: "remote",
     });
     expect(encryptedRows).toEqual(converted);
-    const exportTx = db.beginExclusiveTransaction();
+    const exportTx = db.beginSerializableTransaction();
     for (const row of encryptedRows) {
       exportTx.insert(exportApp.exportedNotes, { projectId: row.projectId, title: row.title });
     }

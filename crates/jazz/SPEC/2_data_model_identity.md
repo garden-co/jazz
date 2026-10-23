@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: Persisted system authors MUST use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node UUID subject; this provenance MUST NOT grant the internal SYSTEM policy-bypass capability, and external admission MUST reject the reserved account and issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
-- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one exclusive `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
+- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one serializable `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
 - `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
@@ -101,7 +101,7 @@ The browser's durable SharedWorker owns the foreground-lease pool for its
 physical IndexedDB replica and gives each attached tab a separate lease over a
 dedicated port. A persistent Node foreground owner keeps its pool under the
 current working directory, namespaced by app, environment, and auth scope;
-exclusive state as a per-node O_EXCL active claim plus a separate durable
+serializable state as a per-node O_EXCL active claim plus a separate durable
 per-node reusable high-water receipt. A claimant creates its active claim
 before reading a reusable receipt; it never deletes or reclaims an unknown
 active claim. A clean handoff fsyncs the replacement receipt, fsyncs its
@@ -436,10 +436,10 @@ interned into `authors`, fate,
 global_time: Nullable<U64>, durability, user_metadata: Nullable<String>,
 rejection: Nullable<jazz_rejection_reason>, permission_subject: Nullable<AuthorSubject>)`, keyed
 `(time, node_id)` with the `by_global_time` index.
-`TxKind` is `Mergeable=0`, `Exclusive=1`; fate is `Pending=0`, `Accepted=1`,
+`TxKind` is `Mergeable=0`, `Serializable=1`; fate is `Pending=0`, `Accepted=1`,
 `Rejected=2`; durability is `None=0`, `Local=1`, `Global=2` in
 `jazz.transaction-durability.v2` (ch. 9); rejection reasons are
-`ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `ExclusiveConflict=2`,
+`ClientClockTooFarAhead=0`, `AuthorizationDenied=1`, `SerializationConflict=2`,
 `CausalityViolation=3`, `Cascade=4`, and `MalformedCommit=5`.
 
 - `flags` bit 0 says the stored `n_total_writes` is view-redacted; it is
@@ -490,7 +490,7 @@ whatever the write count.
 rejected) may have one `jazz_pending_transactions` record keyed like its
 transaction record: `(time, node_id, base_snapshot, row_read_set,
 absent_read_set, predicate_read_set)`, the last four nullable bytes holding
-its exclusive read evidence. It exists only when one of those fields is
+its serializable read evidence. It exists only when one of those fields is
 non-null, and the batch that records the transaction's seq or rejection
 deletes it. A settled transaction therefore keeps no read evidence; a stored
 copy without it still matches a redelivery that carries it.
@@ -531,8 +531,8 @@ exact key `(default branch, row, seq, tx_time, tx_node_id)` in the physical
 table it names, and a resent or re-delivered copy is compared row for row at
 the copy's coordinates, its write count already checked against the stored
 record. Asking to list a released transaction's versions is an error
-(`TransactionVersionsReleased`), never an empty answer. Exclusive transactions
-keep the list (complete exclusive payloads list every write), as do
+(`TransactionVersionsReleased`), never an empty answer. Serializable transactions
+keep the list (complete serializable payloads list every write), as do
 view-scoped ones (later fragments extend and settle the rows already held) and
 any transaction with a row on another branch (a point read needs the branch).
 A history write after the release comes from a re-ingest of the complete
@@ -540,17 +540,17 @@ payload, which marks every row again, so the release check always sees the
 whole row set and writes no partial list. Releasing changes no record layout:
 a store whose settled transactions still have lists reads them as before.
 
-The pending record's four evidence slots hold exclusive read evidence in the
+The pending record's four evidence slots hold serializable read evidence in the
 `jazz.exclusive-read-evidence.v2` family, and only while it can still be
-retransmitted. Exclusive snapshot/read/CAS evidence belongs to the immutable
+retransmitted. Serializable snapshot/read/CAS evidence belongs to the immutable
 `Transaction` commit-unit payload and authority validation seam. A node that
-authored or relays an `Exclusive` transaction whose fate is still `Pending`
+authored or relays an `Serializable` transaction whose fate is still `Pending`
 stores that payload's `base_snapshot`, `row_read_set`, `absent_read_set` and
 `predicate_read_set` in these slots, so a unit rebuilt from storage after a
 restart (outbox or relay recovery) is byte-for-byte the unit that was
 committed. The batch that records a settled fate deletes the pending record;
 the slots are not an audit or revalidation log. Every other row, and any
-exclusive row whose evidence v1 cannot represent, writes all four null, and a
+serializable row whose evidence v1 cannot represent, writes all four null, and a
 missing snapshot still fails authority validation. Each non-null slot is the
 Groove typed-record v1 bytes of one fixed descriptor led by a format byte:
 `(format_v1 = 1, owner, global_base, local_base, dots[(time, node)])`,
@@ -567,13 +567,13 @@ binding id that does not match its bindings,
 read sets without a snapshot, and evidence on a `Mergeable` row, as corrupt
 storage. Validation MUST still finish before lowering discards the evidence.
 Reopen recovers the resulting fate and immutable versions, and MUST NOT
-reconstruct exclusive dependencies from parents or user metadata.
+reconstruct serializable dependencies from parents or user metadata.
 
 The optional audit fields have kind-specific meaning; their shared physical
 slots do not make their semantics interchangeable:
 
 - A `Mergeable` transaction carries row-version provenance and causal parent
-  dots but has no exclusive dependency/read-set contract. Canonical local
+  dots but has no serializable dependency/read-set contract. Canonical local
   authoring leaves `base_snapshot`, `row_read_set`, `absent_read_set`, and
   `predicate_read_set` null; their shared audit slots do not confer
   serializability if encountered on a mergeable receipt. An authority MUST NOT
@@ -584,18 +584,18 @@ slots do not make their semantics interchangeable:
   row, and source content version for a first inherited head overlay. That is
   authority-checked operation provenance, never a parent, history dependency,
   or serializability read.
-- An `Exclusive` transaction carries its table-bound compare-and-swap evidence:
+- An `Serializable` transaction carries its table-bound compare-and-swap evidence:
   `base_snapshot`, point reads `(table, row_uuid, observed TxId)`, absent reads
   `(table, row_uuid)`, and predicate reads `(table, shape_id, canonical query,
 binding_id, binding values)`. The authority compares those dependencies and
   every written row's single parent against global current state. The table is
   part of each dependency identity; the same `RowUuid` in another table is not
   the same read or CAS target. These fields MUST NOT be discarded or inferred
-  from version parents while an exclusive commit is being validated.
+  from version parents while a serializable commit is being validated.
 
 For example, concurrent mergeable edits to `todos/r1` may each name the prior
 transaction as provenance and later merge per column; neither asserts that the
-prior transaction is still current. By contrast, an exclusive update that read
+prior transaction is still current. By contrast, a serializable update that read
 `todos/r1@T1`, proved `todos/r2` absent, and evaluated predicate `P(binding B)`
 commits only if `r1` is still at `T1`, `r2` is still absent, and the bound
 predicate output is unchanged at authority validation. A write to
@@ -629,7 +629,7 @@ Column components contain exactly `physical_column_id: u64`,
 operation components contain `(physical_column_id: u64, identity bytes)`, and
 the register component has an empty payload. Substitutions and source dots use
 their canonical sorted/deduplicated order. These records explain contributed
-field origin only; they add neither causal parents nor exclusive dependencies.
+field origin only; they add neither causal parents nor serializable dependencies.
 
 Derived global-current content positions `0..=10` are `(branch_key, row_uuid,
 tx_time, tx_node_alias, schema_version_alias, parents, created_by,
@@ -697,7 +697,7 @@ require byte-for-byte postcard equality.
 `VersionRecord::new` remains a public untrusted constructor, so every node
 semantic ingress repeats whole-carrier validation before accessor-based
 filtering, parking, staging, policy evaluation, or mutation. This includes
-Core commit authority and local relay paths, local exclusive finalization, view and
+Core commit authority and local relay paths, local serializable finalization, view and
 authorization-view application, and row-version repair. Multi-bundle view and
 repair frames are preflighted in full: one bad later receipt leaves no partial
 transaction, history, clock, or view mutation.

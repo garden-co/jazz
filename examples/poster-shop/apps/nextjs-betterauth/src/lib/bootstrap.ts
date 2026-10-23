@@ -9,14 +9,14 @@ export const POSTER_WIDTH = 1080;
 export const POSTER_HEIGHT = 1350;
 
 // Concurrent first opens for one account in this process share one run; the
-// exclusive transaction below covers races across processes.
+// serializable transaction below covers races across processes.
 const inFlight = new Map<string, Promise<string>>();
 
 /**
  * The only first-open side effect, and the only place a canvas is created. It
  * runs server-side on a backend-authority `db` (the routes pass
  * `client.withAttributionForRequest(request)`), never from a query hook or a
- * browser-held secret. The exclusive transaction makes it idempotent: a user
+ * browser-held secret. The serializable transaction makes it idempotent: a user
  * who already has a membership gets nothing new, and two racing first opens
  * cannot both seed a poster. Resolves to the user's first canvas id.
  */
@@ -39,7 +39,7 @@ export function ensurePersonalCanvas(
 export async function seedPersonalCanvas(db: Db, accountId: string, displayName: string) {
   const memberAuthor = authorForSession(accountId);
   return await withBoundedConflictRetry(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const existing = await tx.one(app.canvasMembers.where({ memberAuthor }));
       if (existing) return existing.canvasId;
       const canvasId = randomUUID();

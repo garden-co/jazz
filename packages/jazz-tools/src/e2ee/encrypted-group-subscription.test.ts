@@ -78,7 +78,7 @@ it("invalidates encrypted equality when membership is removed from a child group
     const child = await owner.e2ee.groups.create().wait();
     await owner.e2ee.groups.add(parent.id, { kind: "group", id: child.id }).wait();
     await owner.e2ee.groups.add(child.id, { kind: "account", id: bob.account.id }).wait();
-    const tx = owner.beginExclusiveTransaction();
+    const tx = owner.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Group project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Shared note" });
     await tx.commit().wait({ tier: "global" });

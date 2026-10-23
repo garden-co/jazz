@@ -11,7 +11,7 @@ import type { KeyEnvelope } from "./types.js";
 it.each([
   "insert",
   "upsert",
-  "exclusive",
+  "serializable",
   "mergeable",
   "deny-data",
   "deny-root",
@@ -108,9 +108,11 @@ it.each([
       const data = { projectId: project.id, body: "Original value" };
       let noteId: string;
       let completed: Promise<unknown>;
-      if (mode === "exclusive" || mode === "mergeable") {
+      if (mode === "serializable" || mode === "mergeable") {
         const tx =
-          mode === "exclusive" ? writer.beginExclusiveTransaction() : writer.beginTransaction();
+          mode === "serializable"
+            ? writer.beginSerializableTransaction()
+            : writer.beginTransaction();
         tx.insert(app.events, { message: "Same transaction" });
         noteId = tx.insert(app.notes, data).id;
         completed = tx.commit().wait({ tier: "local" });
@@ -126,7 +128,7 @@ it.each([
       data.body = "Changed after the mutation returned";
       if (mode === "mergeable" || mode.startsWith("deny-") || mode === "crypto-error") {
         if (mode === "mergeable")
-          await expect(completed).rejects.toThrow("beginExclusiveTransaction()");
+          await expect(completed).rejects.toThrow("beginSerializableTransaction()");
         else if (mode === "crypto-error")
           await expect(completed).rejects.toMatchObject({
             code: "key-unavailable",
@@ -146,7 +148,7 @@ it.each([
         expected,
       );
       expect(await writer.all(app.events, { tier: "remote" })).toHaveLength(
-        mode === "exclusive" ? 1 : 0,
+        mode === "serializable" ? 1 : 0,
       );
       expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toHaveLength(1);
       if (mode === "insert") {

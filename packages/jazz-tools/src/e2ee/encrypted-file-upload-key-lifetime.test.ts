@@ -5,7 +5,7 @@ it("keeps both existing-space keys borrowed until their staged files reach the g
   const fixture = await uploadFixture(false, false, true);
   try {
     const recipient = await fixture.getRecipient();
-    const preparation = fixture.owner.beginExclusiveTransaction();
+    const preparation = fixture.owner.beginSerializableTransaction();
     const recipients = { initialRecipients: [fixture.ownerId, recipient.id] };
     const first = preparation.insert(uploadApp.projects, { title: "First space" }, recipients);
     const second = preparation.insert(uploadApp.projects, { title: "Second space" }, recipients);

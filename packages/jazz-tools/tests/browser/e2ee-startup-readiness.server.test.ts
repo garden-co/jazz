@@ -66,7 +66,7 @@ it("restores offline readiness after persistent reopen and refuses missing keys 
       },
     };
     db = await createDb(config);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Local evidence" });
     const note = tx.insert(app.notes, { projectId: project.id, body: "Key required" });
     await tx.commit().wait({ tier: "global" });

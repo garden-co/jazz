@@ -194,7 +194,7 @@ it.each(["retained account", "removed account", "removed nested member"] as cons
         await alice.e2ee.groups.add(parent.id, { kind: "group", id: child }).wait();
         recipient = parent.id;
       }
-      const tx = alice.beginExclusiveTransaction();
+      const tx = alice.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Retained project" },

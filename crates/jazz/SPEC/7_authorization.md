@@ -42,7 +42,7 @@ Invariant digest:
   reads holds a unit update that was not yet grounded when it passed.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
 - `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
-- `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
+- `INV-RLS-12`: Serializable transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: Every omitted operation is denied at the serving authority, including when the table has no policy clauses; anonymous permission subjects remain structurally read-only.
@@ -267,7 +267,7 @@ policy.
 
 A transaction reads its own writes and nothing else that is uncommitted, and
 its policy checks follow the same rule (`INV-RLS-9`). This holds for mergeable
-and exclusive commit units alike, and wherever a unit's write policies are
+and serializable commit units alike, and wherever a unit's write policies are
 decided: at the fate authority, when a node self-finalizes its own commit, and
 in terminal relay admission. Without it, a client that applies a transaction
 optimistically through its read-your-writes view would have the authority
@@ -278,7 +278,7 @@ its insert policy requires.
 write-policy decision (WITH CHECK, USING and read-for-write alike) reads the
 Global tier, the current rows whose transactions the authority has accepted,
 never the Local read-your-writes view. This holds on every path that decides a
-unit: foreign ingest, a node finalizing its own mergeable or exclusive commit
+unit: foreign ingest, a node finalizing its own mergeable or serializable commit
 (where the unit is already stored Pending and Local, `INV-TX-2`) and relay
 admission. So the candidate never justifies itself through its own pending
 rows, a committed row the unit deletes is not hidden by that pending deletion,
@@ -400,7 +400,7 @@ ordinary insert. Its v1 branch-view copy descriptor is the only additional proof
 may satisfy this rule: the authority re-resolves its exact live or frozen source
 and evaluates that source's ordinary read policy. The client does not evaluate
 or receive policy support, and the descriptor is not a causal dependency,
-exclusive read set, or CAS precondition.
+serializable read set, or CAS precondition.
 
 An upsert asks whether its target row exists. If there is a current target row,
 that is a read and an upsert MUST be rejected unless the writer may read it. If
@@ -622,15 +622,15 @@ non-system identity only when the row has a global content winner that satisfies
 the read policy for that identity.
 that identity's read policy (ch. 12).
 
-### 7.5 Exclusive atomicity and historical reads
+### 7.5 Serializable atomicity and historical reads
 
-Exclusive transaction view shipping protects recipients from seeing an incomplete
+Serializable transaction view shipping protects recipients from seeing an incomplete
 policy-visible fragment for the maintained subscription view. It is
 **policy-atomic per recipient and per view**: a non-system recipient receives a
-result member or program fact from an exclusive transaction only when every
+result member or program fact from a serializable transaction only when every
 version required for that view is readable to it (`INV-RLS-12`). Versions
 outside that view need not be shipped or readable for the view to advance. This
-is distinct from exclusive serializability (ch. 3) and from write authorization:
+is distinct from serializability (ch. 3) and from write authorization:
 it governs only read/view shipping.
 
 Historical/as-of reads served for a link evaluate read policy **at the requested

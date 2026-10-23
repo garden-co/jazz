@@ -258,6 +258,7 @@ fn unsupported_history_shapes_are_explicit_errors() {
         ReadOpts {
             read_view: jazz::protocol::ReadViewSpec {
                 source: jazz::protocol::ReadViewSourceSpec::Snapshot { snapshot },
+                include_deleted: false,
             },
             ..Default::default()
         },
@@ -278,7 +279,10 @@ fn deletion_hides_history_and_restores_reveal_it() {
     block_on(db.delete("notes", note, Default::default())).unwrap();
 
     let deleted = ReadOpts {
-        include_deleted: true,
+        read_view: jazz::protocol::ReadViewSpec {
+            include_deleted: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     assert!(read(&db, &history_of(note), ReadOpts::default()).is_empty());
@@ -592,21 +596,6 @@ fn history_subscriptions_follow_accepted_versions() {
         next_delta(&mut subscription),
         (vec!["first".into(), "second".into()], vec![], 0)
     );
-
-    let message = match block_on(db.subscribe(
-        &prepared,
-        ReadOpts {
-            include_deleted: true,
-            ..Default::default()
-        },
-    )) {
-        Err(error) => error.message,
-        Ok(_) => panic!("includeDeleted history subscriptions must be refused"),
-    };
-    assert!(
-        message.contains("includeDeleted on history subscriptions"),
-        "{message}"
-    );
 }
 
 /// A history subscription under a read policy follows the current row's
@@ -774,9 +763,7 @@ fn remote_history_reads_fetch_versions_with_their_transactions() {
         tier: ReadTier::Remote,
         ..Default::default()
     };
-    let versions = synced
-        .alice_reads(&history_of(note), remote.clone())
-        .unwrap();
+    let versions = synced.alice_reads(&history_of(note), remote).unwrap();
     let expected = [
         (first, SERVER_NODE),
         (second, BOB_NODE),
@@ -804,20 +791,6 @@ fn remote_history_reads_fetch_versions_with_their_transactions() {
         titles(&current),
         ["third"],
         "fetched history never stands in for the current row"
-    );
-
-    let message = synced
-        .alice_reads(
-            &history_of(note),
-            ReadOpts {
-                include_deleted: true,
-                ..remote
-            },
-        )
-        .unwrap_err();
-    assert!(
-        message.contains("includeDeleted on synced history reads"),
-        "{message}"
     );
 }
 
@@ -868,5 +841,60 @@ fn local_first_history_subscriptions_receive_accepted_versions() {
             (second, BOB_NODE),
             (third, ALICE_NODE)
         ]
+    );
+}
+
+/// Aggregates over history count and group every listed version, current
+/// and superseded, equal values included; a deleted row's versions drop
+/// out with it. Aggregates over the history metadata are refused.
+#[test]
+fn history_aggregates_summarize_every_version() {
+    let db = open(notes_schema(), NODE, AuthorSubject::SYSTEM);
+    insert(&db, row(1), "a");
+    update(&db, row(1), "a");
+    update(&db, row(1), "b");
+    insert(&db, row(2), "a");
+    let rows = |ids: &[u8]| {
+        Query::from("history.notes").filter(jazz::query::in_list(
+            col("id"),
+            ids.iter().map(|n| lit(Value::Uuid(row(*n).0))),
+        ))
+    };
+    let count = |query: Query| {
+        read(&db, &query.count(), ReadOpts::default())
+            .iter()
+            .map(|row| (cell(row, "title"), cell(row, "count")))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(count(rows(&[1])), [(None, Some(Value::U64(3)))]);
+    // A repeated id contributes once.
+    assert_eq!(count(rows(&[1, 2, 1])), [(None, Some(Value::U64(4)))]);
+    assert_eq!(count(rows(&[])), [(None, Some(Value::U64(0)))]);
+    let grouped = read(
+        &db,
+        &rows(&[1, 2])
+            .count()
+            .group_by("title")
+            .order_by("title", OrderDirection::Asc),
+        ReadOpts::default(),
+    );
+    assert_eq!(
+        grouped
+            .iter()
+            .map(|row| (titles(std::slice::from_ref(row)), cell(row, "count")))
+            .collect::<Vec<_>>(),
+        [
+            (vec!["a".to_owned()], Some(Value::U64(3))),
+            (vec!["b".to_owned()], Some(Value::U64(1))),
+        ]
+    );
+
+    block_on(db.delete("notes", row(1), Default::default())).unwrap();
+    assert_eq!(count(rows(&[1, 2])), [(None, Some(Value::U64(1)))]);
+
+    let message = error_of(&db, &rows(&[2]).max("$acceptedAt"), ReadOpts::default());
+    assert!(
+        message.contains("aggregates over history metadata"),
+        "{message}"
     );
 }

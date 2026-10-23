@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jazz::ids::{AuthorSubject, AuthorSubjectError};
-use jazz::serving::auth_admission::{
+use jazz_server::runtime::auth_admission::{
     AdmissionSource, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake, JwtVerifierConfig,
     LOCAL_FIRST_JWT_ISSUER, admit_bearer_jwt, admit_local_first_jwt, admit_static_bearer,
     admit_static_bearer_with_claims,
@@ -278,8 +278,11 @@ fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
     assert_ne!(static_admitted.author, admitted.author);
     assert_eq!(
         static_admitted.author.canonical(),
-        serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, exact))
-            .unwrap()
+        serde_json::to_string(&(
+            jazz_server::runtime::auth_admission::STATIC_BEARER_ISSUER,
+            exact
+        ))
+        .unwrap()
     );
 }
 
@@ -313,8 +316,11 @@ fn static_bearer_claim_admission_rejects_ascii_blank_and_preserves_exact_subject
     assert_eq!(admitted.subject, exact);
     assert_eq!(
         admitted.author.canonical(),
-        serde_json::to_string(&(jazz::serving::auth_admission::STATIC_BEARER_ISSUER, exact))
-            .unwrap()
+        serde_json::to_string(&(
+            jazz_server::runtime::auth_admission::STATIC_BEARER_ISSUER,
+            exact
+        ))
+        .unwrap()
     );
 }
 

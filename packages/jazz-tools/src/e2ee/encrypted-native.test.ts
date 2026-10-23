@@ -111,7 +111,7 @@ it.each(["grant", "initial", "initial-upsert"])(
       [native, wasm, account.account.id],
       [wasm, native, nativeId],
     ] as const) {
-      const tx = writer.beginExclusiveTransaction();
+      const tx = writer.beginSerializableTransaction();
       const recipients = [readerId];
       const project =
         sharing === "initial-upsert"
@@ -238,7 +238,7 @@ it.each(["grant", "initial", "initial-upsert"])(
 it("rejects a late initial recipient on native and WASM without publishing any rows", async () => {
   const { app, native, wasm, server } = fixture;
   const writers = [native, wasm];
-  const transactions = writers.map((writer) => writer.beginExclusiveTransaction());
+  const transactions = writers.map((writer) => writer.beginSerializableTransaction());
   const pending = new Set(transactions);
   let recipient: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
