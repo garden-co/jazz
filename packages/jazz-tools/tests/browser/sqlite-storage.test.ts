@@ -81,7 +81,13 @@ function insert(db: WasmDb, text: string) {
   );
 }
 async function count(db: WasmDb) {
-  const bytes = await db.all(queryFromTable("notes"), { tier: "local-only" });
+  const bytes = await db.all(
+    queryFromTable("notes"),
+    { tier: "local-only" },
+    undefined,
+    undefined,
+    undefined,
+  );
   expect(bytes).toBeInstanceOf(Uint8Array);
   return new PostcardReader(bytes as Uint8Array)
     .readVec(readNativeRowBatch)

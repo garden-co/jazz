@@ -37,7 +37,10 @@ async function open(name = "notes", owner = "alice") {
   return { store, epoch };
 }
 function runtime() {
-  return { flush: vi.fn(async () => undefined), close: vi.fn(async () => undefined) };
+  return {
+    flush: vi.fn(async (): Promise<void> => undefined),
+    close: vi.fn(async (): Promise<void> => undefined),
+  };
 }
 async function release(handle: Awaited<ReturnType<typeof open>>) {
   await handle.store.close();
