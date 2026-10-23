@@ -2345,6 +2345,21 @@ impl Inner {
 
     /// Keep the superseded image (linear history: history holds superseded
     /// images only).
+    /// Whether `row` on branch `key` has a superseded committed image.
+    fn has_history(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
+        let sql = format!(
+            "SELECT EXISTS (SELECT 1 FROM {} WHERE id = ?1 AND _b = ?2)",
+            quote(&format!("{}__h", table.stored))
+        );
+        self.conn
+            .query_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                |r| r.get(0),
+            )
+            .map_err(storage)
+    }
+
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
@@ -2701,9 +2716,11 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
+        let check = |inner: &Self, key: &[u8], fresh: bool| -> Result<(), Error> {
             if let Who::Session(author) = who {
-                if !inner.check(table, row, key, author, Operation::Select)? {
+                // Deleting a row this same commit inserted needs no read
+                // permission: nothing persisted is revealed.
+                if !fresh && !inner.check(table, row, key, author, Operation::Select)? {
                     return Err(denied(
                         "read policy denied DELETE: the target requires read permission",
                     ));
@@ -2718,9 +2735,10 @@ impl Inner {
             Located::Row {
                 key,
                 deleted: false,
-                ..
+                seq: current,
             } => {
-                check(self, &key)?;
+                let fresh = current == seq && !self.has_history(table, row, &key)?;
+                check(self, &key, fresh)?;
                 self.snapshot(table, row, &key, seq)?;
                 self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true), false)?;
             }
@@ -2732,7 +2750,7 @@ impl Inner {
                 head_cells,
                 at,
             } => {
-                check(self, &from)?;
+                check(self, &from, false)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true), false)?;
             }
@@ -3351,6 +3369,30 @@ impl StagedOp {
         }
     }
 
+    /// The write's explicit provenance timestamp, if it names one.
+    pub(crate) fn updated_at_ms(&self) -> Option<u64> {
+        match self {
+            StagedOp::Insert(.., o) => o.updated_at_ms,
+            StagedOp::Update(.., o) => o.updated_at_ms,
+            StagedOp::Upsert(.., o) => o.updated_at_ms,
+            StagedOp::Delete(.., o) => o.updated_at_ms,
+            StagedOp::Restore(.., o) => o.updated_at_ms,
+            StagedOp::Move(..) => None,
+        }
+    }
+
+    /// Stamp the write at `at` (Unix ms) instead of the applying clock.
+    pub(crate) fn stamp_at(&mut self, at: u64) {
+        match self {
+            StagedOp::Insert(.., o) => o.updated_at_ms = Some(at),
+            StagedOp::Update(.., o) => o.updated_at_ms = Some(at),
+            StagedOp::Upsert(.., o) => o.updated_at_ms = Some(at),
+            StagedOp::Delete(.., o) => o.updated_at_ms = Some(at),
+            StagedOp::Restore(.., o) => o.updated_at_ms = Some(at),
+            StagedOp::Move(..) => {}
+        }
+    }
+
     /// Attribute the write to `author` (unchecked, as an uploaded write is
     /// re-applied locally).
     pub(crate) fn attribute(&mut self, author: AuthorSubject) {
@@ -3413,6 +3455,9 @@ impl Inner {
             now.max(last_at + 1)
         };
         self.last_stamp = (seq, at);
+        // An explicit timestamp (a backfill) stamps this write alone; the
+        // clock's monotonic stamps go on.
+        let at = op.updated_at_ms().map_or(at, |ms| ms as i64);
         self.writer = Some(Stamp {
             at,
             author: self.author_code(&author_key(&author))?,

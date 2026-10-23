@@ -350,6 +350,8 @@ pub enum SyncMessage {
         kind: WireKind,
         ops: Vec<WireOp>,
         author: Option<String>,
+        /// The writes' explicit provenance timestamp (Unix ms), if any.
+        updated_at: Option<u64>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -2001,7 +2003,13 @@ impl Inner {
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
             let rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-            let SyncMessage::Commit { ops, author, .. } = &commit else {
+            let SyncMessage::Commit {
+                ops,
+                author,
+                updated_at,
+                ..
+            } = &commit
+            else {
                 continue;
             };
             let mut ops = ops
@@ -2012,6 +2020,9 @@ impl Inner {
             if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
                 ops.iter_mut().for_each(|op| op.attribute(author));
+            }
+            if let Some(at) = *updated_at {
+                ops.iter_mut().for_each(|op| op.stamp_at(at));
             }
             client.pending.push(Pending {
                 tx,
@@ -2293,6 +2304,7 @@ impl Db {
                     kind,
                     ops: wire,
                     author: author.map(|author| author.canonical().to_owned()),
+                    updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
@@ -3720,6 +3732,7 @@ impl Db {
                 kind,
                 ops,
                 author,
+                updated_at,
             } => {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
@@ -3727,8 +3740,9 @@ impl Db {
                     Some(result) => (result, Vec::new()),
                     None => match commit_who(policy, author.as_deref())
                         .map_err(|error| (error, Vec::new()))
-                        .and_then(|who| db.authorize_commit(who, policy, kind, ops, (node, tx)))
-                    {
+                        .and_then(|who| {
+                            db.authorize_commit(who, policy, kind, ops, updated_at, (node, tx))
+                        }) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
                         Err((error, rows)) => {
@@ -3829,12 +3843,17 @@ impl Db {
         identity: Option<AuthorSubject>,
         kind: WireKind,
         ops: Vec<WireOp>,
+        updated_at: Option<u64>,
         origin: ([u8; 16], u64),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
-        let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
+        let mut ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>()
+        {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
+        if let Some(at) = updated_at {
+            ops.iter_mut().for_each(|op| op.stamp_at(at));
+        }
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
             for op in &ops {
