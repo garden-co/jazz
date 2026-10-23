@@ -558,6 +558,9 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
+    /// Flush the storage owner's asynchronous backing store. Required when
+    /// its Db defers owner durability; completion must cover all preceding writes.
+    pub flush_owner: RefCell<Option<Box<dyn Fn() -> HostFuture<()>>>>,
 }
 
 impl Hooks {
@@ -1405,9 +1408,8 @@ impl Binding {
         )
     }
 
-    /// Resolve once write `seq` reached `tier`: at once for `none` and
-    /// `local`, on the server's acceptance for `global` (rejecting if it
-    /// refused).
+    /// Resolve once write `seq` reached `tier`. Foreground Local waits for
+    /// the storage owner's receipt; Global waits for authority acceptance.
     pub fn wait_for(&self, seq: u64, tier: &str) -> HostResult<HostFuture<()>> {
         let tier = binding_args::durability_tier(tier)?;
         let db = self.db.clone();
@@ -1446,8 +1448,17 @@ impl Binding {
         self.wait_for(write.seq, tier)
     }
 
-    /// Resolve once every local write so far reached the server. Local
-    /// durability is the host's store to flush.
+    /// Wait for every pending local transaction to reach the requested tier.
+    /// Foregrounds wait for their owner's durable receipt at Local.
+    pub fn wait_for_pending_writes(&self, tier: DurabilityTier) -> HostFuture<()> {
+        let db = self.db.clone();
+        Box::pin(self.hooks.progress.parked(async move {
+            db.wait_for_pending_writes(tier).await?;
+            Ok(())
+        }))
+    }
+
+    /// Resolve once every local write so far reached the server.
     pub fn wait_for_pending_writes_global(&self) -> HostFuture<()> {
         let db = self.db.clone();
         Box::pin(self.hooks.progress.parked(async move {
@@ -1458,9 +1469,30 @@ impl Binding {
 
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
-        let result = self.db.tick().await;
+        let result = async {
+            self.db.tick().await?;
+            if let Some(barrier) = self.db.prepare_owner_durability()? {
+                let flush = self
+                    .hooks
+                    .flush_owner
+                    .borrow()
+                    .as_ref()
+                    .map(|flush| flush());
+                let flush = flush.ok_or_else(|| {
+                    HostError::Engine(Error::new(
+                        ErrorCode::Storage,
+                        "storage owner has no durability flush hook",
+                    ))
+                })?;
+                flush.await?;
+                self.db.confirm_owner_durability(barrier)?;
+                self.db.flush_owner_durability()?;
+            }
+            Ok(())
+        }
+        .await;
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result
     }
 
     /// Report the path to the authoritative server (`"none" | "attempting"

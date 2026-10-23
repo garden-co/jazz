@@ -485,6 +485,40 @@ impl WasmDbInner {
             }
         }));
         binding.db.set_tick_scheduler(Some(host.clone()));
+        binding.db.require_owner_durability_flush();
+        let flush_host = Rc::downgrade(&host);
+        let flush_db = binding.db.clone();
+        *binding.hooks.flush_owner.borrow_mut() = Some(Box::new(move || {
+            let host = flush_host.upgrade();
+            let through = flush_db.seq_high_water();
+            Box::pin(async move {
+                let host = host.ok_or_else(|| {
+                    HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        "storage owner closed",
+                    ))
+                })?;
+                if host.closed.get() {
+                    return Err(HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        "storage owner closed",
+                    )));
+                }
+                host.flush(through).await.map_err(|error| {
+                    HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        format!("storage owner flush failed: {}", js_error_message(&error)),
+                    ))
+                })?;
+                if host.closed.get() {
+                    return Err(HostError::Engine(Error::new(
+                        jazz::db::ErrorCode::Storage,
+                        "storage owner closed during flush",
+                    )));
+                }
+                Ok(())
+            })
+        }));
         Self { binding, host }
     }
 
@@ -1564,6 +1598,11 @@ impl WasmDb {
             match durability_tier_from_str(&tier)? {
                 DurabilityTier::None => {}
                 DurabilityTier::Local => {
+                    inner
+                        .binding
+                        .wait_for_pending_writes(DurabilityTier::Local)
+                        .await
+                        .map_err(host_error)?;
                     inner.host.flush(inner.binding.db.seq_high_water()).await?
                 }
                 DurabilityTier::Global => inner

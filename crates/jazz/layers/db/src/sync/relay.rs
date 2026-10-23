@@ -34,6 +34,7 @@ pub(super) struct RelayUpload {
     pub(super) schema: crate::ids::SchemaVersionId,
     pub(super) message: SyncMessage,
     pub(super) sent: bool,
+    pub(super) locally_durable: bool,
 }
 
 pub(super) const DDL: &str = "\
@@ -149,6 +150,7 @@ impl Inner {
                     schema: crate::ids::SchemaVersionId::from_bytes(schema),
                     message,
                     sent: false,
+                    locally_durable: false,
                 },
             );
         }
@@ -352,6 +354,7 @@ impl Db {
                     schema: version,
                     message,
                     sent: false,
+                    locally_durable: false,
                 },
             );
         }
@@ -411,8 +414,122 @@ impl Db {
                     result,
                 });
                 session.relay_uploads.remove(&(node, tx));
+                session.owner_acked.remove(&(node, tx));
             }
         }
         Ok(())
+    }
+}
+
+/// An opaque set of complete relay uploads captured before a storage flush.
+/// Confirming it after the flush cannot acknowledge later arrivals or another owner.
+pub struct OwnerDurabilityBarrier {
+    owner: std::rc::Weak<std::cell::RefCell<Inner>>,
+    uploads: Vec<UploadId>,
+}
+
+impl Db {
+    /// Require an explicit backing-store flush before acknowledging relay storage.
+    /// Async storage hosts call this before accepting any peer traffic.
+    pub fn require_owner_durability_flush(&self) {
+        self.inner().deferred_owner_durability = true;
+    }
+
+    /// Capture complete, still-pending uploads for the next backing-store barrier.
+    /// Incomplete uploads wait for ordinary chunk delivery and cannot receive a
+    /// local durability claim.
+    pub fn prepare_owner_durability(&self) -> Result<Option<OwnerDurabilityBarrier>, Error> {
+        let inner = self.inner();
+        if inner.retired {
+            return Err(Error::new(ErrorCode::Storage, "storage owner is retired"));
+        }
+        let Some(client) = &inner.client else {
+            return Ok(None);
+        };
+        if inner.non_durable {
+            return Ok(None);
+        }
+        let mut uploads = Vec::new();
+        for (id, upload) in &client.relay_uploads {
+            if upload.locally_durable {
+                continue;
+            }
+            let mut complete = true;
+            for value in large_values(&upload.message) {
+                if let Err(error) = crate::large::admit(&inner.conn, &inner.chunks, value) {
+                    if error.code == ErrorCode::Storage {
+                        return Err(error);
+                    }
+                    // Authority validation still decides the unit's fate. Local
+                    // retention is never asserted for missing or malformed data.
+                    complete = false;
+                    break;
+                }
+            }
+            if complete {
+                uploads.push(*id);
+            }
+        }
+        Ok((!uploads.is_empty()).then(|| OwnerDurabilityBarrier {
+            owner: Rc::downgrade(&self.inner),
+            uploads,
+        }))
+    }
+
+    /// Confirm exactly the captured uploads after successful backing-store flush.
+    /// A failed flush must never call this method. Retirement invalidates tokens.
+    pub fn confirm_owner_durability(&self, barrier: OwnerDurabilityBarrier) -> Result<(), Error> {
+        if !barrier.owner.ptr_eq(&Rc::downgrade(&self.inner)) {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "durability barrier belongs to another owner",
+            ));
+        }
+        let mut inner = self.inner();
+        if inner.retired {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "storage owner retired during flush",
+            ));
+        }
+        if inner.non_durable {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "foreground cannot confirm owner durability",
+            ));
+        }
+        if let Some(client) = &mut inner.client {
+            for id in barrier.uploads {
+                if let Some(upload) = client.relay_uploads.get_mut(&id) {
+                    upload.locally_durable = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Ship newly confirmed storage receipts through normal session output.
+    pub fn flush_owner_durability(&self) -> Result<(), Error> {
+        self.server_tick()
+    }
+
+    pub(super) fn progress_owner_durability(&self) {
+        let mut inner = self.inner();
+        let Some(client) = &inner.client else { return };
+        let stored: BTreeSet<_> = client
+            .relay_uploads
+            .iter()
+            .filter_map(|(id, upload)| upload.locally_durable.then_some(*id))
+            .collect();
+        for session in &mut inner.sessions {
+            if !session.open {
+                continue;
+            }
+            for &(node, tx) in &session.relay_uploads {
+                if stored.contains(&(node, tx)) && session.owner_acked.insert((node, tx)) {
+                    session.outbox.push(SyncMessage::OwnerStoredV1 { node, tx });
+                }
+            }
+        }
     }
 }
