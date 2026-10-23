@@ -39,6 +39,22 @@ having a marker in another operation's policy cannot turn ordinary updates into
 mutual grants. Schema admission still rejects negative and non-INSERT markers.
 Caller-supplied query candidate-source flags do not acquire this private scope.
 
+Scalar forward and reverse permission inheritance also uses accepted roots.
+Each inherited check selects the requested operation's policy, with the usual
+default depth of ten and any tighter explicit depth limit. Inheriting UPDATE
+uses its USING grant; an immutable parent's WITH CHECK refusal does not prevent
+it from granting a capability. A newly created administration row cannot grant
+inherited permission until acceptance. An inherited policy containing
+`ExistsIncludingCreated` returns an explicit unsupported error rather than
+exposing another table's creation-aware predicate.
+
+For example, a founder can create a space, its administration row and its
+designated initial grant in one unit, using independent and marked INSERT
+permissions. Later lifecycle records can inherit through the accepted space
+and administration row. A different initial grant cannot borrow that new
+administration row's capability, and removing an accepted capability in the
+same unit rejects dependent lifecycle writes.
+
 While staging a local transaction, SELECT dependencies use the accepted baseline.
 An unproved membership cannot unlock an existing secret before commit. Provisional
 reads requiring large-value preprocessing return a typed unsupported error.
@@ -53,8 +69,8 @@ Every policy dependency requires a mandatory scalar declared-reference
 correlation. Each current-source UNION arm contains that key filter and uses a
 leading index. Baseline history is driven by this unit's publication sequence,
 then looked up by exact coordinate; it never starts from all accepted rows.
-Uncorrelated dependency sources, relation helpers and inherited policies in
-these scoped units return an explicit unsupported error. Reverse references
+Uncorrelated dependency sources, relation helpers and array-reference
+inheritance in these scoped units return an explicit unsupported error. Reverse references
 into branched tables also require an unavailable branch-bound index shape and
 are refused.
 
@@ -65,8 +81,13 @@ the remaining budget rather than enumerating a whole large-value column. A
 corrupted unrelated chunked value cannot poison an independent proof. Equal
 chunked values compare by logical content; a common prefix is not equality.
 
-Large-value preprocessing through uncorrelated dependencies, relation helpers or
-inheritance is explicitly unsupported. Branch-view dependencies and branch moves in a marked-schema unit are
+Scalar inheritance uses the same bounded preparation, operation selection and
+depth limits as the permission compiler. Baseline preparation includes exact
+historical operands when the unit also updates accepted grants. Matching final
+values cannot manufacture a grant absent from the baseline.
+
+Large-value preprocessing through uncorrelated dependencies or relation helpers
+is explicitly unsupported. Branch-view dependencies and branch moves in a marked-schema unit are
 also explicitly unsupported. These errors identify the unsupported pattern;
 they do not fall back to loading unrelated data.
 
@@ -90,7 +111,7 @@ rollout. No retired engine or unreleased E2EE migration guarantee is added.
 
 The core contracts in `sqlite_candidates.rs` cover allowed and denied graphs,
 occurrence isolation, selected operation checks, both proof phases, provisional
-reads, chunked comparisons and rollback. Real Chromium tests exercise both an
+reads, scalar inheritance, chunked comparisons and rollback. Real Chromium tests exercise both an
 authenticated wire upload and an authority-local session through the public WASM
 binding. These checks qualify the permission primitive; they do not qualify the
 complete encrypted application, browser worker, native binding or journal flow.
