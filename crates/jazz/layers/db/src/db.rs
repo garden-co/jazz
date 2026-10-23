@@ -4144,6 +4144,34 @@ impl Db {
         self.begin(id, BatchKind::Mergeable)
     }
 
+    /// Open a mergeable batch whose reads and writes use an authenticated
+    /// session. Replica commits are checked by the authority under that session.
+    pub async fn begin_mergeable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_mergeable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Session(author);
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend mergeable batch with separate row provenance.
+    /// Replica attribution still requires a trusted connection to the authority.
+    /// Staged upload attachment continues to require a serializable batch.
+    pub async fn begin_mergeable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_mergeable(id).await?;
+        self.inner().batches.get_mut(&id).expect("opened").identity =
+            WriteIdentity::Attribution(author);
+        Ok(())
+    }
+
     /// A serializable transaction: snapshot reads, validated at commit.
     /// On a client the snapshot is the server seq the replica is known
     /// complete through.
