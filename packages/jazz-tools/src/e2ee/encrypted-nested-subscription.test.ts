@@ -143,7 +143,7 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
     const { app, server, bob, owner, reader, clients } = fixture;
     let stopPlaintext: (() => void) | undefined;
     try {
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Private project" });
       const folder = tx.insert(app.folders, { title: "Shared folder" });
       const note = tx.insert(app.notes, {

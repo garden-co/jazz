@@ -21,7 +21,7 @@ it.each([
   { operation: "insert", bytes: 512 * 1024 },
   { operation: "update", bytes: 512 * 1024 },
   { operation: "mergeable", bytes: 512 * 1024 },
-  { operation: "exclusive", bytes: 512 * 1024 },
+  { operation: "serializable", bytes: 512 * 1024 },
 ] as const)(
   "$operation syncs two pending values of $bytes bytes",
   async ({ operation, bytes }) => {
@@ -54,9 +54,11 @@ it.each([
     // Admit both writes before waiting: awaiting the first conceals the deadlock.
     const writes = values.map((value, index) => {
       if (operation === "update") return alice.update(app.docs, seeds[index]!.id, value);
-      if (operation === "mergeable" || operation === "exclusive") {
+      if (operation === "mergeable" || operation === "serializable") {
         const tx =
-          operation === "exclusive" ? alice.beginExclusiveTransaction() : alice.beginTransaction();
+          operation === "serializable"
+            ? alice.beginSerializableTransaction()
+            : alice.beginTransaction();
         tx.insert(app.docs, value);
         return tx.commit();
       }

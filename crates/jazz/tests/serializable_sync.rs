@@ -230,7 +230,15 @@ impl Net {
                 .insert("members", code(c), Default::default()),
         )
         .unwrap();
-        let receipt = self.drive(db.commit_serializable_handle(open)).unwrap();
+        // A change the replica already holds conflicts at once; otherwise
+        // the authority decides.
+        let receipt = match self.drive(db.commit_serializable_handle(open)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+                return Redeem::Conflict;
+            }
+        };
         match self.settle(i, receipt.0) {
             Ok(_) => Redeem::Joined,
             Err(error) => {
@@ -556,4 +564,111 @@ fn racing_seat_bookings_never_double_book() {
         "nobody holds two seats: {holders:?}"
     );
     assert_eq!(booked, 3, "exactly one accepted booking per seat");
+}
+
+/// The snapshot includes the replica's own writes that were still unsettled
+/// at begin: the transaction reads them, and the authority, resolving each
+/// to where it settled, accepts the commit.
+#[test]
+fn a_serializable_read_sees_the_replicas_own_unsettled_writes() {
+    let mut net = Net::new(1);
+    net.go_offline(OWNER);
+    let db = net.db(OWNER);
+    let invite = block_on(db.insert("invites", code("own"), Default::default())).unwrap();
+
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("own")).unwrap();
+    assert_eq!(
+        block_on(db.serializable_tx_ref(open).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1,
+        "the snapshot holds the replica's own unsettled insert"
+    );
+    // A write after begin is not in the snapshot.
+    block_on(db.insert("invites", code("own"), Default::default())).unwrap();
+    assert_eq!(
+        block_on(db.serializable_tx_ref(open).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1
+    );
+    block_on(db.serializable_tx_ref(open).update(
+        "invites",
+        invite.row_uuid(),
+        code("own, redeemed"),
+        Default::default(),
+    ))
+    .unwrap();
+    // The second insert changed the read's result, which the replica
+    // already holds: the commit conflicts without asking the authority.
+    assert_eq!(
+        block_on(db.commit_serializable_handle(open))
+            .unwrap_err()
+            .code,
+        ErrorCode::TransactionConflict
+    );
+}
+
+#[test]
+fn a_commit_over_the_replicas_own_unsettled_writes_is_accepted() {
+    let mut net = Net::new(1);
+    net.go_offline(OWNER);
+    let db = net.db(OWNER);
+    let invite = block_on(db.insert("invites", code("own"), Default::default())).unwrap();
+
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("own")).unwrap();
+    assert_eq!(
+        block_on(db.serializable_tx_ref(open).all_prepared(&query))
+            .unwrap()
+            .len(),
+        1
+    );
+    block_on(db.serializable_tx_ref(open).update(
+        "invites",
+        invite.row_uuid(),
+        code("own"),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(
+        db.serializable_tx_ref(open)
+            .insert("members", code("own"), Default::default()),
+    )
+    .unwrap();
+    let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
+    net.go_online(OWNER);
+    assert!(net.settle(OWNER, receipt.0).is_ok());
+    assert_eq!(net.members("own"), 1);
+}
+
+/// A read that lists deleted rows is re-run the same way by the authority:
+/// a revoked invite read with `include_deleted` still holds at commit.
+#[test]
+fn a_read_of_deleted_rows_validates_as_it_was_read() {
+    let net = Net::new(1);
+    let invite = net.write_invite(OWNER, "gone");
+    net.revoke(OWNER, invite);
+    let db = net.db(OWNER);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("gone")).unwrap();
+    let tx = db.serializable_tx_ref(open);
+    assert!(net.drive(tx.all_prepared(&query)).unwrap().is_empty());
+    let read = net.drive(tx.all_prepared_with(&query, true)).unwrap();
+    assert_eq!(
+        read.iter()
+            .map(|row| (row.row_uuid(), row.is_deleted()))
+            .collect::<Vec<_>>(),
+        [(invite, true)],
+        "the deleted invite is listed"
+    );
+    net.drive(tx.insert("members", code("gone"), Default::default()))
+        .unwrap();
+    let receipt = net.drive(db.commit_serializable_handle(open)).unwrap();
+    net.settle(OWNER, receipt.0)
+        .expect("the authority re-reads deleted rows too");
 }

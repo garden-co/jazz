@@ -2,7 +2,7 @@
 
 jazz is a local-first, distributed, real-time database with full edit history,
 RLS-authorized sync, and two transaction kinds — eventually-consistent
-`mergeable` and serializable `exclusive` — built by lowering everything onto
+`mergeable` and `serializable` — built by lowering everything onto
 [`groove`](../groove/README.md), our incremental-view-maintenance engine.
 
 ## The design and contract live in [`SPEC/`](SPEC/)

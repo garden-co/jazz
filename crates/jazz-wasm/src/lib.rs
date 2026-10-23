@@ -402,8 +402,7 @@ fn not_supported(what: &str) -> JsValue {
 #[derive(Default)]
 struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
-    /// Kept for the host's lifecycle; `jazz-db` has no rejected-write
-    /// notification to forward yet (rejections reach `WasmWrite.wait`).
+    /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
     #[cfg(target_arch = "wasm32")]
     store: RefCell<Option<browser::Store>>,
@@ -446,11 +445,59 @@ impl WasmDbInner {
 
     fn write(&self, write: HostResult<Write>) -> Result<WasmWrite, JsValue> {
         let write = write.map_err(host_error)?;
+        let claimed = Rc::new(std::cell::Cell::new(false));
+        if let Some(error) = &write.rejected {
+            self.report_unclaimed(&write, error, Rc::clone(&claimed));
+        }
         Ok(WasmWrite {
             inner: Some(self.clone()),
             write,
+            claimed,
         })
     }
+
+    /// Tell the mutation-error callback of a rejected write unless a wait
+    /// claims it first: the caller gets until the current task ends (its
+    /// promise chain included) to call `wait`.
+    fn report_unclaimed(&self, write: &Write, error: &Error, claimed: Rc<std::cell::Cell<bool>>) {
+        let host = Rc::clone(&self.host);
+        let event = mutation_error_event(&write.tx_id.to_string(), error);
+        let report = Closure::once_into_js(move || {
+            if claimed.get() {
+                return;
+            }
+            let callback = host.mutation_errors.borrow().clone();
+            if let (Some(callback), Ok(event)) = (callback, event) {
+                let _ = callback.call1(&JsValue::NULL, &event);
+            }
+        });
+        let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+        if let Some(set_timeout) = set_timeout {
+            let _ = set_timeout.call2(&JsValue::NULL, &report, &JsValue::from_f64(0.0));
+        }
+    }
+}
+
+/// A `MutationErrorEvent` for transaction `tx` rejected with `error`.
+fn mutation_error_event(tx: &str, error: &Error) -> Result<JsValue, JsValue> {
+    let code = error.code.as_str();
+    let rejected = js_sys::Object::new();
+    set_prop(&rejected, "kind", JsValue::from_str("rejected"))?;
+    set_prop(&rejected, "transactionId", JsValue::from_str(tx))?;
+    set_prop(&rejected, "code", JsValue::from_str(code))?;
+    set_prop(&rejected, "reason", JsValue::from_str(&error.message))?;
+    let transaction = js_sys::Object::new();
+    set_prop(&transaction, "transactionId", JsValue::from_str(tx))?;
+    set_prop(&transaction, "kind", JsValue::from_str("mergeable"))?;
+    set_prop(&transaction, "sealed", JsValue::TRUE)?;
+    set_prop(&transaction, "latestSettlement", rejected.into())?;
+    let event = js_sys::Object::new();
+    set_prop(&event, "code", JsValue::from_str(code))?;
+    set_prop(&event, "reason", JsValue::from_str(&error.message))?;
+    set_prop(&event, "transaction", transaction.into())?;
+    Ok(event.into())
 }
 
 fn host_promise<T: 'static>(
@@ -615,6 +662,8 @@ impl WasmDbInner {
 pub struct WasmWrite {
     write: Write,
     inner: Option<WasmDbInner>,
+    /// Whether a wait took over reporting the write's rejection.
+    claimed: Rc<std::cell::Cell<bool>>,
 }
 
 #[wasm_bindgen]
@@ -646,15 +695,18 @@ impl WasmWrite {
     pub fn wait(
         &self,
         tier: String,
-        _observe_only: Option<bool>,
+        observe_only: Option<bool>,
     ) -> Result<js_sys::Promise, JsValue> {
         let Some(db) = &self.inner else {
             return Err(JsValue::from_str("write state is unavailable"));
         };
         let fate = db
             .binding
-            .wait_for(self.write.seq, &tier)
+            .wait_for_write(&self.write, &tier)
             .map_err(host_error)?;
+        if !observe_only.unwrap_or(false) {
+            self.claimed.set(true);
+        }
         Ok(host_promise(fate, |()| JsValue::UNDEFINED))
     }
 

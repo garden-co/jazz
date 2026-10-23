@@ -145,7 +145,7 @@ it.each(["wasm", "native"])(
         account,
         driver: { type: "memory" },
       });
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Corpus" });
       const note = tx.insert(app.notes, {
         projectId: project.id,

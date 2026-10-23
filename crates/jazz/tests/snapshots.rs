@@ -159,6 +159,7 @@ fn at(snapshot: &SnapshotRef) -> ReadOpts {
             source: ReadViewSourceSpec::Snapshot {
                 snapshot: snapshot.clone(),
             },
+            include_deleted: false,
         },
         ..ReadOpts::default()
     }
@@ -257,15 +258,12 @@ fn an_offline_capture_names_its_unsettled_writes_and_they_stay_in_after_settling
     update(&alice, row, current(), "after");
     assert_eq!(titles(&alice, at(&snapshot)), one(row, "before"));
     // Bob's store has not seen Alice's commit yet.
-    assert!(
-        block_on(bob.all(
-            &bob.prepare_query(&Query::from("notes")).unwrap(),
-            at(&snapshot)
-        ))
-        .unwrap_err()
-        .to_string()
-        .contains("not supported yet")
-    );
+    let error = block_on(bob.all(
+        &bob.prepare_query(&Query::from("notes")).unwrap(),
+        at(&snapshot),
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::NotObserved, "{error}");
 
     insert(&bob, theirs, None, "bob's");
     settle(&[&bob, &server]);

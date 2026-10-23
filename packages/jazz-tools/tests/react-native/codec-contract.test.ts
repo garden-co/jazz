@@ -75,8 +75,8 @@ const cases: [string, unknown, unknown][] = [
 
   ["probe", "probe", "Probe"],
   [
-    "exclusive transaction",
-    { type: "beginTransaction", kind: "exclusive" },
+    "serializable transaction",
+    { type: "beginTransaction", kind: "serializable" },
     { BeginTransaction: { kind: "Exclusive" } },
   ],
   [

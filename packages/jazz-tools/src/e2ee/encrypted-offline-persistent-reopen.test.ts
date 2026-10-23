@@ -83,7 +83,7 @@ it.each([
         reopenAt === "immediately after creation with a group recipient"
           ? await before.e2ee.groups.create().wait()
           : undefined;
-      const tx = before.beginExclusiveTransaction();
+      const tx = before.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Persisted project" },

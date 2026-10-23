@@ -30,7 +30,7 @@ it("updates an existing encrypted space offline and accepts the write after reco
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Offline project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Before disconnect" });
     await tx.commit().wait({ tier: "global" });
@@ -108,7 +108,7 @@ it.each([false, true])(
         },
       };
       db = await createDb(config);
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Immediate offline project" });
       const note = tx.insert(app.notes, { projectId: project.id, title: "Initial value" });
       await tx.commit().wait({ tier: "global" });
@@ -186,7 +186,7 @@ it("stores an encrypted update locally after unexpected transport loss", async (
         },
       },
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Transport loss project" });
     const note = tx.insert(app.notes, { projectId: project.id, title: "Before transport loss" });
     await tx.commit().wait({ tier: "global" });
