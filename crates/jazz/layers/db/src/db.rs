@@ -201,6 +201,8 @@ pub enum SubscriptionEvent {
 #[derive(Clone, Debug, Default)]
 struct ReadSpec {
     include_deleted: bool,
+    /// A replica's read of the server's view (`ReadTier::Remote`).
+    members_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
 }
@@ -232,6 +234,7 @@ impl ReadSpec {
         };
         Ok(Self {
             include_deleted: opts.read_view.include_deleted,
+            members_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
         })
@@ -1031,10 +1034,13 @@ impl Db {
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        let read = ReadSpec::of(&opts, &self.inner())?;
+        let mut read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
         // A frozen read is answered from the replica alone.
         let remote_read = client && opts.tier != ReadTier::LocalOnly && !read.frozen();
+        // A synced subscription follows the server's results: a row the
+        // server stopped listing leaves it, though the copy stays readable.
+        read.members_only |= remote_read;
         if remote_read {
             Self::remote_shape(&prepared.query)?;
         }
@@ -1535,7 +1541,11 @@ impl Db {
                 inner.admitted.push(schema);
             }
         }
-        self.inner().reset_everything();
+        let mut inner = self.inner();
+        inner.reset_everything();
+        for session in &mut inner.sessions {
+            session.revalidate();
+        }
         Ok(())
     }
 }
@@ -1703,6 +1713,7 @@ impl Inner {
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
+            .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)
     }
 

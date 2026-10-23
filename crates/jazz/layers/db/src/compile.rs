@@ -241,6 +241,9 @@ pub struct Ctx<'a> {
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
     pub history_origin: Option<[u8; 16]>,
+    /// Read the server's view on a replica: root rows the server stopped
+    /// listing for it (`_jazz_revoked`) are left out.
+    pub members_only: bool,
     next_alias: usize,
 }
 
@@ -315,8 +318,23 @@ impl<'a> Ctx<'a> {
             cut: None,
             preps: Vec::new(),
             history_origin: None,
+            members_only: false,
             next_alias: 0,
         }
+    }
+
+    pub fn with_members_only(mut self, members_only: bool) -> Self {
+        self.members_only = members_only;
+        self
+    }
+
+    /// The row at `alias` is one the server still lists for this replica.
+    fn listed(&mut self, table: &Table, alias: &str) -> String {
+        let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
+        format!(
+            "NOT EXISTS (SELECT 1 FROM _jazz_revoked AS r WHERE r.t = {stored} \
+             AND r.id = {alias}.id AND r.k = {alias}._b)"
+        )
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -669,6 +687,9 @@ impl<'a> Ctx<'a> {
         if !include_deleted {
             wheres.push(format!("{alias}._del = 0"));
         }
+        if self.members_only {
+            wheres.push(self.listed(table, alias));
+        }
         for filter in &query.filters {
             wheres.push(self.predicate(filter, table, alias)?);
         }
@@ -982,6 +1003,11 @@ impl<'a> Ctx<'a> {
             // History sources are gated by their current rows already.
             for source in sources.iter().filter(|source| !source.history) {
                 wheres.push(self.read_policy(&source.table, &source.alias, session)?);
+            }
+        }
+        if self.members_only {
+            for source in sources.iter().filter(|source| !source.history) {
+                wheres.push(self.listed(&source.table, &source.alias));
             }
         }
         let version = |source: &FlatSource| match source.history {

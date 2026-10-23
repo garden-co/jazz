@@ -396,6 +396,7 @@ impl Inner {
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
+            .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -1205,6 +1206,7 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()
+        && !read.members_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
 }

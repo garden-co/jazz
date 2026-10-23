@@ -16,9 +16,14 @@
 //! * The server keeps one fan-out subscription per client query (under the
 //!   client's identity, so policies apply there) and sends row images for
 //!   rows entering or changing in it. A row leaving it is sent again if the
-//!   client may still read it, and evicted otherwise. Answers carry the
-//!   server seq they are complete through, and windows carry their row ids
-//!   so the client can drop stale cached rows.
+//!   client may still read it. Otherwise a write that took the client's
+//!   access unlists it: synced subscriptions and `ReadTier::Remote` reads
+//!   leave it out, but the copy already delivered stays readable locally
+//!   (INV-SYNC-14) until the server ships the row again. A read-policy
+//!   change, or a held row the server checks on reconnect, evicts it: the
+//!   row is currently unavailable to the reader. Answers carry the server
+//!   seq they are complete through, and windows carry their row ids so the
+//!   client can drop stale cached rows.
 //! * Serializable transactions: reads run locally at the snapshot cut
 //!   (hydrated from the authority at that cut when online); the commit
 //!   ships the read set with server versions, and the authority re-runs
@@ -379,7 +384,17 @@ pub enum SyncMessage {
     Rows {
         images: Vec<Image>,
     },
+    /// The row is currently unavailable to this reader (a policy change,
+    /// or a held row the server checked): the replica drops its copy.
     Evict {
+        table: String,
+        id: [u8; 16],
+        key: Vec<u8>,
+    },
+    /// The row left the server's results for this reader (a write took
+    /// away its read access): later settled results leave it out, but the
+    /// copy already delivered stays readable locally (INV-SYNC-14).
+    Unlist {
         table: String,
         id: [u8; 16],
         key: Vec<u8>,
@@ -603,6 +618,12 @@ pub(crate) struct Session {
     stale: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// Touched rows a `Hold` declared: the client's copy is checked, so
+    /// one it can no longer read is evicted rather than unlisted.
+    probed: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// The read policies changed since the last tick: a row the client can
+    /// no longer read is evicted rather than unlisted.
+    revalidate: bool,
     /// The versions this tick's accepted commits from the client wrote:
     /// (table, id, branch key, seq). Each ships even when a later version
     /// supersedes it, so the replica holds every state its own commits
@@ -637,6 +658,12 @@ pub(crate) struct Session {
 }
 
 impl Session {
+    /// Read policies changed: rows the client loses read access to are
+    /// evicted on its next tick.
+    pub(crate) fn revalidate(&mut self) {
+        self.revalidate = true;
+    }
+
     fn new(transport: Box<dyn Transport>, identity: AuthorSubject) -> Self {
         Self {
             transport,
@@ -646,6 +673,8 @@ impl Session {
             outbox: Vec::new(),
             stale: Vec::new(),
             touched: BTreeSet::new(),
+            probed: BTreeSet::new(),
+            revalidate: false,
             committed: Vec::new(),
             support: BTreeMap::new(),
             watch: HashSet::new(),
@@ -1418,13 +1447,16 @@ impl Inner {
     fn held_versions(&self) -> Result<Vec<(String, [u8; 16], Vec<u8>, u64)>, Error> {
         let mut out = Vec::new();
         for table in self.owner.tables.values().map(|table| &table.stored) {
+            // Rows the server stopped listing are not declared: it ships
+            // them again if this reader regains access.
             let sql = format!(
-                "SELECT id, _b, _seq FROM {} WHERE _seq < ?1 AND _del = 0",
+                "SELECT id, _b, _seq FROM {} AS t WHERE _seq < ?1 AND _del = 0 AND NOT EXISTS \
+                 (SELECT 1 FROM _jazz_revoked AS r WHERE r.t = ?2 AND r.id = t.id AND r.k = t._b)",
                 quote(table)
             );
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let rows = statement
-                .query_map([LOCAL_BASE as i64], |r| {
+                .query_map(rusqlite::params![LOCAL_BASE as i64, table], |r| {
                     let id: Vec<u8> = r.get(0)?;
                     Ok((
                         table.clone(),
@@ -1743,6 +1775,40 @@ impl Inner {
         self.drop_row(table, row, key, 0)
     }
 
+    /// Forget that the server stopped listing a row ([`Inner::unlist`]).
+    fn readmit(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<(), Error> {
+        let readmitted = self
+            .conn
+            .execute(
+                "DELETE FROM _jazz_revoked WHERE t = ?1 AND id = ?2 AND k = ?3",
+                rusqlite::params![table, row.0.as_bytes().to_vec(), key],
+            )
+            .map_err(storage)?;
+        if readmitted > 0 {
+            self.changed
+                .borrow_mut()
+                .push((table.to_owned(), row, key.to_vec()));
+        }
+        Ok(())
+    }
+
+    /// The server no longer lists a row for this replica (it lost read
+    /// access). The cached copy stays readable locally, as local reads are
+    /// not a redaction boundary, but reads of the server's view
+    /// (`ReadTier::Remote`) leave it out until the server ships it again.
+    fn unlist(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<(), Error> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO _jazz_revoked (t, id, k) VALUES (?1, ?2, ?3)",
+                rusqlite::params![table, row.0.as_bytes().to_vec(), key],
+            )
+            .map_err(storage)?;
+        self.changed
+            .borrow_mut()
+            .push((table.to_owned(), row, key.to_vec()));
+        Ok(())
+    }
+
     /// The (stored table, id, key) of the rows a commit at `seq` wrote.
     fn written_rows(
         &self,
@@ -1803,7 +1869,8 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));\
-    CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);";
+    CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
+    CREATE TABLE IF NOT EXISTS _jazz_revoked (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, PRIMARY KEY (t, id, k)) WITHOUT ROWID;";
 
 type RowKey = (String, RowUuid, Vec<u8>);
 
@@ -2922,6 +2989,7 @@ impl Db {
                             continue;
                         };
                         let row = RowUuid::from_bytes(id);
+                        inner.readmit(&table, row, &key)?;
                         let client = inner.client.as_mut().expect("client");
                         if let Some(shadow) =
                             client.shadow.get_mut(&(table.clone(), row, key.clone()))
@@ -2931,6 +2999,12 @@ impl Db {
                         } else {
                             inner.evict(&table, row, &key)?;
                         }
+                    }
+                    SyncMessage::Unlist { table, id, key } => {
+                        let Ok(table) = inner.owner.stored_table(&table).map(str::to_owned) else {
+                            continue;
+                        };
+                        inner.unlist(&table, RowUuid::from_bytes(id), &key)?;
                     }
                     SyncMessage::Settled {
                         id,
@@ -3184,6 +3258,8 @@ impl Inner {
     /// is shadowed by a pending write).
     fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
         let row = RowUuid::from_bytes(image.id);
+        // A version the server ships is one it lists for this replica again.
+        self.readmit(&image.table, row, &image.key)?;
         let client = self.client.as_mut().expect("client");
         if let Some(shadow) = client
             .shadow
@@ -3447,6 +3523,8 @@ impl Db {
                 .session_schema(index)
                 .unwrap_or_else(|| inner.owner.clone());
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
+            let probed = std::mem::take(&mut inner.sessions[index].probed);
+            let revalidate = std::mem::take(&mut inner.sessions[index].revalidate);
             let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
@@ -3643,6 +3721,15 @@ impl Db {
                     Some(image) if readable(&inner, &table, row, &key, policy)? => {
                         images.push(image)
                     }
+                    Some(_)
+                        if !revalidate && !probed.contains(&(table.clone(), row, key.clone())) =>
+                    {
+                        evictions.push(SyncMessage::Unlist {
+                            table,
+                            id: *row.0.as_bytes(),
+                            key,
+                        })
+                    }
                     _ => evictions.push(SyncMessage::Evict {
                         table,
                         id: *row.0.as_bytes(),
@@ -3674,7 +3761,9 @@ impl Db {
                 )));
             }
             for eviction in &evictions {
-                if let SyncMessage::Evict { table, id, .. } = eviction {
+                if let SyncMessage::Evict { table, id, .. }
+                | SyncMessage::Unlist { table, id, .. } = eviction
+                {
                     watch.remove(&wk((
                         table.clone(),
                         "id".to_owned(),
@@ -3860,6 +3949,7 @@ impl Db {
                 }
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
+                session.probed.extend(touched.iter().cloned());
                 session.touched.extend(touched);
                 session.stale.extend(evict);
             }
@@ -4352,6 +4442,11 @@ fn message_out(schema: &Schema, message: SyncMessage) -> Option<SyncMessage> {
             id,
             key,
         },
+        SyncMessage::Unlist { table, id, key } => SyncMessage::Unlist {
+            table: schema.by_stored(&table)?.name.clone(),
+            id,
+            key,
+        },
         other => other,
     })
 }
@@ -4474,8 +4569,16 @@ impl Db {
         let Some(client) = &inner.client else {
             return "not a client".to_owned();
         };
+        let revoked: Vec<(String, String)> = inner
+            .conn
+            .prepare("SELECT t, hex(id) FROM _jazz_revoked")
+            .and_then(|mut s| {
+                s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()
+            })
+            .unwrap_or_default();
         format!(
-            "pending {:?} sent {} unsent {} shadow {:?} fates {:?} connected {}",
+            "pending {:?} sent {} unsent {} shadow {:?} fates {:?} connected {} unlisted {revoked:?}",
             client
                 .pending
                 .iter()
