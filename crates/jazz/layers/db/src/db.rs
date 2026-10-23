@@ -3698,6 +3698,23 @@ impl Inner {
         result
     }
 
+    /// On a replica, the newest version of `row` the authority settled
+    /// (pending local versions sit above [`sync::LOCAL_BASE`]).
+    fn settled_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
+        let sql = format!(
+            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _seq < ?2",
+            quote(table)
+        );
+        self.conn
+            .query_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), sync::LOCAL_BASE as i64],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .map(|seq| seq.map(|seq| seq as u64))
+            .map_err(storage)
+    }
+
     /// The newest committed version of `row` in stored table `table` on
     /// any branch.
     fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
@@ -3819,8 +3836,25 @@ impl Db {
             return Err(rejected(format!("transaction {id:?} is not serializable")));
         };
         // On a client the authority validates, against its own state; the
-        // commit applies optimistically here meanwhile.
+        // commit applies optimistically here meanwhile. A row the replica
+        // already knows moved past the snapshot is a conflict now (with no
+        // own writes still unsettled at the snapshot, whose landing seqs
+        // only the authority can place).
         if self.is_client() {
+            if own.is_empty() {
+                let inner = self.inner();
+                for (schema, op) in &batch.ops {
+                    if let Some(row) = op.row()
+                        && inner
+                            .settled_seq(schema.stored_table(op.table())?, row)?
+                            .is_some_and(|seq| seq > *snapshot)
+                    {
+                        return Err(conflict(
+                            "row visible parent changed since transaction write was staged",
+                        ));
+                    }
+                }
+            }
             let reads = reads
                 .iter()
                 .map(|read| sync::WireRead {
