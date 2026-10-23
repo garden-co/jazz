@@ -2025,6 +2025,31 @@ impl Inner {
             .collect()
     }
 
+    /// The versions of the rows a read returns, its relations' rows
+    /// included: what a serializable read set compares at commit.
+    pub(crate) fn read_versions(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<Vec<(RowUuid, u64)>, Error> {
+        let roots = self.run(prepared, identity, read)?;
+        let mut out = versions(&roots);
+        if !prepared.query.array_subqueries.is_empty() {
+            for row in roots {
+                let node = self.node(
+                    prepared,
+                    identity,
+                    &prepared.query.table,
+                    &prepared.query.array_subqueries,
+                    row,
+                )?;
+                child_versions(&node, &mut out);
+            }
+        }
+        Ok(out)
+    }
+
     fn node(
         &self,
         prepared: &PreparedQuery,
@@ -3797,6 +3822,18 @@ fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, u64)> {
     rows.iter().map(|row| (row.id, row.seq)).collect()
 }
 
+/// The versions of a relation tree's child rows, depth first.
+fn child_versions(node: &ResultNode, out: &mut Vec<(RowUuid, u64)>) {
+    for relation in node.relations.values() {
+        if let ResultRelation::Array(children) = relation {
+            for child in children {
+                out.push((child.row.id, child.row.seq));
+                child_versions(child, out);
+            }
+        }
+    }
+}
+
 impl StagedOp {
     fn identity(&self) -> Option<WriteIdentity> {
         match self {
@@ -4159,6 +4196,33 @@ impl Db {
                     }
                 }
             }
+            // A read row the replica now holds at another version changed,
+            // and the authority, which gets this replica's earlier writes
+            // first, would refuse the commit too; so it is a conflict now.
+            // A row read at an own unsettled commit's local version that now
+            // holds a server version may only have settled: the authority
+            // decides that one.
+            {
+                let inner = self.inner();
+                for read in reads {
+                    let spec = ReadSpec {
+                        include_deleted: read.include_deleted,
+                        ..ReadSpec::default()
+                    };
+                    let now = inner.read_versions(&read.prepared, None, &spec)?;
+                    let changed = now.len() != read.rows.len()
+                        || now.iter().zip(&read.rows).any(|(now, then)| {
+                            now.0 != then.0
+                                || (now.1 != then.1
+                                    && !(own.contains(&then.1) && now.1 < LOCAL_BASE))
+                        });
+                    if changed {
+                        return Err(conflict(
+                            "a row read by the transaction changed since its snapshot",
+                        ));
+                    }
+                }
+            }
             let reads = reads
                 .iter()
                 .map(|read| sync::WireRead {
@@ -4199,8 +4263,7 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                let now = inner.run(&read.prepared, None, &spec)?;
-                if versions(&now) != read.rows {
+                if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -4363,7 +4426,7 @@ impl Db {
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = versions(&inner.run(prepared, None, &read)?);
+        let rows = inner.read_versions(prepared, None, &read)?;
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, .. },
             ..
@@ -4454,8 +4517,9 @@ impl TxRef<'_> {
         self.all_prepared_with(prepared, false).await
     }
 
-    /// A read in the transaction; `include_deleted` lists deleted rows too
-    /// (with their deletion metadata), as outside one.
+    /// A read in the transaction, its relations nested in their parents'
+    /// cells; `include_deleted` lists deleted rows too (with their deletion
+    /// metadata), as outside one.
     pub async fn all_prepared_with(
         &self,
         prepared: &PreparedQuery,
@@ -4532,8 +4596,9 @@ impl TxRef<'_> {
                 *pinned = true;
             }
         }
+        // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
-            inner.run(
+            let roots = inner.run(
                 prepared,
                 None,
                 &ReadSpec {
@@ -4541,7 +4606,8 @@ impl TxRef<'_> {
                     cut,
                     ..ReadSpec::default()
                 },
-            )
+            )?;
+            inner.nest_relations(prepared, None, roots)
         })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)

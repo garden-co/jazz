@@ -9,7 +9,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, ReadOpts, ReadTier, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
@@ -279,6 +279,43 @@ fn restoring_a_live_row_is_rejected_through_its_receipt() {
         format!("row not deleted: {}", live.row_id.0)
     );
     assert_eq!(titles(&db), ["live"]);
+}
+
+#[test]
+fn a_row_changed_after_an_exclusive_read_rejects_the_commit() {
+    let db = open(0xa4);
+    let read = db.insert("notes", &title("read"), &none()).unwrap();
+    let other = db.insert("notes", &title("other"), &none()).unwrap();
+    let tx = &OpenTransactionId::new().to_string();
+    db.begin_transaction(tx, "exclusive", None, None).unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes").filter(jazz::query::eq(
+        jazz::query::col("id"),
+        jazz::query::lit(Value::Uuid(read.row_id.0)),
+    )))
+    .unwrap();
+    block_on(db.all(query, &none(), Some(tx), None, None).unwrap()).unwrap();
+    db.update("notes", &read.row_id.to_bytes(), &title("changed"), &none())
+        .unwrap();
+    db.update_in_transaction(
+        tx,
+        "notes",
+        &other.row_id.to_bytes(),
+        &title("staged"),
+        &none(),
+    )
+    .unwrap();
+    let commit = db.commit_transaction(tx, Some("exclusive")).unwrap();
+    let conflict = commit.rejected.expect("the commit is rejected");
+    assert_eq!(
+        conflict.code,
+        ErrorCode::TransactionConflict,
+        "{conflict:?}"
+    );
+    assert_eq!(
+        titles(&db),
+        ["changed", "other"],
+        "the staged write is not applied"
+    );
 }
 
 #[test]
