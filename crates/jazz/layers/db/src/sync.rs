@@ -369,12 +369,17 @@ pub enum SyncMessage {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
     /// A one-shot read, at the current state or as of a server seq.
+    /// `tier` is how far it reaches past a relay: `LocalOnly` is served
+    /// from the relay's store, `LocalFirst` too while the relay asks its
+    /// upstream to refresh it, `Remote` once its upstream answered. An
+    /// authority's store answers any tier.
     Fetch {
         id: u64,
         query: Query,
         binding: BTreeMap<String, Value>,
         at: Option<u64>,
         include_deleted: bool,
+        tier: ReadTier,
     },
     /// `author`: the provenance the writes carry when it is not the
     /// sender's own (a trusted session or an attribution), as a canonical
@@ -580,8 +585,9 @@ pub(crate) struct Client {
     arrived: bool,
     /// As a relay: sessions' commits this store accepted and uploads as
     /// its own, by upload tx. Each session gets its fate once the
-    /// upstream's arrives (`(session, session tx)`).
-    relayed_fates: HashMap<u64, Vec<(usize, u64)>>,
+    /// upstream's arrives (`(session, session tx, rows it wrote)`); a
+    /// refused one also gets the rows as this store reverted them.
+    relayed_fates: HashMap<u64, Vec<RelayedFate>>,
     /// As a relay: sessions' one-shot reads asked of the upstream, served
     /// from this store once it answers.
     relayed_fetches: Vec<RelayedFetch>,
@@ -590,6 +596,10 @@ pub(crate) struct Client {
     /// The server said it has not admitted this client's schema version.
     unadmitted: bool,
 }
+
+/// A session's commit a relay uploads as its own: (session, the session's
+/// tx, the rows it wrote).
+type RelayedFate = (usize, u64, Vec<(String, RowUuid, Vec<u8>)>);
 
 /// A session's `Fetch` a relay asked its upstream for.
 struct RelayedFetch {
@@ -2824,6 +2834,7 @@ impl Db {
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
+        tier: ReadTier,
         deadline: Option<Instant>,
         coverage: Option<&dyn Fn() -> bool>,
     ) -> Result<Option<u64>, Error> {
@@ -2844,6 +2855,7 @@ impl Db {
                 binding: prepared.binding.clone(),
                 at,
                 include_deleted,
+                tier,
             });
             id
         };
@@ -3322,12 +3334,17 @@ impl Db {
                         if let Some(relayed) = client.relayed_fates.remove(&tx) {
                             client.relay_ready = true;
                             let fate = client.fates.get(&tx).cloned().unwrap_or(Ok(()));
-                            for (index, session_tx) in relayed {
+                            for (index, session_tx, rows) in relayed {
                                 let Some(session) =
                                     inner.sessions.get_mut(index).filter(|s| s.open)
                                 else {
                                     continue;
                                 };
+                                // A refused commit's rows go back to the
+                                // session as this store reverts them.
+                                if fate.is_err() {
+                                    session.touched.extend(rows);
+                                }
                                 session.outbox.push(SyncMessage::Fate {
                                     tx: session_tx,
                                     through,
@@ -3492,7 +3509,7 @@ impl Inner {
             keep
         });
         for sessions in client.relayed_fates.values_mut() {
-            sessions.retain(|(session, _)| *session != index);
+            sessions.retain(|(session, _, _)| *session != index);
         }
         client
             .relayed_fates
@@ -3607,14 +3624,18 @@ impl Inner {
             .get_mut(&(image.table.clone(), row, image.key.clone()))
         {
             match shadow {
-                Some(old) if old.seq >= image.seq => {
+                Some(old) if old.seq >= image.seq && old.seq < LOCAL_BASE => {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
-                // The replaced server version stays as history.
+                // The replaced server version stays as history. A relay's
+                // unsettled version (above `LOCAL_BASE`) gives way to any
+                // version it ships, as the relay's store moved on from it.
                 Some(old) => {
                     let older = std::mem::replace(old, image);
-                    self.put_image(&older, true)?;
+                    if older.seq < LOCAL_BASE {
+                        self.put_image(&older, true)?;
+                    }
                 }
                 None => *shadow = Some(image),
             }
@@ -4447,18 +4468,39 @@ impl Db {
                 binding,
                 at,
                 include_deleted,
+                tier,
             } => {
-                // A relay asks its upstream first, then serves the read from
-                // its store once the answer's rows are in it.
-                let relay = {
+                // A relay asks its upstream first for a Remote read, then
+                // serves it from its store once the answer's rows are in
+                // it. A LocalFirst read is served now, and its upstream's
+                // answer refreshes the store for the next.
+                let (relay, refresh) = {
                     let mut inner = self.inner.borrow_mut();
                     let answered = inner.sessions[index].fetched_upstream.remove(&id);
-                    !answered
-                        && inner
-                            .client
-                            .as_ref()
-                            .is_some_and(|client| may_wait(client.hint.get()))
+                    let upstream = inner
+                        .client
+                        .as_ref()
+                        .is_some_and(|client| may_wait(client.hint.get()));
+                    (
+                        upstream && !answered && tier == ReadTier::Remote,
+                        upstream && tier == ReadTier::LocalFirst,
+                    )
                 };
+                if refresh {
+                    let prepared = db.prepare_query_bound(&query, binding.clone())?;
+                    let mut inner = self.inner.borrow_mut();
+                    let client = inner.client.as_mut().expect("client");
+                    let upstream = client.next_id;
+                    client.next_id += 1;
+                    client.outbox.push(SyncMessage::Fetch {
+                        id: upstream,
+                        query: remote_query(&prepared.query).into_owned(),
+                        binding: prepared.binding.clone(),
+                        at,
+                        include_deleted,
+                        tier: ReadTier::Remote,
+                    });
+                }
                 if relay {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
                     let mut inner = self.inner.borrow_mut();
@@ -4472,6 +4514,7 @@ impl Db {
                         binding: prepared.binding.clone(),
                         at,
                         include_deleted,
+                        tier,
                     });
                     client.relayed_fetches.push(RelayedFetch {
                         upstream,
@@ -4482,6 +4525,7 @@ impl Db {
                             binding,
                             at,
                             include_deleted,
+                            tier,
                         },
                     });
                     return Ok(());
@@ -4650,7 +4694,7 @@ impl Db {
                             .map(|(table, row, key)| (table.clone(), *row, key.clone(), through)),
                     );
                 }
-                session.touched.extend(rows);
+                session.touched.extend(rows.iter().cloned());
                 // A relay's accepted commit is final once its upstream
                 // accepts the upload carrying it: the session waits for that
                 // fate, not this store's.
@@ -4665,7 +4709,7 @@ impl Db {
                         .relayed_fates
                         .entry(through)
                         .or_default()
-                        .push((index, tx));
+                        .push((index, tx, rows));
                 } else {
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
@@ -4711,16 +4755,23 @@ impl Db {
                     .conn
                     .execute_batch("SAVEPOINT jazz_lv_push")
                     .map_err(storage)?;
+                // A relay pushes what its sessions push on to its upstream,
+                // ahead of the commits that name it.
+                let relay = inner.client.is_some();
                 for node in nodes {
                     // A node that fails authentication is dropped; a commit
                     // that needs it is then rejected for missing chunks.
-                    let _ = crate::large::receive_pushed(
+                    let request = node.request();
+                    let received = crate::large::receive_pushed(
                         &inner.conn,
                         &inner.chunks,
-                        &node.request(),
+                        &request,
                         node.bytes,
                         expires,
                     );
+                    if relay && received.is_ok() {
+                        crate::large::mark_unpushed(&inner.conn, &request.locator)?;
+                    }
                 }
                 inner
                     .conn
@@ -5144,9 +5195,13 @@ impl Db {
             return Ok(result(rows));
         }
         let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
-        if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
+        // A non-durable foreground's store starts empty: its local view is
+        // its relay's, which it asks for at every tier.
+        let non_durable = self.inner().non_durable;
+        if self.is_client() && (opts.tier != ReadTier::LocalOnly || non_durable) && !frozen {
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
+                _ if non_durable => Some(None),
                 (_, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => Some(Some(
                     Instant::now() + std::time::Duration::from_millis(*timeout_ms),
                 )),
@@ -5159,10 +5214,18 @@ impl Db {
                 // its schema version; others fall back to local.
                 let coverage: Option<&dyn Fn() -> bool> =
                     require_coverage.then_some(&coverage_expired);
+                // A non-durable foreground reads its relay's view at the
+                // tier it was asked for.
+                let tier = if non_durable {
+                    opts.tier
+                } else {
+                    ReadTier::Remote
+                };
                 self.fetch(
                     &prepared,
                     None,
                     opts.read_view.include_deleted,
+                    tier,
                     deadline,
                     coverage,
                 )

@@ -915,7 +915,7 @@ fn record_base(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
     Ok(())
 }
 
-fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
+pub(crate) fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
     conn.prepare_cached("INSERT OR IGNORE INTO _jazz_lv_unpushed (locator) VALUES (?1)")
         .and_then(|mut statement| statement.execute([locator.as_bytes().as_slice()]))
         .map_err(storage)?;

@@ -683,3 +683,149 @@ fn a_tab_reads_and_writes_through_its_worker_to_the_server() {
     assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 2);
     assert_eq!(opening_rows(&links, &tab), 2);
 }
+
+#[test]
+fn a_tab_sees_another_workers_tab_write_live() {
+    let server = authority();
+    let connect = |node: u8| {
+        let worker = open(node);
+        worker.set_remote_link_hint("live").unwrap();
+        let up = worker.connect_upstream();
+        let down = server.accept_subscriber(worker.author(), Default::default());
+        let (tab, tab_up, tab_down) = tab_over(&worker, open(node + 1));
+        (worker, tab, up, down, tab_up, tab_down)
+    };
+    let (_worker_a, tab_a, a_up, a_down, a_tab_up, a_tab_down) = connect(0xd0);
+    let (_worker_b, tab_b, b_up, b_down, b_tab_up, b_tab_down) = connect(0xd2);
+    let links = [
+        (&a_up, &a_down),
+        (&a_tab_up, &a_tab_down),
+        (&b_up, &b_down),
+        (&b_tab_up, &b_tab_down),
+    ];
+
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut stream = tab_b.subscribe(&query, &none(), None, None).unwrap();
+    let opening = binding_host::event_chunk(drive(&links, tab_b.next_event(&mut stream))).unwrap();
+    assert!(matches!(opening, EventChunk::Delta { reset: true, .. }));
+
+    tab_a.insert("notes", &title("from a"), &none()).unwrap();
+    let delta = binding_host::event_chunk(drive(&links, tab_b.next_event(&mut stream))).unwrap();
+    let EventChunk::Delta { delta, .. } = delta else {
+        panic!("expected a delta, got {delta:?}");
+    };
+    let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+    assert_eq!(
+        added[0].rows[0].cells["title"],
+        Value::String("from a".to_owned())
+    );
+    assert_eq!(titles(&server), ["from a"]);
+}
+
+#[test]
+fn a_tabs_large_value_reaches_the_server_through_its_worker() {
+    let server = authority();
+    let worker = open(0xe0);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xe1));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+
+    // The worker pushes on the chunks the tab pushed it, ahead of the
+    // commit that names them.
+    let text = "x".repeat(300 * 1024);
+    let write = tab.insert("notes", &title(&text), &none()).unwrap();
+    drive(&links, tab.wait_for(write.seq, "global").unwrap()).unwrap();
+    assert_eq!(titles(&server), [text]);
+}
+
+#[test]
+fn a_tab_whose_write_the_server_refuses_reverts_to_the_servers_row() {
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let open = |node: u8| {
+        let identity = identity(node);
+        let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
+        Binding::new(db, identity, false)
+    };
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let worker = open(0xf0);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xf1));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+
+    let write = tab.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, tab.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    let update = tab
+        .update("notes", &row, &title("changed"), &none())
+        .unwrap();
+    assert!(drive(&links, tab.wait_for(update.seq, "global").unwrap()).is_err());
+    pump(&links);
+    assert_eq!(titles(&worker), ["kept"]);
+    assert_eq!(titles(&tab), ["kept"]);
+
+    let delete = tab.delete("notes", &row, &none()).unwrap();
+    assert!(drive(&links, tab.wait_for(delete.seq, "global").unwrap()).is_err());
+    pump(&links);
+    assert_eq!(titles(&worker), ["kept"]);
+    assert_eq!(titles(&tab), ["kept"]);
+}
+
+#[test]
+fn a_tabs_local_reads_are_its_workers_store() {
+    let server = authority();
+    let worker = open(0xa8);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xa9));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let read = |tier: &str| {
+        let read = tab
+            .all(query.clone(), &json!({ "tier": tier }), None, None, None)
+            .unwrap();
+        let rows = jazz::binding_codec::decode_rows(&drive(&links, read).unwrap()).unwrap();
+        rows.iter().map(|batch| batch.rows.len()).sum::<usize>()
+    };
+
+    // The worker's own row: a tab's local-only read is served there.
+    worker.insert("notes", &title("worker's"), &none()).unwrap();
+    assert_eq!(read("local-only"), 1);
+
+    // A row only the server holds: a local-first read answers from the
+    // worker's store at once and refreshes it, so the next one sees it.
+    server.insert("notes", &title("server's"), &none()).unwrap();
+    assert_eq!(read("local-only"), 1);
+    read("local-first");
+    pump(&links);
+    assert_eq!(read("local-only"), 2);
+}

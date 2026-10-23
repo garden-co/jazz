@@ -584,6 +584,7 @@ impl Progress {
         Parked {
             future: Box::pin(future),
             progress: self.clone(),
+            kick: None,
         }
     }
 }
@@ -592,19 +593,24 @@ impl Progress {
 pub struct Parked<F: Future> {
     future: Pin<Box<F>>,
     progress: Progress,
+    /// Asked for a tick after the future's first poll: what it queued for
+    /// the upstream (a remote read, or a local-first read's refresh) goes
+    /// out without waiting for unrelated work.
+    kick: Option<Rc<Hooks>>,
 }
 
 impl<F: Future> Future for Parked<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
-        match self.future.as_mut().poll(context) {
-            Poll::Ready(output) => Poll::Ready(output),
-            Poll::Pending => {
-                self.progress.park(context);
-                Poll::Pending
-            }
+        let poll = self.future.as_mut().poll(context);
+        if poll.is_pending() {
+            self.progress.park(context);
         }
+        if let Some(hooks) = self.kick.take() {
+            hooks.schedule_tick();
+        }
+        poll
     }
 }
 
@@ -758,6 +764,15 @@ impl Binding {
         }
     }
 
+    /// `future`, parked on this binding's progress, asking for a tick
+    /// after its first poll (it may have queued a request upstream).
+    fn parked<F: Future>(&self, future: F) -> Parked<F> {
+        Parked {
+            kick: Some(Rc::clone(&self.hooks)),
+            ..self.hooks.progress.parked(future)
+        }
+    }
+
     /// Let this backend runtime write and read as the local-first account
     /// `claimed_author`, proven by `token`. Raw author bytes never name a
     /// Jazz-reserved identity otherwise. The admission covers this runtime
@@ -784,6 +799,11 @@ impl Binding {
     /// The subject `bytes` (canonical author JSON) names: an ordinary
     /// author, or a local-first account this backend admitted.
     fn author_of(&self, bytes: &[u8]) -> HostResult<AuthorSubject> {
+        // The runtime's own author was proven when it opened, reserved
+        // issuer or not.
+        if bytes == self.author.canonical().as_bytes() {
+            return Ok(self.author);
+        }
         match author(bytes) {
             Ok(author) => Ok(author),
             Err(error) => {
@@ -829,8 +849,13 @@ impl Binding {
     /// Attributed writes are a privilege-escalation surface: their author is
     /// provenance while admission stays SYSTEM, so only backends make them.
     fn checked(&self, identity: WriteIdentity) -> HostResult<WriteIdentity> {
-        if matches!(identity, WriteIdentity::Attribution(_)) {
-            self.require_trusted_backend()?;
+        match identity {
+            WriteIdentity::Attribution(_) => self.require_trusted_backend()?,
+            // A write as the runtime's own session is the database's own.
+            WriteIdentity::Session(author) if author == self.author => {
+                return Ok(WriteIdentity::Database);
+            }
+            _ => {}
         }
         Ok(identity)
     }
@@ -1214,7 +1239,7 @@ impl Binding {
             });
             first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
         };
-        Ok(Box::pin(self.hooks.progress.parked(async move {
+        Ok(Box::pin(self.parked(async move {
             let result = db
                 .all_serialized_query(
                     &query,
@@ -1320,9 +1345,9 @@ impl Binding {
     pub fn capture_snapshot(&self) -> HostFuture<Vec<u8>> {
         let db = self.db.clone();
         Box::pin(
-            self.hooks.progress.parked(async move {
-                Ok(db.capture_snapshot().await?.to_persisted().into_bytes())
-            }),
+            self.parked(
+                async move { Ok(db.capture_snapshot().await?.to_persisted().into_bytes()) },
+            ),
         )
     }
 
