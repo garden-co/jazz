@@ -92,6 +92,11 @@ impl Group {
         self.awaiting
     }
 
+    /// The root table's stored name.
+    pub(super) fn root(&self) -> &str {
+        &self.root
+    }
+
     /// The query this group answers.
     pub(super) fn query(&self) -> &Query {
         &self.prepared.query

@@ -651,8 +651,9 @@ pub(crate) struct Session {
     watch: HashSet<u64>,
     /// Resumed subscriptions whose opening is still to send: `since` seq.
     resume: BTreeMap<u64, u64>,
-    /// Supporting rows shipped to the replica, per table, with whether the
-    /// client could read each when last checked. A commit to a table their
+    /// Supporting rows shipped to the replica, and rows of fetches and
+    /// ended subscriptions it keeps, per table, with whether the client
+    /// could read each when last checked. A commit to a table their
     /// read policy depends on re-checks them: lost access ships an
     /// eviction, regained access ships the image.
     held: BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
@@ -4033,9 +4034,32 @@ impl Db {
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
-                if inner.sessions[index].subs.remove(&id).is_some() {
+                if let Some((_, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
                     dropped.set(dropped.get() + 1);
+                    // The replica keeps the rows it was shipped: held, a
+                    // policy dependency's commit still re-checks them, so a
+                    // retained copy is unlisted once the client loses access.
+                    if policy.is_some()
+                        && let Some(group) = group.upgrade()
+                    {
+                        let group = group.borrow();
+                        let table = group.root().to_owned();
+                        let mut held = std::mem::take(&mut inner.sessions[index].held);
+                        for row in group.rows.iter().filter(|row| *row.table == *table) {
+                            let rid = row.id.0.as_bytes().to_vec();
+                            let seq = row.seq as i64;
+                            for image in
+                                inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?
+                            {
+                                held.entry(table.clone())
+                                    .or_default()
+                                    .entry((row.id, image.key))
+                                    .or_insert(true);
+                            }
+                        }
+                        inner.sessions[index].held = held;
+                    }
                 }
             }
             SyncMessage::Advise { id, action } => {
@@ -4105,6 +4129,15 @@ impl Db {
                 let mut extra = Vec::new();
                 let mut watch = std::mem::take(&mut inner.sessions[index].watch);
                 let mut held = std::mem::take(&mut inner.sessions[index].held);
+                // The replica keeps current rows it fetched: like supporting
+                // rows, a policy dependency's commit re-checks them.
+                if policy.is_some() && at.is_none() && history.is_none() {
+                    for image in images.iter().filter(|image| image.table == table) {
+                        held.entry(table.clone())
+                            .or_default()
+                            .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
+                    }
+                }
                 for image in &images {
                     inner.follow_support(
                         &support, image, policy, &mut extra, &mut watch, &mut held,
