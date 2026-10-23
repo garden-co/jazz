@@ -1201,6 +1201,8 @@ impl WasmDb {
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
+    // The public WASM ABI includes proof, owner and catalogue arguments.
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_browser_with_self_signed_proof(
         storage: JsValue,
         schema: Vec<u8>,

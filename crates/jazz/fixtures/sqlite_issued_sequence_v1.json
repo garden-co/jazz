@@ -1,0 +1,31 @@
+{
+  "role": "jazz.sqlite.issued-sequence.v1",
+  "version": 1,
+  "key": "issued-seq-v1",
+  "cases": [
+    {
+      "value": "0",
+      "hex": "00"
+    },
+    {
+      "value": "1",
+      "hex": "01"
+    },
+    {
+      "value": "127",
+      "hex": "7f"
+    },
+    {
+      "value": "128",
+      "hex": "8001"
+    },
+    {
+      "value": "16384",
+      "hex": "808001"
+    },
+    {
+      "value": "4503599627370497",
+      "hex": "8180808080808008"
+    }
+  ]
+}
