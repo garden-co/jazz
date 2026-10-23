@@ -113,6 +113,28 @@ pub use crate::wire::WireTransport;
 /// Frames messages with postcard over a byte transport.
 pub struct WireTransportAdapter<W>(W);
 
+/// The largest encoded message one wire frame carries, leaving room for
+/// the carrier's count and length prefixes.
+const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
+
+/// `message` as wire frames. A first result can outgrow one frame: its row
+/// images travel in as many `Rows` messages as it takes (a row fits one,
+/// as a large value travels as chunks).
+pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    let frame = postcard::to_allocvec(&message)?;
+    match message {
+        SyncMessage::Rows { mut images }
+            if frame.len() > MAX_MESSAGE_FRAME_BYTES && images.len() > 1 =>
+        {
+            let rest = images.split_off(images.len() / 2);
+            let mut frames = encode_frames(SyncMessage::Rows { images })?;
+            frames.extend(encode_frames(SyncMessage::Rows { images: rest })?);
+            Ok(frames)
+        }
+        _ => Ok(vec![frame]),
+    }
+}
+
 impl<W> WireTransportAdapter<W> {
     pub fn current(wire: W) -> Self {
         Self(wire)
@@ -121,9 +143,10 @@ impl<W> WireTransportAdapter<W> {
 
 impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        let frame =
-            postcard::to_allocvec(&message).map_err(|e| TransportError::Failed(e.to_string()))?;
-        self.0.send_frame(frame)
+        for frame in encode_frames(message).map_err(|e| TransportError::Failed(e.to_string()))? {
+            self.0.send_frame(frame)?;
+        }
+        Ok(())
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
@@ -2385,7 +2408,7 @@ impl Db {
     /// Connect this database to its server. Writes from now on upload, and
     /// subscriptions attach remotely.
     pub async fn connect_upstream(&self, transport: Box<dyn Transport>) -> Upstream {
-        self.ensure_client();
+        self.become_replica();
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
         client.transport = Some(transport);
@@ -2496,8 +2519,10 @@ impl Db {
     }
 
     /// Become a replica: optimistic seqs from here on sit above every
-    /// server seq.
-    fn ensure_client(&self) {
+    /// server seq, and commits are owed to an upstream (uploaded once one
+    /// connects). A store that will connect later becomes one before it
+    /// writes, or its earlier commits stay local.
+    pub fn become_replica(&self) {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_some() {
             return;
@@ -2511,7 +2536,7 @@ impl Db {
     }
 
     pub fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
-        self.ensure_client();
+        self.become_replica();
         let inner = self.inner.borrow();
         let client = inner.client.as_ref().expect("client");
         let link = client.hint.get();
@@ -2544,12 +2569,16 @@ impl Db {
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
-        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
-            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
-        });
+        let session = ops.iter().any(StagedOp::is_session);
+        let author = if session && inner.local_sessions {
+            Some(inner.identity.author)
+        } else {
+            ops.iter().find_map(StagedOp::author)
+        }
+        .or_else(|| (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author()));
         // A session's writes carry its claims, for the authority's check.
         let session_claims = author
-            .filter(|_| ops.iter().any(StagedOp::is_session))
+            .filter(|_| session)
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq).unwrap_or_default();
         let mut shadows = Vec::new();
@@ -4806,6 +4835,8 @@ impl Db {
         let query: Query = postcard::from_bytes(query)
             .map_err(|e| Error::new(ErrorCode::Query, format!("undecodable query: {e}")))?;
         let mut prepared = self.prepare_query(&query)?;
+        // An explicit identity reads what its policies let it see.
+        let identity = request_scope.as_ref().map(|(author, _)| *author);
         if let Some((author, claims)) = request_scope {
             prepared = prepared.with_identity_claims(author, claims);
         }
@@ -4844,16 +4875,13 @@ impl Db {
                     .await?;
             }
         }
-        let roots = self
-            .all(
-                &prepared,
-                ReadOpts {
-                    first_load: FirstLoad::Deliver,
-                    ..opts
-                },
-            )
-            .await?;
-        Ok(result(self.nest_relations(&prepared, roots)?))
+        let opts = ReadOpts {
+            first_load: FirstLoad::Deliver,
+            ..opts
+        };
+        let inner = self.inner();
+        let roots = inner.run(&prepared, identity, &ReadSpec::of(&opts, &inner)?)?;
+        Ok(result(inner.nest_relations(&prepared, identity, roots)?))
     }
 }
 

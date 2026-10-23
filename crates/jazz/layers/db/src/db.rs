@@ -49,7 +49,7 @@ use crate::values::{
 pub use sync::{
     Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
+    Upstream, WireError, WireTransport, WireTransportAdapter, duplex, encode_frames,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -399,6 +399,9 @@ struct Inner {
     non_durable: bool,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
+    /// Sessions this store writes as are its own, not vouched for upstream
+    /// (see [`Db::keep_sessions_local`]).
+    local_sessions: bool,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Rows written since the last server tick (only while serving).
@@ -910,6 +913,7 @@ impl Db {
                 client: None,
                 non_durable: false,
                 authority: false,
+                local_sessions: false,
                 sessions: Vec::new(),
                 since_tick: Vec::new(),
                 capture: Vec::new(),
@@ -955,6 +959,18 @@ impl Db {
     /// store without the role (a relay with no upstream) settles at `Local`.
     pub fn set_authority(&self) {
         self.inner.borrow_mut().authority = true;
+    }
+
+    /// Whether this store is the global authority.
+    pub fn is_authority(&self) -> bool {
+        self.inner.borrow().authority
+    }
+
+    /// Check session writes here as their session, but upload them as this
+    /// store's own: an untrusted runtime cannot vouch for the sessions it
+    /// is handed, so the authority checks them as the runtime itself.
+    pub fn keep_sessions_local(&self) {
+        self.inner.borrow_mut().local_sessions = true;
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -1853,7 +1869,7 @@ impl Inner {
             .then(|| *self.identity.node.as_bytes())
     }
 
-    fn run(
+    pub(crate) fn run(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
@@ -3162,18 +3178,16 @@ impl Inner {
         // The new row is checked against the other rows as they were
         // before this transaction, as a policy's subqueries see the
         // statement's snapshot: a same-table EXISTS compares the new row
-        // with the old one, not with itself.
+        // with the old one, not with itself. Without a WITH CHECK, the new
+        // row must pass USING, as in Postgres.
+        let update = &table.policies.update;
+        let with_check = update.with_check.as_ref().or(update.using.as_ref());
         if let Some(author) = self.checked(who)
             && !{
                 let session = self.session(author);
                 let before = Some(Cut::at(seq.saturating_sub(1)));
                 self.holds_at(table, row, &key, before, |ctx| {
-                    ctx.policy_clause(
-                        table.policies.update.with_check.as_ref(),
-                        table,
-                        "a",
-                        &session,
-                    )
+                    ctx.policy_clause(with_check, table, "a", &session)
                 })?
             }
         {
