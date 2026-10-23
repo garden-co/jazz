@@ -18,6 +18,9 @@ pub use account_session::{
     jazz_native_relay_host_lease_release_account_session,
 };
 mod foreground_mutations;
+mod initialization;
+pub use initialization::InitializationAction;
+mod catalogue_cache;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
@@ -566,6 +569,11 @@ pub enum ForegroundDbCommandRequest {
     },
     AbortStagedStreamingMutation {
         staged: u64,
+    },
+    /// Local bridge tag 38. Version and action ordinals are frozen independently of sync wire v3.
+    InitializationV1 {
+        version: u8,
+        action: InitializationAction,
     },
 }
 
@@ -2876,6 +2884,16 @@ impl NativeRelayHost {
         }
         let lifecycle_failure = |_| JazzNativeRelayStatus::LifecycleFailure;
         let response = match command {
+            Request::InitializationV1 { version, action } => {
+                if version != 1 {
+                    return Err(JazzNativeRelayStatus::InvalidCommand);
+                }
+                let client = self.foreground_client(foreground)?;
+                match client.initialization_command(action) {
+                    Ok(poll) => foreground_operation_response(poll),
+                    Err(error) => foreground_command_error(error)?,
+                }
+            }
             Request::NativeSessionMetadata => {
                 let opened = self
                     .foregrounds
@@ -2896,6 +2914,7 @@ impl NativeRelayHost {
                     user_id,
                 }
             }
+
             Request::DisconnectNativeUpstream => {
                 self.foreground_connectivity(foreground, Some(true))?
             }
@@ -4920,6 +4939,7 @@ struct ConnectedClient {
     read_cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
     read_cleanup: Option<Pin<Box<dyn Future<Output = ()>>>>,
     transactions: BTreeMap<u64, ForegroundTransaction>,
+    initialization_seals: Rc<RefCell<BTreeMap<String, (u64, jazz::db::InitializationSeal)>>>,
     /// Public transaction ids are opaque digests, while only the foreground
     /// owner may retain the core causal id needed for a settlement wait.
     committed_transactions: BTreeMap<TransactionId, TxId>,
@@ -5378,6 +5398,7 @@ struct RelayWorker {
     pump_cursor: Option<u64>,
     schema: JazzSchema,
     liveness: Arc<RelayLiveness>,
+    catalogue_cache: Option<Rc<RefCell<catalogue_cache::CatalogueCache>>>,
 }
 
 impl RelayWorker {
@@ -5405,6 +5426,13 @@ impl RelayWorker {
         owner_wake_queued: Arc<AtomicBool>,
         owner_commands: Weak<mpsc::SyncSender<RelayCommand>>,
     ) -> Result<Self, RelayError> {
+        let catalogue_cache = client_relay_scope
+            .as_ref()
+            .map(|_| catalogue_cache::CatalogueCache::load(&config))
+            .transpose()?;
+        let cached = catalogue_cache
+            .as_ref()
+            .and_then(|cache| cache.capture.as_deref());
         let column_families = config.schema.column_families();
         let db_config = DbConfig {
             schema: config.schema.clone(),
@@ -5417,6 +5445,7 @@ impl RelayWorker {
             identity: config.identity,
             id_source: None,
         };
+        let admitted_account_owner = client_relay_scope.is_some();
         let persistent = Rc::new(
             match client_relay_scope {
                 Some(scope) => {
@@ -5424,12 +5453,23 @@ impl RelayWorker {
                     // this capability, before storage or foreground peers are exposed.
                     // Trusted platform admission owns the durable account/root binding;
                     // account-session setup derives that root from versioned account data.
-                    block_on(unsafe { Db::open_scope_isolated_client_relay(db_config, scope) })
+                    block_on(unsafe {
+                        Db::open_scope_isolated_client_relay_with_cached_catalogue(
+                            db_config, scope, cached,
+                        )
+                    })
                 }
                 None => block_on(Db::open(db_config)),
             }
             .map_err(RelayError::Db)?,
         );
+        if admitted_account_owner {
+            // SAFETY: the host admitted this exact account/root before opening
+            // its scope-isolated owner. Restore original leased-foreground units
+            // before any upstream or new foreground can observe the runtime.
+            block_on(unsafe { persistent.restore_initialization_owner_pending_uploads() })
+                .map_err(RelayError::Db)?;
+        }
         let upstream = block_on(persistent.connect_upstream(Box::new(QueueTransport {
             wire: wire.clone(),
             session_context: None,
@@ -5442,6 +5482,7 @@ impl RelayWorker {
             drive: Arc::clone(&drive),
         }));
         Ok(Self {
+            catalogue_cache: catalogue_cache.map(|cache| Rc::new(RefCell::new(cache))),
             wake,
             drive,
             drive_error: None,
@@ -5565,6 +5606,7 @@ impl RelayWorker {
         if let Some(generation) = self.foreground_wake_generations.remove(&id) {
             generation.fetch_add(1, Ordering::AcqRel);
         }
+        client.initialization_seals.borrow_mut().clear();
         let abandoned = client.abandon_foreground_transactions();
         let db = Rc::clone(&client.db);
         self.closing.push_back(ClosingForeground {
@@ -5652,15 +5694,25 @@ impl RelayWorker {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
+        let catalogue_cache = self.catalogue_cache.as_ref().map(|cache| cache.borrow());
         let db = Rc::new(
-            block_on(Db::open(DbConfig {
-                schema: self.schema.clone(),
-                storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
-                identity,
-                id_source: None,
-            }))
+            // SAFETY: cache scope was derived from the admitted relay root.
+            block_on(unsafe {
+                Db::open_with_cached_catalogue(
+                    DbConfig {
+                        schema: self.schema.clone(),
+                        storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
+                        identity,
+                        id_source: None,
+                    },
+                    catalogue_cache
+                        .as_ref()
+                        .and_then(|cache| cache.capture.as_deref()),
+                )
+            })
             .map_err(RelayError::Db)?,
         );
+        drop(catalogue_cache);
         // A foreground owns only an in-memory preview. Its paired persistent
         // relay provides Local durability and the relay-authority subscription
         // handoff; treating this Db as durable makes sibling subscriptions wait
@@ -5716,6 +5768,7 @@ impl RelayWorker {
                 read_cleanups: Rc::new(RefCell::new(VecDeque::new())),
                 read_cleanup: None,
                 transactions: BTreeMap::new(),
+                initialization_seals: Rc::default(),
                 committed_transactions: BTreeMap::new(),
                 next_foreground_handle: 1,
                 _upstream: upstream,
@@ -5852,6 +5905,15 @@ impl RelayWorker {
             self.upstream_io.poll(&waker)?;
         }
         poll_relay_tick(&self.persistent, &mut self.persistent_tick, &waker)?;
+        if let Some(cache) = &self.catalogue_cache {
+            let mut context = Context::from_waker(&waker);
+            if let Poll::Ready(result) = cache
+                .borrow_mut()
+                .poll_refresh(&self.persistent, &mut context)
+            {
+                result?;
+            }
+        }
         for id in &client_ids {
             let client = self.clients.get_mut(id).expect("selected client exists");
             if client.admission_error.is_some() {
@@ -7293,6 +7355,7 @@ pub enum RelayError {
 
 #[cfg(test)]
 mod tests {
+    mod initialization;
     mod publication_codec;
     mod snapshot_capture_codec;
 

@@ -36,6 +36,7 @@ mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
 mod identity;
+mod initialization;
 
 #[cfg(feature = "bench-probes")]
 pub mod bench_probes;
@@ -1085,7 +1086,17 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = openMemory)]
-    pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
+    pub fn open_memory(
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        cached_catalogue: Option<Vec<u8>>,
+    ) -> Result<WasmDb, JsValue> {
+        if cached_catalogue.is_some() {
+            return Err(not_supported(
+                "E2EE authenticated catalogue cache on SQLite",
+            ));
+        }
+
         Self::open_memory_as(&schema, &config, OpenAs::Untrusted)
     }
 
@@ -1107,7 +1118,14 @@ impl WasmDb {
         token: String,
         app_id: String,
         claimed_author: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
+        if cached_catalogue.is_some() {
+            return Err(not_supported(
+                "E2EE authenticated catalogue cache on SQLite",
+            ));
+        }
+
         Self::open_memory_as(
             &schema,
             &config,
@@ -1142,7 +1160,14 @@ impl WasmDb {
         schema: Vec<u8>,
         config: Vec<u8>,
         storage_owner: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
+        if cached_catalogue.is_some() {
+            return Err(not_supported(
+                "E2EE authenticated catalogue cache on SQLite",
+            ));
+        }
+
         Self::open_browser_as(storage, schema, config, storage_owner, OpenAs::Untrusted).await
     }
 
@@ -1156,7 +1181,14 @@ impl WasmDb {
         app_id: String,
         claimed_author: String,
         storage_owner: String,
+        cached_catalogue: Option<Vec<u8>>,
     ) -> Result<WasmDb, JsValue> {
+        if cached_catalogue.is_some() {
+            return Err(not_supported(
+                "E2EE authenticated catalogue cache on SQLite",
+            ));
+        }
+
         let how = OpenAs::SelfSigned {
             token: &token,
             app_id: &app_id,

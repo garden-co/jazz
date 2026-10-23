@@ -70,7 +70,14 @@ export function queryKeyDependencies(
       for (const [key, space] of wanted) {
         if (stopped) return;
         if (spaces.has(key)) continue;
-        const scopeId = await db.tableIdentity(new TypedTableQueryBuilder(space.scope, schema));
+        // Dependency routing follows the result's read tier. Local plaintext
+        // delivery must not wait for a live catalogue round trip; key validation
+        // below still authenticates the history used for every result.
+        const tier = options.tier ?? "remote";
+        const scopeId = await db.tableIdentity(
+          new TypedTableQueryBuilder(space.scope, schema),
+          tier === "local-first",
+        );
         if (stopped) return;
         const entry = { ...space, stop: () => {} };
         spaces.set(key, entry);

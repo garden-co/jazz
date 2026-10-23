@@ -1,7 +1,16 @@
 import { sha256 } from "@noble/hashes/sha2.js";
-import { serializableE2eeTransaction } from "../runtime/db.js";
+import {
+  beginDbTransactionAfter,
+  serializableE2eeTransaction,
+  insertInitializationRow,
+  prepareDbTransaction,
+} from "../runtime/db.js";
 import type { Db, TableProxy, E2eeTransactionScope, QueryBuilder } from "../runtime/db.js";
-import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
+import {
+  observeE2eeHistory,
+  E2eeHistoryUnavailable,
+  type E2eeHistoryReader,
+} from "./history-reader.js";
 import type { RowSettlement } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
@@ -9,11 +18,13 @@ import { decodeRecoveryMaterial, type DecodedRecoveryMaterial } from "./recovery
 import {
   readAcceptedHistory,
   prepareAcceptedHistory,
-  prepareInitialHistory,
-  discardInitialHistory,
+  retainLocalAcceptedHistory,
+  RetainedHistoryUnavailableError,
 } from "./accepted-history.js";
 import { E2eeRecoveryError, RecoveryCandidateError } from "./recovery-error.js";
 import { E2eeDataError } from "./data-error.js";
+import { InitializationJournal, E2eeInitializationNotReady } from "./provisional-initialization.js";
+import type { FounderProposal } from "./provisional-initialization.js";
 import { spaceRecoveryContext, spaceRecoveryBytes } from "./space-recovery-format.js";
 import { loadRecoveredSpaceKey, retainRecoveredSpaceKey } from "./local-space-keys.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
@@ -51,6 +62,7 @@ import {
 
 type DeviceState = {
   active: Set<string>;
+  verified: Set<string>;
   epochId: string;
   publicHistory: PublicMembershipHistory;
 };
@@ -100,6 +112,16 @@ export class SpaceInitialisationRequired extends Error {
       "Initialising an encryption space requires beginSerializableTransaction() or serializableTransaction()",
     );
     this.name = "SpaceInitialisationRequired";
+  }
+}
+/** @internal Standalone captured-value writes may retry before any encryption or mutation. */
+export class ProvisionalSpaceRequiresExclusive extends SpaceInitialisationRequired {
+  readonly code = "e2ee_provisional_requires_exclusive";
+  readonly retryable = true;
+  constructor() {
+    super();
+    this.name = "ProvisionalSpaceRequiresExclusive";
+    this.message = "Provisional encrypted writes require an exclusive transaction";
   }
 }
 type Snapshot = {
@@ -220,6 +242,8 @@ export class Spaces {
       release(device: LocalDevice): void;
       readonly keyLifetime: DeviceKeyLifetime;
       states(tx?: E2eeHistoryReader): Promise<DeviceState>;
+      journal?: InitializationJournal;
+      founder?(): Promise<FounderProposal | undefined>;
     },
     private readonly groups?: Groups,
     private readonly staleWrites: "warn" | "reject" = "warn",
@@ -245,6 +269,16 @@ export class Spaces {
       provider.release(device);
       throw error;
     }
+  }
+
+  async assertWriteTransaction<T, Init>(
+    scope: TableProxy<T, Init>,
+    identifier: string,
+    kind: "mergeable" | "serializable",
+  ): Promise<void> {
+    const address = await this.address(scope, identifier, true);
+    const pending = await this.device?.journal?.space(spaceRootId(address));
+    if (pending && kind !== "serializable") throw new ProvisionalSpaceRequiresExclusive();
   }
 
   private async address<T, Init>(
@@ -665,26 +699,15 @@ export class Spaces {
     const device = await this.loadDevice();
     try {
       const secret = runtimeRandomBytes(32);
-      let prepared: SpaceRoot | undefined;
       try {
         const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
-          prepared = await this.stageInitial(
-            tx,
-            scope,
-            identifier,
-            [recipientId],
-            address,
-            device,
-            secret,
-          );
-          return prepared;
+          return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
         });
-        const accepted = await proposal.wait({ tier: "global" });
+        // Global acceptance includes the journal's initial recipient handoff.
+        await proposal.wait({ tier: "global" });
         this.assertOpen();
-        await this.deliver(address, accepted, secret, device);
         await this.explain(scope, identifier);
       } finally {
-        if (prepared) discardInitialHistory(this.db, prepared);
         secret.fill(0);
       }
     } finally {
@@ -694,55 +717,138 @@ export class Spaces {
 
   async warmInitialRecipients(recipientIds: readonly string[] = [this.accountId]): Promise<void> {
     const ids = initialRecipientIds(recipientIds);
+    const founder = await this.device?.founder?.();
+    if (founder) {
+      await this.provisionalRecipients(founder, ids);
+      return;
+    }
+    if (ids.every((id) => id === this.accountId)) return;
+    const device = await this.loadDevice();
+    try {
+      await observeE2eeHistory(this.db, (reader) =>
+        this.acceptedInitialEligibility(reader, device.id, ids),
+      );
+      return;
+    } catch (error) {
+      if (
+        !(error instanceof E2eeHistoryUnavailable) &&
+        !(error instanceof E2eeInitializationNotReady)
+      )
+        throw error;
+      if (await this.db.e2eeIsExplicitlyOffline())
+        throw new E2eeInitializationNotReady("An explicit recipient has no accepted local keys");
+    } finally {
+      this.requireDevice().release(device);
+    }
     for (const recipientId of ids)
       if (recipientId !== this.accountId)
         await prefetchPublicMembershipHistory(this.db, recipientId, this.tables);
     await this.groups?.warmMembership({ groupIds: ids });
   }
 
+  private async provisionalRecipients(founder: FounderProposal, recipientIds: readonly string[]) {
+    const ids = initialRecipientIds(recipientIds);
+    const self: InitialRecipient = {
+      recipientId: this.accountId,
+      recipientKind: "account",
+      recipientEpochId: founder.epochId,
+    };
+    if (ids.every((id) => id === this.accountId)) return [self];
+    try {
+      return await observeE2eeHistory(this.db, async (reader) => {
+        const own = await readPublicMembershipHistory(reader, this.accountId, this.tables);
+        const snapshot = await this.groups?.readMembership(reader, { groupIds: ids }, own);
+        const graph = snapshot && (await this.groups!.acceptedGraph(snapshot));
+        const recipients: InitialRecipient[] = [];
+        for (const recipientId of ids) {
+          if (recipientId === this.accountId) {
+            recipients.push(self);
+            continue;
+          }
+          const history = await readPublicMembershipHistory(reader, recipientId, this.tables);
+          const group = graph?.get(recipientId);
+          if (group && history.roots.rows.length)
+            throw new Error("Ambiguous E2EE space recipient ID");
+          if (group) {
+            if (group.sealed || group.rotationRequired)
+              throw new E2eeInitializationNotReady(
+                "The explicit recipient group requires reconciliation",
+              );
+            recipients.push({
+              recipientId,
+              recipientKind: "group",
+              recipientEpochId: group.keyRoot.epochId,
+            });
+          } else {
+            if (!history.roots.rows.length)
+              throw new E2eeInitializationNotReady(
+                "An explicit recipient has no accepted local keys",
+              );
+            const account = await replayAccountMembership(
+              history,
+              this.accountContext(recipientId),
+              this.signer,
+            );
+            recipients.push({
+              recipientId,
+              recipientKind: "account",
+              recipientEpochId: account.epochId,
+            });
+          }
+        }
+        return recipients;
+      });
+    } catch (error) {
+      if (error instanceof E2eeHistoryUnavailable)
+        throw new E2eeInitializationNotReady("An explicit recipient has no accepted local keys");
+      throw error;
+    }
+  }
+
+  /** Recover acceptance-before-promotion without requiring a live authority connection. */
+  async promoteInitial(expected: SpaceRoot): Promise<void> {
+    await retainLocalAcceptedHistory(
+      this.db,
+      JSON.stringify(["space", expected.scopeId, expected.identifier]),
+      (reader) => this.readSnapshot(reader, expected, expected.id),
+      async (snapshot) => {
+        const state = await this.validate(snapshot, expected);
+        if (!sameSnapshotValue(state.root, expected)) throw new E2eeDataError("key-unavailable");
+        this.assertOpen();
+      },
+    );
+  }
+
   /** Accepted original-epoch handoff only; this never rotates or grants membership. */
   async completeInitial(expected: SpaceRoot): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.completeInitialAttempt(expected);
+        return;
+      } catch (error) {
+        // Retry only rejected maintenance, never the original initialization or
+        // its source. Each attempt reopens keys and revalidates accepted history.
+        const conflict =
+          (error instanceof PersistedWriteRejectedError &&
+            (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+          (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
+        if (!conflict || attempt >= 2) throw error;
+      }
+    }
+  }
+
+  private async completeInitialAttempt(expected: SpaceRoot): Promise<void> {
     this.assertOpen();
     await this.warm(expected);
     const device = await this.loadDevice();
-    let secret: Uint8Array | undefined;
     try {
-      const snapshot = await this.readAcceptedSnapshot(expected, expected.id);
-      const state = await this.validate(snapshot, expected);
-      if (
-        state.root.id !== expected.id ||
-        state.root.epochId !== expected.epochId ||
-        !snapshot.state.active.has(device.id) ||
-        state.sealed ||
-        state.rotationRequired ||
-        !state.groupsReady ||
-        !isInitialAuthor(
-          state.root,
-          state.keyRoot.epochId,
-          this.accountId,
-          device.id,
-          snapshot.state.epochId,
-        )
-      )
-        throw new E2eeDataError("key-unavailable");
-      secret = await this.keys.open(
-        device,
-        spaceContext(
-          this.accountContext(state.root.creatorAccountId),
-          state.root,
-          "author",
-          device.id,
-        ),
-        state.root.authorEnvelope,
-      );
-      // deliver revalidates the exact epoch and eligibility in its own authority transaction.
-      await this.deliver(expected, state.root, secret, device);
+      // Open the author key under the same authority snapshot as its delivery.
+      await this.deliver(expected, expected, undefined, device);
       this.assertOpen();
       // Delivery adds accepted metadata after the preparation snapshot.
       // Retain that coherent state before callers can immediately go offline.
       await this.readAcceptedSnapshot(expected, expected.id);
     } finally {
-      secret?.fill(0);
       this.requireDevice().release(device);
     }
   }
@@ -755,21 +861,24 @@ export class Spaces {
     prepareData: Parameters<Spaces["prepareInitial"]>[3],
     seed?: InitialSpaceSeed,
   ): Promise<boolean> {
-    const address = await this.address(scope, identifier);
+    const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
+    const address = await this.address(scope, identifier, retainedScopeId !== null);
     const roots = this.tables.__e2ee_spaces.where(address);
     if (tx) {
-      if ((await tx.allSettledForE2ee(roots)).rows.length) return false;
+      if (await tx.one(roots.includeDeleted(), { tier: "local-first" })) return false;
       // Hydrate a pre-existing scope row in this transaction, not in a later snapshot.
-      await tx.one(
-        new TypedTableQueryBuilder(scope._table, scope._schema)
-          .where({ id: identifier })
-          .select("id"),
-        { tier: "remote" },
-      );
+      const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
+        .where({ id: identifier })
+        .select("id");
+      if (
+        !(await tx.one(scopeRow, { tier: "local-first" })) &&
+        !(await this.db.e2eeIsExplicitlyOffline())
+      )
+        await tx.one(scopeRow, { tier: "remote" });
       await this.prepareInitial(tx, scope, identifier, prepareData, undefined, seed);
       return true;
     }
-    if (await this.db.one(roots, { tier: "remote" })) return false;
+    if (await this.db.one(roots.includeDeleted(), { tier: "local-first" })) return false;
     // This read only chooses a retry. The fresh exclusive transaction must
     // independently validate absence and accept root, grant and data together.
     throw new SpaceInitialisationRequired();
@@ -786,7 +895,8 @@ export class Spaces {
   ): Promise<void> {
     if (tx.kind !== "serializable")
       throw new Error("E2EE initialisation requires an exclusive transaction");
-    const address = await this.address(scope, identifier);
+    const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
+    const address = await this.address(scope, identifier, retainedScopeId !== null);
     const pending = seed && initialSeeds.get(seed);
     if (
       seed &&
@@ -839,7 +949,7 @@ export class Spaces {
     const roots = this.tables.__e2ee_spaces.where({ id: rootId });
     if (
       await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
-        tier: "remote",
+        tier: "local-first",
       })
     )
       throw new Error("E2EE space already exists");
@@ -878,30 +988,79 @@ export class Spaces {
         eligibility.recipients,
       ));
     if (pending) pending.used = true;
-    await prepareInitialHistory(
-      this.db,
-      tx,
-      (reader) => this.readSnapshot(reader, address, rootId, [...recipientsToUse]),
-      signedRoot,
-      initialGrants,
-    );
-    try {
-      this.assertOpen();
-      const { id, ...values } = signedRoot;
-      // The settled lookup above rejects visible roots. Exclusive upsert records
-      // an exact-row precondition, so hidden roots and concurrent creators cannot
-      // turn a filtered empty query into a second accepted space.
-      tx.upsert(this.tables.__e2ee_spaces, id, values);
-      for (const { id: grantId, ...grantValues } of initialGrants)
-        tx.insert(this.tables.__e2ee_space_grants, grantValues, { id: grantId });
-      return signedRoot;
-    } catch (error) {
-      discardInitialHistory(this.db, signedRoot);
-      throw error;
-    }
+    const journal = this.requireDevice().journal;
+    if (!journal) throw new Error("Automatic initialization requires its private journal");
+    this.assertOpen();
+    const { id, ...values } = signedRoot;
+    // Exact absence is captured before INSERT, never via overwrite semantics.
+    await insertInitializationRow(tx, this.tables.__e2ee_spaces, values, { id });
+    for (const { id: grantId, ...grantValues } of initialGrants)
+      await insertInitializationRow(tx, this.tables.__e2ee_space_grants, grantValues, {
+        id: grantId,
+      });
+    journal.stage(tx, { kind: "space", id, root: signedRoot, grants: initialGrants });
+    return signedRoot;
   }
 
   private async initialEligibility(
+    tx: E2eeTransactionScope,
+    deviceId: string,
+    recipientIds: readonly string[],
+  ) {
+    const founder = await this.device?.founder?.();
+    if (founder) {
+      if (founder.deviceId !== deviceId) throw new E2eeDataError("key-unavailable");
+      const identity = await tx.one(
+        this.tables.__e2ee_account_identities.where({ id: this.accountId }),
+        { tier: "local-first" },
+      );
+      const root = await tx.one(this.tables.__e2ee_account_roots.where({ id: founder.rootId }), {
+        tier: "local-first",
+      });
+      const keys = await tx.one(this.tables.__e2ee_device_keys.where({ id: founder.publicKeyId }), {
+        tier: "local-first",
+      });
+      if (
+        identity?.deviceId !== deviceId ||
+        identity.epochId !== founder.epochId ||
+        root?.deviceId !== deviceId ||
+        root.epochId !== founder.epochId ||
+        keys?.deviceId !== deviceId
+      )
+        throw new E2eeInitializationNotReady("The exact founder proposal is not locally visible");
+      const recipients = await this.provisionalRecipients(founder, recipientIds);
+      return {
+        state: { epochId: founder.epochId },
+        recipients,
+        expectation: { founder: founder.id, deviceId, epochId: founder.epochId, recipients },
+      };
+    }
+    // Recipient eligibility belongs to the public transaction's fixed snapshot.
+    // External recipients need online coverage at that coordinate. Offline
+    // proposals use only accepted local rows from that same snapshot.
+    const offline = await this.db.e2eeIsExplicitlyOffline();
+    // A creator-only proposal does not introduce another recipient. Its accepted
+    // local history must remain usable after transport loss, without requiring
+    // an explicit disconnect. Keep live coverage for external recipients.
+    const creatorOnly = initialRecipientIds(recipientIds).every((id) => id === this.accountId);
+    const reader: E2eeHistoryReader = {
+      allSettledForE2ee: (query) =>
+        tx.allSettledForE2ee(query, offline || creatorOnly ? "local-only" : undefined, true),
+    };
+    try {
+      return await this.acceptedInitialEligibility(reader, deviceId, recipientIds);
+    } catch (error) {
+      if (
+        !offline ||
+        (!(error instanceof E2eeHistoryUnavailable) &&
+          !(error instanceof E2eeInitializationNotReady))
+      )
+        throw error;
+      throw new E2eeInitializationNotReady("Initial recipient history is not locally available");
+    }
+  }
+
+  private async acceptedInitialEligibility(
     tx: E2eeHistoryReader,
     deviceId: string,
     recipientIds: readonly string[],
@@ -940,7 +1099,7 @@ export class Spaces {
         ]);
       } else {
         if (!history.roots.rows.length)
-          throw new Error("E2EE initial recipient account is unavailable");
+          throw new E2eeInitializationNotReady("E2EE initial recipient account is unavailable");
         const recipient = await replayAccountMembership(
           history,
           this.accountContext(recipientId),
@@ -971,7 +1130,7 @@ export class Spaces {
     address: Address,
     device: LocalDevice,
     secret: Uint8Array,
-    state: DeviceState,
+    state: { epochId: string },
     recipients: InitialRecipient[],
   ) {
     const root = {
@@ -1021,44 +1180,97 @@ export class Spaces {
     return { root: { ...completeRoot, signature }, grants };
   }
 
-  /** Stage source bytes outside any transaction, then bind publication to fresh authority reads. */
+  /** Stage source bytes outside any transaction, then bind publication to its accepted history. */
   async prepareStreaming<T, Init, R>(
     scope: TableProxy<T, Init>,
     identifier: string,
     options: StreamingSpaceOptions,
     stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<R>,
   ): Promise<{ value: R; plan: StreamingSpacePlan }> {
-    const address = await this.address(scope, identifier);
+    const retainedScopeId = await this.db.authenticatedTableIdentity(scope);
+    const address = await this.address(scope, identifier, retainedScopeId !== null);
     const newScope = options.newScope === true;
     const rootId = spaceRootId(address);
     const recipients = initialRecipientIds(options.initialRecipients ?? [this.accountId]);
     await this.warmInitialRecipients(recipients);
     const roots = this.tables.__e2ee_spaces.where(address);
-    const observed = await this.db.one(roots, { tier: "remote" });
+    let observed = await this.db.one(roots.includeDeleted(), { tier: "local-first" });
     const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
       .where({ id: identifier })
       .select("id");
-    if (!newScope) await this.db.one(scopeRow, { tier: "remote" });
+    if (!newScope) {
+      const localScope = await this.db.one(scopeRow, { tier: "local-first" });
+      if (!observed || !localScope) {
+        if (await this.db.e2eeIsExplicitlyOffline())
+          throw new E2eeInitializationNotReady("Space history is not locally available");
+        // A missing local root is not proof that a legacy scope is unencrypted.
+        // Resolve missing facts before choosing keys or consuming source bytes.
+        if (!observed) observed = await this.db.one(roots.includeDeleted(), { tier: "remote" });
+        if (!localScope) await this.db.one(scopeRow, { tier: "remote" });
+      }
+    }
+    const pendingSpace = await this.device?.journal?.space(rootId);
+    if (observed && pendingSpace) {
+      if (newScope) throw new E2eeDataError("key-unavailable");
+      let value!: R;
+      const result = await this.withKeys(
+        scope,
+        identifier,
+        async (secret, root) => {
+          value = await stage(secret, root);
+        },
+        false,
+        undefined,
+        true,
+      );
+      if (result.state !== "ready") throw new E2eeDataError("key-unavailable");
+      let disposed = false;
+      return {
+        value,
+        plan: {
+          validate: async (tx) => {
+            if (disposed) throw new E2eeDataError("key-unavailable");
+            const root = await tx.one(this.tables.__e2ee_spaces.where({ id: rootId }), {
+              tier: "local-first",
+            });
+            if (root?.epochId !== pendingSpace.root.epochId)
+              throw new E2eeDataError("key-unavailable");
+            const state = await this.withKeys(
+              scope,
+              identifier,
+              async (_key, current) => {
+                if (current.epochId !== pendingSpace.root.epochId)
+                  throw new E2eeDataError("key-unavailable");
+              },
+              false,
+              undefined,
+              true,
+            );
+            if (state.state !== "ready") throw new E2eeDataError("key-unavailable");
+          },
+          dispose() {
+            disposed = true;
+          },
+        },
+      };
+    }
     if (observed) {
       if (newScope) throw new E2eeDataError("key-unavailable");
-      await this.warm(observed);
       const device = await this.loadDevice();
       const deviceId = device.id;
       this.requireDevice().release(device);
-      const readState = async (tx: E2eeTransactionScope) => {
+      const expectation = async (snapshot: Snapshot & { state: DeviceState }) => {
         this.assertOpen();
-        if (!(await tx.one(scopeRow, { tier: "remote" })))
-          throw new E2eeDataError("key-unavailable");
-        const snapshot = await this.readSnapshot(tx, address, rootId, [], false);
         const state = await this.validate(snapshot, address);
         if (
+          this.device?.isKnownRevoked() ||
           !snapshot.state.active.has(deviceId) ||
           !state.members.has(this.accountId) ||
-          state.sealed ||
-          state.rotationRequired ||
-          !state.groupsReady
+          state.sealed
         )
           throw new E2eeDataError("key-unavailable");
+        if (this.staleWrites !== "warn" && (state.rotationRequired || !state.groupsReady))
+          throw new E2eeDataError("maintenance-required");
         return {
           epochId: state.keyRoot.epochId,
           accountId: this.accountId,
@@ -1067,14 +1279,39 @@ export class Spaces {
           active: snapshot.state.active,
           members: state.members,
           revision: state.revision,
+          rotationRequired: state.rotationRequired,
+          groupsReady: state.groupsReady,
         };
       };
-      const read = await serializableE2eeTransaction(this.db, readState);
-      const expected = structuredClone(await read.wait({ tier: "global" }));
+      let snapshot: Snapshot & { state: DeviceState };
+      try {
+        snapshot = await this.readAcceptedSnapshot(address, rootId, true);
+      } catch (error) {
+        if (
+          !(error instanceof RetainedHistoryUnavailableError) ||
+          this.device?.isKnownRevoked() ||
+          (await this.db.e2eeIsExplicitlyOffline())
+        )
+          throw error;
+        // Missing or changed retained coverage may be refreshed only before
+        // consuming a source. A coherent local eligibility refusal is final.
+        await this.warm(observed);
+        snapshot = await this.readAcceptedSnapshot(address, rootId);
+      }
+      const expected = await expectation(snapshot);
       let disposed = false;
       const plan: StreamingSpacePlan = {
         validate: async (tx) => {
-          if (disposed || !sameSnapshotValue(expected, await readState(tx)))
+          if (disposed) throw new E2eeDataError("key-unavailable");
+          const reader: E2eeHistoryReader = {
+            allSettledForE2ee: (query) => tx.allSettledForE2ee(query, "local-only"),
+          };
+          // These remain accepted-row reads inside the publishing exclusive
+          // snapshot, not retained rows substituted for transaction evidence.
+          if (!(await reader.allSettledForE2ee(scopeRow)).rows.length)
+            throw new E2eeDataError("key-unavailable");
+          const current = await this.readSnapshot(reader, address, rootId, [], false);
+          if (!sameSnapshotValue(expected, await expectation(current)))
             throw new E2eeDataError("key-unavailable");
         },
         dispose() {
@@ -1082,13 +1319,32 @@ export class Spaces {
         },
       };
       try {
+        const preparation = beginDbTransactionAfter(this.db, async () => {});
+        try {
+          await prepareDbTransaction(preparation, (tx) => plan.validate(tx));
+        } finally {
+          await preparation.rollback();
+        }
         let value!: R;
         let used = false;
-        const state = await this.withKeys(scope, identifier, async (secret, root) => {
-          if (used || root.epochId !== expected.epochId) throw new E2eeDataError("key-unavailable");
-          used = true;
-          value = await stage(secret, root);
-        });
+        const state = await this.withKeys(
+          scope,
+          identifier,
+          async (secret, root) => {
+            if (used || root.epochId !== expected.epochId)
+              throw new E2eeDataError("key-unavailable");
+            used = true;
+            // Key lookup may discover newer history before it calls us. Never
+            // consume bytes against a different preflight expectation.
+            const current = await this.readAcceptedSnapshot(address, rootId, true);
+            if (!sameSnapshotValue(expected, await expectation(current)))
+              throw new E2eeDataError("key-unavailable");
+            value = await stage(secret, root);
+          },
+          false,
+          undefined,
+          true,
+        );
         if (state.state !== "ready" || !used) throw new E2eeDataError("key-unavailable");
         return { value, plan };
       } catch (error) {
@@ -1104,17 +1360,17 @@ export class Spaces {
         this.assertOpen();
         if (
           (await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
-            tier: "remote",
+            tier: "local-first",
           })) ||
-          (await tx.allSettledForE2ee(roots)).rows.length
+          (await tx.one(roots.includeDeleted(), { tier: "local-first" }))
         )
           throw new E2eeDataError("key-unavailable");
-        if (!newScope && !(await tx.one(scopeRow, { tier: "remote" })))
+        if (!newScope && !(await tx.one(scopeRow, { tier: "local-first" })))
           throw new E2eeDataError("key-unavailable");
         return this.initialEligibility(tx, device.id, recipients);
       };
       const read = await serializableE2eeTransaction(this.db, readInitial);
-      const eligibility = await read.wait({ tier: "global" });
+      const eligibility = await read.wait({ tier: "local" });
       const records = await this.initialRecords(
         address,
         device,
@@ -1832,16 +2088,87 @@ export class Spaces {
   async withKeys<T, Init>(
     scope: TableProxy<T, Init>,
     identifier: string,
-    use: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<void>,
+    use: (
+      secret: Uint8Array,
+      root: Readonly<SpaceRoot>,
+      source: "accepted" | "provisional",
+    ) => Promise<void>,
     includeHistory = false,
     prepareOnline?: () => Promise<void>,
     forWrite = false,
     requiredEpochs?: ReadonlySet<string>,
   ): Promise<SpaceState> {
+    const address = await this.address(scope, identifier, true);
+    const pending = await this.device?.journal?.space(spaceRootId(address));
+    if (pending) {
+      if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
+      const founder = await this.device?.founder?.();
+      const device = await this.loadDevice();
+      let secret: Uint8Array | undefined;
+      try {
+        if (!founder) {
+          const state = await observeE2eeHistory(this.db, (reader) =>
+            this.requireDevice().states(reader),
+          );
+          if (
+            !state.active.has(device.id) ||
+            !state.verified.has(device.id) ||
+            state.epochId !== pending.root.accountEpochId
+          )
+            return { state: "refused", reason: "device-not-active" };
+        }
+        const { root, grants } = pending;
+        const grant = grants.find(
+          (grant) =>
+            grant.recipientKind === "account" &&
+            grant.recipientId === this.accountId &&
+            grant.operation === "add" &&
+            grant.epochId === root.epochId &&
+            grant.spaceId === root.id &&
+            grant.authorDeviceId === root.deviceId &&
+            grant.authorAccountId === root.creatorAccountId &&
+            grant.authorEpochId === root.accountEpochId &&
+            (!founder || grant.recipientEpochId === founder.epochId),
+        );
+        if (
+          !grant ||
+          root.deviceId !== device.id ||
+          root.creatorAccountId !== this.accountId ||
+          (founder && root.accountEpochId !== founder.epochId)
+        )
+          return { state: "refused", reason: "not-a-space-recipient" };
+        const application = this.accountContext(root.creatorAccountId);
+        if (
+          !(await this.signer.verify(
+            device.signing.publicKey,
+            spaceRootBytes(application, root),
+            root.signature,
+          )) ||
+          !(await this.signer.verify(
+            device.signing.publicKey,
+            spaceGrantBytes(application, root, grant),
+            grant.signature,
+          ))
+        )
+          throw new E2eeDataError("key-unavailable");
+        secret = await this.keys.open(
+          device,
+          spaceContext(application, root, "author", device.id),
+          root.authorEnvelope,
+        );
+        await this.confirm(root, secret);
+        this.assertOpen();
+        await use(secret, root, "provisional");
+        return { state: "ready" };
+      } finally {
+        secret?.fill(0);
+        this.requireDevice().release(device);
+      }
+    }
     let used = false;
     const localUse = async (secret: Uint8Array, root: Readonly<SpaceRoot>) => {
       used = true;
-      await use(secret, root);
+      await use(secret, root, "accepted");
     };
     try {
       const address = await this.address(scope, identifier, true);
@@ -1871,9 +2198,9 @@ export class Spaces {
     // A locally refused recipient may have received a grant since this snapshot.
     // Online reconciliation must discover it before returning that refusal.
     await prepareOnline?.();
-    const address = await this.address(scope, identifier);
-    const state = await this.explainAddress(address, use, includeHistory);
-    if (state.state === "ready") this.reconcileInBackground(address);
+    const onlineAddress = await this.address(scope, identifier);
+    const state = await this.explainAddress(onlineAddress, localUse, includeHistory);
+    if (state.state === "ready") this.reconcileInBackground(onlineAddress);
     return state;
   }
 
@@ -2202,7 +2529,7 @@ export class Spaces {
         return await readAcceptedHistory(
           this.db,
           JSON.stringify(["space", address.scopeId, address.identifier]),
-          (tx, initialRecipients) => this.readSnapshot(tx, address, id, initialRecipients),
+          (tx) => this.readSnapshot(tx, address, id),
           localOnly,
         );
       } catch (error) {
@@ -2437,7 +2764,7 @@ export class Spaces {
   private async deliver(
     address: Address,
     expected: SpaceRoot,
-    secret: Uint8Array,
+    secret: Uint8Array | undefined,
     device: LocalDevice,
   ) {
     const delivery = await serializableE2eeTransaction(this.db, async (tx) =>
@@ -2460,14 +2787,26 @@ export class Spaces {
     snapshot: Snapshot & { state: DeviceState },
     address: Address,
     expected: SpaceRoot,
-    secret: Uint8Array,
+    secret: Uint8Array | undefined,
     device: LocalDevice,
   ) {
     let wrote = false;
-    const { root, keyRoot, members, rotationRequired, position } = await this.validate(
-      snapshot,
-      address,
-    );
+    const { root, keyRoot, members, rotationRequired, position, sealed, groupsReady } =
+      await this.validate(snapshot, address);
+    // Initial completion may use only the original author's accepted epoch.
+    // Keep these reads in the delivery transaction so concurrent changes reject
+    // the write, including changes while the asynchronous key open is pending.
+    if (
+      secret === undefined &&
+      (root.id !== expected.id ||
+        root.epochId !== expected.epochId ||
+        !snapshot.state.active.has(device.id) ||
+        sealed ||
+        rotationRequired ||
+        !groupsReady ||
+        !isInitialAuthor(root, keyRoot.epochId, this.accountId, device.id, snapshot.state.epochId))
+    )
+      throw new E2eeDataError("key-unavailable");
     if (
       root.id !== expected.id ||
       keyRoot.epochId !== expected.epochId ||
@@ -2477,61 +2816,111 @@ export class Spaces {
         !isInitialAuthor(root, keyRoot.epochId, this.accountId, device.id, snapshot.state.epochId))
     )
       throw new Error("E2EE space membership requires reconciliation");
-    await this.confirmHistory(snapshot, root, secret);
-    const delivered = new Set<string>();
-    for (const row of snapshot.deliveries.rows) {
-      if (
-        row.epochId === keyRoot.epochId &&
-        (await this.acceptedDelivery(
-          snapshot,
-          root,
-          position,
-          row,
-          positionOf(snapshot.deliveries, row.id),
-        ))
-      )
-        delivered.add(JSON.stringify([row.recipientAccountId, row.recipientDeviceId]));
-    }
-    for (const [recipientAccountId, recipientEpochId] of members) {
-      const history = snapshot.histories.get(recipientAccountId)!;
-      const recipients = await replayAccountMembership(
-        history,
-        this.accountContext(recipientAccountId),
-        this.signer,
-      );
-      if (recipients.epochId !== recipientEpochId)
-        throw new Error("E2EE space recipient epoch changed");
-      if (recipients.recoveryRoots.length) {
-        const recovery = await tx.allSettledForE2ee(
-          this.tables.__e2ee_space_recovery_deliveries.where({
-            spaceId: root.id,
-            recipientAccountId,
-          }),
+    const deliverySecret =
+      secret ??
+      (await this.keys.open(
+        device,
+        spaceContext(this.accountContext(root.creatorAccountId), root, "author", device.id),
+        root.authorEnvelope,
+      ));
+    try {
+      await this.confirmHistory(snapshot, root, deliverySecret);
+      const delivered = new Set<string>();
+      for (const row of snapshot.deliveries.rows) {
+        if (
+          row.epochId === keyRoot.epochId &&
+          (await this.acceptedDelivery(
+            snapshot,
+            root,
+            position,
+            row,
+            positionOf(snapshot.deliveries, row.id),
+          ))
+        )
+          delivered.add(JSON.stringify([row.recipientAccountId, row.recipientDeviceId]));
+      }
+      for (const [recipientAccountId, recipientEpochId] of members) {
+        const history = snapshot.histories.get(recipientAccountId)!;
+        const recipients = await replayAccountMembership(
+          history,
+          this.accountContext(recipientAccountId),
+          this.signer,
         );
-        for (const recoveryRoot of recipients.recoveryRoots) {
-          if (
-            recoveryRoot.mechanism !== this.keys.mechanism.id ||
-            recoveryRoot.version !== this.keys.mechanism.version
-          )
-            throw new Error("Unsupported E2EE space recovery recipient");
-          let present = false;
-          for (const row of recovery.rows) {
+        if (recipients.epochId !== recipientEpochId)
+          throw new Error("E2EE space recipient epoch changed");
+        if (recipients.recoveryRoots.length) {
+          const recovery = await tx.allSettledForE2ee(
+            this.tables.__e2ee_space_recovery_deliveries.where({
+              spaceId: root.id,
+              recipientAccountId,
+            }),
+          );
+          for (const recoveryRoot of recipients.recoveryRoots) {
             if (
-              row.epochId === keyRoot.epochId &&
-              row.recoveryRootId === recoveryRoot.id &&
-              (await this.acceptedDelivery(
-                snapshot,
-                root,
-                position,
-                row,
-                positionOf(recovery, row.id),
-              ))
-            ) {
-              present = true;
-              break;
+              recoveryRoot.mechanism !== this.keys.mechanism.id ||
+              recoveryRoot.version !== this.keys.mechanism.version
+            )
+              throw new Error("Unsupported E2EE space recovery recipient");
+            let present = false;
+            for (const row of recovery.rows) {
+              if (
+                row.epochId === keyRoot.epochId &&
+                row.recoveryRootId === recoveryRoot.id &&
+                (await this.acceptedDelivery(
+                  snapshot,
+                  root,
+                  position,
+                  row,
+                  positionOf(recovery, row.id),
+                ))
+              ) {
+                present = true;
+                break;
+              }
             }
+            if (present) continue;
+            const row = {
+              id: crypto.randomUUID(),
+              spaceId: root.id,
+              epochId: keyRoot.epochId,
+              senderAccountId: this.accountId,
+              senderDeviceId: device.id,
+              senderEpochId: snapshot.state.epochId,
+              recipientAccountId,
+              recipientEpochId,
+              recoveryRootId: recoveryRoot.id,
+            };
+            const envelope = await this.keys.seal(
+              recoveryRoot.publicKey,
+              spaceRecoveryContext(this.accountContext(root.creatorAccountId), keyRoot, row),
+              deliverySecret,
+            );
+            const signature = await this.sign(
+              device,
+              spaceRecoveryBytes(this.accountContext(root.creatorAccountId), keyRoot, {
+                ...row,
+                envelope,
+              }),
+            );
+            this.assertOpen();
+            const { id, ...values } = row;
+            wrote = true;
+            tx.insert(
+              this.tables.__e2ee_space_recovery_deliveries,
+              { ...values, envelope, signature },
+              { id },
+            );
           }
-          if (present) continue;
+        }
+        for (const recipientDeviceId of recipients.active) {
+          if (delivered.has(JSON.stringify([recipientAccountId, recipientDeviceId]))) continue;
+          const key = history.keys.rows.find((row) => row.deviceId === recipientDeviceId);
+          if (
+            !key ||
+            key.mechanism !== this.keys.mechanism.id ||
+            key.version !== this.keys.mechanism.version
+          )
+            throw new Error("Unsupported E2EE space recipient key");
           const row = {
             id: crypto.randomUUID(),
             spaceId: root.id,
@@ -2540,17 +2929,17 @@ export class Spaces {
             senderDeviceId: device.id,
             senderEpochId: snapshot.state.epochId,
             recipientAccountId,
-            recipientEpochId,
-            recoveryRootId: recoveryRoot.id,
+            recipientDeviceId,
+            recipientEpochId: recipients.epochId,
           };
           const envelope = await this.keys.seal(
-            recoveryRoot.publicKey,
-            spaceRecoveryContext(this.accountContext(root.creatorAccountId), keyRoot, row),
-            secret,
+            key.publicKey,
+            spaceDeliveryContext(this.accountContext(root.creatorAccountId), keyRoot, row),
+            deliverySecret,
           );
           const signature = await this.sign(
             device,
-            spaceRecoveryBytes(this.accountContext(root.creatorAccountId), keyRoot, {
+            spaceDeliveryBytes(this.accountContext(root.creatorAccountId), keyRoot, {
               ...row,
               envelope,
             }),
@@ -2559,51 +2948,17 @@ export class Spaces {
           const { id, ...values } = row;
           wrote = true;
           tx.insert(
-            this.tables.__e2ee_space_recovery_deliveries,
+            this.tables.__e2ee_space_deliveries,
             { ...values, envelope, signature },
             { id },
           );
         }
       }
-      for (const recipientDeviceId of recipients.active) {
-        if (delivered.has(JSON.stringify([recipientAccountId, recipientDeviceId]))) continue;
-        const key = history.keys.rows.find((row) => row.deviceId === recipientDeviceId);
-        if (
-          !key ||
-          key.mechanism !== this.keys.mechanism.id ||
-          key.version !== this.keys.mechanism.version
-        )
-          throw new Error("Unsupported E2EE space recipient key");
-        const row = {
-          id: crypto.randomUUID(),
-          spaceId: root.id,
-          epochId: keyRoot.epochId,
-          senderAccountId: this.accountId,
-          senderDeviceId: device.id,
-          senderEpochId: snapshot.state.epochId,
-          recipientAccountId,
-          recipientDeviceId,
-          recipientEpochId: recipients.epochId,
-        };
-        const envelope = await this.keys.seal(
-          key.publicKey,
-          spaceDeliveryContext(this.accountContext(root.creatorAccountId), keyRoot, row),
-          secret,
-        );
-        const signature = await this.sign(
-          device,
-          spaceDeliveryBytes(this.accountContext(root.creatorAccountId), keyRoot, {
-            ...row,
-            envelope,
-          }),
-        );
-        this.assertOpen();
-        const { id, ...values } = row;
-        wrote = true;
-        tx.insert(this.tables.__e2ee_space_deliveries, { ...values, envelope, signature }, { id });
-      }
+      return wrote ? undefined : snapshot;
+    } finally {
+      // Caller-owned keys retain their caller's lifetime.
+      if (secret === undefined) deliverySecret.fill(0);
     }
-    return wrote ? undefined : snapshot;
   }
 
   private async confirm(

@@ -1,3 +1,4 @@
+import type { CatalogueCacheScope } from "../catalogue-cache.js";
 import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
@@ -361,6 +362,7 @@ export interface BrowserWorkerInitOptions {
   selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;
   appId: string;
+  catalogueCacheScope?: CatalogueCacheScope;
   /** Non-secret logical owner pinned to an explicitly selected physical IDB root. */
   storageOwner: string;
   authSessionKey: string;
@@ -535,6 +537,8 @@ export type BrowserFollowerPortRequest =
     }
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
+  | { type: "initialization-status"; id: number; reservedTxIds: string[] }
+  | { type: "authenticated-catalogue-ready"; id: number }
   | { type: "disconnect"; id: number }
   | { type: "flush-local"; id: number }
   | { type: "flush-pending-writes"; id: number }
@@ -645,6 +649,8 @@ export type BrowserFollowerPortEvent =
       type: "result";
       id: number;
       error?: BrowserRelayError;
+      initializationStatuses?: string;
+      authenticatedCatalogueReady?: boolean;
       /** Present only on an init reply for a worker-authenticated Inspector peer. */
       inspectorAttachmentPhysicalDbName?: string;
       peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
