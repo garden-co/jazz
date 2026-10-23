@@ -80,7 +80,7 @@ it("preserves accepted scope and data when later initial recipient delivery is d
     });
     await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
-    const tx = creator.beginExclusiveTransaction();
+    const tx = creator.beginSerializableTransaction();
     const project = tx.insert(
       app.projects,
       { title: "Accepted despite denied handoff" },

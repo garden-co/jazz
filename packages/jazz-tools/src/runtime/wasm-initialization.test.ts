@@ -28,15 +28,15 @@ it.skipIf(!hasJazzWasmBuild()).each(["absence", "seal"] as const)(
     const absent = new Uint8Array(16);
     absent[0] = 52;
     const failed = crypto.randomUUID().replaceAll("-", "");
-    db.beginTransaction(failed, "exclusive");
+    db.beginTransaction(failed, "serializable");
     db.updateInTransaction(
       failed,
       "missing_table",
       absent,
       encodeCellsForPatch(app.wasmSchema.values!, { text: { type: "Text", value: "invalid" } }),
     );
-    const failedWrite = db.commitTransaction(failed, "exclusive");
-    db.beginTransaction(open, "exclusive");
+    const failedWrite = db.commitTransaction(failed, "serializable");
+    db.beginTransaction(open, "serializable");
     // No scheduler or explicit tick may rescue the awaited initialization.
     if (operation === "absence") await db.recordInitializationInsertAbsence(open, "values", absent);
     const row = db.insertInTransaction(

@@ -51,7 +51,7 @@ it.each(["explicit disconnect", "unexpected transport loss"] as const)(
       });
       clients.push(rejecting);
       const owners = [owner, rejecting];
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         app.projects,
         { title: "Stale offline epoch" },

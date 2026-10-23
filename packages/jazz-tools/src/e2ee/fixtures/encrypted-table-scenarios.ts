@@ -288,7 +288,7 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toHaveLength(1);
       expect(await db.all(app.__e2ee_space_grants, { tier: "remote" })).toHaveLength(1);
     }
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const event =
       timing === "plaintext-first"
         ? tx.insert(app.events, { message: "Created together" })

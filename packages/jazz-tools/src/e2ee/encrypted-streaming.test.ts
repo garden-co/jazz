@@ -294,7 +294,7 @@ it("uploads an encrypted image to an accepted space after a transport-offline pe
         "base64",
       ),
     );
-    const tx = before.beginExclusiveTransaction();
+    const tx = before.beginSerializableTransaction();
     const project = tx.insert(
       app.projects,
       { title: "Accepted before transport loss" },

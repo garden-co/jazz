@@ -43,7 +43,7 @@ it("keeps independent offline readers revoked after ordinary-query and device-li
     )!;
     await first.e2ee.devices.approve(request.id).wait();
     await second.e2ee.devices.list();
-    const initial = first.beginExclusiveTransaction();
+    const initial = first.beginSerializableTransaction();
     const project = initial.insert(app.projects, { title: "Pending deletion scope" });
     initial.insert(app.notes, { projectId: project.id, title: "Encrypted note" });
     await initial.commit().wait({ tier: "global" });
@@ -185,7 +185,7 @@ it.each(["group", "space grant"] as const)(
         groupId = (await owner.e2ee.groups.create().wait()).id;
         await owner.e2ee.groups.add(groupId, { kind: "account", id: bob.account.id }).wait();
       }
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         groupApp.projects,
         { title: "Group removal" },

@@ -221,7 +221,7 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = ServerRuntimeHandle::start_with_storage(schema, storage_config)?;
+        let started = ServerRuntimeHandle::start_awaiting_permissions(schema, storage_config)?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }

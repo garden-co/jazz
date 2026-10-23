@@ -11,8 +11,8 @@ import type { KeyEnvelope } from "./types.js";
 it.each([
   "insert",
   "upsert",
-  "exclusive",
-  "exclusive-nullable-upsert",
+  "serializable",
+  "serializable-nullable-upsert",
   "mergeable",
   "deny-data",
   "deny-root",
@@ -31,7 +31,7 @@ it.each([
         .table(
           {
             projectId: s.uuid(),
-            body: mode === "exclusive-nullable-upsert" ? s.string().optional() : s.string(),
+            body: mode === "serializable-nullable-upsert" ? s.string().optional() : s.string(),
           },
           { project: s.rel("projects", "projectId") },
         )
@@ -109,12 +109,12 @@ it.each([
         await writer.e2ee.devices.list();
         failWrapping = true;
       }
-      if (mode === "exclusive-nullable-upsert") {
+      if (mode === "serializable-nullable-upsert") {
         await writer.e2ee.devices.list();
         await writer.all(app.projects, { tier: "remote" });
         await writer.disconnect();
         const id = crypto.randomUUID();
-        const tx = writer.beginExclusiveTransaction();
+        const tx = writer.beginSerializableTransaction();
         tx.upsert(app.notes, id, { projectId: project.id });
         await tx.commit().wait({ tier: "local" });
         const expected = { id, projectId: project.id, body: null };
@@ -133,9 +133,11 @@ it.each([
       let completed: Promise<unknown>;
       // Policy rejection and portable accepted keys require authority acceptance,
       // not merely the provisional initialization's local durability.
-      if (mode === "exclusive" || mode === "mergeable") {
+      if (mode === "serializable" || mode === "mergeable") {
         const tx =
-          mode === "exclusive" ? writer.beginExclusiveTransaction() : writer.beginTransaction();
+          mode === "serializable"
+            ? writer.beginSerializableTransaction()
+            : writer.beginTransaction();
         tx.insert(app.events, { message: "Same transaction" });
         noteId = tx.insert(app.notes, data).id;
         completed = tx.commit().wait({ tier: "global" });
@@ -151,7 +153,7 @@ it.each([
       data.body = "Changed after the mutation returned";
       if (mode === "mergeable" || mode.startsWith("deny-") || mode === "crypto-error") {
         if (mode === "mergeable")
-          await expect(completed).rejects.toThrow("beginExclusiveTransaction()");
+          await expect(completed).rejects.toThrow("beginSerializableTransaction()");
         else if (mode === "crypto-error")
           await expect(completed).rejects.toMatchObject({
             code: "key-unavailable",
@@ -171,7 +173,7 @@ it.each([
         expected,
       );
       expect(await writer.all(app.events, { tier: "remote" })).toHaveLength(
-        mode === "exclusive" ? 1 : 0,
+        mode === "serializable" ? 1 : 0,
       );
       expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toHaveLength(1);
       if (mode === "insert") {

@@ -36,7 +36,7 @@ it("observes both accepted rows after persistent reopening without encryption", 
     };
     db = await createDb(config);
     await db.all(app.__e2ee_snapshot_roots.where({}), { tier: "local-first" });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const root = tx.insert(app.__e2ee_snapshot_roots, { title: "Root" });
     const ref = tx.insert(app.__e2ee_snapshot_refs, { rootId: root.id });
     await tx.commit().wait({ tier: "global" });

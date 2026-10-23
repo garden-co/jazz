@@ -107,7 +107,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
       await owner.e2ee.devices.list();
       await other.e2ee.devices.list();
       console.info("E2EE_SEARCH_PERF", JSON.stringify({ phase: "devices-ready" }));
-      const tx = owner.beginExclusiveTransaction();
+      const tx = owner.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "History measurement" });
       const expected = Array.from({ length: 8 }, (_, position) =>
         tx.insert(app.notes, { projectId: project.id, title: "Wanted", position }),
@@ -129,7 +129,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
           expect(await owner.e2ee.explain(target)).toEqual({ state: "ready" });
           // Rewrite two existing rows per epoch: eight rows throughout, with
           // matching ciphertext retained in every historical epoch at size four.
-          const update = owner.beginExclusiveTransaction();
+          const update = owner.beginSerializableTransaction();
           for (const row of expected.slice((epochs - 1) * 2, epochs * 2))
             update.update(app.notes, row.id, { title: "Wanted" });
           await update.commit().wait({ tier: "global" });

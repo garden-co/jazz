@@ -6,7 +6,7 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
-it("accepts an exclusive read of an unchanged table after migration", async () => {
+it("accepts a serializable read of an unchanged table after migration", async () => {
   const projects = s.table({ title: s.string() }, {});
   const before = { projects, notes: s.table({ title: s.string() }, {}) };
   const after = { projects, notes: s.table({ body: s.string() }, {}) };
@@ -37,7 +37,7 @@ it("accepts an exclusive read of an unchanged table after migration", async () =
     db = await createDb(account);
     const query = newApp.projects.where({ id: project.id });
     expect(await db.one(query, { tier: "remote" })).toEqual(project);
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     expect(await tx.one(query, { tier: "local-first" })).toEqual(project);
     await tx.commit().wait();
   } finally {
@@ -46,7 +46,7 @@ it("accepts an exclusive read of an unchanged table after migration", async () =
   }
 }, 30_000);
 
-it("preserves exclusive conflict detection after renaming the queried table", async () => {
+it("preserves serializable conflict detection after renaming the queried table", async () => {
   const before = { projects: s.table({ title: s.string() }, {}) };
   const after = { initiatives: s.table({ title: s.string() }, {}) };
   const oldApp = s.defineApp(before);
@@ -79,10 +79,10 @@ it("preserves exclusive conflict detection after renaming the queried table", as
     db = await createDb(account);
     writer = await createDb(await localAccountConfig(server.appId, server.url));
     expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
-    const stable = db.beginExclusiveTransaction();
+    const stable = db.beginSerializableTransaction();
     expect(await stable.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
     await stable.commit().wait();
-    const changed = db.beginExclusiveTransaction();
+    const changed = db.beginSerializableTransaction();
     expect(await changed.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
     // Admit the fresh writer's B schema without changing the existing reader cut.
     expect(await writer.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
@@ -90,7 +90,7 @@ it("preserves exclusive conflict detection after renaming the queried table", as
       .insert(newApp.initiatives, { title: "Concurrent project" })
       .wait({ tier: "global" });
     await expect(changed.commit().wait()).rejects.toMatchObject({
-      code: "exclusive_conflict",
+      code: "serialization_conflict",
     });
   } finally {
     await writer?.shutdown();

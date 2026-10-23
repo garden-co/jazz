@@ -203,15 +203,17 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       ).rejects.toThrow();
       const onError = vi.fn();
       founder.onMutationError(onError);
-      for (const kind of ["mergeable", "exclusive"] as const) {
+      for (const kind of ["mergeable", "serializable"] as const) {
         const tx =
-          kind === "exclusive" ? founder.beginExclusiveTransaction() : founder.beginTransaction();
+          kind === "serializable"
+            ? founder.beginSerializableTransaction()
+            : founder.beginTransaction();
         tx.insert(app.plaintext, { title: "Must not publish", done: false });
         tx.upsert(app.plaintext, crypto.randomUUID(), { done: true });
         await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow();
         expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([]);
       }
-      const callbackWrite = await founder.exclusiveTransaction((tx) => {
+      const callbackWrite = await founder.serializableTransaction((tx) => {
         const row = tx.insert(app.plaintext, { title: "Mapped callback", done: false });
         tx.upsert(app.plaintext, crypto.randomUUID(), { done: true });
         return row;
@@ -225,7 +227,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
         .wait({ tier: "local" });
       expect(await founder.all(app.plaintext, { tier: "local-first" })).toEqual([valid]);
       expect(onError).not.toHaveBeenCalled();
-      const unwaited = founder.beginExclusiveTransaction();
+      const unwaited = founder.beginSerializableTransaction();
       unwaited.insert(app.plaintext, { title: "Unwaited rejection", done: false });
       unwaited.upsert(app.plaintext, crypto.randomUUID(), { done: true });
       const rejected = unwaited.commit();
@@ -261,7 +263,7 @@ export async function runOfflineFounderScenario(scenario: FounderScenario) {
       return;
     }
 
-    const tx = founder.beginExclusiveTransaction();
+    const tx = founder.beginSerializableTransaction();
     const project = tx.insert(app.projects, { title: "Pending founder space" });
     const note = tx.insert(app.notes, {
       projectId: project.id,

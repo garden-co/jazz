@@ -11,7 +11,7 @@ export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
 
 export async function createChat(db: Db, ownerId: string) {
-  const tx = db.beginExclusiveTransaction();
+  const tx = db.beginSerializableTransaction();
   const chat = tx.insert(app.chats, { ownerId });
   // Upsert records exact point absence for these same-commit policy witnesses.
   tx.upsert(app.chatOwners, crypto.randomUUID(), { chatId: chat.id, accountId: ownerId });

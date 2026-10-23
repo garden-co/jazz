@@ -338,7 +338,13 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType, columnName?: 
       }
       return v.value.map((entry) => unwrapValue(entry));
     case "Row":
-      if (columnType?.type === "Row" && columnName && isProvenanceMagicColumn(columnName)) {
+      if (
+        columnType?.type === "Row" &&
+        columnName &&
+        (isProvenanceMagicColumn(columnName) ||
+          columnName === "$deletedBy" ||
+          columnName.startsWith("$deletedBy."))
+      ) {
         return Object.fromEntries(
           columnType.columns.map((column, index) => [
             column.name,

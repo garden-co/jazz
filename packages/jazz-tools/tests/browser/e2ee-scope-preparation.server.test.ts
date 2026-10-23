@@ -54,7 +54,7 @@ it.each([false, true])(
       // Attach the schema without requesting authority coverage. Public reads
       // propagate even at the local tier; a local catalogue probe does not.
       await db.tableIdentity(app.projects, true);
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Atomic scope" });
       const transactionId = tx.openTransactionId();
       source.client.prepareTransaction(transactionId, async () => {

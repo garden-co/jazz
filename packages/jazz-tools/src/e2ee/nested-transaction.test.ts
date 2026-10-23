@@ -85,7 +85,7 @@ it.each([
             store,
           },
         });
-      const write = db.beginExclusiveTransaction();
+      const write = db.beginSerializableTransaction();
       const project = write.insert(app.projects, { title: "Project" });
       const note = write.insert(app.notes, { project: project.id, title: "Private note" });
       await write.commit().wait({ tier: "global" });

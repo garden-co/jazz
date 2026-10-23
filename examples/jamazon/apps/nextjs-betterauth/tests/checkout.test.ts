@@ -200,15 +200,15 @@ describe("conflict retries", () => {
   const rejection = (code: string) =>
     new PersistedWriteRejectedError("tx" as never, code, "concurrent write");
 
-  it("retry local and authority exclusive conflicts", () => {
+  it("retry local and authority serializable conflicts", () => {
     expect(isRetryableConflict(rejection("transaction_conflict"))).toBe(true);
-    expect(isRetryableConflict(rejection("exclusive_conflict"))).toBe(true);
+    expect(isRetryableConflict(rejection("serialization_conflict"))).toBe(true);
     expect(isRetryableConflict(rejection("cascade_rejected"))).toBe(true);
   });
 
   it("do not retry other rejections or untyped errors", () => {
     expect(isRetryableConflict(rejection("policy_denied"))).toBe(false);
     expect(isRetryableConflict(new Error("(transaction_conflict): not typed"))).toBe(false);
-    expect(isRetryableConflict("exclusive_conflict")).toBe(false);
+    expect(isRetryableConflict("serialization_conflict")).toBe(false);
   });
 });

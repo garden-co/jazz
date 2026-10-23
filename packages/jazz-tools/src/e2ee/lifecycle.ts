@@ -1,4 +1,4 @@
-import { exclusiveE2eeTransaction } from "../runtime/db.js";
+import { serializableE2eeTransaction } from "../runtime/db.js";
 import { configureAcceptedHistory } from "./accepted-history.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -193,7 +193,7 @@ export async function assertSpaceWriteTransaction<T, Init>(
   db: Db,
   scope: TableProxy<T, Init>,
   identifier: string,
-  kind: "mergeable" | "exclusive",
+  kind: "mergeable" | "serializable",
   requireAccepted = false,
 ): Promise<void> {
   e2eeForDb(db);
@@ -258,7 +258,7 @@ export async function withSpaceKeys<T, Init>(
 export function beginInitialSpaceTransaction(
   db: Db,
   recipientIds?: readonly string[],
-): Transaction<"exclusive"> {
+): Transaction<"serializable"> {
   const recipients = recipientIds?.slice();
   return beginDbTransactionAfter(db, async () => {
     e2eeForDb(db);
@@ -269,7 +269,7 @@ export function beginInitialSpaceTransaction(
 /** @internal Not exported from the package API; used by transaction preparation. */
 export async function prepareInitialSpaceForTransaction<T, Init>(
   db: Db,
-  tx: Transaction<"exclusive">,
+  tx: Transaction<"serializable">,
   scope: TableProxy<T, Init>,
   identifier: string,
   prepareData: SpaceDataPreparation,
@@ -465,7 +465,7 @@ export class E2ee {
       this.assertOpen();
       if (material !== undefined) return this.inspectRecovery(material);
       await prefetchPublicMembershipHistory(this.db, this.account.id, this.app);
-      const read = await exclusiveE2eeTransaction(this.db, (tx) =>
+      const read = await serializableE2eeTransaction(this.db, (tx) =>
         readPublicMembershipHistory(tx, this.account.id, this.app),
       );
       const history = await read.wait({ tier: "global" });

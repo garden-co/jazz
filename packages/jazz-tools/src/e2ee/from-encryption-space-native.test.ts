@@ -188,7 +188,7 @@ async function fixture(denyMemberUpdates = false, ownNotesOnly = false) {
     const createProject = async (title: string, initialRecipients?: readonly string[]) => {
       for (const id of initialRecipients ?? [])
         await prefetchPublicMembershipHistory(owner.db, id, app);
-      const tx = owner.db.beginExclusiveTransaction();
+      const tx = owner.db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { ownerId: owner.id, title }, { initialRecipients });
       tx.insert(app.projectOwners, { projectId: project.id, accountId: owner.id });
       await tx.commit().wait({ tier: "global" });
@@ -356,7 +356,7 @@ it("fails missing and unaccepted space writes and atomically rejects denied memb
         .wait({ tier: "global" }),
     ).rejects.toMatchObject({ code: "space-not-initialised" });
     for (const upsert of [false, true]) {
-      const tx = owner.db.beginExclusiveTransaction();
+      const tx = owner.db.beginSerializableTransaction();
       const project = tx.insert(app.projects, { ownerId: owner.id, title: "Unaccepted" });
       tx.insert(app.projectOwners, { projectId: project.id, accountId: owner.id });
       if (upsert)
@@ -390,7 +390,7 @@ it("fails missing and unaccepted space writes and atomically rejects denied memb
 it("preserves atomic first writes and streams for explicit-policy siblings in the same scope", async () => {
   const { app, owner, close } = await fixture();
   try {
-    const tx = owner.db.beginExclusiveTransaction();
+    const tx = owner.db.beginSerializableTransaction();
     const project = tx.insert(app.projects, { ownerId: owner.id, title: "Atomic explicit policy" });
     tx.insert(app.projectOwners, { projectId: project.id, accountId: owner.id });
     tx.insert(app.drafts, { projectId: project.id, body: "First" });

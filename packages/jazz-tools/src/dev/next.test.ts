@@ -213,10 +213,10 @@ describe("withJazz", () => {
             assert.ok(staged instanceof StagedStreamingMutation);
             assert.deepEqual(await rows(), []);
             const transaction = createOpenTransactionId();
-            db.beginTransaction(transaction, "exclusive");
+            db.beginTransaction(transaction, "serializable");
             staged.attach(transaction);
             assert.deepEqual(await rows(), []);
-            write = db.commitTransaction(transaction, "exclusive");
+            write = db.commitTransaction(transaction, "serializable");
             await write.wait("local");
             const published = await rows();
             assert.equal(published.length, 1);

@@ -152,7 +152,7 @@ it("retries enrollment and keeps immutable administration isolated", async () =>
     // before the administration denials below.
     // An unauthorized candidate must not authorize descendants or partially
     // publish an otherwise legitimate room in the same exclusive transaction.
-    const forged = outsider.beginExclusiveTransaction();
+    const forged = outsider.beginSerializableTransaction();
     const forgedChat = forged.insert(app.chats, { ownerId: configs[2]!.account.id });
     const forgedBindingId = crypto.randomUUID();
     forged.upsert(app.chatOwners, forgedBindingId, {

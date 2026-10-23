@@ -16,7 +16,7 @@ it("returns rows and settlement evidence together from one native read", async (
   );
   const transaction = createOpenTransactionId();
   try {
-    db.beginTransaction(transaction, "exclusive");
+    db.beginTransaction(transaction, "serializable");
     const reading = db.allSettlementMetadata(
       queryFromTable("notes"),
       { tier: "local-only" },

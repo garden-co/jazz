@@ -32,7 +32,7 @@ function deferred() {
 it("drains preparation, seals without publication, then publishes the exact reserved unit once", async () => {
   const owner = await client();
   const foreign = await client();
-  const id = owner.beginTransaction("exclusive");
+  const id = owner.beginTransaction("serializable");
   const rowId = crypto.randomUUID();
   const entered = deferred();
   const release = deferred();
@@ -75,7 +75,7 @@ it.each(["cancel", "rollback"])(
   "abandons a sealed unit via %s without exposing rows or reusing its reservation",
   async (action) => {
     const owner = await client();
-    const id = owner.beginTransaction("exclusive");
+    const id = owner.beginTransaction("serializable");
     await owner.prepareTransaction(id, async (io) => {
       const row = crypto.randomUUID();
       await io.recordInitializationInsertAbsence("notes", row);
@@ -90,7 +90,9 @@ it.each(["cancel", "rollback"])(
     else await owner.rollbackTransaction(id);
     await expect(owner.publishInitializationTransaction(seal)).rejects.toThrow(/consumed/);
     expect(await owner.queryInternal(query, { tier: "local-first" })).toEqual([]);
-    const second = await owner.sealInitializationTransaction(owner.beginTransaction("exclusive"));
+    const second = await owner.sealInitializationTransaction(
+      owner.beginTransaction("serializable"),
+    );
     expect(second.reservedTxId).not.toBe(seal.reservedTxId);
     await owner.cancelInitializationTransaction(second);
   },
@@ -98,7 +100,7 @@ it.each(["cancel", "rollback"])(
 
 it("failed preparation cannot publish a partial initialization unit", async () => {
   const owner = await client();
-  const id = owner.beginTransaction("exclusive");
+  const id = owner.beginTransaction("serializable");
   void owner.prepareTransaction(id, async (io) => {
     io.insertInternal("notes", { text: { type: "Text", value: "rolled back" } });
     throw new Error("durable preparation failed");
