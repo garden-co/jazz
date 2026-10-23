@@ -571,6 +571,14 @@ pub(crate) struct Gate {
 }
 
 impl Gate {
+    /// Whether the read may keep waiting: its deadline has not passed and
+    /// the link may still answer.
+    pub(crate) fn may_still_wait(&self) -> bool {
+        self.deadline
+            .is_none_or(|deadline| Instant::now() < deadline)
+            && may_wait(self.hint.get())
+    }
+
     pub(crate) fn open(&self) -> bool {
         if self.answered.get() {
             return true;
@@ -1779,6 +1787,47 @@ impl Inner {
 
     fn evict(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<(), Error> {
         self.drop_row(table, row, key, 0)
+    }
+
+    /// The server accepted this replica's commit `tx` at `through` but will
+    /// not ship rows it wrote that the reader cannot read (a write-only
+    /// insert). Those versions are the replica's own writes: they stay, as
+    /// settled at `through`, rather than vanishing on the rebase.
+    fn keep_unlisted_own(&mut self, tx: u64, through: u64) -> Result<(), Error> {
+        let client = self.client.as_ref().expect("client");
+        let Some(pending) = client.pending.iter().find(|p| p.tx == tx) else {
+            return Ok(());
+        };
+        let rows = pending.rows.clone();
+        for (table, row, key) in rows {
+            let unlisted = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM _jazz_revoked WHERE t = ?1 AND id = ?2 AND k = ?3",
+                    rusqlite::params![table, row.0.as_bytes().to_vec(), key],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(storage)?
+                .is_some();
+            let unsettled = matches!(
+                self.client.as_ref().expect("client").shadow.get(&(
+                    table.clone(),
+                    row,
+                    key.clone()
+                )),
+                Some(None)
+            );
+            if !(unlisted && unsettled) {
+                continue;
+            }
+            if let Some(mut image) = self.current_image(&table, row, &key)? {
+                image.seq = through;
+                let client = self.client.as_mut().expect("client");
+                client.shadow.insert((table, row, key), Some(image));
+            }
+        }
+        Ok(())
     }
 
     /// Forget that the server stopped listing a row ([`Inner::unlist`]).
@@ -3079,13 +3128,16 @@ impl Db {
                         through,
                         result,
                     } => {
+                        let accepted = result.is_ok();
+                        if accepted {
+                            inner.keep_unlisted_own(tx, through)?;
+                        }
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         client.pending.retain(|p| p.tx != tx);
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
-                        let accepted = result.is_ok();
                         client.fates.insert(tx, result.map_err(from_wire_error));
                         let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {

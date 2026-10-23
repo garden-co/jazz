@@ -87,6 +87,11 @@ pub(super) struct Group {
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    /// Whether the last run waits on large-value chunks still to arrive.
+    pub(super) fn awaiting(&self) -> bool {
+        self.awaiting
+    }
+
     /// The query this group answers.
     pub(super) fn query(&self) -> &Query {
         &self.prepared.query
@@ -1284,6 +1289,13 @@ fn row_key(row: &CurrentRow) -> RowKey {
 }
 
 /// The keyed diff of two results, or `None` when nothing changed.
+/// A row with the same cells at a newer version (a same-value write: its
+/// metadata moved). A pending local version settling as the server's is
+/// the same write, not a new one.
+fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
+    prior.seq != row.seq && !(prior.seq >= crate::db::LOCAL_BASE && row.seq < crate::db::LOCAL_BASE)
+}
+
 fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
     let old: HashMap<RowKey, (usize, &CurrentRow)> = before
         .iter()
@@ -1304,6 +1316,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
             Some((previous, prior))
                 if prior.cells != row.cells
                     || prior.deleted != row.deleted
+                    || new_version(prior, row)
                     || moved.contains(&row_key(row)) =>
             {
                 updated.push(SubscriptionOutputRow {
