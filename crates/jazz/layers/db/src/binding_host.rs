@@ -1082,6 +1082,66 @@ impl Binding {
         })))
     }
 
+    /// Paired accepted content and settlement metadata for one serializable
+    /// transaction. The read registers before its returned future is polled.
+    pub fn all_settlement_metadata<O: HostObject>(
+        &self,
+        query: Vec<u8>,
+        options: &O,
+        open_transaction_id: &str,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+        include_rows: bool,
+    ) -> HostResult<HostFuture<Vec<u8>>> {
+        let opts = read_opts(options)?;
+        let snapshot_at_begin = options
+            .get("e2ee_snapshot_at_begin")?
+            .map(|value| O::boolean(&value).ok_or("e2ee_snapshot_at_begin must be a boolean"))
+            .transpose()?
+            .unwrap_or(opts.tier == ReadTier::LocalOnly);
+        let id = open_transaction(open_transaction_id)?;
+        let explicit = author.is_some();
+        let author = self.read_author(author)?;
+        let query: Query = postcard::from_bytes(&query)
+            .map_err(|e| HostError::Argument(format!("undecodable query: {e}")))?;
+        let mut prepared = self.db.prepare_query(&query)?;
+        if let (true, Some(author)) = (explicit, author) {
+            prepared = prepared.with_identity_claims(
+                author,
+                self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
+            );
+        }
+        let read = self
+            .db
+            .all_settled(prepared, opts, id, snapshot_at_begin, author)?;
+        Ok(Box::pin(self.hooks.progress.parked(async move {
+            let result = read.await?;
+            let metadata = result
+                .rows
+                .iter()
+                .zip(&result.settlements)
+                .map(|(row, (tx, position))| {
+                    serde_json::json!({ "rowId": row.row_uuid().0.to_string(),
+                    "transactionId": TransactionId::from_committed_tx(*tx).to_string(),
+                    "position": position.0.to_string() })
+                })
+                .collect::<Vec<_>>();
+            let metadata =
+                serde_json::to_vec(&metadata).map_err(|e| HostError::Argument(e.to_string()))?;
+            if !include_rows {
+                return Ok(metadata);
+            }
+            // Existing jazz.binding.settled-rows.v1: u32LE JSON byte length,
+            // UTF-8 metadata, then the ordinary binding row codec.
+            let length =
+                u32::try_from(metadata.len()).map_err(|_| "settled-row metadata is too large")?;
+            let mut bytes = length.to_le_bytes().to_vec();
+            bytes.extend(metadata);
+            bytes.extend(crate::binding_codec::encode_rows(&result.rows)?);
+            Ok(bytes)
+        })))
+    }
+
     /// Subscribe to a postcard query. A remote attachment goes upstream on
     /// the next tick.
     pub fn subscribe<O: HostObject>(
