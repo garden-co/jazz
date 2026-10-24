@@ -21,7 +21,8 @@ async function healthy(base, timeoutMs) {
       const r = await fetch(`${base}/health`, { signal: AbortSignal.timeout(2000) });
       if (r.ok) return true;
     } catch {}
-    await new Promise((r) => setTimeout(r, 50));
+    // Short gap: every 10 ms a waiting client spends here is wake latency.
+    await new Promise((r) => setTimeout(r, 10));
   }
   return false;
 }
@@ -31,15 +32,14 @@ async function startServer(sbx, exe, shell = true) {
   if (!shell) {
     // Images without a shell: run the binary directly. Its output stays in
     // the Sandbox's command log.
-    await sbx.runCommand({
+    return sbx.runCommand({
       cmd: exe,
       args: ["server", APP_ID, "--port", String(PORT), "--data-dir", "/data/jazz"],
       env: { JAZZ_ADMIN_SECRET: process.env.SPIKE_ADMIN_SECRET, RUST_LOG: "info" },
       detached: true,
     });
-    return;
   }
-  await sbx.runCommand({
+  return sbx.runCommand({
     cmd: "bash",
     args: [
       "-lc",
@@ -75,8 +75,11 @@ export async function ensureCore({
   const mounts = { "/data": { drive: data, mode: "read-write" } };
   if (!image) mounts["/opt/jazz"] = { drive: bin, mode: "snapshot" };
   const t0 = performance.now();
+  // Wall-clock marks, to line up with the server's own startup timeline.
+  const epochs = { call: Date.now() };
   const timings = {};
   let started = false;
+  let command = null;
   const sbx = await Sandbox.getOrCreate({
     name,
     region: "iad1",
@@ -91,7 +94,9 @@ export async function ensureCore({
     ...creds,
     onResume: async (s) => {
       timings.resumed = since(t0);
-      await startServer(s, exe, shell);
+      epochs.resumed = Date.now();
+      command = await startServer(s, exe, shell);
+      epochs.spawned = Date.now();
       started = true;
     },
   });
@@ -100,11 +105,52 @@ export async function ensureCore({
   // A session that was already running keeps its server; a fresh one
   // (created, not resumed) still needs it started.
   if (!started && !(await healthy(base, 300))) {
-    await startServer(sbx, exe, shell);
+    epochs.resumed = Date.now();
+    command = await startServer(sbx, exe, shell);
+    epochs.spawned = Date.now();
     started = true;
   }
   timings.spawned = since(t0);
   const ok = await healthy(base, 60_000);
   timings.healthy = since(t0);
-  return { sbx, base, ok, started, timings, session: sbx.currentSession?.()?.sessionId };
+  epochs.healthy = Date.now();
+  return {
+    sbx,
+    base,
+    ok,
+    started,
+    timings,
+    epochs,
+    command,
+    session: sbx.currentSession?.()?.sessionId,
+  };
+}
+
+/**
+ * Read the server's startup timeline (`jazz_server::startup` lines) from
+ * its command log, for at most `waitMs`.
+ */
+export async function startupTimeline(command, waitMs = 3000) {
+  const steps = {};
+  let main = null;
+  const signal = AbortSignal.timeout(waitMs);
+  let buffer = "";
+  try {
+    for await (const log of command.logs({ signal })) {
+      buffer += log.data;
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).replace(/\x1b\[[0-9;]*m/g, "");
+        buffer = buffer.slice(newline + 1);
+        const m = line.match(
+          /step="?([a-z_.]+)"? us=(\d+) main_epoch_us=(\d+) main_uptime_ms=(\d+)/,
+        );
+        if (!m) continue;
+        steps[m[1]] = Number(m[2]);
+        main = { epoch_ms: Number(m[3]) / 1000, uptime_ms: Number(m[4]) };
+      }
+      if ("bound" in steps) break;
+    }
+  } catch {}
+  return { steps, main };
 }

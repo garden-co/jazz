@@ -1,7 +1,7 @@
 // Control endpoint for the spike: shard lifecycle and commands inside the
 // shard's sandbox. Guarded by SPIKE_CTL_SECRET; never part of a real app.
 import { Drive, Sandbox } from "@vercel/sandbox";
-import { drive, ensureCore } from "../lib/core.js";
+import { drive, ensureCore, startupTimeline } from "../lib/core.js";
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body, null, 2), {
@@ -39,12 +39,16 @@ export async function GET(request) {
           image: q.get("image") ?? undefined,
           shell: q.get("shell") !== "0",
         });
+        const profile =
+          q.get("profile") === "1" && r.command ? await startupTimeline(r.command) : undefined;
         return json({
           base: r.base,
           ok: r.ok,
           started: r.started,
           session: r.session,
           timings: r.timings,
+          epochs: r.epochs,
+          profile,
         });
       }
       case "config": {
