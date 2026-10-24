@@ -394,6 +394,9 @@ struct Inner {
     catalogue_cache_required: bool,
     /// Shared by every view; observation moves the capture once.
     catalogue_capture_pending: std::cell::Cell<bool>,
+    /// Policies for views admitted from authenticated authority metadata. Kept
+    /// separately from the replica's caller-supplied, possibly policy-free owner.
+    view_policy_source: Option<Rc<Schema>>,
     candidate_checks: RefCell<Option<Vec<candidates::DeferredCheck>>>,
     candidate_read_evidence: Option<crate::compile::CandidateEvidence>,
     /// Large-value chunks: the cache the collation and decoders read.
@@ -972,6 +975,7 @@ impl Db {
                 conn,
                 catalogue_cache_required,
                 catalogue_capture_pending: std::cell::Cell::new(true),
+                view_policy_source: None,
                 candidate_checks: RefCell::new(None),
                 candidate_read_evidence: None,
                 chunks,
@@ -1072,7 +1076,11 @@ impl Db {
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self
+            .view
+            .as_ref()
+            .map(|view| inner.effective_schema(view))
+            .unwrap_or_else(|| inner.owner.clone());
         inner
     }
 
@@ -1975,6 +1983,30 @@ impl MergeableTx<'_> {
 }
 
 impl Inner {
+    /// A retained handle pins names, not an authority's old permission grant.
+    /// Plain local views retain their exact policy contract.
+    fn effective_schema(&self, schema: &Rc<Schema>) -> Rc<Schema> {
+        let Some(previous) = &schema.policies_from else {
+            return schema.clone();
+        };
+        let current = self.view_policy_source.as_ref().unwrap_or(&self.owner);
+        if Rc::ptr_eq(previous, current) {
+            schema.clone()
+        } else {
+            Rc::new((**schema).clone().with_policies_of(current.clone()))
+        }
+    }
+
+    /// Keep the owner's compatible physical defaults and indexes when adopting
+    /// the authority's policy semantics for the same structural schema.
+    fn named_policy_schema(&self, policies: &JazzSchema) -> Schema {
+        if policies.version_id() == self.owner.jazz.version_id() {
+            self.named(&self.owner.jazz.with_permissions_from(policies))
+        } else {
+            self.named(policies)
+        }
+    }
+
     /// An admitted schema under the names this store keeps it by.
     fn named(&self, schema: &JazzSchema) -> Schema {
         match self.names.get(&schema.version_id()) {
@@ -2025,9 +2057,9 @@ impl Inner {
     ) -> Result<Compiled, Error> {
         self.require_owner_subject(identity.unwrap_or(self.identity.author))?;
         let (policy, claims) = self.read_sessions(prepared, identity);
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
-        self.require_catalogue_schema(schema)?;
-        let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
+        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
+        self.require_catalogue_schema(&schema)?;
+        let compiled = Ctx::new(&schema, policy.as_ref(), &claims, &prepared.binding)
             .with_candidate_evidence(self.candidate_read_evidence)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
@@ -3973,10 +4005,38 @@ impl Db {
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
+            let authenticated =
+                inner.client.is_some() && inner.catalogue_schema(version)?.is_some();
+            if authenticated {
+                let descriptor = inner.policy_descriptor()?;
+                let policy_free = schema == schema.without_permissions();
+                let exact = descriptor.as_ref().is_some_and(|descriptor| {
+                    descriptor.schema.id == version
+                        && same_tables(&descriptor.schema.schema, &schema, |l, r| {
+                            l.read_policy == r.read_policy && l.write_policies == r.write_policies
+                        })
+                });
+                if !policy_free && !exact {
+                    return Err(schema_error(
+                        "schema view policy metadata conflicts with its admitted structural schema",
+                    ));
+                }
+                // This view's permissions come from authenticated metadata,
+                // never from the caller. A split head/descriptor denies access.
+                if inner.view_policy_source.is_none() {
+                    inner.view_policy_source =
+                        Some(Rc::new(inner.named_policy_schema(&descriptor.map_or_else(
+                            || inner.owner.jazz.without_permissions(),
+                            |descriptor| descriptor.schema.schema,
+                        ))));
+                }
+            }
             if let Some(admitted) = inner.admitted.iter().find(|a| a.version_id() == version) {
-                if !same_tables(admitted, &schema, |l, r| {
-                    l.read_policy == r.read_policy && l.write_policies == r.write_policies
-                }) {
+                if !authenticated
+                    && !same_tables(admitted, &schema, |l, r| {
+                        l.read_policy == r.read_policy && l.write_policies == r.write_policies
+                    })
+                {
                     return Err(schema_error(
                         "schema view policy metadata conflicts with its admitted structural schema",
                     ));
@@ -4007,7 +4067,11 @@ impl Db {
                 .views
                 .entry(SchemaViewId::for_schema(&schema))
                 .or_insert(schema);
-            logical
+            if authenticated {
+                logical.with_policies_of(inner.view_policy_source.as_ref().unwrap().clone())
+            } else {
+                logical
+            }
         };
         Ok(Db {
             inner: self.inner.clone(),

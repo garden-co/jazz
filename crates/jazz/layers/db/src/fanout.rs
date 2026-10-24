@@ -407,9 +407,9 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
-        self.require_catalogue_schema(schema)?;
-        let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
+        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
+        self.require_catalogue_schema(&schema)?;
+        let compiled = Ctx::new(&schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
@@ -427,7 +427,7 @@ impl Inner {
         read: &ReadSpec,
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -678,9 +678,8 @@ impl Inner {
             if reset
                 && let Some(pinned) = &group.prepared.schema
                 && pinned.policies_from.is_some()
-                && let Some(governed) = self.governed(pinned.jazz.version_id())
             {
-                group.prepared.schema = Some(governed);
+                group.prepared.schema = Some(self.effective_schema(pinned));
             }
             let old = std::mem::take(&mut group.watches);
             self.fan.unindex(gid, &old);
