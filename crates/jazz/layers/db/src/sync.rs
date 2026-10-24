@@ -6979,6 +6979,55 @@ impl Db {
     {
         let query: Query = postcard::from_bytes(query)
             .map_err(|e| Error::new(ErrorCode::Query, format!("undecodable query: {e}")))?;
+        let wait = match (opts.tier, opts.first_load) {
+            (ReadTier::Remote, _) => Some(None),
+            (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) if timeout_ms > 0 => {
+                Some(Some(
+                    Instant::now() + std::time::Duration::from_millis(timeout_ms),
+                ))
+            }
+            _ => None,
+        };
+        let frozen = open_tx.is_none() && ReadSpec::of(&opts, &self.inner())?.frozen();
+        if open_tx.is_none()
+            && !frozen
+            && self.is_client()
+            && let Some(deadline) = wait
+        {
+            let (needed, opened, scope) = {
+                let inner = self.inner();
+                let scope = request_scope.clone().or_else(|| {
+                    author
+                        .filter(|author| {
+                            *author != AuthorSubject::SYSTEM && *author != inner.identity.author
+                        })
+                        .map(|author| {
+                            (
+                                author,
+                                inner.claims.get(&author).cloned().unwrap_or_default(),
+                            )
+                        })
+                });
+                (
+                    inner.needs_catalogue_schema(&inner.schema)?,
+                    inner.schema.jazz.version_id(),
+                    scope,
+                )
+            };
+            if needed {
+                // A stale host cache is not a refusal from the authority. Obtain
+                // its exact schema receipt before preparing the ordinary query;
+                // local-only/frozen/transaction reads never fetch admission here.
+                let limit = Instant::now() + std::time::Duration::from_secs(15);
+                self.fetch_catalogue_until(
+                    &query.table,
+                    opened,
+                    scope,
+                    deadline.map_or(limit, |d| d.min(limit)),
+                )
+                .await?;
+            }
+        }
         let mut prepared = self.prepare_query(&query)?;
         if let Some((author, claims)) = request_scope {
             prepared = prepared.with_identity_claims(author, claims);
@@ -7003,7 +7052,6 @@ impl Db {
                 .await?;
             return Ok(result(rows));
         }
-        let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
         if self.inner().non_durable
             && self.is_client()
             && opts.tier != ReadTier::LocalOnly
@@ -7021,6 +7069,15 @@ impl Db {
             // A temporary normal subscription provides both owner-local and
             // authority settlement, including an empty answer. Its drop releases
             // the upstream attachment on success, refusal or cancellation.
+            let mut opts = opts;
+            if let Some(Some(deadline)) = wait {
+                // Catalogue admission has already consumed part of this wait.
+                opts.first_load = FirstLoad::WaitForRemote {
+                    timeout_ms: deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64,
+                };
+            }
             let mut stream = self.open_subscription(&prepared, author, opts)?;
             let rows = poll_fn(|_| {
                 if let Some(error) = stream
@@ -7047,71 +7104,66 @@ impl Db {
             .await?;
             return Ok(result(rows));
         }
-        if self.is_client() && opts.tier != ReadTier::LocalOnly && !frozen {
-            let wait = match (opts.tier, &opts.first_load) {
-                (ReadTier::Remote, _) => Some(None),
-                (_, FirstLoad::WaitForRemote { timeout_ms }) if *timeout_ms > 0 => Some(Some(
-                    Instant::now() + std::time::Duration::from_millis(*timeout_ms),
-                )),
-                _ => None,
-            };
-            if let Some(deadline) = wait {
-                if author.is_some_and(|author| {
-                    author != AuthorSubject::SYSTEM && author != self.inner().identity.author
-                }) || prepared.request_claims.is_some()
-                {
-                    self.check_scoped_fetch(&prepared)?;
-                    let identity = author.unwrap_or(self.inner().identity.author);
-                    let claims = match &prepared.request_claims {
-                        Some((requested, claims)) if *requested == identity => claims.clone(),
-                        Some(_) => {
-                            return Err(Error::new(
-                                ErrorCode::Query,
-                                "request claims differ from the read identity",
-                            ));
-                        }
-                        None => self
-                            .inner()
-                            .claims
-                            .get(&identity)
-                            .cloned()
-                            .unwrap_or_default(),
-                    };
-                    let answer = self
-                        .fetch_answer(
-                            &prepared,
-                            None,
-                            opts.read_view.include_deleted,
-                            deadline,
-                            Some((identity, claims)),
-                            false,
-                        )
-                        .await?;
-                    if let Some((through, rows)) = answer {
-                        // Only these authority-approved roots, at this cut, belong
-                        // to this request. Other cached or pending rows do not.
-                        let exact = scoped_result_query(&prepared, rows);
-                        let read = ReadSpec {
-                            cut: Some(Cut::at(through)),
-                            include_deleted: opts.read_view.include_deleted,
-                            ..ReadSpec::default()
-                        };
-                        let rows = self.inner().run(&exact, Some(identity), &read)?;
-                        return Ok(result(rows));
-                    }
-                    if opts.tier == ReadTier::Remote {
+        if self.is_client()
+            && opts.tier != ReadTier::LocalOnly
+            && !frozen
+            && let Some(deadline) = wait
+        {
+            if author.is_some_and(|author| {
+                author != AuthorSubject::SYSTEM && author != self.inner().identity.author
+            }) || prepared.request_claims.is_some()
+            {
+                self.check_scoped_fetch(&prepared)?;
+                let identity = author.unwrap_or(self.inner().identity.author);
+                let claims = match &prepared.request_claims {
+                    Some((requested, claims)) if *requested == identity => claims.clone(),
+                    Some(_) => {
                         return Err(Error::new(
-                            ErrorCode::NotObserved,
-                            "scoped remote read has no available authority",
+                            ErrorCode::Query,
+                            "request claims differ from the read identity",
                         ));
                     }
-                    // A local-first deadline may return the locally permitted
-                    // cache; it never promotes it to an authoritative answer.
-                } else {
-                    Self::remote_shape(&prepared.query)?;
-                    self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
-                        .await?;
+                    None => self
+                        .inner()
+                        .claims
+                        .get(&identity)
+                        .cloned()
+                        .unwrap_or_default(),
+                };
+                let answer = self
+                    .fetch_answer(
+                        &prepared,
+                        None,
+                        opts.read_view.include_deleted,
+                        deadline,
+                        Some((identity, claims)),
+                        false,
+                    )
+                    .await?;
+                if let Some((through, rows)) = answer {
+                    // Only these authority-approved roots, at this cut, belong
+                    // to this request. Other cached or pending rows do not.
+                    let exact = scoped_result_query(&prepared, rows);
+                    let read = ReadSpec {
+                        cut: Some(Cut::at(through)),
+                        include_deleted: opts.read_view.include_deleted,
+                        ..ReadSpec::default()
+                    };
+                    let rows = self.inner().run(&exact, Some(identity), &read)?;
+                    return Ok(result(rows));
                 }
+                if opts.tier == ReadTier::Remote {
+                    return Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "scoped remote read has no available authority",
+                    ));
+                }
+                // A local-first deadline may return the locally permitted
+                // cache; it never promotes it to an authoritative answer.
+            } else {
+                Self::remote_shape(&prepared.query)?;
+                self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
+                    .await?;
             }
         }
         let inner = self.inner();
@@ -7263,6 +7315,17 @@ impl Db {
         scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
     ) -> Result<(), Error> {
         let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        self.fetch_catalogue_until(table, opened, scope, deadline)
+            .await
+    }
+
+    async fn fetch_catalogue_until(
+        &self,
+        table: &str,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        deadline: Instant,
+    ) -> Result<(), Error> {
         let _wake = self.read_deadline(Some(deadline));
         let _attempt = self.read_attempt_deadline();
         let (id, connection) = {
