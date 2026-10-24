@@ -36,6 +36,8 @@ export async function GET(request) {
           data: q.get("data") ?? `${name}-data`,
           vcpus: Number(q.get("vcpus") ?? 1),
           timeoutMs: Number(q.get("timeout_ms") ?? 3_600_000),
+          image: q.get("image") ?? undefined,
+          shell: q.get("shell") !== "0",
         });
         return json({
           base: r.base,
@@ -76,10 +78,17 @@ export async function GET(request) {
       }
       case "exec": {
         const sbx = await Sandbox.get({ name });
+        // vcr=1 hands the command this function's project-scoped OIDC token,
+        // which Vercel Container Registry accepts for pushes (user "oidc").
+        const env =
+          q.get("vcr") === "1"
+            ? { VCR_TOKEN: request.headers.get("x-vercel-oidc-token") ?? "" }
+            : {};
         const cmd = await sbx.runCommand({
           cmd: "bash",
           args: ["-lc", q.get("cmd")],
           sudo: q.get("sudo") === "1",
+          env,
         });
         return json({
           exit: cmd.exitCode,
