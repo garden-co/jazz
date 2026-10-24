@@ -33,6 +33,10 @@ getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
 sqlite-wasm-rs = { version = "0.5", default-features = false }
 sqlite-wasm-vfs = "0.2"
+# The paged IndexedDB spike (`browser-bench` only).
+rsqlite-vfs = { version = "0.1", optional = true }
+indexed_db_futures = { version = "0.6.4", optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
@@ -51,7 +55,7 @@ web-sys = { version = "0.3", features = [
 default = ["console_error_panic_hook", "transport-compression-ruzstd"]
 bench-probes = []
 # Browser store comparison probes (IndexedDB vs OPFS); never in release builds.
-browser-bench = []
+browser-bench = ["dep:rsqlite-vfs", "dep:indexed_db_futures", "dep:tokio"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
