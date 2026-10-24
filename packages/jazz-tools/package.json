@@ -182,6 +182,7 @@
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
     "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
+    "test:browser:sqlite-e2ee": "pnpm exec vitest run --config vitest.config.browser-e2ee-sqlite.ts",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:transport": "node --test scripts/evaluate-harness.test.mjs",
     "test:browser:contract": "node scripts/test-browser-focused.test.mjs",

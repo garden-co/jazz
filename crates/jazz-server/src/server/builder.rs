@@ -1101,7 +1101,7 @@ mod tests {
             .unwrap();
         super::super::runtime_catalogue::publish_runtime_catalogue(
             &core.state,
-            &[target.clone()],
+            std::slice::from_ref(&target),
             &[lens],
         )
         .await
@@ -1117,7 +1117,6 @@ mod tests {
             None,
         )
         .await
-        .ok()
         .expect("activate descendant");
         core.shutdown().await;
         drop(core);

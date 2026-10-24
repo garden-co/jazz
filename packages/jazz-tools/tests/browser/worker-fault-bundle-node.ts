@@ -9,7 +9,7 @@ import type { Plugin } from "vite";
 const runNode = promisify(execFile);
 const worktreeRoot = fileURLToPath(new URL("../../../..", import.meta.url));
 const bundlerUrl = new URL("../../scripts/bundle-broker-worker.mjs", import.meta.url).href;
-const workerEntry = fileURLToPath(new URL("./jazz-broker-worker-test.ts", import.meta.url));
+const faultWorkerEntry = fileURLToPath(new URL("./jazz-broker-worker-test.ts", import.meta.url));
 
 type FixtureAsset = { path: string; contentType: string };
 const assetRegistryKey = Symbol.for("jazz-tools.browser-worker-fault-assets.v1");
@@ -26,8 +26,26 @@ export function createWorkerFaultBundleFixture(wasmPackage: string | undefined):
   plugin: Plugin;
   url(): Promise<string>;
 } {
+  return createWorkerBundleFixture(wasmPackage, faultWorkerEntry);
+}
+
+/** Serve the shipping worker unchanged, outside Vitest's page instrumentation. */
+export function createProductionWorkerBundleFixture(wasmPackage: string) {
+  return createWorkerBundleFixture(
+    wasmPackage,
+    fileURLToPath(new URL("../../src/worker/jazz-broker-worker.ts", import.meta.url)),
+  );
+}
+
+function createWorkerBundleFixture(
+  wasmPackage: string | undefined,
+  workerEntry: string,
+): {
+  plugin: Plugin;
+  url(): Promise<string>;
+} {
   // The admitted package path identifies an immutable sealed WASM/glue pair.
-  const identity = JSON.stringify([worktreeRoot, wasmPackage && resolve(wasmPackage)]);
+  const identity = JSON.stringify([worktreeRoot, wasmPackage && resolve(wasmPackage), workerEntry]);
   const assets = assetRegistry.get(identity) ?? new Map<string, FixtureAsset>();
   assetRegistry.set(identity, assets);
   // Re-evaluating the config must build fresh source, not reuse an older bundle.

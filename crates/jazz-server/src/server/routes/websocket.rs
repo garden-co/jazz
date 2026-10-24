@@ -795,24 +795,6 @@ async fn handle_ws_connection(
                 return;
             }
         };
-    // The relay tier is designed but not built on SQLite: refuse a valid
-    // relay request for good rather than as a retryable failure.
-    if matches!(
-        link_admission,
-        ServerLinkAdmission::ScopeIsolatedClientRelay { .. }
-    ) {
-        send_ws_error(
-            &mut socket,
-            WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::Never,
-                "scope-isolated client relays are not supported yet on SQLite",
-            ),
-        )
-        .await;
-        let _ = socket.close().await;
-        return;
-    }
     let session = match core_server_shell
         .open_with_session_context(
             admission.identity,

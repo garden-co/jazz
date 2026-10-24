@@ -1,0 +1,82 @@
+# SQLite private-owner WebSocket admission
+
+An authenticated browser storage owner can now open the existing
+`scope_isolated_client_relay` link to the SQLite server. Previously the server
+refused every such connection with `UnsupportedFeature`, even after successful
+session authentication and feature negotiation. That stopped the production
+SharedWorker before encrypted application reads and writes could reach the
+server.
+
+## Admission and permissions
+
+The runtime requires an ordinary authenticated session, the negotiated
+`FEATURE_SCOPE_ISOLATED_CLIENT_RELAY` feature and a non-zero server-issued
+admission epoch. SYSTEM, anonymous and trusted backend/authority identities
+cannot use this runtime admission mode. The WebSocket route continues to
+normalise an actual backend or admin credential to its ordinary trusted link;
+requesting the browser capability does not change that credential's authority.
+
+The accepted link runs as its immutable session identity with the claims supplied
+by authentication. It does not become SYSTEM. Existing permission, account
+revocation, resource-budget and shutdown checks remain on the normal route.
+
+For example, Alice's two tabs can upload their own original `(node, transaction)`
+pairs through Alice's owner. Each receives the authority's real receipt. Alice
+cannot label an upload as Bob, replace her authenticated claims with Bob's, or
+read as Bob. The backend-only scoped-fetch and accepted-overlay-check operations
+remain refused on this connection, even when Alice requests her own identity.
+
+Two tabs may use the same local transaction number. Their node identifiers keep
+the receipts distinct. Retrying those exact uploads after a persistent authority
+restart returns the stored receipts and creates no duplicate rows.
+
+## Protocol compatibility
+
+This port changes admission behaviour, not wire or storage bytes. It uses the
+existing `jazz-websocket-prelude-v1` requested-link field, feature bit, server Hello,
+SQLite upload format and origin-qualified fate encoding. The shared prelude
+fixture and all message discriminants are unchanged. The server issues a fresh
+endpoint epoch on each accepted connection; it never takes an epoch supplied by
+the browser as authentication.
+
+An older SQLite server still refuses the private-owner link. Deploy the server
+port before relying on this browser path. The rest of the E2EE stack retains its
+own coordinated-upgrade requirements, including the newer scoped-evidence and
+accepted-overlay messages. This admission change does not port the separate
+stateless server-relay role or alter the accepted-read limits.
+
+## Reproducible browser check
+
+From the repository root, with dependencies installed:
+
+```sh
+pnpm --filter jazz-wasm build:fast
+pnpm --filter jazz-tools test:browser:sqlite-e2ee
+```
+
+This dedicated Chromium suite verifies the current WASM producer manifest,
+generates its SDK fingerprint expectation from that verified manifest, and
+checks provenance again after the run. It builds the actual `jazz-tools` server
+binary from this checkout and starts it on an ephemeral port. It bundles the
+production SharedWorker into a private test directory. It neither loads NAPI nor
+substitutes a test worker for the application worker. The ordinary dual-artifact
+correctness runner is unchanged.
+
+The browser tests use local-first accounts and separate persistent owner roots
+in one browser origin. They cover encrypted chat creation, global settlement,
+reopening and decryption, sharing with a second account, a reply delivered through
+a live subscription, and refusal to decrypt for an unshared third account. The
+four existing SQLite browser-storage tests also run in this suite. These cases
+do not establish independent-profile interoperability, crash recovery at every
+instruction boundary, all encrypted query shapes or mobile support.
+
+The Rust tests cover runtime admission, direct session permissions, forged
+attribution and claims, backend-only request rejection over WebSocket, and
+receipt replay after a persistent authority restart. The two new WebSocket cases
+fail against the previous implementation at its explicit unsupported-link
+response.
+
+The existing prelude corpus test still expects a negotiated private-owner link
+to be unsupported. Its separately prepared expectation update awaits approval
+under AGENTS.md and remains unapplied. The stack remains draft; the native binding
+port and broader browser/application and mobile qualification are separate.

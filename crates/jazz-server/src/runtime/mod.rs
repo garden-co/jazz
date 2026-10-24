@@ -105,7 +105,8 @@ pub enum ServerLinkAdmission {
     /// protocol cannot express a delegated scope yet.
     AuthorityQueryDelegate,
     /// A durable relay for exactly the one session authenticated by this
-    /// connection. Not supported yet on SQLite.
+    /// connection. It retains ordinary session policy and attribution checks;
+    /// this capability never grants SYSTEM or delegated-query authority.
     ScopeIsolatedClientRelay {
         /// Fresh server-issued capability epoch for this accepted connection.
         admission_epoch: u64,
@@ -300,7 +301,7 @@ impl ServerRuntimeHandle {
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
-        _negotiated_features: WireFeatures,
+        negotiated_features: WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
@@ -308,8 +309,19 @@ impl ServerRuntimeHandle {
             // The SQLite sync protocol has no per-query delegated scope yet,
             // so an authority link is served as the trusted SYSTEM link it is.
             ServerLinkAdmission::OrdinarySession | ServerLinkAdmission::AuthorityQueryDelegate => {}
-            ServerLinkAdmission::ScopeIsolatedClientRelay { .. } => {
-                return Err("client relays are not supported yet on SQLite".into());
+            ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch } => {
+                if trust != CommitUnitTrust::Session
+                    || identity.principal_parts().0 == AuthorSubject::SYSTEM_ISSUER
+                    || identity.principal_parts().0 == AuthorSubject::ANONYMOUS_ISSUER
+                    || admission_epoch == 0
+                    || negotiated_features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY == 0
+                {
+                    return Err("scope-isolated relay requires an authenticated session and negotiated relay feature".into());
+                }
+                // Original foreground (node, tx) uploads already pass through
+                // the session subscriber. Do not elevate the relay: its writes
+                // and accepted-read scopes must match this immutable identity
+                // and these authenticated claims on every connection.
             }
         }
         // Trusted links are served with full access; a session reads and
