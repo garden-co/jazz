@@ -10,7 +10,9 @@ persists the authority's active policy descriptor through ordinary upstream sync
 
 The descriptor binds the complete policy-bearing schema to the exact accepted
 catalogue head: namespace root, publication position, active revision and schema
-UUID. Its structural schema must equal the already admitted structural descriptor.
+UUID. Its structural schema must match the already admitted lineage descriptor.
+Compatible default/index metadata may differ; the owner retains its own physical
+schema and adopts only the authority policies.
 A schema UUID alone is insufficient because policies can change without changing
 that UUID. Two policy meanings at the same revision are rejected. Older positions,
 foreign namespaces and descriptors received before their matching catalogue head
