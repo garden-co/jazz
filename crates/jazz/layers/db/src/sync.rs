@@ -7559,14 +7559,47 @@ impl Db {
         open_tx: Option<OpenTransactionId>,
         request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         author: Option<AuthorSubject>,
-        _require_coverage: bool,
-        _coverage_expired: E,
+        require_coverage: bool,
+        coverage_expired: E,
         _release_coverage: F,
     ) -> Result<SerializedReadResult, Error>
     where
         F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
+        let read = self.read_serialized_query(query, opts, open_tx, request_scope, author);
+        let mut read = std::pin::pin!(read);
+        let mut deadline = None;
+        poll_fn(|cx| match read.as_mut().poll(cx) {
+            Poll::Pending if require_coverage => {
+                // Start the binding's coverage budget only once the normal
+                // read actually waits. Dropping this future on expiry also
+                // releases its fetch or subscription through the usual guards.
+                if coverage_expired() {
+                    return Poll::Ready(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "Timed out waiting for query coverage",
+                    )));
+                }
+                if deadline.is_none() {
+                    deadline = self
+                        .read_deadline(Some(Instant::now() + std::time::Duration::from_secs(15)));
+                }
+                Poll::Pending
+            }
+            ready => ready,
+        })
+        .await
+    }
+
+    async fn read_serialized_query(
+        &self,
+        query: &[u8],
+        opts: ReadOpts,
+        open_tx: Option<OpenTransactionId>,
+        request_scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        author: Option<AuthorSubject>,
+    ) -> Result<SerializedReadResult, Error> {
         let query: Query = postcard::from_bytes(query)
             .map_err(|e| Error::new(ErrorCode::Query, format!("undecodable query: {e}")))?;
         let wait = match (opts.tier, opts.first_load) {
