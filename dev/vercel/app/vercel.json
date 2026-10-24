@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "fluid": true,
+  "regions": ["iad1"],
+  "functions": {
+    "api/gw.js": { "maxDuration": 800 },
+    "api/ctl.js": { "maxDuration": 800 }
+  },
+  "rewrites": [{ "source": "/apps/(.*)", "destination": "/api/gw" }]
+}

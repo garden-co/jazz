@@ -1,0 +1,17 @@
+[package]
+name = "jazz-vercel-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Drives a Jazz server running on Vercel (Sandbox + Drive, or a Fluid
+# function) and prints what it measured as JSON lines. See README.md.
+
+[dependencies]
+jazz = { workspace = true, features = ["runtime"] }
+jazz-native-transport.workspace = true
+jazz-testkit = { path = "../../../crates/jazz-testkit" }
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1.0.145"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tempfile = "3.27.0"

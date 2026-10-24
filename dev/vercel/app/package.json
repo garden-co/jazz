@@ -1,0 +1,9 @@
+{
+  "name": "jazz-vercel-spike",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vercel/sandbox": "3.9.0",
+    "ws": "8.18.3"
+  }
+}

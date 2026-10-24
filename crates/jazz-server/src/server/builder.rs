@@ -157,14 +157,17 @@ impl ServerBuilder {
         }
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
+        crate::startup::mark("auth");
 
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
+        crate::startup::mark("catalogue_store");
         let core_server_shell_storage_config = self.build_core_server_shell_storage_config();
         let core_server_shell = self.build_core_server_shell(
             latest_catalogue_schema,
             core_server_shell_storage_config.clone(),
         )?;
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
+        crate::startup::mark("runtime");
 
         let accounts = {
             let durable = match &self.storage_backend {
@@ -175,6 +178,7 @@ impl ServerBuilder {
                 durable,
             )?)
         };
+        crate::startup::mark("accounts");
 
         let state = Arc::new(ServerState {
             accounts,
@@ -201,6 +205,7 @@ impl ServerBuilder {
         super::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
             .await
             .map_err(|error| format!("restore active schema before serving: {error}"))?;
+        crate::startup::mark("restore_schema");
 
         let app = routes::create_router(state.clone()).merge(profiling::admin_router(
             self.heap_profiler,

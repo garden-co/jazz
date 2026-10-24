@@ -19,6 +19,7 @@ members = [
   "crates/jazz-otel",
   # "crates/jazz-sim",
   "crates/jazz-napi",
+  "dev/vercel/spike",
   # The old Axum todo server examples expect a Send + Sync JazzClient in shared
   # router state. Core Db ownership is currently local-thread by design;
   # keep these examples as integration targets, but out of workspace-wide green
@@ -84,6 +85,15 @@ debug = "line-tables-only"
 # debug level into full `-g`), keep only their symbol names.
 [profile.release-server.package."*"]
 debug = false
+
+# Smallest server binary, for images where size and load time matter
+# (e.g. a Vercel Sandbox that boots per wake): whole-program LTO, one
+# codegen unit, no symbols.
+[profile.release-small]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [profile.perf]
 inherits = "release"

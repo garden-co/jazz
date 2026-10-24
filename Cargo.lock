@@ -2201,6 +2201,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-vercel-spike"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "jazz",
+ "jazz-native-transport",
+ "jazz-testkit",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "jazz-wasm"
 version = "0.1.0"
 dependencies = [

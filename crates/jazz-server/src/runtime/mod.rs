@@ -877,6 +877,7 @@ impl Owner {
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
                 }
                 let store = SqliteKv::open(&path.with_extension("catalogue.sqlite"))?;
+                crate::startup::mark("runtime.catalogue_kv_open");
                 let stored = match store.get(CATALOGUE_KEY)? {
                     Some(bytes) => Some(
                         postcard::from_bytes::<CatalogueSnapshot>(&bytes)
@@ -903,6 +904,7 @@ impl Owner {
                         ..FileOptions::default()
                     },
                 ));
+                crate::startup::mark("runtime.db_open");
                 (db, Some(store), stored)
             }
         };
@@ -917,9 +919,11 @@ impl Owner {
         if let Some(snapshot) = stored {
             owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
             owner.apply_snapshot(snapshot)?;
+            crate::startup::mark("runtime.apply_catalogue");
         }
         owner.catalogue.store = store;
         owner.catalogue.persist()?;
+        crate::startup::mark("runtime.persist_catalogue");
         Ok(owner)
     }
 

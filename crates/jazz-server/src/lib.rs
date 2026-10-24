@@ -9,6 +9,43 @@ pub mod server;
 pub mod storage_cache;
 mod tcp;
 
+/// Startup timeline. Each mark logs the microseconds since `main` began,
+/// so a slow start shows which step it spent in.
+pub mod startup {
+    use std::sync::OnceLock;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// When `main` began: monotonic, wall clock, and the host's uptime in
+    /// milliseconds (Linux; 0 elsewhere), which places it after boot.
+    static START: OnceLock<(Instant, u128, u64)> = OnceLock::new();
+
+    /// Call first thing in `main`.
+    pub fn begin() {
+        START.get_or_init(|| {
+            let epoch_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_micros());
+            let uptime_ms = std::fs::read_to_string("/proc/uptime")
+                .ok()
+                .and_then(|text| text.split_whitespace().next()?.parse::<f64>().ok())
+                .map_or(0, |seconds| (seconds * 1000.0) as u64);
+            (Instant::now(), epoch_us, uptime_ms)
+        });
+    }
+
+    pub fn mark(step: &'static str) {
+        begin();
+        let (at, epoch_us, uptime_ms) = START.get().expect("startup clock set");
+        tracing::info!(
+            target: "jazz_server::startup",
+            step,
+            us = at.elapsed().as_micros() as u64,
+            main_epoch_us = *epoch_us as u64,
+            main_uptime_ms = *uptime_ms,
+        );
+    }
+}
+
 pub use middleware::AuthConfig;
 pub use server::{
     BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase, StorageBackend,
@@ -102,8 +139,10 @@ pub async fn run(
             .await
     }
     .map_err(|error| format!("failed to build server: {error}"))?;
+    startup::mark("built");
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
     let bound_addr = listener.local_addr()?;
+    startup::mark("bound");
     // Serves until this function returns, including while the app drains.
     let _diagnostics_task = match diagnostics.listen {
         Some(addr) => {
