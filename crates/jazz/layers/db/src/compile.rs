@@ -18,6 +18,7 @@ use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
 
+mod candidate_relations;
 mod history;
 
 /// Inherits chains with no explicit bound unroll this deep.
@@ -2147,11 +2148,8 @@ impl<'a> Ctx<'a> {
         } else {
             format!("WITH RECURSIVE {} ", rel.ctes.join(", "))
         };
-        Ok(format!(
-            "EXISTS ({with}SELECT 1 FROM {} WHERE {})",
-            rel.sql_from_clause(),
-            and(&rel.wheres)
-        ))
+        let arms = self.rel_selects(&rel, "1", None, &[])?;
+        Ok(format!("EXISTS ({with}{})", arms.join(" UNION ALL ")))
     }
 
     fn relation(&mut self, expr: &RelationExpr, scope: &RelScope<'_>) -> Result<Rel, Error> {
@@ -2163,17 +2161,24 @@ impl<'a> Ctx<'a> {
                     ctes: Vec::new(),
                     wheres: vec![format!("{r}._del = 0")],
                     from: vec![Src {
-                        sql: self.source(table)?,
+                        sql: if self.candidate_evidence.is_some() {
+                            quote(&table.stored)
+                        } else {
+                            self.source(table)?
+                        },
                         alias: r,
                         scope: alias.clone().unwrap_or_else(|| table.name.clone()),
                         table: Some(table.name.clone()),
                     }],
                     id: None,
+                    bounds: Vec::new(),
                 })
             }
             RelationExpr::Filter { input, predicate } => {
                 let mut rel = self.relation(input, scope)?;
-                let condition = self.rel_predicate(predicate, &rel, scope)?;
+                let mut bounds = Vec::new();
+                let condition = self.rel_predicate(predicate, &rel, scope, Some(&mut bounds))?;
+                rel.bounds.extend(bounds);
                 rel.wheres.push(condition);
                 Ok(rel)
             }
@@ -2187,19 +2192,34 @@ impl<'a> Ctx<'a> {
                     return Err(unsupported("outer relation joins on SQLite"));
                 }
                 let mut left = self.relation(left, scope)?;
-                let right = self.relation(right, scope)?;
+                let mut right = self.relation(right, scope)?;
                 let mut conditions = Vec::new();
                 for condition in on {
-                    conditions.push(format!(
-                        "{} = {}",
-                        self.resolve(&left, &condition.left)?,
-                        self.resolve(&right, &condition.right)?
-                    ));
+                    let l = self.resolve(&left, &condition.left)?;
+                    let r = self.resolve(&right, &condition.right)?;
+                    if let Some(bound) = self.rel_bound(
+                        &left,
+                        &condition.left,
+                        r.clone(),
+                        Some(self.resolve_src(&right, &condition.right)?.alias.clone()),
+                    ) {
+                        left.bounds.push(bound);
+                    }
+                    if let Some(bound) = self.rel_bound(
+                        &right,
+                        &condition.right,
+                        l.clone(),
+                        Some(self.resolve_src(&left, &condition.left)?.alias.clone()),
+                    ) {
+                        right.bounds.push(bound);
+                    }
+                    conditions.push(format!("{l} = {r}"));
                 }
                 left.ctes.extend(right.ctes);
                 left.from.extend(right.from);
                 left.wheres.extend(right.wheres);
                 left.wheres.extend(conditions);
+                left.bounds.extend(right.bounds);
                 left.id = None;
                 Ok(left)
             }
@@ -2251,16 +2271,15 @@ impl<'a> Ctx<'a> {
                     RecursionBound::Fixpoint => (FIXPOINT_GUARD, true),
                 };
                 let _ = guard;
-                let cte = format!(
-                    "{g}(id, d) AS (SELECT {}, 0 FROM {} WHERE {} \
-                     UNION SELECT {}, {g}.d + 1 FROM {g}, {} WHERE {g}.d < {max} AND {})",
-                    seed.output_id(),
-                    seed.sql_from_clause(),
-                    and(&seed.wheres),
-                    step.output_id(),
-                    step.sql_from_clause(),
-                    and(&step.wheres),
-                );
+                let mut arms =
+                    self.rel_selects(&seed, &format!("{}, 0", seed.output_id()), None, &[])?;
+                arms.extend(self.rel_selects(
+                    &step,
+                    &format!("{}, {g}.d + 1", step.output_id()),
+                    Some(&g),
+                    &[format!("{g}.d < {max}")],
+                )?);
+                let cte = format!("{g}(id, d) AS ({})", arms.join(" UNION "));
                 let mut ctes = seed.ctes;
                 ctes.extend(step.ctes);
                 ctes.push(cte);
@@ -2275,6 +2294,7 @@ impl<'a> Ctx<'a> {
                         table: None,
                     }],
                     id: None,
+                    bounds: Vec::new(),
                 })
             }
             other => Err(unsupported(format!(
@@ -2287,7 +2307,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn resolve(&self, rel: &Rel, column: &RelationColumnRef) -> Result<String, Error> {
+    fn resolve_src<'r>(&self, rel: &'r Rel, column: &RelationColumnRef) -> Result<&'r Src, Error> {
         let has = |src: &Src| match &src.table {
             Some(table) => self.schema.tables[table].has_column(&column.column),
             None => column.column == "id",
@@ -2306,6 +2326,11 @@ impl<'a> Ctx<'a> {
                 "relation column {column:?} does not exist"
             )));
         }
+        Ok(src)
+    }
+
+    fn resolve(&self, rel: &Rel, column: &RelationColumnRef) -> Result<String, Error> {
+        let src = self.resolve_src(rel, column)?;
         Ok(match &src.table {
             Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
             None if column.column == "id" => format!("{}.id", src.alias),
@@ -2387,6 +2412,7 @@ impl<'a> Ctx<'a> {
         predicate: &RelationPredicate,
         rel: &Rel,
         scope: &RelScope<'_>,
+        mut bounds: Option<&mut Vec<RelBound>>,
     ) -> Result<String, Error> {
         Ok(match predicate {
             RelationPredicate::True => "1".to_owned(),
@@ -2394,24 +2420,45 @@ impl<'a> Ctx<'a> {
             RelationPredicate::And(parts) => {
                 let parts = parts
                     .iter()
-                    .map(|part| self.rel_predicate(part, rel, scope))
+                    .map(|part| self.rel_predicate(part, rel, scope, bounds.as_deref_mut()))
                     .collect::<Result<Vec<_>, _>>()?;
                 and(&parts)
             }
             RelationPredicate::Or(parts) => {
                 let parts = parts
                     .iter()
-                    .map(|part| self.rel_predicate(part, rel, scope))
+                    .map(|part| self.rel_predicate(part, rel, scope, None))
                     .collect::<Result<Vec<_>, _>>()?;
                 or(&parts)
             }
             RelationPredicate::Not(part) => format!(
                 "(NOT COALESCE({}, 0))",
-                self.rel_predicate(part, rel, scope)?
+                self.rel_predicate(part, rel, scope, None)?
             ),
             RelationPredicate::Cmp { left, op, right } => {
+                let right_term = self.rel_value(right, rel, scope)?;
+                if *op == RelationCmpOp::Eq
+                    && let Some(bounds) = bounds
+                {
+                    let value = match &right_term {
+                        Term::Large(_) => None,
+                        Term::Missing | Term::NaN => Some("NULL"),
+                        other => other.sql(),
+                    };
+                    let dependency = match right {
+                        RelationValueRef::RowId(RelationRowIdRef::Current) => {
+                            rel.from.first().map(|s| s.alias.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(value) = value
+                        && let Some(bound) = self.rel_bound(rel, left, value.to_owned(), dependency)
+                    {
+                        bounds.push(bound);
+                    }
+                }
                 let left = self.resolve_term(rel, left)?;
-                let right = self.rel_value(right, rel, scope)?;
+                let right = right_term;
                 let op = match op {
                     RelationCmpOp::Eq => CmpOp::Eq,
                     RelationCmpOp::Ne => CmpOp::Ne,
@@ -2472,7 +2519,15 @@ struct Src {
     table: Option<String>,
 }
 
+struct RelBound {
+    alias: String,
+    column: String,
+    value: String,
+    dependency: Option<String>,
+}
+
 struct Rel {
+    bounds: Vec<RelBound>,
     ctes: Vec<String>,
     from: Vec<Src>,
     wheres: Vec<String>,

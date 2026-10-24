@@ -22,7 +22,7 @@ const groupMembers = defineTable(
     account: rel("__e2ee_account_identities", "accountId"),
     childGroup: rel("__e2ee_groups", "childGroupId"),
   },
-);
+).indexOnly(["recipientId", "groupId", "accountId", "childGroupId"]);
 function spaceMembers<const Scope extends string>(scope: Scope) {
   return new DefinedTable(
     {

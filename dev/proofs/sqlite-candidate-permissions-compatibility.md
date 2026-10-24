@@ -67,8 +67,11 @@ reads requiring large-value preprocessing return a typed unsupported error.
 ## Bounded work and large values
 
 Each unit has a 16,384-step proof/dependency budget, including repeated checks
-and scoped preprocessing. Exhausting it rejects the whole unit. There is no
-unbounded retry or unchecked remainder.
+and scoped preprocessing. Each batch of 256 SQLite VM instructions during a
+permission check also consumes one budget step. This bounds cyclic relation
+walks as well as Rust-side proof passes. Exhaustion rejects the whole unit with
+the existing bounded-work error; the connection's progress callback is removed
+on success, failure or unwind. There is no unchecked remainder.
 
 Every policy dependency requires a mandatory UUID equality whose target is a
 primary key or the leading column of a declared index. This includes references
@@ -77,10 +80,28 @@ validator still checks reference compatibility. All additional predicates remain
 part of the proof. Each current-source UNION arm contains that key filter and
 uses its index. Baseline history is driven by this unit's publication sequence,
 then looked up by exact coordinate; it never starts from all accepted rows.
-Uncorrelated dependency sources, relation helpers and array-reference
-inheritance in these scoped units return an explicit unsupported error. Reverse references
-into branched tables also require an unavailable branch-bound index shape and
-are refused.
+Uncorrelated dependency sources and array-reference inheritance in these scoped
+units return an explicit unsupported error. Reverse references into branched
+tables also require an unavailable branch-bound index shape and are refused.
+
+Relation helpers support inner joins, filters, projected UUID keys and bounded
+recursive gathers. Each physical source must have a mandatory indexed UUID
+equality to a session/outer key, recursion frontier or an already bounded join
+input. Equalities below OR/NOT do not qualify as lookup bounds. Additional
+predicates, including nullable membership endpoints, remain in the query.
+Ordinary relation occurrences see accepted evidence, never same-unit creates.
+Baseline checks use exact historical images for rows changed by the unit;
+post-state checks use the surviving graph while excluding new coordinates.
+
+The compiler distributes current/history alternatives over each complete
+SELECT, so a join or recursive frontier remains in the same SQL scope as its
+lookup. CROSS JOIN fixes the bounded lookup order. History starts with this
+unit's publication-sequence index and then reads each exact prior coordinate.
+At most 64 physical alternatives are emitted for one relation SELECT; larger
+shapes return a typed unsupported error. No source falls back to a table scan.
+The managed group-membership schema explicitly indexes `recipientId` alongside
+its existing reference endpoints, so account-seeded group traversal has a
+bounded entry point on SQLite.
 
 String and byte comparisons prepare only exact root and related dependency
 cells, including historical images used by the baseline proof. Dependency
@@ -102,8 +123,11 @@ they do not fall back to loading unrelated data.
 ## Storage and wire compatibility
 
 This port changes no durable encoding, query/catalogue encoding or wire layout.
-The existing `ExistsIncludingCreated` policy representation and serializable
-commit framing remain unchanged. No client-supplied proof is trusted or stored:
+The existing `ExistsIncludingCreated` policy representation, relation IR and
+serializable commit framing remain unchanged. The managed membership index is
+declared through existing schema index metadata; deploy that schema with the
+authority so its physical index exists. An older schema without a bounded seed
+index is rejected rather than scanned. No client-supplied proof is trusted or stored:
 the authority reconstructs the proof from its own transaction and session.
 
 Two connection-local TEMP tables, `_jazz_candidate_created_v1` and
@@ -119,7 +143,12 @@ rollout. No retired engine or unreleased E2EE migration guarantee is added.
 
 The core contracts in `sqlite_candidates.rs` cover allowed and denied graphs,
 occurrence isolation, selected operation checks, both proof phases, provisional
-reads, scalar inheritance, chunked comparisons and rollback. Real Chromium tests exercise both an
+reads, scalar inheritance, chunked comparisons and rollback. The public
+`sqlite_candidate_relations.rs` tests cover account/resource isolation, projected
+recursive keys, joined current/history combinations, rejected new witnesses,
+revocation, historical baseline grants, missing indexes, bounded SQL work and
+rollback recovery. They also check nullable endpoint revocation through ordinary
+reads and a cached replica's strict remote read. Real Chromium tests exercise both an
 authenticated wire upload and an authority-local session through the public WASM
 binding. These checks qualify the permission primitive; they do not qualify the
 complete encrypted application, browser worker, native binding or journal flow.

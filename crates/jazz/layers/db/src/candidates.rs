@@ -306,10 +306,12 @@ impl Inner {
             }
             inputs
         };
-        let value: i64 = self.with_candidate_preps(&preps, &inputs, || {
-            self.conn
-                .query_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .map_err(storage)
+        let value: i64 = self.with_candidate_sql_budget(budget, || {
+            self.with_candidate_preps(&preps, &inputs, || {
+                self.conn
+                    .query_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                    .map_err(storage)
+            })
         })?;
         Ok(value != 0)
     }
@@ -478,6 +480,57 @@ impl Inner {
             inputs.push((target.stored.clone(), found));
         }
         Ok(())
+    }
+
+    /// Count VM work as well as Rust proof steps. Recursive relation queries
+    /// can revisit a finite graph many times before their depth bound, so each
+    /// batch of 256 SQLite instructions also consumes one unit of proof budget.
+    fn with_candidate_sql_budget<T>(
+        &self,
+        budget: &mut usize,
+        body: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let initial = *budget;
+        let counter = Arc::new((AtomicUsize::new(initial), AtomicBool::new(false)));
+        let meter = counter.clone();
+        self.conn
+            .progress_handler(
+                256,
+                Some(move || {
+                    let exhausted = meter
+                        .0
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                            left.checked_sub(1)
+                        })
+                        .is_err();
+                    if exhausted {
+                        meter.1.store(true, Ordering::Relaxed);
+                    }
+                    exhausted
+                }),
+            )
+            .map_err(storage)?;
+        // Also remove the callback if a test or host unwinds this call.
+        struct Reset<'a>(&'a rusqlite::Connection);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.progress_handler(0, None::<fn() -> bool>);
+            }
+        }
+        let reset = Reset(&self.conn);
+        let result = body();
+        drop(reset);
+        charge(budget, initial - counter.0.load(Ordering::Relaxed))?;
+        if counter.1.load(Ordering::Relaxed) {
+            return Err(unsupported(
+                "authorized-created proof exceeds its bounded work or dependency limit (SQL instruction budget)",
+            ));
+        }
+        result
     }
 
     fn with_candidate_preps<T>(
