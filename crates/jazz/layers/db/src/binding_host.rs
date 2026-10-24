@@ -915,6 +915,40 @@ impl Binding {
         Ok(result)
     }
 
+    /// Foregrounds reserve at their admitted durable owner before returning a
+    /// journal identity. Local owner callers retain the synchronous primitive.
+    pub async fn seal_initialization_transaction_with_owner(
+        &self,
+        id: &str,
+    ) -> HostResult<InitializationToken> {
+        if self.initializations.borrow().closed {
+            return Err(closed());
+        }
+        let id = open_transaction(id)?;
+        if let Some(error) = self.refused.borrow_mut().remove(&id) {
+            self.db.abandon_transaction_handle(id)?;
+            return Err(error.into());
+        }
+        let seal = self
+            .hooks
+            .progress
+            .parked(self.db.seal_initialization_transaction_with_owner(id))
+            .await?;
+        if self.initializations.borrow().closed {
+            self.db.cancel_initialization_transaction(seal)?;
+            return Err(closed());
+        }
+        let result = InitializationToken {
+            token: OpenTransactionId::new().to_string(),
+            reserved_tx_id: seal.reservation().encode(),
+        };
+        self.initializations
+            .borrow_mut()
+            .seals
+            .insert(result.token.clone(), seal);
+        Ok(result)
+    }
+
     /// Recheck after an asynchronous host durability barrier (close may win).
     pub fn check_initialization_token(&self, token: &str) -> HostResult<()> {
         let registry = self.initializations.borrow();

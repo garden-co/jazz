@@ -55,6 +55,8 @@ use serde::{Deserialize, Serialize};
 use super::*;
 #[path = "sync/owner.rs"]
 mod owner;
+#[path = "sync/owner_init.rs"]
+pub(super) mod owner_init;
 #[path = "sync/relay.rs"]
 mod relay;
 pub use relay::OwnerDurabilityBarrier;
@@ -627,6 +629,26 @@ pub enum SyncMessage {
     /// Tag 32, jazz.sqlite.sync.policy-descriptor.v1. Authority-issued policies
     /// for the exact accepted catalogue head; this never grants session trust.
     PolicyDescriptorV1(PolicyDescriptorV1),
+    /// Tag 33, jazz.sqlite.sync.owner-initialization-reserve.v1.
+    OwnerInitializationReserveV1 {
+        id: u64,
+        nonce: [u8; 16],
+        node: [u8; 16],
+        minimum: u64,
+    },
+    /// Tag 34, jazz.sqlite.sync.owner-initialization-reserved.v1. Success is
+    /// emitted only after the private owner's real backing-store flush.
+    OwnerInitializationReservedV1 {
+        id: u64,
+        nonce: [u8; 16],
+        result: Result<([u8; 16], u64), WireError>,
+    },
+    /// Tag 35, jazz.sqlite.sync.owner-initialization-publish.v1. The private
+    /// owner validates the capability and forwards the unchanged normal Commit.
+    OwnerInitializationPublishV1 {
+        nonce: [u8; 16],
+        commit: Vec<u8>,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -694,6 +716,8 @@ pub(crate) struct Client {
     relay_uploads: BTreeMap<UploadId, RelayUpload>,
     relay_finished: BTreeSet<UploadId>,
     owner_stored: BTreeSet<UploadId>,
+    initialization_reservations: BTreeMap<u64, owner_init::ReservationAnswer>,
+    pub(super) initialization_uploads: BTreeMap<UploadId, [u8; 16]>,
     transport: Option<Box<dyn Transport>>,
     pub(crate) hint: Rc<StdCell<Link>>,
     next_id: u64,
@@ -934,6 +958,7 @@ pub(crate) struct Session {
     forwarded_catalogue: BTreeMap<u64, ForwardedCatalogue>,
     relay_uploads: BTreeSet<UploadId>,
     owner_acked: BTreeSet<UploadId>,
+    initialization_reservations: BTreeMap<u64, owner_init::OwnerReservation>,
     owner_projection: bool,
     owner_observed: BTreeSet<UploadId>,
     catalogue_pending: bool,
@@ -975,6 +1000,7 @@ impl Session {
             forwarded_catalogue: BTreeMap::new(),
             relay_uploads: BTreeSet::new(),
             owner_acked: BTreeSet::new(),
+            initialization_reservations: BTreeMap::new(),
             owner_projection: false,
             owner_observed: BTreeSet::new(),
             catalogue_pending: false,
@@ -3035,7 +3061,9 @@ impl Inner {
         }
         client.relay_uploads = self.load_relay_uploads()?;
         self.client = Some(client);
-        let recovery = self.check_initialization_recovery();
+        let recovery = self
+            .check_initialization_recovery()
+            .and_then(|()| self.check_owner_initialization_recovery());
         self.client
             .as_mut()
             .expect("client")
@@ -3090,6 +3118,8 @@ impl Client {
             relay_uploads: BTreeMap::new(),
             relay_finished: BTreeSet::new(),
             owner_stored: BTreeSet::new(),
+            initialization_reservations: BTreeMap::new(),
+            initialization_uploads: BTreeMap::new(),
             node,
             connection: 0,
             upstream_schema: None,
@@ -3191,6 +3221,7 @@ impl Db {
                     | SyncMessage::CatalogueFetchV1 { .. }
             )
         });
+        inner.resend_initialization_reservations();
         let version = inner.owner.jazz.version_id();
         let client = inner.client.as_mut().expect("client");
         client.upstream_schema = Some(version);
@@ -4154,6 +4185,9 @@ impl Db {
                         // before any following answer or authority fate.
                         rebase = false;
                     }
+                    SyncMessage::OwnerInitializationReservedV1 { id, nonce, result } => {
+                        inner.receive_initialization_reservation(id, nonce, result)?;
+                    }
                     SyncMessage::OwnerStoredV1 { node, tx } => {
                         let client = inner.client.as_mut().expect("client");
                         if client
@@ -4425,6 +4459,7 @@ impl Db {
                         client.known = client.known.max(through);
                         if own {
                             client.owner_stored.remove(&id);
+                            client.initialization_uploads.remove(&id);
                             client.owner_inputs.remove(&id);
                             client
                                 .pending
@@ -4551,7 +4586,9 @@ impl Db {
             out.retain(|message| {
                 if matches!(
                     message,
-                    SyncMessage::Commit { .. } | SyncMessage::PushChunks { .. }
+                    SyncMessage::Commit { .. }
+                        | SyncMessage::PushChunks { .. }
+                        | SyncMessage::OwnerInitializationPublishV1 { .. }
                 ) {
                     client.outbox.push(message.clone());
                     false
@@ -4613,6 +4650,15 @@ impl Db {
         // drain wakes.
         let mut out = out.into_iter();
         while let Some(message) = out.next() {
+            let message = match relay::upload_id(&message)
+                .and_then(|id| client.initialization_uploads.get(&id))
+            {
+                Some(nonce) => SyncMessage::OwnerInitializationPublishV1 {
+                    nonce: *nonce,
+                    commit: encode(&message),
+                },
+                None => message,
+            };
             match transport.send(message.clone()) {
                 Ok(()) => {}
                 Err(TransportError::Backpressure) => {
@@ -5891,6 +5937,26 @@ impl Db {
         // client's schema version does.
         let db = self.session_db(index);
         match message {
+            SyncMessage::OwnerInitializationReserveV1 {
+                id,
+                nonce,
+                node,
+                minimum,
+            } => {
+                let result = db.reserve_owner_initialization(index, id, nonce, node, minimum);
+                if let Err(error) = result {
+                    self.inner().sessions[index].outbox.push(
+                        SyncMessage::OwnerInitializationReservedV1 {
+                            id,
+                            nonce,
+                            result: Err(wire_error(&error)),
+                        },
+                    );
+                }
+            }
+            SyncMessage::OwnerInitializationPublishV1 { nonce, commit } => {
+                db.publish_owner_initialization(index, policy, nonce, &commit)?;
+            }
             SyncMessage::OwnerProjectionV1 { known } => {
                 db.admit_owner_observer(index, known)?;
             }
@@ -6225,7 +6291,7 @@ impl Db {
                         session,
                         updated_at,
                     };
-                    if let Err(error) = db.forward_upload(index, policy, request) {
+                    if let Err(error) = db.forward_upload(index, policy, request, None) {
                         let mut inner = self.inner.borrow_mut();
                         // This unit is already journalled. A private projection
                         // fault cannot reject a unit that recovery will forward.
@@ -7054,6 +7120,11 @@ impl Db {
 }
 
 impl Db {
+    /// Whether this runtime relies on an admitted owner for durable storage.
+    pub fn is_non_durable_client(&self) -> bool {
+        self.inner().non_durable
+    }
+
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
     /// unless explicitly LocalOnly, waits for its storage owner's answer.

@@ -943,6 +943,7 @@ impl Db {
         conn.execute_batch(catalogue_policy::DDL).map_err(storage)?;
         conn.execute_batch(catalogue_cache::DDL).map_err(storage)?;
         conn.execute_batch(initialization::DDL).map_err(storage)?;
+        conn.execute_batch(sync::owner_init::DDL).map_err(storage)?;
         let catalogue_cache_required = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM _jazz_catalogue_cache_mode_v1 WHERE slot=1)",
@@ -1589,6 +1590,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let standalone = {
             let mut inner = self.inner();
+            inner.require_initialization_allocator()?;
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
                 None => (inner.seq + 1, true),
@@ -1648,6 +1650,7 @@ impl Db {
         {
             let mut inner = self.inner();
             inner.require_foreground_writes("commits")?;
+            inner.require_initialization_allocator()?;
             inner.require_owner_subject(author)?;
             if inner.tx.is_some() {
                 return Err(unsupported("nested transactions"));
@@ -4749,6 +4752,7 @@ impl Db {
         reservation: Option<ReservedTxId>,
     ) -> Result<TxReceipt, Error> {
         self.inner().require_foreground_writes("commits")?;
+        self.inner().require_initialization_allocator()?;
         let ops = &batch.ops;
         let seq = {
             let mut inner = self.inner();

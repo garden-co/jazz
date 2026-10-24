@@ -12,7 +12,7 @@ pub(super) const DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_local_commits_v1 
 
 /// Private journal linkage. Knowing these bytes is not a publication capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReservedTxId(TxId);
+pub struct ReservedTxId(pub(super) TxId);
 impl ReservedTxId {
     /// `jazz.sqlite.initialization-reservation.v1`, canonical UUID and decimal u64.
     pub fn encode(self) -> String {
@@ -57,9 +57,10 @@ impl ReservedTxId {
 /// by its old open id. Dropping or cancelling a seal publishes nothing and drops
 /// its staged upload leases. Its durable allocator reservation is never reused.
 pub struct InitializationSeal {
-    owner: Weak<RefCell<Inner>>,
-    reservation: ReservedTxId,
-    batch: Batch,
+    pub(super) owner: Weak<RefCell<Inner>>,
+    pub(super) reservation: ReservedTxId,
+    pub(super) batch: Batch,
+    pub(super) owner_nonce: Option<[u8; 16]>,
 }
 impl InitializationSeal {
     pub fn reservation(&self) -> ReservedTxId {
@@ -190,6 +191,7 @@ impl Db {
             owner: Rc::downgrade(&self.inner),
             reservation,
             batch,
+            owner_nonce: None,
         })
     }
 
@@ -198,7 +200,30 @@ impl Db {
         seal: InitializationSeal,
     ) -> Result<TxReceipt, Error> {
         self.check_initialization_owner(&seal)?;
-        self.commit_serializable_batch(&seal.batch, Some(seal.reservation))
+        let id = (
+            *seal.reservation.0.node.as_bytes(),
+            seal.reservation.0.time.0,
+        );
+        if let Some(nonce) = seal.owner_nonce {
+            let mut inner = self.inner();
+            inner.require_foreground_writes("initialization publication")?;
+            inner
+                .client
+                .as_mut()
+                .expect("foreground")
+                .initialization_uploads
+                .insert(id, nonce);
+        }
+        let result = self.commit_serializable_batch(&seal.batch, Some(seal.reservation));
+        if result.is_err() && seal.owner_nonce.is_some() {
+            self.inner()
+                .client
+                .as_mut()
+                .expect("foreground")
+                .initialization_uploads
+                .remove(&id);
+        }
+        result
     }
     pub fn cancel_initialization_transaction(&self, seal: InitializationSeal) -> Result<(), Error> {
         self.check_initialization_owner(&seal)
@@ -279,7 +304,7 @@ impl Db {
                 rusqlite::params![id.0.node.as_bytes().as_slice(),id.0.time.0 as i64,inner.identity.author.canonical()],|r|r.get(0),
             ).optional().map_err(storage)?;
             results.push(match position {
-                None => InitializationTransactionStatus::NotObserved,
+                None => inner.owner_initialization_status(*id)?,
                 Some(seq) => inner.initialization_publication_status(seq as u64)?,
             });
         }

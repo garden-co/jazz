@@ -45,6 +45,26 @@ impl WasmDb {
         open_id: String,
     ) -> Result<js_sys::Promise, JsValue> {
         let inner = self.open_inner()?;
+        if inner.binding.db.is_non_durable_client() {
+            return Ok(future_to_promise(async move {
+                let seal = inner
+                    .binding
+                    .seal_initialization_transaction_with_owner(&open_id)
+                    .await
+                    .map_err(host_error)?;
+                inner
+                    .binding
+                    .check_initialization_token(&seal.token)
+                    .map_err(host_error)?;
+                match serde_wasm_bindgen::to_value(&seal) {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        let _ = inner.binding.cancel_initialization_transaction(&seal.token);
+                        Err(js_sys::Error::new(&error.to_string()).into())
+                    }
+                }
+            }));
+        }
         let seal = inner
             .binding
             .seal_initialization_transaction(&open_id)
