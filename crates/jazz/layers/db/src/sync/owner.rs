@@ -73,6 +73,40 @@ pub(crate) fn check_open_schema(
 }
 
 impl Inner {
+    /// A client schema may omit policies. This private serving owner uses only
+    /// the active descriptor admitted from its authority,
+    /// including after an offline reopen; the caller's schema cannot replace it.
+    pub(super) fn restore_owner_policies(&mut self) -> Result<(), Error> {
+        if !self.scope_isolated_owner {
+            return Ok(());
+        }
+        let Some(head) = self.catalogue_head()? else {
+            return Ok(());
+        };
+        if head.current != self.owner.jazz.version_id() {
+            return Err(unsupported(
+                "private owner policies under another active schema",
+            ));
+        }
+        // A new head invalidates the preceding policies immediately, even when
+        // transport delivery splits the head and its policy descriptor. Keep
+        // ordinary deny-by-default policies until the exact descriptor arrives.
+        let schema = match self.policy_descriptor()? {
+            Some(descriptor) => descriptor.schema.schema,
+            None => self.owner.jazz.without_permissions(),
+        };
+        if schema == self.owner.jazz {
+            return Ok(());
+        }
+        self.owner = Rc::new(self.named(&schema));
+        self.schema = self.owner.clone();
+        self.reset_everything();
+        for session in &mut self.sessions {
+            session.revalidate();
+        }
+        Ok(())
+    }
+
     pub(in crate::db) fn require_foreground_writes(&self, action: &str) -> Result<(), Error> {
         self.require_owner_subject(self.identity.author)?;
         if self.non_durable
@@ -527,6 +561,7 @@ impl Db {
         let result = (|| {
             {
                 let mut inner = self.inner();
+                inner.restore_owner_policies()?;
                 let pending = inner
                     .client
                     .as_ref()

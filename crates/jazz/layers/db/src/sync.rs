@@ -624,6 +624,9 @@ pub enum SyncMessage {
         subject: String,
         node: [u8; 16],
     },
+    /// Tag 32, jazz.sqlite.sync.policy-descriptor.v1. Authority-issued policies
+    /// for the exact accepted catalogue head; this never grants session trust.
+    PolicyDescriptorV1(PolicyDescriptorV1),
 }
 
 // ---- client state ---------------------------------------------------------
@@ -4234,6 +4237,14 @@ impl Db {
                     }
                     SyncMessage::CatalogueMetadataV1 { head, schemas } => {
                         inner.record_catalogue(&head, &schemas)?;
+                        inner.restore_owner_policies()?;
+                        for session in &mut inner.sessions {
+                            session.catalogue_pending = true;
+                        }
+                    }
+                    SyncMessage::PolicyDescriptorV1(descriptor) => {
+                        inner.record_policy_descriptor(&descriptor)?;
+                        inner.restore_owner_policies()?;
                         for session in &mut inner.sessions {
                             session.catalogue_pending = true;
                         }
@@ -5943,6 +5954,11 @@ impl Db {
                             head: head.clone(),
                             schemas,
                         });
+                    if let Some(descriptor) = inner.policy_descriptor()? {
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::PolicyDescriptorV1(descriptor));
+                    }
                     inner.sessions[index]
                         .outbox
                         .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
@@ -7268,6 +7284,11 @@ impl Db {
         inner.sessions[index]
             .outbox
             .push(SyncMessage::CatalogueMetadataV1 { head, schemas });
+        if let Some(descriptor) = inner.policy_descriptor()? {
+            inner.sessions[index]
+                .outbox
+                .push(SyncMessage::PolicyDescriptorV1(descriptor));
+        }
         Ok(())
     }
     fn forward_catalogue_fetch(
@@ -7363,16 +7384,21 @@ impl Db {
                             "catalogue relay lacks the exact covered metadata",
                         ));
                     }
-                    Ok((head, opened, schemas))
+                    Ok((head, opened, schemas, inner.policy_descriptor()?))
                 });
                 match result {
-                    Ok((head, opened, schemas)) => {
+                    Ok((head, opened, schemas, descriptor)) => {
                         inner.sessions[index]
                             .outbox
                             .push(SyncMessage::CatalogueMetadataV1 {
                                 head: head.clone(),
                                 schemas,
                             });
+                        if let Some(descriptor) = descriptor {
+                            inner.sessions[index]
+                                .outbox
+                                .push(SyncMessage::PolicyDescriptorV1(descriptor));
+                        }
                         inner.sessions[index]
                             .outbox
                             .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
