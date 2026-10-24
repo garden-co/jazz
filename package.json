@@ -38,7 +38,7 @@
     "oxfmt": "^0.27.0",
     "oxlint": "^1.42.0",
     "pkg-pr-new": "^0.0.75",
-    "playwright": "^1.58.2",
+    "playwright": "^1.64.1",
     "turbo": "^2.0.0",
     "typescript": "catalog:default",
     "yaml": "2.8.2"

@@ -103,6 +103,11 @@ offline use, see the
 Run `pnpm dev` and open Vite's `localhost` URL in two independent, regular browser
 profiles. Two tabs in the same profile share an account.
 
+For this SQLite preview, use current Chrome or Firefox for the walkthrough.
+Older WebKit builds can stall IndexedDB reads after reload. The automated
+quickstart now uses WebKit 27.2; Safari on Apple devices still needs qualification.
+See the [browser qualification notes](https://github.com/garden-co/jazz/blob/joe/e2ee-17-sdk-ergonomics/dev/proofs/sqlite-browser-reload-qualification.md).
+
 A normal and private window can also work for a temporary two-account test, if
 the browser allows the required storage APIs in private mode. Crypto is available
 on localhost, but private-session storage is temporary: closing the private

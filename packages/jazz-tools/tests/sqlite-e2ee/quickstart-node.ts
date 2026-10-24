@@ -10,6 +10,7 @@ export async function quickstartScenario(
   context: BrowserContext,
   page: Page,
   input: QuickstartInput,
+  reloadCycles = 0,
 ) {
   const browser = context.browser();
   if (!browser) throw new Error("Quickstart profiles require an attached browser");
@@ -108,6 +109,19 @@ export async function quickstartScenario(
     const aliceReopened = await open(alice, chatUrl!);
     await alice.getByRole("listitem").filter({ hasText: reply }).waitFor();
     const aliceRestoredMessages = await messages(alice, [first, reply]);
+    const reloads: Array<Array<{ account: string; messages: string[] }>> = [];
+    for (let cycle = 0; cycle < reloadCycles; cycle++) {
+      // Reload both independent owners without draining their runtimes first:
+      // browser eviction must preserve each account and its committed messages.
+      reloads.push(
+        await Promise.all(
+          [alice, bob].map(async (p) => ({
+            account: await open(p, chatUrl!),
+            messages: await messages(p, [first, reply]),
+          })),
+        ),
+      );
+    }
     const alerts = await Promise.all(pages.map((p) => p.getByRole("alert").allTextContents()));
     return {
       accounts,
@@ -127,6 +141,7 @@ export async function quickstartScenario(
       malloryMessages,
       alerts,
       browserErrors,
+      reloads,
     };
   } catch (error) {
     const screens = await Promise.all(

@@ -26,8 +26,8 @@ const config = mergeConfig(sqlite as ViteUserConfig, {
   test: {
     browser: {
       commands: {
-        sqliteQuickstartScenario: async ({ context, page }, input) =>
-          quickstartScenario(context, page, input),
+        sqliteQuickstartScenario: async ({ context, page }, input, reloadCycles?: number) =>
+          quickstartScenario(context, page, input, reloadCycles),
       },
     },
   },

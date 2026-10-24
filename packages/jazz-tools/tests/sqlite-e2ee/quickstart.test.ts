@@ -43,3 +43,34 @@ it("runs the React quickstart with owner-only sharing, live messages and restore
   expect(result.alerts).toEqual([[], [], []]);
   expect(result.browserErrors).toEqual([]);
 }, 120_000);
+
+it("restores both encrypted chat accounts and messages through repeated concurrent reloads", async () => {
+  const server = inject("sqliteE2eeServer");
+  await deploy({ ...server, schema: app, permissions });
+  const worker = Reflect.get(commands, "sqliteE2eeWorkerUrl");
+  const scenario = Reflect.get(commands, "sqliteQuickstartScenario");
+  if (typeof worker !== "function" || typeof scenario !== "function")
+    throw new Error("Quickstart browser commands are missing");
+  const result: QuickstartResult = await scenario.call(
+    commands,
+    {
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      runtimeSources: {
+        wasmUrl: new URL(wasmUrl, location.href).href,
+        brokerWorkerUrl: new URL(await worker.call(commands), location.href).href,
+        wasmVersion: "sqlite-quickstart-reload-test",
+      },
+    },
+    8,
+  );
+  expect(result.reloads).toHaveLength(8);
+  for (const cycle of result.reloads) {
+    expect(cycle).toEqual([
+      { account: result.accounts[0], messages: [result.first, result.reply] },
+      { account: result.accounts[1], messages: [result.first, result.reply] },
+    ]);
+  }
+  expect(result.alerts).toEqual([[], [], []]);
+  expect(result.browserErrors).toEqual([]);
+}, 120_000);
