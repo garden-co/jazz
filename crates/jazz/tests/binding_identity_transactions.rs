@@ -2026,3 +2026,63 @@ fn scoped_relay_schema_activation_requires_a_new_upstream_handshake() {
         "the relay still waits for the authority"
     );
 }
+
+/// Alice catches a refused streamed attachment after staging another insert.
+/// The binding rejects the complete unit and rollback retires the refusal.
+#[test]
+fn streamed_stage_refusal_rejects_companion_writes_and_retires_on_rollback() {
+    let alice = open(0xac, true, None);
+    alice
+        .insert("files", &cells("alice"), &json!({ "rowId": vec![1; 16] }))
+        .unwrap();
+    for rollback in [false, true] {
+        let mut duplicate = stage(&alice, 1, None, None);
+        let id = OpenTransactionId::new().to_string();
+        alice
+            .begin_transaction(&id, "serializable", None, None)
+            .unwrap();
+        alice
+            .insert_in_transaction(
+                &id,
+                "files",
+                &cells("alice"),
+                &json!({ "rowId": vec![2; 16] }),
+            )
+            .unwrap();
+        let attachment = duplicate.attach(&id);
+        if rollback {
+            alice.rollback_transaction(&id).unwrap();
+        } else {
+            let write = alice.commit_transaction(&id, Some("serializable")).unwrap();
+            assert!(
+                write.rejected.is_some(),
+                "a caught attachment refusal cannot publish its companion"
+            );
+            assert!(block_on(alice.wait_for_write(&write, "local").unwrap()).is_err());
+        }
+        assert!(
+            attachment.is_ok(),
+            "the refusal belongs to the transaction receipt: {attachment:?}"
+        );
+        assert!(
+            !duplicate.abort().unwrap(),
+            "attachment consumes the capability"
+        );
+        assert_eq!(rows(&alice).len(), 1);
+    }
+    let id = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&id, "serializable", None, None)
+        .unwrap();
+    alice
+        .insert_in_transaction(
+            &id,
+            "files",
+            &cells("alice"),
+            &json!({ "rowId": vec![2; 16] }),
+        )
+        .unwrap();
+    let write = alice.commit_transaction(&id, Some("serializable")).unwrap();
+    assert!(write.rejected.is_none());
+    assert_eq!(rows(&alice).len(), 2);
+}

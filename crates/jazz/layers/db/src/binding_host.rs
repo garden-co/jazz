@@ -1052,7 +1052,7 @@ impl Binding {
     /// [`Self::write`]), a refusal decided by the row's stored state is not
     /// the call's error: the transaction stays open and its commit is
     /// rejected with the first such refusal.
-    fn staged(&self, id: OpenTransactionId, staged: Result<WriteHandle, Error>) -> HostResult<()> {
+    fn staged<T>(&self, id: OpenTransactionId, staged: Result<T, Error>) -> HostResult<()> {
         match staged {
             Err(error) if error.is_apply_time_rejection() => {
                 self.refused.borrow_mut().entry(id).or_insert(error);
@@ -1901,12 +1901,12 @@ impl StagedStreamingMutation {
     pub fn attach(&mut self, transaction: &str) -> HostResult<()> {
         let mut staged = self.staged.take().ok_or_else(closed)?;
         let tx = open_transaction(transaction)?;
-        block_on(
+        let attached = block_on(
             self.binding
                 .db
                 .attach_staged_streaming_value(tx, &mut staged),
-        )?;
-        Ok(())
+        );
+        self.binding.staged(tx, attached)
     }
 
     /// Release an unattached upload; false after attachment or abandonment.
