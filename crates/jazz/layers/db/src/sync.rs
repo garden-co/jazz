@@ -4070,6 +4070,7 @@ impl Db {
             ready
         };
         applied?;
+        self.inner().refresh_authenticated_views()?;
         self.notify();
         let arrived = {
             let mut inner = self.inner.borrow_mut();
@@ -6938,7 +6939,7 @@ impl Db {
             ));
         }
         let inner = self.inner();
-        let schema = prepared.schema.as_ref().unwrap_or(&inner.owner);
+        let schema = inner.effective_schema(prepared.schema.as_ref().unwrap_or(&inner.owner));
         let table = schema.table(&query.table)?;
         if !table.branch_by.is_empty() {
             return Err(unsupported("scoped remote reads of branched tables"));
