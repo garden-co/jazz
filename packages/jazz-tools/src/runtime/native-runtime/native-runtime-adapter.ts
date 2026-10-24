@@ -2631,7 +2631,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.pumpSubscriptions();
             return;
           } catch (error) {
-            throw rejectedWaitError(txId, error) ?? error;
+            throw rejectedWaitError(txId, error, write) ?? error;
           }
         } finally {
           state.wake = null;
@@ -5584,6 +5584,7 @@ function sleep(ms: number): Promise<void> {
 function rejectedWaitError(
   transactionId: TxId,
   error: unknown,
+  write: Pick<Write, "writeState">,
 ): {
   kind: "rejected";
   transactionId: TxId;
@@ -5594,7 +5595,57 @@ function rejectedWaitError(
 } | null {
   if (isCoreTransactionConflict(error)) return transactionConflictRejection(transactionId, error);
   if (!isCoreWriteRejection(error)) return null;
+  // SQLite exposes the real fate through the retained receipt. Use it before
+  // interpreting the host's diagnostic: WASM and NAPI render that text
+  // differently, and malformed payload text can contain a rejection name.
+  const details = rejectedWriteState(write);
+  if (details) {
+    const rejection = {
+      kind: "rejected" as const,
+      transactionId,
+      ...details,
+      message: errorMessage(error),
+    };
+    Object.defineProperty(rejection, "message", { enumerable: false });
+    return rejection;
+  }
   return queuedWriteRejection(transactionId, error);
+}
+
+function rejectedWriteState(write: Pick<Write, "writeState">): {
+  code: string;
+  reason: string;
+} | null {
+  // A shutdown or an older binding may make the receipt unavailable. Preserve
+  // the original wait failure in that case instead of throwing a second error.
+  let state: unknown;
+  try {
+    state = write.writeState();
+  } catch {
+    return null;
+  }
+  if (!state || typeof state !== "object" || !("fate" in state)) return null;
+  const fate = state.fate;
+  if (!fate || typeof fate !== "object" || !("Rejected" in fate)) return null;
+  const rejected = fate.Rejected;
+  if (typeof rejected === "string") {
+    const codes: Readonly<Record<string, string>> = {
+      AuthorizationDenied: "permission_denied",
+      ExclusiveConflict: "serialization_conflict",
+      CausalityViolation: "causality_violation",
+      ClientClockTooFarAhead: "client_clock_too_far_ahead",
+    };
+    const code = Object.hasOwn(codes, rejected) ? codes[rejected] : undefined;
+    return code ? { code, reason: READABLE_REJECTION_REASONS[code]! } : null;
+  }
+  if (!rejected || typeof rejected !== "object") return null;
+  if ("MalformedCommit" in rejected && typeof rejected.MalformedCommit === "string") {
+    return { code: "write_rejected", reason: rejected.MalformedCommit };
+  }
+  if ("Cascade" in rejected && rejected.Cascade && typeof rejected.Cascade === "object") {
+    return { code: "cascade_rejected", reason: READABLE_REJECTION_REASONS.cascade_rejected! };
+  }
+  return null;
 }
 
 /**

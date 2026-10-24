@@ -408,3 +408,139 @@ fn reads_overtake_uploads_held_by_the_ingress_limit() {
     assert_eq!(opening[0].row.row_uuid(), row(9));
     assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
 }
+
+/// Alice's offline streamed write keeps its chunk tree until Bob's authority
+/// returns a real receipt, even when the row is small enough to store inline.
+/// Maintenance and a durable reopen must not turn an admitted write into a
+/// missing-chunks rejection; settled inline uploads release their staging data.
+#[test]
+fn offline_streamed_values_survive_maintenance_and_reopen() {
+    use jazz::db::RemoteLinkHint;
+    use jazz::tx::{DurabilityTier, Fate};
+    for size in [32, LARGE] {
+        for private_owner in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("alice.sqlite");
+            let reopen = || {
+                let schema = SchemaBuilder::new()
+                    .table(
+                        TableSchemaBuilder::new("docs")
+                            .column("body", ColumnType::Text)
+                            .column("blob", ColumnType::Bytea)
+                            .policies(allow_all_policies()),
+                    )
+                    .table(
+                        TableSchemaBuilder::new("titled")
+                            .column("title", ColumnType::Text)
+                            .index_only(["title"])
+                            .policies(allow_all_policies()),
+                    )
+                    .build();
+                let config = DbConfig::new(
+                    compile_schema(&schema),
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([1; 16]),
+                        author: user(1),
+                    },
+                );
+                let db = block_on(Db::open_at(config, &path, Default::default())).unwrap();
+                db.set_remote_link_hint(RemoteLinkHint::Failed);
+                if private_owner {
+                    db.set_scope_isolated_storage_owner().unwrap();
+                }
+                db
+            };
+            let alice = reopen();
+            let blob: Vec<u8> = (0..size).map(|n| (n * 13 % 253) as u8).collect();
+            let write = block_on(alice.insert_streaming_value_with_id(
+                "docs",
+                row(1),
+                BTreeMap::from([("body".to_owned(), Value::String("offline".into()))]),
+                "blob",
+                std::io::Cursor::new(blob.clone()),
+            ))
+            .unwrap();
+            let tx = write.mergeable_tx_id();
+            drop(write);
+            for _ in 0..12 {
+                block_on(alice.tick()).unwrap();
+            }
+            assert_eq!(alice.write_state(tx).unwrap().fate, Fate::Pending);
+            assert_eq!(
+                local_cell(&alice, "docs", 1, "blob").unwrap(),
+                Some(Value::Bytes(blob.clone()))
+            );
+            block_on(alice.close()).unwrap();
+            drop(alice);
+            let alice = reopen();
+            for _ in 0..12 {
+                block_on(alice.tick()).unwrap();
+            }
+            let server = open(0, AuthorSubject::SYSTEM);
+            let _log = connect(&server, &alice, user(1));
+            pump(&server, &[&alice]);
+            let state = alice.write_state(tx).unwrap();
+            assert_eq!(
+                state.fate,
+                Fate::Accepted,
+                "size={size}, private_owner={private_owner}"
+            );
+            assert_eq!(state.durability, DurabilityTier::Global);
+            assert_eq!(
+                local_cell(&server, "docs", 1, "blob").unwrap(),
+                Some(Value::Bytes(blob))
+            );
+            if size == 32 {
+                // Physical inspection is needed only for the reclamation
+                // contract: public row reads intentionally hide chunk storage.
+                assert_eq!(alice.large_value_nodes_for_test().unwrap().0, 0);
+            }
+        }
+    }
+}
+
+/// Alice's offline upload collides with Bob's existing authority row. The real
+/// rejection settles it and releases the upload hold, just as acceptance does.
+#[test]
+fn rejected_streamed_upload_releases_its_pending_chunks() {
+    use jazz::db::RemoteLinkHint;
+    use jazz::tx::Fate;
+    let server = open(0, AuthorSubject::SYSTEM);
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("Bob's existing row".into())),
+            ("blob", Value::Bytes(vec![0])),
+        ],
+    );
+    let alice = open(1, user(1));
+    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    let write = block_on(alice.insert_streaming_value_with_id(
+        "docs",
+        row(1),
+        BTreeMap::from([("body".into(), Value::String("Alice's duplicate".into()))]),
+        "blob",
+        std::io::Cursor::new(vec![7; 32]),
+    ))
+    .unwrap();
+    let tx = write.mergeable_tx_id();
+    for _ in 0..12 {
+        block_on(alice.tick()).unwrap();
+    }
+    assert_eq!(alice.write_state(tx).unwrap().fate, Fate::Pending);
+    let _log = connect(&server, &alice, user(1));
+    pump(&server, &[&alice]);
+    assert!(matches!(
+        alice.write_state(tx).unwrap().fate,
+        Fate::Rejected(_)
+    ));
+    assert_eq!(
+        local_cell(&server, "docs", 1, "blob").unwrap(),
+        Some(Value::Bytes(vec![0]))
+    );
+    // Public row reads hide storage reclamation; the test-only count verifies
+    // that rejection releases the otherwise unreferenced upload tree.
+    assert_eq!(alice.large_value_nodes_for_test().unwrap().0, 0);
+}

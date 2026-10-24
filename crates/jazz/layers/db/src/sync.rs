@@ -2687,10 +2687,10 @@ impl Inner {
         Ok(())
     }
 
-    fn forget_pending(&self, tx: u64) -> Result<(), Error> {
-        self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
+    fn forget_pending(&self, id: relay::UploadId) -> Result<(), Error> {
+        self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [id.1 as i64])
             .map_err(storage)?;
-        Ok(())
+        self.release_upload_roots(id)
     }
 
     fn persist_shadow(&self) -> Result<(), Error> {
@@ -3474,6 +3474,7 @@ impl Db {
             updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
         };
         inner.persist_pending(origin.time.0, &commit, &rows)?;
+        inner.retain_upload_roots(&commit)?;
         inner.record_owner_input_rows((*origin.node.as_bytes(), origin.time.0), &rows, &ops)?;
         for ((table, row, key), image) in &shadows {
             inner
@@ -4466,7 +4467,7 @@ impl Db {
                                 if relayed {
                                     inner.finish_relay_upload(id)
                                 } else if !owner_managed {
-                                    inner.forget_pending(tx)
+                                    inner.forget_pending(id)
                                 } else {
                                     Ok(())
                                 }

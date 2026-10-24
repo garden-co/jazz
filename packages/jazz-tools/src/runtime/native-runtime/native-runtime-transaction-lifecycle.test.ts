@@ -1544,3 +1544,67 @@ it.each([
     runtime.rollbackTransaction(id);
   },
 );
+
+// The receipt is the authoritative classification boundary. WASM diagnostics
+// need not contain Rust enum names, and untrusted malformed-commit text can.
+it.each([
+  ["AuthorizationDenied", "permission_denied", "Write rejected by server authorization"],
+  [
+    "ExclusiveConflict",
+    "serialization_conflict",
+    "Serializable transaction conflicted with another write",
+  ],
+  [
+    { MalformedCommit: "payload contains AuthorizationDenied" },
+    "write_rejected",
+    "payload contains AuthorizationDenied",
+  ],
+] as const)(
+  "classifies a rejected receipt from its typed fate (%j)",
+  async (fate, code, reason) => {
+    const txId = "00000000000070008000000000000045" as TxId;
+    const diagnostic = "WriteRejected: authorization_denied: authority rejected this unit";
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => ({
+              txId,
+              payload: new Uint8Array(),
+              rowId: new Uint8Array(16),
+              wait: async () => {
+                throw Object.assign(new Error(diagnostic), { code: "write_rejected" });
+              },
+              writeState: () => ({
+                fate: { Rejected: fate },
+                durability: "None",
+                global_time: null,
+              }),
+            }),
+          }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "Alice's rejected note" } },
+        null,
+        "00000000-0000-0000-0000-000000000045",
+      );
+      await expect(runtime.waitForTransaction(txId, "global")).rejects.toMatchObject({
+        kind: "rejected",
+        transactionId: txId,
+        code,
+        reason,
+        message: diagnostic,
+      });
+    } finally {
+      await runtime.close();
+    }
+  },
+);

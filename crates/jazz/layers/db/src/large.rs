@@ -85,7 +85,9 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// this replica wrote that its upstream may not have yet; `_jazz_lv_upload`
 /// leases a local streaming upload's nodes (`_jazz_lv_upload_node`) until
 /// its row commits, it is aborted, or it goes untouched past the staging
-/// policy's maximum age.
+/// policy's maximum age. `_jazz_lv_relay_root_v1` retains the roots referenced
+/// by pending own or relayed uploads until their authority fate, independently
+/// of whether their local row representation still names those roots.
 pub(crate) const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS _jazz_lv_node (locator BLOB PRIMARY KEY, hash BLOB NOT NULL, \
  bytes BLOB NOT NULL) WITHOUT ROWID;
