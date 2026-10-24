@@ -251,6 +251,7 @@ enum CreateResource {
 }
 
 fn main() {
+    jazz_server::startup::begin();
     // Before the runtime starts its worker threads: only threads that start
     // after sampling is turned on sample.
     #[cfg(heap_profiling)]
@@ -265,6 +266,7 @@ fn main() {
 async fn run() {
     // Initialize tracing with layered subscriber
     init_tracing();
+    jazz_server::startup::mark("tracing");
 
     let cli = Cli::parse();
     if let Err(error) = validate_server_cli_options(&cli.command) {
