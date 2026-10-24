@@ -397,6 +397,7 @@ struct Inner {
     /// Policies for views admitted from authenticated authority metadata. Kept
     /// separately from the replica's caller-supplied, possibly policy-free owner.
     view_policy_source: Option<Rc<Schema>>,
+    view_policies_dirty: bool,
     candidate_checks: RefCell<Option<Vec<candidates::DeferredCheck>>>,
     candidate_read_evidence: Option<crate::compile::CandidateEvidence>,
     /// Large-value chunks: the cache the collation and decoders read.
@@ -976,6 +977,7 @@ impl Db {
                 catalogue_cache_required,
                 catalogue_capture_pending: std::cell::Cell::new(true),
                 view_policy_source: None,
+                view_policies_dirty: false,
                 candidate_checks: RefCell::new(None),
                 candidate_read_evidence: None,
                 chunks,

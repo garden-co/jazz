@@ -76,6 +76,9 @@ impl Inner {
     /// Refresh registered views after the metadata transaction commits. A later
     /// invalid message in that transaction must not install an uncommitted grant.
     pub(super) fn refresh_authenticated_views(&mut self) -> Result<(), Error> {
+        if !self.view_policies_dirty {
+            return Ok(());
+        }
         // Registered authority views can also belong to ordinary foregrounds.
         // Refresh their governor once per metadata change, not once per query.
         if let Some(previous) = &self.view_policy_source {
@@ -83,11 +86,13 @@ impl Inner {
                 || previous.jazz.without_permissions(),
                 |descriptor| descriptor.schema.schema,
             );
-            if schema != previous.jazz {
-                self.view_policy_source = Some(Rc::new(self.named_policy_schema(&schema)));
+            let source = self.named_policy_schema(&schema);
+            if source.jazz != previous.jazz {
+                self.view_policy_source = Some(Rc::new(source));
                 self.reset_everything();
             }
         }
+        self.view_policies_dirty = false;
         Ok(())
     }
 
@@ -95,6 +100,7 @@ impl Inner {
     /// the active descriptor admitted from its authority,
     /// including after an offline reopen; the caller's schema cannot replace it.
     pub(super) fn restore_owner_policies(&mut self) -> Result<(), Error> {
+        self.view_policies_dirty |= self.view_policy_source.is_some();
         // Revocation can happen before commit; a new grant cannot. In
         // particular, owner subscription resets must not reuse a stale view
         // governor while the new head is missing its exact policy descriptor.
