@@ -438,3 +438,81 @@ fn parallel_paths_must_preserve_table_identity() {
     assert!(matches!(error, DeploymentError::ConflictingPaths { .. }));
     assert!(error.to_string().contains(" -> "));
 }
+
+/// Alice redeploys a stored add/drop migration whose catalogue lens omits the
+/// single-column index selection. Bob's canonical endpoint schema still owns
+/// that selection; declarations must continue to match every row-shape field.
+#[test]
+fn stored_table_lenses_use_endpoint_index_selection() {
+    let base = schema(&[]);
+    let members = TableSchema::builder("members")
+        .column("recipient", ColumnType::Uuid)
+        .column("group", ColumnType::Uuid)
+        .index_only(["recipient"])
+        .composite_index(["recipient", "group"])
+        .build();
+    let mut expanded = base.clone();
+    expanded.insert(TableName::from("members"), members.clone());
+    for adding in [true, false] {
+        let (from, to) = if adding {
+            (&base, &expanded)
+        } else {
+            (&expanded, &base)
+        };
+        // The persisted catalogue lens deliberately does not encode this field.
+        // Exercise its public decoded shape without changing that wire contract.
+        let mut declared = members.clone();
+        declared.indexed_columns = None;
+        let lens = |declared| {
+            migration(
+                from,
+                to,
+                vec![if adding {
+                    LensOp::AddTable {
+                        table: "members".into(),
+                        schema: declared,
+                    }
+                } else {
+                    LensOp::RemoveTable {
+                        table: "members".into(),
+                        schema: declared,
+                    }
+                }],
+            )
+        };
+        let stored = DeploymentCatalogue {
+            schemas: vec![from.clone(), to.clone()],
+            migrations: vec![lens(declared.clone())],
+            active_schema_hash: Some(SchemaHash::compute(to)),
+        };
+        let prepared = prepare_deployment(&stored, request(to, &[], vec![])).unwrap();
+        assert_eq!(prepared.active_schema().public_schema(), to);
+        let canonical = prepared
+            .schemas()
+            .iter()
+            .find(|schema| SchemaHash::compute(schema) == SchemaHash::compute(&expanded))
+            .unwrap();
+        assert_eq!(
+            canonical[&TableName::from("members")].indexed_columns,
+            members.indexed_columns
+        );
+        for field in ["column", "branch", "composite"] {
+            let mut invalid = declared.clone();
+            match field {
+                "column" => invalid.columns.columns[0].column_type = ColumnType::Text,
+                "branch" => invalid.branch_by = vec!["group".into()],
+                _ => invalid.composite_indexes.clear(),
+            }
+            let invalid = DeploymentCatalogue {
+                migrations: vec![lens(invalid)],
+                schemas: stored.schemas.clone(),
+                active_schema_hash: stored.active_schema_hash,
+            };
+            let error = prepare_deployment(&invalid, request(to, &[], vec![])).unwrap_err();
+            assert!(
+                matches!(error, DeploymentError::InvalidMigration { .. }),
+                "adding={adding}, {field}: {error}"
+            );
+        }
+    }
+}

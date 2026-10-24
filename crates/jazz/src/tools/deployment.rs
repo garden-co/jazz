@@ -350,9 +350,17 @@ fn validate_public_operations(lens: &Lens, source: &Schema, target: &Schema) -> 
                 } else {
                     source
                 };
+                let expected = endpoint
+                    .get(&TableName::from(table.as_str()))
+                    .ok_or_else(|| format!("table declaration does not match {table}"))?;
                 let mut declared = schema.clone();
                 declared.policies = TablePolicies::default();
-                if endpoint.get(&TableName::from(table.as_str())) != Some(&declared) {
+                // Single-column index selection belongs to the canonical
+                // endpoint schema and is omitted by persisted table lenses.
+                // Reconstruct it before comparing the declaration's row shape;
+                // columns, branch bindings and composite indexes still match.
+                declared.indexed_columns = expected.indexed_columns.clone();
+                if expected != &declared {
                     return Err(format!("table declaration does not match {table}"));
                 }
             }

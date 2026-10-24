@@ -7202,7 +7202,9 @@ impl Db {
                         include_deleted: opts.read_view.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let rows = self.inner().run(&exact, Some(identity), &read)?;
+                    let rows = self
+                        .hydrate_one_shot(wait, || self.inner().run(&exact, Some(identity), &read))
+                        .await?;
                     return Ok(result(rows));
                 }
                 if opts.tier == ReadTier::Remote {
@@ -7250,9 +7252,54 @@ impl Db {
                 }
             }
         }
-        let inner = self.inner();
-        let roots = inner.run(&prepared, author, &ReadSpec::of(&opts, &inner)?)?;
-        Ok(result(inner.nest_relations(&prepared, author, roots)?))
+        let rows = self
+            .hydrate_one_shot(wait.filter(|_| !frozen), || {
+                let inner = self.inner();
+                let roots = inner.run(&prepared, author, &ReadSpec::of(&opts, &inner)?)?;
+                inner.nest_relations(&prepared, author, roots)
+            })
+            .await?;
+        Ok(result(rows))
+    }
+
+    /// A row answer can precede its chunk tree. Retry only that read's normal
+    /// evaluation while sync supplies its missing nodes, preserving its scope,
+    /// root restriction and snapshot. Immediate/local/frozen reads never wait.
+    async fn hydrate_one_shot<T>(
+        &self,
+        wait: Option<Option<Instant>>,
+        mut read: impl FnMut() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let deadline = wait.map(|deadline| {
+            deadline.unwrap_or_else(|| Instant::now() + std::time::Duration::from_secs(15))
+        });
+        let connection = self.inner().client.as_ref().map(|client| client.connection);
+        let _deadline = self.read_deadline(deadline);
+        let _attempt_deadline = deadline.and_then(|_| self.read_attempt_deadline());
+        poll_fn(|_| {
+            if self.inner().client.as_ref().map(|client| client.connection) != connection {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "one-shot hydration interrupted by an upstream reconnect",
+                )));
+            }
+            match read() {
+                Err(error) if crate::large::is_missing(&error) && deadline.is_some() => {
+                    if deadline.is_some_and(|at| Instant::now() >= at)
+                        || self.link_hint().is_none_or(|link| !may_wait(link.get()))
+                    {
+                        return Poll::Ready(Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "one-shot content hydration unavailable",
+                        )));
+                    }
+                    self.schedule_pending_tick();
+                    Poll::Pending
+                }
+                result => Poll::Ready(result),
+            }
+        })
+        .await
     }
 }
 
