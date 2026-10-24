@@ -12,6 +12,7 @@ use crate::protocol::{
 };
 use crate::query::Query;
 use crate::records::{Value, ValueType};
+use crate::schema::history::history_source_table;
 use crate::schema::{JazzSchema, MergeStrategy};
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
@@ -2128,6 +2129,14 @@ impl Inner {
         };
         self.require_catalogue_schema(&schema)?;
         let compiled = Ctx::new(&schema, policy.as_ref(), &claims, &prepared.binding)
+            .with_owner_previews(
+                self.owner_previews(identity)
+                    && !read.scoped_evidence
+                    && !prepared.authority_policies
+                    && read.permission_cut.is_none()
+                    && self.candidate_read_evidence.is_none()
+                    && history_source_table(&prepared.query.table).is_none(),
+            )
             .with_scoped_evidence(read.scoped_evidence)
             .with_candidate_evidence(self.candidate_read_evidence)
             .with_permission_cut(read.permission_cut, read.permission_own)
@@ -2408,6 +2417,7 @@ impl Inner {
             self.require_owner_subject(identity.unwrap_or(self.identity.author))?;
             let (policy, claims) = self.read_sessions(prepared, identity);
             let compiled = Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
+                .with_owner_previews(self.owner_previews(identity))
                 .with_catalogue(self)
                 .compile_children(array, &parent)?;
             let children = self.execute(&compiled, &array.table)?;
@@ -2655,11 +2665,13 @@ impl Inner {
     ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_catalogue(self);
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
+            .with_owner_previews(self.owner_previews(author))
+            .with_catalogue(self);
         let mut condition = match author {
             Some(author) => {
                 let session = self.session(author);
-                ctx.operation_policy(table, Operation::Select, "a", &session)?
+                ctx.read_policy(table, "a", &session)?
             }
             None => "1".to_owned(),
         };

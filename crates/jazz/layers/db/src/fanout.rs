@@ -503,6 +503,10 @@ impl Inner {
         let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
         self.require_catalogue_schema(&schema)?;
         let compiled = Ctx::new(&schema, policy.as_ref(), &claims, &prepared.binding)
+            .with_owner_previews(
+                self.owner_previews(identity)
+                    && history_source_table(&prepared.query.table).is_none(),
+            )
             .with_catalogue(self)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())

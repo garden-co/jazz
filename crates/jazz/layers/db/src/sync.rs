@@ -92,7 +92,7 @@ fn now_ms() -> i64 {
 pub const LOCAL_BASE: u64 = 1 << 52;
 /// Ephemeral own publications follow the durable owner's ordered prefix. Both
 /// ranges remain exactly representable by JavaScript's number type.
-pub(super) const FOREGROUND_BASE: u64 = LOCAL_BASE + (1 << 51);
+pub(crate) const FOREGROUND_BASE: u64 = LOCAL_BASE + (1 << 51);
 
 /// A message transport between a client and its server.
 pub trait Transport {
@@ -4443,7 +4443,15 @@ impl Db {
                         }
                     }
                     SyncMessage::CatalogueMetadataV1 { head, schemas } => {
+                        let first_owner_catalogue =
+                            inner.scope_isolated_owner && inner.catalogue_head()?.is_none();
                         inner.record_catalogue(&head, &schemas)?;
+                        if first_owner_catalogue {
+                            inner.reset_everything();
+                            for session in &mut inner.sessions {
+                                session.revalidate();
+                            }
+                        }
                         inner.restore_owner_policies()?;
                         for session in &mut inner.sessions {
                             session.catalogue_pending = true;
@@ -7294,6 +7302,9 @@ fn readable(
     let Some(author) = identity else {
         return Ok(true);
     };
+    if inner.owner_pending_preview(table, row, key, identity)? {
+        return Ok(true);
+    }
     let schema = inner.owner.clone();
     let table = owned_table(&schema, table)?;
     inner.check(table, row, key, author, Operation::Select)

@@ -73,6 +73,30 @@ pub(crate) fn check_open_schema(
 }
 
 impl Inner {
+    /// Only the host-admitted owner's own identity can recover pending previews
+    /// before it has an authority catalogue. Accepted images never qualify.
+    pub(in crate::db) fn owner_previews(&self, subject: Option<AuthorSubject>) -> bool {
+        self.scope_isolated_owner && subject == Some(self.identity.author)
+    }
+
+    pub(super) fn owner_pending_preview(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        subject: Option<AuthorSubject>,
+    ) -> Result<bool, Error> {
+        if !self.owner_previews(subject) || self.catalogue_head()?.is_some() {
+            return Ok(false);
+        }
+        Ok(self
+            .existing(table, row, key)?
+            .is_some_and(|(seq, _)| (LOCAL_BASE..FOREGROUND_BASE).contains(&seq))
+            && !self
+                .inputs_at(&(table.to_owned(), row, key.to_vec()))?
+                .is_empty())
+    }
+
     /// Refresh registered views after the metadata transaction commits. A later
     /// invalid message in that transaction must not install an uncommitted grant.
     pub(super) fn refresh_authenticated_views(&mut self) -> Result<(), Error> {

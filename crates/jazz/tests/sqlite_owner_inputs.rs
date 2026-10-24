@@ -66,6 +66,27 @@ fn foreground(node: u8) -> Db {
     db.set_non_durable_client();
     db
 }
+
+fn cold_owner(path: Option<&Path>) -> Db {
+    let mut config = config(50);
+    config.schema = config.schema.without_permissions();
+    let db = match path {
+        Some(path) => block_on(Db::open_at(config, path, Default::default())),
+        None => block_on(Db::open(config)),
+    }
+    .unwrap();
+    db.set_scope_isolated_storage_owner().unwrap();
+    db.set_remote_link_hint(RemoteLinkHint::Failed);
+    db
+}
+
+fn cold_foreground(node: u8) -> Db {
+    let mut config = config(node);
+    config.schema = config.schema.without_permissions();
+    let db = block_on(Db::open(config)).unwrap();
+    db.set_non_durable_client();
+    db
+}
 fn connect(client: &Db, owner: &Db) {
     let (a, b) = duplex_transport::duplex();
     block_on(client.connect_upstream(a));
@@ -147,6 +168,172 @@ fn opening(stream: &mut SubscriptionStream, dbs: &[&Db]) -> (Vec<String>, Durabi
         }
     }
     panic!("foreground never received a settled opening")
+}
+
+/// Alice starts offline with the public policy-free schema. Her sibling and
+/// reopened foreground recover the matching complete unit, preserving original
+/// pending identities and excluding unrelated writes without an authority.
+#[test]
+fn cold_private_owner_previews_survive_sibling_and_durable_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cold.sqlite");
+    {
+        let owner = cold_owner(Some(&path));
+        let writer = cold_foreground(1);
+        connect(&writer, &owner);
+        turns(&[&writer, &owner]);
+        let batch = block_on(writer.mergeable_tx()).unwrap();
+        for text in ["wanted", "companion"] {
+            block_on(batch.insert(
+                "notes",
+                BTreeMap::from([
+                    ("text".into(), Value::String(text.into())),
+                    ("allowed".into(), Value::Bool(true)),
+                ]),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+        block_on(batch.commit()).unwrap();
+        insert(&writer, "unrelated", true);
+        turns(&[&writer, &owner]);
+        let sibling = cold_foreground(2);
+        connect(&sibling, &owner);
+        let mut stream = subscribe(
+            &sibling,
+            Query::from("notes").filter(eq(col("text"), lit("wanted"))),
+            ReadOpts::default(),
+        );
+        assert_eq!(
+            opening(&mut stream, &[&sibling, &owner]),
+            (vec!["wanted".into()], DurabilityTier::Local),
+        );
+        assert_eq!(values(&sibling), vec!["companion", "wanted"]);
+        sibling.set_remote_link_hint(RemoteLinkHint::Failed);
+        let snapshot = block_on(sibling.capture_snapshot()).unwrap();
+        assert_eq!(snapshot.global_base.0, 0);
+        assert_eq!(snapshot.dots.len(), 1);
+        assert_eq!(snapshot.dots[0].node, NodeUuid::from_bytes([1; 16]));
+        block_on(writer.close()).unwrap();
+        block_on(sibling.close()).unwrap();
+        block_on(owner.close()).unwrap();
+    }
+    let owner = cold_owner(Some(&path));
+    let reopened = cold_foreground(3);
+    connect(&reopened, &owner);
+    let mut stream = subscribe(
+        &reopened,
+        Query::from("notes").filter(eq(col("text"), lit("wanted"))),
+        ReadOpts::default(),
+    );
+    assert_eq!(
+        opening(&mut stream, &[&reopened, &owner]),
+        (vec!["wanted".into()], DurabilityTier::Local),
+    );
+    assert_eq!(values(&reopened), vec!["companion", "wanted"]);
+}
+
+/// Alice's cold owner exposes pending previews only to Alice. Mallory's direct
+/// query and authenticated peer request both fail before any row or unit leaves.
+#[test]
+fn cold_private_previews_reject_a_different_admitted_identity() {
+    use jazz::db::SyncMessage;
+    let owner = cold_owner(None);
+    insert(&owner, "private", true);
+    let mallory = AuthorSubject::authenticated("https://issuer.example", "mallory").unwrap();
+    let query = owner.prepare_query(&Query::from("notes")).unwrap();
+    assert!(
+        block_on(owner.all_for_identity(
+            &query,
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+            mallory,
+        ))
+        .is_err()
+    );
+    let (mut peer, link) = duplex_transport::duplex();
+    owner.accept_subscriber(link, mallory);
+    peer.send(SyncMessage::Fetch {
+        id: 7,
+        query: Query::from("notes"),
+        binding: BTreeMap::new(),
+        at: None,
+        include_deleted: false,
+    })
+    .unwrap();
+    block_on(owner.tick()).unwrap();
+    let replies = std::iter::from_fn(|| peer.try_recv()).collect::<Vec<_>>();
+    assert!(
+        replies
+            .iter()
+            .any(|r| matches!(r, SyncMessage::Refused { id: 7, .. }))
+    );
+    assert!(!replies.iter().any(|r| matches!(r,
+        SyncMessage::Rows { images } if !images.is_empty()
+    ) || matches!(r, SyncMessage::OwnerInputsV1 { .. })));
+}
+
+/// Alice sees an offline preview, then Bob's authority accepts the insert while
+/// denying SELECT. Acceptance must not turn that preview into readable cache
+/// content for a new sibling, including after the owner reopens offline.
+#[test]
+fn cold_preview_does_not_grant_read_access_to_its_accepted_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accepted.sqlite");
+    {
+        let owner = cold_owner(Some(&path));
+        let writer = cold_foreground(1);
+        connect(&writer, &owner);
+        turns(&[&writer, &owner]);
+        let (_, tx) = insert(&writer, "private preview", true);
+        turns(&[&writer, &owner]);
+        let sibling = cold_foreground(2);
+        connect(&sibling, &owner);
+        let mut stream = subscribe(&sibling, Query::from("notes"), ReadOpts::default());
+        assert_eq!(
+            opening(&mut stream, &[&sibling, &owner]).0,
+            vec!["private preview"]
+        );
+        let mut server_config = config(90);
+        server_config.schema = common::compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("text", ColumnType::Text)
+                        .column("allowed", ColumnType::Boolean)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::False)
+                                .with_insert(PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        );
+        let authority = block_on(Db::open(server_config)).unwrap();
+        authority.set_authority();
+        authority.initialize_authority_catalogue().unwrap();
+        connect(&owner, &authority);
+        turns(&[&writer, &sibling, &owner, &authority]);
+        assert_eq!(writer.write_state(tx).unwrap().fate, Fate::Accepted);
+        let reader = cold_foreground(3);
+        connect(&reader, &owner);
+        let mut read = subscribe(&reader, Query::from("notes"), ReadOpts::default());
+        assert!(
+            opening(&mut read, &[&reader, &owner, &authority])
+                .0
+                .is_empty()
+        );
+        assert!(values(&reader).is_empty());
+        block_on(writer.close()).unwrap();
+        block_on(sibling.close()).unwrap();
+        block_on(reader.close()).unwrap();
+        block_on(owner.close()).unwrap();
+    }
+    let owner = cold_owner(Some(&path));
+    let reopened = cold_foreground(4);
+    connect(&reopened, &owner);
+    let mut read = subscribe(&reopened, Query::from("notes"), ReadOpts::default());
+    assert!(opening(&mut read, &[&reopened, &owner]).0.is_empty());
+    assert!(values(&reopened).is_empty());
 }
 
 /// Alice reloads into a fresh tab after her owner reopens. LocalOnly does not

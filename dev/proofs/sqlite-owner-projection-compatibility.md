@@ -11,6 +11,25 @@ worker store. A foreground can write once its current owner acknowledges the
 same subject and schema. Authority connectivity is not required. This port does
 not establish that every E2EE application path or pending snapshot is supported.
 
+A new offline account opens with the public, policy-free schema. Until its
+private owner receives its first authority catalogue, the same admitted identity
+can also recover its pending previews from a sibling or reopened foreground.
+The ordinary query adds an exact pending-coordinate index probe for provisional
+rows; it does not enumerate the outbox or grant SELECT on accepted rows. Query
+filters still select the roots, and the existing bounded input closure supplies
+the complete matching transactions with their original attribution and receipts.
+Another identity, a generic relay, historical reads and permission evidence
+queries do not gain this preview capability. Policy dependencies are unchanged.
+
+The first authority catalogue closes this bootstrap preview path and revalidates
+subscriptions, including when the authority's schema still denies every read.
+Once that catalogue is cached, offline reopening continues to use the authority's
+policies. Accepted live and frozen bases always require their existing accepted
+read evidence, even while a pending preview is selected. This changes no storage
+or wire bytes. The cold-owner tests in `sqlite_owner_inputs.rs` cover filtered
+complete-unit recovery, durable reopen, cross-identity refusal and an accepted
+insert whose SELECT is denied, alongside the existing unreadable-base tests.
+
 ## Storage contracts
 
 Three additive SQL encodings have independent versioned names. Existing
@@ -126,8 +145,10 @@ Pending images are removed from ordinary Rows output. Retained accepted bases
 travel through the existing Rows, Origins, content witness and accepted-row
 pipeline before the pending envelope, which precedes the query answer. The owner
 checks accepted bases against accepted policy dependencies; a pending grant does
-not supply accepted read evidence. A unit with an unreadable coordinate or base
-is refused rather than partially disclosed. Referenced large-value nodes use
+not supply accepted read evidence. Before the first authority catalogue, pending
+coordinates for the admitted identity may qualify as the private previews
+described above; accepted bases cannot. A unit with another unreadable coordinate
+or base is refused rather than partially disclosed. Referenced large-value nodes use
 the ordinary authenticated chunk request/response path. Before installing an
 input envelope, the foreground fetches the verified chunks needed to reconstruct
 its index keys. Later semantic frames, including query answers and receipts,

@@ -330,6 +330,9 @@ pub struct Ctx<'a> {
     /// Read the server's view on a replica: root rows the server stopped
     /// listing for it (`_jazz_revoked`) are left out.
     pub members_only: bool,
+    /// Current private pending rows before this owner's first authority catalogue.
+    /// This applies to result selection, never to permission dependencies.
+    owner_previews: bool,
     next_alias: usize,
     permission_evidence: Option<PermissionEvidence>,
     in_policy: bool,
@@ -415,6 +418,7 @@ impl<'a> Ctx<'a> {
             preps: Vec::new(),
             history_origin: None,
             members_only: false,
+            owner_previews: false,
             next_alias: 0,
             permission_evidence: None,
             in_policy: false,
@@ -426,6 +430,11 @@ impl<'a> Ctx<'a> {
 
     pub fn with_catalogue(mut self, catalogue: &'a dyn CatalogueIdentityLookup) -> Self {
         self.catalogue = Some(catalogue);
+        self
+    }
+
+    pub(crate) fn with_owner_previews(mut self, enabled: bool) -> Self {
+        self.owner_previews = enabled;
         self
     }
 
@@ -1882,7 +1891,24 @@ impl<'a> Ctx<'a> {
         alias: &str,
         session: &Session,
     ) -> Result<String, Error> {
-        self.operation_policy(table, Operation::Select, alias, session)
+        let policy = self.operation_policy(table, Operation::Select, alias, session)?;
+        if !self.owner_previews || self.in_policy || self.cut.is_some() {
+            return Ok(policy);
+        }
+        session.used.set(true);
+        let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
+        // The partial index probes this exact row/branch, not the outbox. The
+        // normal owner-input envelope still checks the complete unit, original
+        // attribution and any accepted bases before exposing it to a peer.
+        Ok(format!(
+            "(({policy}) OR ({alias}._seq >= {} AND {alias}._seq < {} \
+             AND NOT EXISTS (SELECT 1 FROM _jazz_catalogue_head_v1 WHERE slot=1) \
+             AND EXISTS (SELECT 1 FROM _jazz_owner_input_rows_v1 AS preview \
+             WHERE preview.t={stored} AND preview.id={alias}.id AND preview.k={alias}._b \
+             AND preview.pending=1 AND preview.writes=1)))",
+            crate::db::sync::LOCAL_BASE,
+            crate::db::sync::FOREGROUND_BASE,
+        ))
     }
 
     pub fn operation_policy(
