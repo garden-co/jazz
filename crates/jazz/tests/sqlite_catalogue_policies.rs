@@ -749,3 +749,82 @@ fn offline_cache_restores_intrinsic_policy_scope_without_trusting_claims() {
     assert_eq!(ids(&alice_db, "documents").len(), 2);
     assert!(block_on(alice_db.cover_catalogue("documents", None)).is_err());
 }
+
+/// Alice's fresh foreground reads accepted rows through her private owner.
+/// Its catalogue-backed policy admits the genuine scope, ignores spoofed
+/// claims, and removes the row when the authority revokes its scope.
+#[test]
+fn private_owner_checks_accepted_rows_with_authenticated_catalogue() {
+    let schema = schema("documents", intrinsic("documents"));
+    let snapshot = snapshot(schema.clone());
+    let server = authority(&snapshot);
+    let scope = server.table_identity("documents").unwrap().unwrap().0;
+    let fake = uuid::Uuid::new_v4();
+    let good = seed(&server, "documents", scope, "accepted");
+    seed(&server, "documents", fake, "forged");
+    let open_alice = |node| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: alice(),
+            },
+        )))
+        .unwrap()
+    };
+    let owner = open_alice(1);
+    owner.set_scope_isolated_storage_owner().unwrap();
+    let foreground = open_alice(2);
+    foreground.set_non_durable_client();
+    spoof(&server, fake);
+    spoof(&owner, fake);
+    spoof(&foreground, fake);
+    connect(&owner, &server, alice());
+    connect(&foreground, &owner, alice());
+    let dbs = [&foreground, &owner, &server];
+    drive(&dbs, foreground.wait_for_storage_owner()).unwrap();
+    drive(&dbs, foreground.cover_catalogue("documents", None)).unwrap();
+    let query = foreground.prepare_query(&Query::from("documents")).unwrap();
+    let mut stream =
+        block_on(foreground.subscribe(&query, ReadOpts::for_read_tier(ReadTier::Remote))).unwrap();
+    for _ in 0..12 {
+        turn(&dbs);
+    }
+    let mut added = vec![];
+    while let Some(event) = stream.try_next_event() {
+        match event {
+            jazz::db::SubscriptionEvent::Delta { added: rows, .. } => {
+                added.extend(rows.iter().map(|row| row.row_uuid()));
+            }
+            jazz::db::SubscriptionEvent::Rejected { reason } => panic!("{reason}"),
+            _ => {}
+        }
+    }
+    assert_eq!(added, vec![good]);
+    block_on(server.update(
+        "documents",
+        good,
+        BTreeMap::from([("scopeId".into(), Value::Uuid(fake))]),
+        Default::default(),
+    ))
+    .unwrap();
+    for _ in 0..12 {
+        turn(&dbs);
+    }
+    assert!(
+        std::iter::from_fn(|| stream.try_next_event()).any(|event| matches!(
+            event,
+            jazz::db::SubscriptionEvent::Delta { removed, .. }
+                if removed.iter().any(|row| row.row_uuid == good)
+        ))
+    );
+    let mut fresh =
+        block_on(foreground.subscribe(&query, ReadOpts::for_read_tier(ReadTier::Remote))).unwrap();
+    for _ in 0..12 {
+        turn(&dbs);
+    }
+    assert!(matches!(
+        fresh.try_next_event(),
+        Some(jazz::db::SubscriptionEvent::Delta { added, settled: true, .. }) if added.is_empty()
+    ));
+}

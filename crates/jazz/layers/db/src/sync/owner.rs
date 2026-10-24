@@ -857,7 +857,9 @@ impl Inner {
         let binding = BTreeMap::new();
         let session = self.session(subject);
         let cut = self.accepted_cut(self.client.as_ref().expect("owner replica").known)?;
-        let mut ctx = Ctx::new(&self.owner, None, &session, &binding).with_cut(Some(cut));
+        let mut ctx = Ctx::new(&self.owner, None, &session, &binding)
+            .with_catalogue(self)
+            .with_cut(Some(cut));
         let condition = ctx.operation_policy(table, Operation::Select, "a", &session)?;
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
