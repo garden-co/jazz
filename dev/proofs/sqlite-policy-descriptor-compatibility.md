@@ -32,6 +32,18 @@ still fails with the existing explicit unsupported-shape boundary for private
 owners. Policy evaluation uses the ordinary permission engine and indexed
 catalogue records, without scanning unrelated data.
 
+Typed views on a replica may supply the exact active authority policies or omit
+policies. Registration checks the requested schema's authenticated catalogue
+receipt; an arbitrary policy with the same structural UUID is still rejected.
+These views pin their table and column names while their permissions follow the
+current authority descriptor. A newer head without its descriptor denies access.
+Retained handles, prepared reads and subscription watches use the refreshed
+policies. New grants become visible after the metadata transaction commits, so a
+later invalid message cannot install an uncommitted grant. The governor is cached
+in memory and does not decode catalogue schemas on each query. Ordinary local
+views without authenticated catalogue admission retain their exact policy
+contract. This view handling changes no stored or wire encoding.
+
 The SQLite compiler also resolves `session.authMode` from the admitted author
 issuer, using the same mapping as the public policy API. Provider claims cannot
 override this intrinsic. Tests cover local-first, external and anonymous issuers
