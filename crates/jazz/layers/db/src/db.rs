@@ -2590,7 +2590,7 @@ impl Inner {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_catalogue(self);
-        let condition = match author {
+        let mut condition = match author {
             Some(author) => {
                 let session = self.session(author);
                 ctx.operation_policy(table, Operation::Select, "a", &session)?
@@ -2598,7 +2598,17 @@ impl Inner {
             None => "1".to_owned(),
         };
         let preps = std::mem::take(&mut ctx.preps);
-        let base = ctx.params;
+        let mut base = ctx.params;
+        if self.client.is_some() {
+            // A reconnect's Hold must respect upstream revocations even when
+            // the retained image still passes this relay's local policy.
+            base.push(Sql::Text(table.stored.as_bytes().to_vec()));
+            condition = format!(
+                "({condition}) AND NOT EXISTS (SELECT 1 FROM _jazz_revoked AS r \
+                 WHERE r.t = ?{} AND r.id = a.id AND r.k = a._b)",
+                base.len()
+            );
+        }
         self.with_preps(&preps, |_| self.versions_in(table, &condition, &base, ids))
     }
 

@@ -611,3 +611,111 @@ fn remote_reads_do_not_reuse_a_cached_group_grant_after_revocation() {
         );
     }
 }
+
+/// Alice's accepted insert leaves her own cached row without a read subscription.
+/// Bob removes her group grant; Alice's first Remote read must honour the empty
+/// authority answer instead of returning that previously written row.
+#[test]
+fn remote_reads_exclude_own_cached_writes_after_a_group_grant_is_removed() {
+    use jazz::db::{ReadTier, SerializedReadResult, duplex};
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    for subscription in [false, true] {
+        let server = open(true);
+        graph(&server, None);
+        let replica = block_on(Db::open(DbConfig::new(
+            definition(true, relation(8)).without_permissions(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([28; 16]),
+                author: author(1),
+            },
+        )))
+        .unwrap();
+        let (up, down) = duplex();
+        block_on(replica.connect_upstream(up));
+        server.accept_subscriber(down, author(1));
+        block_on(replica.insert(
+            "resources",
+            BTreeMap::from([("label".into(), Value::String("Alice's note".into()))]),
+            InsertOptions {
+                row_id: Some(id(100)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        for _ in 0..20 {
+            block_on(replica.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(
+            block_on(server.all(
+                &server.prepare_query(&Query::from("resources")).unwrap(),
+                ReadOpts::default()
+            ))
+            .unwrap()
+            .len(),
+            1
+        );
+        block_on(server.update(
+            "members",
+            id(1),
+            BTreeMap::from([("activeAccount".into(), Value::Nullable(None))]),
+            Default::default(),
+        ))
+        .unwrap();
+        let query = postcard::to_allocvec(&Query::from("resources")).unwrap();
+        let mut read = pin!(async {
+            if subscription {
+                let prepared = replica.prepare_query(&Query::from("resources")).unwrap();
+                let mut stream = replica
+                    .subscribe(&prepared, ReadOpts::for_read_tier(ReadTier::Remote))
+                    .await
+                    .unwrap();
+                std::future::poll_fn(|_| match stream.try_next_event() {
+                    Some(jazz::db::SubscriptionEvent::Delta { added, .. }) => {
+                        Poll::Ready(added.is_empty())
+                    }
+                    None => Poll::Pending,
+                    other => panic!("unexpected event: {other:?}"),
+                })
+                .await
+            } else {
+                let result = replica
+                    .all_serialized_query(
+                        &query,
+                        ReadOpts::for_read_tier(ReadTier::Remote),
+                        None,
+                        None,
+                        None,
+                        false,
+                        || false,
+                        |_| {},
+                    )
+                    .await
+                    .unwrap();
+                let SerializedReadResult::Rows(rows) = result else {
+                    panic!("rows")
+                };
+                rows.is_empty()
+            }
+        });
+        let mut finished = false;
+        for _ in 0..100 {
+            block_on(replica.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            if let Poll::Ready(empty) = read.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+            {
+                assert!(
+                    empty,
+                    "subscription={subscription}: empty authority answer returned Alice's stale cached write"
+                );
+                finished = true;
+                break;
+            }
+        }
+        assert!(finished, "remote read did not finish");
+    }
+}

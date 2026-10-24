@@ -3545,6 +3545,31 @@ impl Db {
         let key = remote_key(&query, &prepared.binding, include_deleted);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
+            // A new attachment is a new read. Its authority wait cannot reuse
+            // a receipt issued before this request, even if another observer
+            // keeps the same query alive. A fresh ID also excludes old replies
+            // already in flight. Relays take this path too, so the round trip
+            // reaches the authority rather than ending at a warm owner.
+            let id = client.next_id;
+            client.next_id += 1;
+            let previous = std::mem::replace(&mut remote.id, id);
+            remote.answered.set(false);
+            remote.global.set(false);
+            *remote.refused.borrow_mut() = None;
+            remote.through = None;
+            remote.resumed = false;
+            client.remote_ids.remove(&previous);
+            client.remote_ids.insert(id, key);
+            client
+                .outbox
+                .push(SyncMessage::Unsubscribe { id: previous });
+            client.outbox.push(SyncMessage::Subscribe {
+                id,
+                query: query.clone().into_owned(),
+                binding: prepared.binding.clone(),
+                since: None,
+                include_deleted,
+            });
             return Some((
                 remote.answered.clone(),
                 remote.refused.clone(),
@@ -5333,9 +5358,19 @@ impl Db {
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
             for (table, row, key, seq) in committed {
-                let superseded = inner
-                    .current_image(&table, row, &key)?
-                    .is_some_and(|current| current.seq != seq);
+                let current = inner.current_image(&table, row, &key)?;
+                if policy.is_some() && current.is_some() {
+                    // A writer retains accepted rows even without ever reading
+                    // them. Watch their permission dependencies just like a
+                    // fetched row, so a later cross-row revocation reaches the
+                    // cache before a fresh subscription can settle over it.
+                    let can = readable(&inner, &table, row, &key, policy)?;
+                    held_rows
+                        .entry(table.clone())
+                        .or_default()
+                        .insert((row, key.clone()), can);
+                }
+                let superseded = current.is_some_and(|current| current.seq != seq);
                 if superseded && readable(&inner, &table, row, &key, policy)? {
                     let id = row.0.as_bytes().to_vec();
                     images.extend(inner.images_where(
@@ -6752,6 +6787,23 @@ fn readable(
     key: &[u8],
     identity: Option<AuthorSubject>,
 ) -> Result<bool, Error> {
+    // A relay cannot re-admit a row its authority unlisted just because its
+    // retained local image still satisfies the old policy. Keep revocation
+    // effective at every hop, including SYSTEM downstream sessions.
+    if inner.client.is_some()
+        && inner
+            .conn
+            .query_row(
+                "SELECT 1 FROM _jazz_revoked WHERE t = ?1 AND id = ?2 AND k = ?3",
+                rusqlite::params![table, row.as_bytes().to_vec(), key],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(storage)?
+            .is_some()
+    {
+        return Ok(false);
+    }
     let Some(author) = identity else {
         return Ok(true);
     };
@@ -7162,8 +7214,39 @@ impl Db {
                 // cache; it never promotes it to an authoritative answer.
             } else {
                 Self::remote_shape(&prepared.query)?;
-                self.fetch(&prepared, None, opts.read_view.include_deleted, deadline)
+                let answer = self
+                    .fetch_answer(
+                        &prepared,
+                        None,
+                        opts.read_view.include_deleted,
+                        deadline,
+                        None,
+                        false,
+                    )
                     .await?;
+                if opts.tier == ReadTier::Remote
+                    && let Some((_, rows)) = answer
+                {
+                    // The answer names this read's roots, including an empty
+                    // result. Own cached writes need not have been subscribed
+                    // or fetched before, so asynchronous revocations alone do
+                    // not establish coverage. Keep the original window: the
+                    // remote query hydrated its prefix (or aggregate inputs).
+                    let root_id = prepared.query.flat_join.as_ref().map_or_else(
+                        || "id".to_owned(),
+                        |flat| {
+                            format!(
+                                "{}.id",
+                                flat.root_alias.as_ref().unwrap_or(&prepared.query.table)
+                            )
+                        },
+                    );
+                    prepared.query.filters.push(crate::query::in_list(
+                        crate::query::col(root_id),
+                        rows.into_iter()
+                            .map(|row| crate::query::lit(Value::Uuid(RowUuid::from_bytes(row).0))),
+                    ));
+                }
             }
         }
         let inner = self.inner();
