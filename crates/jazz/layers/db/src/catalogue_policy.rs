@@ -59,7 +59,11 @@ impl Inner {
         let structural = self
             .catalogue_schema(descriptor.schema.id)?
             .ok_or_else(|| invalid("policy descriptor lacks accepted schema identities"))?;
-        if structural.schema.schema != descriptor.schema.schema.without_permissions() {
+        if !structural
+            .schema
+            .schema
+            .has_same_lineage_structure(&descriptor.schema.schema)
+        {
             return Err(invalid(
                 "policy descriptor differs from accepted schema structure",
             ));
@@ -98,7 +102,12 @@ impl Inner {
                 ));
             }
             if previous.head.revision == descriptor.head.revision
-                && previous.schema != descriptor.schema
+                && (previous.schema.id != descriptor.schema.id
+                    || previous
+                        .schema
+                        .schema
+                        .with_permissions_from(&descriptor.schema.schema)
+                        != previous.schema.schema)
             {
                 return Err(invalid("conflicting policies at one catalogue revision"));
             }

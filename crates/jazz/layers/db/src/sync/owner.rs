@@ -92,7 +92,10 @@ impl Inner {
         // transport delivery splits the head and its policy descriptor. Keep
         // ordinary deny-by-default policies until the exact descriptor arrives.
         let schema = match self.policy_descriptor()? {
-            Some(descriptor) => descriptor.schema.schema,
+            Some(descriptor) => self
+                .owner
+                .jazz
+                .with_permissions_from(&descriptor.schema.schema),
             None => self.owner.jazz.without_permissions(),
         };
         if schema == self.owner.jazz {
