@@ -23,7 +23,7 @@ use wasm_bindgen::prelude::*;
 use web_time::Instant;
 
 use crate::browser::{self, Store, StoreSpec};
-use crate::idb_paged::{self, PagedUtil, PAGED_VFS};
+use crate::idb_paged::{self, HintPolicy, PagedUtil, PAGED_VFS};
 
 const PAGE: u32 = 65536;
 const ROOM_PAGE: usize = 50;
@@ -42,6 +42,17 @@ thread_local! {
     static SWALLOWED: Cell<u32> = const { Cell::new(0) };
     /// The open file, for saving its hot-page hint at close.
     static PATH: RefCell<String> = const { RefCell::new(String::new()) };
+    static HINT_BYTES: Cell<usize> = const { Cell::new(0) };
+    /// [`paged_bench_hint_timing`]'s settings: store the hint every this
+    /// many ms, age LFU every this many ms.
+    static HINT_TIMING: Cell<(f64, f64)> = const { Cell::new((5000.0, 3_600_000.0)) };
+}
+
+/// How often the next opens store their hint, and how long an LFU epoch
+/// lasts (ms).
+#[wasm_bindgen(js_name = pagedBenchHintTiming)]
+pub fn paged_bench_hint_timing(every_ms: f64, epoch_ms: f64) {
+    HINT_TIMING.with(|t| t.set((every_ms, epoch_ms)));
 }
 
 fn schema() -> JazzSchema {
@@ -231,6 +242,7 @@ pub async fn paged_bench_open(
     budget_kib: f64,
     readahead: u32,
     hot_kib: f64,
+    policy: String,
 ) -> Result<JsValue, JsValue> {
     let out = Out::new();
     let start = Instant::now();
@@ -246,7 +258,16 @@ pub async fn paged_bench_open(
             } else {
                 usize::MAX
             };
-            util.configure(budget, readahead as usize);
+            let policy = match policy.as_str() {
+                "mru" => HintPolicy::Mru,
+                "lfu" => HintPolicy::LfuHalving,
+                "lfu-slow" => HintPolicy::LfuSlow,
+                "sieve" | "" => HintPolicy::Sieve,
+                other => return Err(err(format!("hint policy {other:?} is not supported"))),
+            };
+            util.configure(budget, readahead as usize, policy);
+            let (every, epoch) = HINT_TIMING.with(Cell::get);
+            util.configure_hint(every, epoch, 4096);
             util.reset_stats();
             let path = absolute(&path);
             PATH.with(|p| *p.borrow_mut() = path.clone());
@@ -307,6 +328,16 @@ fn paged_stats(out: &Out) {
         out.set("idbTxs", stats.idb_txs as f64);
         out.set("pagesLoaded", stats.pages_loaded as f64);
         out.set("pagesEvicted", stats.pages_evicted as f64);
+        out.set("recordCounts", stats.record_counts as f64);
+        let (hinted, used, touched) = util.hint_use();
+        out.set("hintPages", hinted as f64);
+        out.set("hintPagesUsed", used as f64);
+        out.set("pagesTouched", touched as f64);
+        out.set("hintPersists", stats.hint_persists as f64);
+        out.set("hintPersistBytes", stats.hint_persist_bytes as f64);
+        out.set("hintSoloPersists", stats.hint_solo_persists as f64);
+        out.set("hintSoloMs", stats.hint_solo_ms);
+        out.set("hintBuildMs", stats.hint_build_ms);
     }
     out.set("swallowed", SWALLOWED.with(Cell::get) as f64);
 }
@@ -585,11 +616,16 @@ pub async fn paged_bench_close(hint_pages: u32) -> Result<JsValue, JsValue> {
     flush().await?;
     if let Some(util) = paged_util() {
         let path = PATH.with(|p| p.borrow().clone());
-        util.save_hint(&path, hint_pages as usize).await?;
+        let (every, epoch) = HINT_TIMING.with(Cell::get);
+        util.configure_hint(every, epoch, hint_pages as usize);
+        let bytes = util.save_hint(&path).await?;
+        HINT_BYTES.with(|b| b.set(bytes));
     }
-    OPEN.with(|open| open.borrow_mut().take());
     let out = Out::new();
+    paged_stats(&out);
+    OPEN.with(|open| open.borrow_mut().take());
     out.set("closeMs", ran.ms);
     out.set("closeRounds", ran.rounds as f64);
+    out.set("hintBytes", HINT_BYTES.with(Cell::get) as f64);
     Ok(out.0.into())
 }

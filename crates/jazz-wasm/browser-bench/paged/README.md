@@ -13,7 +13,11 @@ node serve.cjs "$PWD" &                 # COOP/COEP on 127.0.0.1:8767
 node drive.cjs s,m 3                    # sizes, repetitions[, mode indexes, results file]
 NOCOUNT=1 node drive.cjs l 2            # the 400 MB store: skip the full-scan row count
 node analyze.cjs results.json           # median tables
-node drive-hot.cjs s,m,l 4096,16384,65536 2   # hot-page hint: sizes, hint KiB, repetitions
+node drive-hot.cjs s,m,l 4096,16384,65536 2   # MRU hint: sizes, hint KiB, repetitions
+node drive-lfu.cjs pollution m,l mru,lfu,lfu-slow 65536 out.json   # LFU hints vs a polluting session
+node drive-lfu.cjs tables s,m,l lfu 4096,16384,65536 out.json
+node drive-sieve.cjs p1,p2,p4,p6 l sieve,lfu,lfu-slow,mru 65536 out.json  # 1, 2, 4, 6 polluting sessions
+node drive-sieve.cjs kill,corrupt l sieve,lfu 65536 out.json        # a session killed mid-way; a corrupt hint
 ```
 
 Sizes: `s` (one 3.8 MB document, 500 messages), `m` (5 documents, 60,000

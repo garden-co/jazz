@@ -40,7 +40,7 @@ const SIZES = {
     for (const hot of hots) {
       const rA = 3 % cfg.rooms, rB = 7 % cfg.rooms, docB = 1 % cfg.logs;
       const warm = await session(size, [
-        ["open", "pagedBenchOpen", PATH, "paged", hot, 0, hot],
+        ["open", "pagedBenchOpen", PATH, "paged", hot, 0, hot, "mru"],
         ["doc", "pagedBenchDoc", 0],
         ["room", "pagedBenchRoom", rA],
         ["points", "pagedBenchPoints", 200, cfg.messages, 11],
@@ -49,7 +49,7 @@ const SIZES = {
       ]);
       for (let rep = 0; rep < reps; rep++) {
         const r = await session(size, [
-          ["open", "pagedBenchOpen", PATH, "paged", hot, 0, hot],
+          ["open", "pagedBenchOpen", PATH, "paged", hot, 0, hot, "mru"],
           ["memOpen", "memory"],
           ["docHot", "pagedBenchDoc", 0],
           ["roomHot", "pagedBenchRoom", rA],
