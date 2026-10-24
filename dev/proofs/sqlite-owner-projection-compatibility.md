@@ -174,6 +174,14 @@ and the private owner's own durable uploads. Only captured, still-pending
 identities receive Local receipts after the backing-store flush. Later arrivals
 require another barrier; rejection during a flush cannot be undone by its late
 confirmation. Reopen reconstructs the journals and requires a new barrier.
+
+A standalone empty update keeps the existing row receipt and does not publish
+another upload under that receipt's transaction identity. Previously that upload
+could replace a pending insert's journal entry with an update that the authority
+could not apply after restart. Operations inside an open transaction remain part
+of that complete unit. The `sqlite_write_state.rs` regressions cover accepted and
+rejected inserts across reopen and a transaction containing an empty update;
+neither case changes receipt or journal encodings.
 A session observes only identities actually delivered to it or declared
 as already known on reconnect. Those observers receive the same original-pair
 OwnerStoredV1 receipts as uploaders, including replay after a lost receipt.

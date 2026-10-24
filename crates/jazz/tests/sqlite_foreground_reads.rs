@@ -655,3 +655,158 @@ fn restarted_attempt_rearms_after_the_hosts_older_timer() {
         (vec!["cached".into()], DurabilityTier::Local)
     );
 }
+
+/// Alice's already-open Remote subscription pauses when her replica loses its
+/// authority. Local previews remain usable; reconnect reconciles the last result.
+/// alice -> authority; disconnect -> offline write -> reconnect -> poll
+#[test]
+fn strict_remote_subscription_rechecks_authority_after_its_opening() {
+    for consume_offline in [true, false] {
+        let server = open(93, true);
+        insert(&server, "accepted");
+        let alice = open(92, false);
+        let (up, down) = duplex_transport::duplex();
+        let connection = block_on(alice.connect_upstream(up));
+        let subscriber = server.accept_subscriber(down, AuthorSubject::SYSTEM);
+        let mut stream = subscribe(&alice, ReadOpts::for_read_tier(ReadTier::Remote));
+        assert_eq!(
+            opening(&mut stream, &[&alice, &server, &alice]),
+            (vec!["accepted".into()], DurabilityTier::Global)
+        );
+        while stream.try_next_event().is_some() {}
+        assert!(alice.detach_connection(&connection));
+        server.disconnect_subscriber(subscriber);
+        alice.set_remote_link_hint(RemoteLinkHint::NoServer);
+        if consume_offline {
+            assert!(stream.try_next_event().is_none(), "lost authority");
+        }
+        insert(&alice, "offline");
+        for _ in 0..10 {
+            turn(&[&alice]);
+            if consume_offline {
+                assert!(stream.try_next_event().is_none(), "offline preview leaked");
+            }
+        }
+        let query = alice.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(
+            block_on(alice.all(&query, ReadOpts::default()))
+                .unwrap()
+                .len(),
+            2
+        );
+        connect(&alice, &server);
+        alice.set_remote_link_hint(RemoteLinkHint::Live);
+        for _ in 0..20 {
+            turn(&[&alice, &server, &alice]);
+        }
+        let Some(SubscriptionEvent::Delta {
+            reset,
+            added,
+            removed,
+            settled,
+            tier,
+            ..
+        }) = stream.try_next_event()
+        else {
+            panic!("missing resumed delta")
+        };
+        assert!(!reset && settled);
+        assert_eq!(tier, DurabilityTier::Global);
+        assert!(removed.is_empty());
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            added[0]
+                .cells()
+                .find(|(name, _)| *name == "text")
+                .unwrap()
+                .1
+                .unwrap(),
+            &Value::String("offline".into())
+        );
+        assert!(stream.try_next_event().is_none(), "duplicate resumed delta");
+    }
+}
+
+/// Alice consumes ordered deltas before an outage. Reconciliation uses the last
+/// delivered ordering, even when several updates were queued between polls.
+#[test]
+fn strict_remote_reconnect_preserves_delivered_row_indexes() {
+    let server = open(83, true);
+    let put = |text: &str| {
+        block_on(server.insert(
+            "notes",
+            BTreeMap::from([("text".into(), Value::String(text.into()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .row_uuid()
+    };
+    let a = put("a");
+    let b = put("b");
+    let c = put("c");
+    let alice = open(82, false);
+    let (up, down) = duplex_transport::duplex();
+    let connection = block_on(alice.connect_upstream(up));
+    let subscriber = server.accept_subscriber(down, AuthorSubject::SYSTEM);
+    let query = alice
+        .prepare_query(&Query::from("notes").order_by("text", jazz::query::OrderDirection::Asc))
+        .unwrap();
+    let mut stream =
+        block_on(alice.subscribe(&query, ReadOpts::for_read_tier(ReadTier::Remote))).unwrap();
+    assert_eq!(
+        opening(&mut stream, &[&alice, &server, &alice]).0,
+        ["a", "b", "c"]
+    );
+    block_on(server.update(
+        "notes",
+        b,
+        BTreeMap::from([("text".into(), Value::String("z".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    for _ in 0..5 {
+        turn(&[&alice, &server, &alice]);
+    }
+    block_on(server.delete("notes", a, Default::default())).unwrap();
+    put("d");
+    for _ in 0..5 {
+        turn(&[&alice, &server, &alice]);
+    }
+    while stream.try_next_event().is_some() {}
+    // The delivered order is now c, d, z.
+    assert!(alice.detach_connection(&connection));
+    server.disconnect_subscriber(subscriber);
+    insert(&alice, "offline");
+    assert!(stream.try_next_event().is_none());
+    block_on(server.delete("notes", c, Default::default())).unwrap();
+    connect(&alice, &server);
+    for _ in 0..20 {
+        turn(&[&alice, &server, &alice]);
+    }
+    let Some(SubscriptionEvent::Delta {
+        reset,
+        added,
+        removed,
+        settled,
+        tier,
+        ..
+    }) = stream.try_next_event()
+    else {
+        panic!("missing resumed delta")
+    };
+    assert!(!reset && settled);
+    assert_eq!(tier, DurabilityTier::Global);
+    assert_eq!(removed.len(), 1);
+    assert_eq!((removed[0].row_uuid, removed[0].index), (c, 0));
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].index, 1);
+    assert_eq!(
+        added[0]
+            .cells()
+            .find(|(name, _)| *name == "text")
+            .unwrap()
+            .1
+            .unwrap(),
+        &Value::String("offline".into())
+    );
+}

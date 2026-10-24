@@ -306,7 +306,12 @@ pub struct SubscriptionStream {
     queue: fanout::Queue,
     dropped: Rc<std::cell::Cell<usize>>,
     /// A withheld opening, released as one reset of the current rows.
+    /// Strict Remote streams retain this gate for later authority loss.
     gate: Option<sync::Gate>,
+    strict_remote: bool,
+    gate_opened: bool,
+    /// Last result delivered by a strict stream, for reconciling an outage.
+    delivered: Option<Vec<CurrentRow>>,
     group: Weak<RefCell<fanout::Group>>,
     /// Why the server refused the remote read, once it has; reported once.
     refused: Option<Rc<RefCell<Option<Error>>>>,
@@ -333,6 +338,35 @@ impl SubscriptionStream {
         }
     }
 
+    /// Whether polling can return an event now, without consuming it. Hosts
+    /// use this to notify an idle foreground only when there is work to drain.
+    pub fn has_pending_event(&self) -> bool {
+        if self
+            .refused
+            .as_ref()
+            .is_some_and(|refused| refused.borrow().is_some())
+        {
+            return true;
+        }
+        if let Some(gate) = &self.gate {
+            if !gate.open() || self.gate_waiting_for_content(gate) {
+                return false;
+            }
+            if !self.gate_opened {
+                return true;
+            }
+        }
+        !self.queue.borrow().is_empty()
+    }
+
+    fn gate_waiting_for_content(&self, gate: &sync::Gate) -> bool {
+        (gate.wait_for_owner || gate.may_still_wait())
+            && self
+                .group
+                .upgrade()
+                .is_some_and(|group| group.borrow().awaiting())
+    }
+
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         let reason = self
             .refused
@@ -345,24 +379,43 @@ impl SubscriptionStream {
         }
         if let Some(gate) = &self.gate {
             if !gate.open() {
+                // A restored authority answer must replace any deltas that
+                // accumulated from the local preview while it was unavailable.
+                self.gate_opened = false;
+                self.queue.borrow_mut().clear();
                 return None;
             }
             // The opening lists rows whose large values are complete: while
             // their chunks may still arrive, it waits for them.
-            if (gate.wait_for_owner || gate.may_still_wait())
-                && self
-                    .group
-                    .upgrade()
-                    .is_some_and(|group| group.borrow().awaiting())
-            {
+            if self.gate_waiting_for_content(gate) {
                 return None;
+            }
+            if self.gate_opened {
+                // The consumer may not have polled during the outage. Never
+                // replay its queued Local deltas after the gate reopens.
+                let local_delta = matches!(
+                    self.queue.borrow().front(),
+                    Some(SubscriptionEvent::Delta { settled, tier, .. })
+                        if !settled || *tier != DurabilityTier::Global
+                );
+                if !local_delta {
+                    return self.pop_event();
+                }
             }
             let settled = gate.answered.get();
             let global = settled && gate.global.get();
-            self.gate = None;
+            self.gate_opened = true;
+            if !self.strict_remote {
+                self.gate = None;
+            }
             self.queue.borrow_mut().clear();
             let group = self.group.upgrade()?;
-            let mut event = fanout::opening(&group.borrow().rows);
+            let group = group.borrow();
+            let mut event = match &self.delivered {
+                Some(before) => fanout::diff(before, &group.rows)
+                    .unwrap_or_else(|| delta(false, Vec::new(), Vec::new(), Vec::new())),
+                None => fanout::opening(&group.rows),
+            };
             if let SubscriptionEvent::Delta {
                 settled: flag,
                 tier,
@@ -374,9 +427,61 @@ impl SubscriptionStream {
                     *tier = DurabilityTier::Global;
                 }
             }
+            self.remember(&event);
             return Some(event);
         }
-        self.queue.borrow_mut().pop_front()
+        self.pop_event()
+    }
+
+    fn pop_event(&mut self) -> Option<SubscriptionEvent> {
+        let event = self.queue.borrow_mut().pop_front()?;
+        self.remember(&event);
+        Some(event)
+    }
+
+    fn remember(&mut self, event: &SubscriptionEvent) {
+        if !self.strict_remote {
+            return;
+        }
+        let SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            removed,
+            ..
+        } = event
+        else {
+            return;
+        };
+        if !reset && added.is_empty() && updated.is_empty() && removed.is_empty() {
+            return;
+        }
+        let before = self.delivered.take().unwrap_or_default();
+        let omitted: BTreeSet<usize> = removed
+            .iter()
+            .map(|row| row.index)
+            .chain(updated.iter().filter_map(|row| row.previous_index))
+            .collect();
+        let mut kept = before
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !reset && !omitted.contains(index))
+            .map(|(_, row)| row)
+            .peekable();
+        let mut placed: BTreeMap<usize, CurrentRow> = added
+            .iter()
+            .chain(updated)
+            .map(|row| (row.index, row.row.clone()))
+            .collect();
+        let mut rows = Vec::new();
+        while !placed.is_empty() || kept.peek().is_some() {
+            let row = placed
+                .remove(&rows.len())
+                .or_else(|| kept.next())
+                .expect("subscription delta has contiguous output indexes");
+            rows.push(row);
+        }
+        self.delivered = Some(rows);
     }
 
     pub async fn close(self) -> Result<(), Error> {
@@ -1379,7 +1484,7 @@ impl Db {
                         hint,
                         deadline,
                         wait_for_owner: foreground,
-                        require_global: foreground && wait_for_remote,
+                        require_global: strict || (foreground && wait_for_remote),
                         _wake: self.read_deadline(deadline),
                         _attempt_wake: self.read_attempt_deadline(),
                     })
@@ -1404,6 +1509,9 @@ impl Db {
             queue,
             dropped: inner.fan.dropped.clone(),
             gate,
+            strict_remote: opts.tier == ReadTier::Remote && remote.is_some(),
+            gate_opened: false,
+            delivered: None,
             group,
             refused: remote.as_ref().map(|(_, refused, _)| refused.clone()),
             remote: remote.map(|_| {
@@ -1577,6 +1685,7 @@ impl Db {
         }
         self.with_upload(|| {
             let table = op.table().to_owned();
+            let before = self.inner().seq;
             let handle = self.write(&table, |inner, seq| {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
@@ -1588,7 +1697,13 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
-            self.record_upload(vec![op], handle.seq, None, sync::Kind::Mergeable)?;
+            // A no-op returns the row's existing sequence. Uploading it as a
+            // new unit would reuse that transaction identity with different
+            // bytes, replacing a still-pending write's journal entry. Inside
+            // an open transaction, capture still belongs to that one unit.
+            if self.inner().tx.is_some() || handle.seq > before {
+                self.record_upload(vec![op], handle.seq, None, sync::Kind::Mergeable)?;
+            }
             Ok(handle)
         })
     }

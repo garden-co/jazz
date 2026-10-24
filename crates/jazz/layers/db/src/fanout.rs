@@ -1416,7 +1416,7 @@ fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
     prior.seq != row.seq && !(prior.seq >= crate::db::LOCAL_BASE && row.seq < crate::db::LOCAL_BASE)
 }
 
-fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
+pub(super) fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
     let old: HashMap<RowKey, (usize, &CurrentRow)> = before
         .iter()
         .enumerate()

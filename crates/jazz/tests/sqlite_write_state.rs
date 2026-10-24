@@ -83,6 +83,102 @@ fn count(db: &Db) -> usize {
     block_on(db.all(&query, Default::default())).unwrap().len()
 }
 
+/// Alice applies an empty offline update, then restarts. Bob's authority must
+/// still receive the original insert exactly once and decide its original fate.
+/// The no-op cannot replace that pending unit or manufacture an accepted receipt.
+#[test]
+fn empty_update_preserves_the_pending_insert_across_reopen() {
+    for allowed in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-update.sqlite");
+        let tx = {
+            let db = file(&path);
+            db.set_remote_link_hint(RemoteLinkHint::Failed);
+            let row = block_on(db.insert(
+                "notes",
+                BTreeMap::from([(
+                    "text".into(),
+                    Value::String(if allowed { "allowed" } else { "forbidden" }.into()),
+                )]),
+                Default::default(),
+            ))
+            .unwrap();
+            let tx = row.mergeable_tx_id();
+            let no_op =
+                block_on(db.update("notes", row.row_uuid(), BTreeMap::new(), Default::default()))
+                    .unwrap();
+            assert_eq!(no_op.mergeable_tx_id(), tx);
+            assert_eq!(db.write_state(tx).unwrap().fate, Fate::Pending);
+            assert_eq!(
+                db.write_state(tx).unwrap().durability,
+                DurabilityTier::Local
+            );
+            block_on(db.close()).unwrap();
+            tx
+        };
+        let db = file(&path);
+        let authority = block_on(Db::open_history_complete(config(2))).unwrap();
+        assert_eq!(db.write_state(tx).unwrap().fate, Fate::Pending);
+        connect(&db, &authority);
+        let outcome = drive(
+            &[&db, &authority, &db],
+            db.wait_for_transaction(tx, DurabilityTier::Global),
+        );
+        if allowed {
+            outcome.unwrap();
+            assert_eq!(db.write_state(tx).unwrap().fate, Fate::Accepted);
+            assert_eq!(count(&authority), 1);
+        } else {
+            assert_eq!(outcome.unwrap_err().code, ErrorCode::WriteRejected);
+            assert_eq!(
+                db.write_state(tx).unwrap().fate,
+                Fate::Rejected(RejectionReason::AuthorizationDenied)
+            );
+            assert_eq!(count(&authority), 0);
+        }
+        assert_eq!(count(&db), usize::from(allowed));
+    }
+}
+
+/// Alice's no-op belongs to its existing mergeable transaction. The authority
+/// accepts both inserts together, including the row touched by the empty update.
+#[test]
+fn empty_update_in_an_open_unit_preserves_all_transaction_writes() {
+    let db = block_on(Db::open(config(1))).unwrap();
+    db.set_remote_link_hint(RemoteLinkHint::Failed);
+    let transaction = block_on(db.mergeable_tx()).unwrap();
+    let first = block_on(transaction.insert(
+        "notes",
+        BTreeMap::from([("text".into(), Value::String("allowed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(transaction.update(
+        "notes",
+        first.row_uuid(),
+        BTreeMap::new(),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(transaction.insert(
+        "notes",
+        BTreeMap::from([("text".into(), Value::String("allowed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let tx = block_on(transaction.commit()).unwrap().0;
+    let authority = block_on(Db::open_history_complete(config(2))).unwrap();
+    connect(&db, &authority);
+    drive(
+        &[&db, &authority, &db],
+        db.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(db.write_state(tx).unwrap().fate, Fate::Accepted);
+    assert_eq!(count(&authority), 2);
+    assert_eq!(count(&db), 2);
+}
+
 /// A standalone local write has no authority receipt; only an explicit
 /// authority may report its own committed sequence as globally accepted.
 #[test]
