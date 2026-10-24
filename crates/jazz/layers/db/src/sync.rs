@@ -699,6 +699,9 @@ pub(crate) struct Client {
     relay_ready: bool,
     /// The server said it has not admitted this client's schema version.
     unadmitted: bool,
+    /// A new session has not yet been told which rows this replica holds:
+    /// the next send reads them and puts the `Hold` right after `Schema`.
+    hold_owed: bool,
 }
 
 /// A session's commit a relay uploads as its own: (session, the session's
@@ -1686,6 +1689,35 @@ impl Inner {
     /// Every settled row version in the replica (pending local versions sit
     /// above `LOCAL_BASE`; their settled images are in the shadow), by
     /// stored table.
+    /// The `Hold` a new session starts with: every settled row the replica
+    /// holds, whether or not a live query still reads it. The session
+    /// watches them, so a later change (a deletion, lost access) still
+    /// reaches the cached copy.
+    fn hold(&self) -> Result<Option<SyncMessage>, Error> {
+        let client = self.client.as_ref().expect("client");
+        let mut rows: Vec<(String, [u8; 16], Vec<u8>, u64)> = client
+            .shadow
+            .iter()
+            .filter_map(|((table, row, key), image)| {
+                image
+                    .as_ref()
+                    .map(|image| (table.clone(), *row.0.as_bytes(), key.clone(), image.seq))
+            })
+            .collect();
+        rows.extend(self.held_versions()?);
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        // Held rows name tables as this store's schema does.
+        let rows = rows
+            .into_iter()
+            .filter_map(|(table, id, key, seq)| {
+                Some((self.owner.by_stored(&table)?.name.clone(), id, key, seq))
+            })
+            .collect();
+        Ok(Some(SyncMessage::Hold { rows }))
+    }
+
     fn held_versions(&self) -> Result<Vec<(String, [u8; 16], Vec<u8>, u64)>, Error> {
         let mut out = Vec::new();
         for table in self.owner.tables.values().map(|table| &table.stored) {
@@ -2628,6 +2660,7 @@ impl Client {
             relayed_fetches: Vec::new(),
             relay_ready: false,
             unadmitted: false,
+            hold_owed: false,
         }
     }
 }
@@ -2666,15 +2699,6 @@ impl Db {
                 }
             })
             .collect();
-        let shadowed: Vec<(String, [u8; 16], Vec<u8>, u64)> = client
-            .shadow
-            .iter()
-            .filter_map(|((table, row, key), image)| {
-                image
-                    .as_ref()
-                    .map(|image| (table.clone(), *row.0.as_bytes(), key.clone(), image.seq))
-            })
-            .collect();
         // Commits, their chunk pushes and chunk requests a full queue held
         // back are sent again below from what is still owed.
         client.outbox.retain(|m| {
@@ -2691,27 +2715,9 @@ impl Db {
         let version = *inner.owner.jazz.version_id().as_bytes();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
-        // Every settled row the replica holds, whether or not a live query
-        // still reads it: the new session watches them, so a later change
-        // (a deletion, lost access) still reaches the cached copy.
-        let mut rows = shadowed;
-        match inner.held_versions() {
-            Ok(held) => rows.extend(held),
-            Err(_) => rows.clear(),
-        }
-        if !rows.is_empty() {
-            // Held rows name tables as this store's schema does.
-            let names = inner.owner.clone();
-            let rows = rows
-                .into_iter()
-                .filter_map(|(table, id, key, seq)| {
-                    Some((names.by_stored(&table)?.name.clone(), id, key, seq))
-                })
-                .collect();
-            let client = inner.client.as_mut().expect("client");
-            client.outbox.push(SyncMessage::Hold { rows });
-        }
-        let client = inner.client.as_mut().expect("client");
+        // Reading the held rows can fail, and connecting cannot: the send
+        // that reads them reports the error, and the next one tries again.
+        client.hold_owed = true;
         client.outbox.extend(resubscribe);
         // Sent-but-unsettled commits go first, in their original order.
         let mut resend = client.sent.clone();
@@ -2786,17 +2792,26 @@ impl Db {
 
     /// Record a local commit for upload (client only). Inside an open
     /// transaction the ops join it.
-    pub(crate) fn record_upload(&self, ops: Vec<StagedOp>, seq: u64, _mark: usize, kind: Kind) {
+    /// Record a local commit's upload. It reads and writes the store, so
+    /// it runs inside the commit's SQLite transaction: an error leaves the
+    /// replica's sync state as it was, and the caller rolls the commit back.
+    pub(crate) fn record_upload(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        _mark: usize,
+        kind: Kind,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
-            return;
+            return Ok(());
         }
         if inner.tx.is_some() {
             inner.capture.extend(ops);
-            return;
+            return Ok(());
         }
         if ops.is_empty() || seq != inner.seq {
-            return;
+            return Ok(());
         }
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
@@ -2809,7 +2824,7 @@ impl Db {
         let session_claims = author
             .filter(|_| session)
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
-        let rows = inner.written_rows(&ops, seq).unwrap_or_default();
+        let rows = inner.written_rows(&ops, seq)?;
         let mut shadows = Vec::new();
         for (table, row, key) in &rows {
             let shadowed = inner
@@ -2819,7 +2834,7 @@ impl Db {
             if !shadowed {
                 shadows.push((
                     (table.clone(), *row, key.clone()),
-                    inner.settled_before(table, *row, key).ok().flatten(),
+                    inner.settled_before(table, *row, key)?,
                 ));
             }
         }
@@ -2829,7 +2844,7 @@ impl Db {
         let mut expected = Vec::new();
         let mut expect = Vec::new();
         for (table, row, key) in &rows {
-            let Some(image) = inner.current_image(table, *row, key).ok().flatten() else {
+            let Some(image) = inner.current_image(table, *row, key)? else {
                 continue;
             };
             let Some(named) = image_out(&inner.owner, image.clone()) else {
@@ -2843,6 +2858,7 @@ impl Db {
             expected.push(image);
         }
         let client = inner.client.as_mut().expect("client");
+        let added: Vec<RowKey> = shadows.iter().map(|(key, _)| key.clone()).collect();
         client.shadow.extend(shadows);
         match wire {
             Ok(wire) => {
@@ -2875,10 +2891,18 @@ impl Db {
                     rows: rows.clone(),
                     expected,
                 });
-                inner
+                let persisted = inner
                     .persist_pending(seq, &commit, &rows)
-                    .expect("persist pending commit");
-                inner.persist_shadow().expect("persist shadow");
+                    .and_then(|()| inner.persist_shadow());
+                if let Err(error) = persisted {
+                    let client = inner.client.as_mut().expect("client");
+                    client.unsent.pop();
+                    client.pending.pop();
+                    for key in &added {
+                        client.shadow.remove(key);
+                    }
+                    return Err(error);
+                }
             }
             Err(error) => {
                 client.fates.insert(seq, Err(error));
@@ -2892,6 +2916,7 @@ impl Db {
                 let _ = self.settle_locally(seq);
             }
         }
+        Ok(())
     }
 
     /// A transaction that cannot upload is rejected at once.
@@ -3619,6 +3644,20 @@ impl Db {
         if client.transport.is_none() {
             return Ok(());
         }
+        if client.hold_owed {
+            let hold = inner.hold()?;
+            let client = inner.client.as_mut().expect("client");
+            if let Some(hold) = hold {
+                let at = client
+                    .outbox
+                    .iter()
+                    .position(|m| !matches!(m, SyncMessage::Schema { .. }))
+                    .unwrap_or(client.outbox.len());
+                client.outbox.insert(at, hold);
+            }
+            client.hold_owed = false;
+        }
+        let client = inner.client.as_mut().expect("client");
         let mut out = std::mem::take(&mut client.outbox);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
@@ -5218,7 +5257,7 @@ impl Db {
                 }
             }
         }
-        let seq = {
+        let (seq, mark) = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
             inner
@@ -5238,23 +5277,50 @@ impl Db {
                 let rows = mentioned(&inner);
                 return Err((error, rows));
             }
-            inner
+            let recorded = inner
                 .record_fate(origin.0, origin.1, &Ok(()))
-                .and_then(|()| inner.record_settled(origin.0, origin.1, Some(seq)))
-                .map_err(|e| (e, Vec::new()))?;
-            inner
-                .conn
-                .execute_batch("RELEASE upload")
-                .map_err(|e| (storage(e), Vec::new()))?;
+                .and_then(|()| inner.record_settled(origin.0, origin.1, Some(seq)));
+            if let Err(error) = recorded {
+                inner
+                    .conn
+                    .execute_batch("ROLLBACK TO upload; RELEASE upload")
+                    .map_err(|e| (storage(e), Vec::new()))?;
+                inner.changed.borrow_mut().truncate(mark);
+                return Err((error, Vec::new()));
+            }
             inner.seq = seq;
-            seq
+            (seq, mark)
         };
-        if relay {
-            self.record_upload(ops.clone(), seq, 0, Kind::Mergeable);
+        // The relay's own upload record and the rows the sender hears about
+        // are read before the commit is released, so a storage error
+        // rejects it whole instead of leaving it applied but not relayed.
+        let finished = if relay {
+            self.record_upload(ops.clone(), seq, 0, Kind::Mergeable)
+        } else {
+            Ok(())
         }
-        self.notify();
-        let inner = self.inner.borrow();
-        Ok(inner.written_rows(&ops, seq).unwrap_or_default())
+        .and_then(|()| self.inner.borrow().written_rows(&ops, seq));
+        let mut inner = self.inner();
+        match finished {
+            Ok(rows) => {
+                inner
+                    .conn
+                    .execute_batch("RELEASE upload")
+                    .map_err(|e| (storage(e), Vec::new()))?;
+                drop(inner);
+                self.notify();
+                Ok(rows)
+            }
+            Err(error) => {
+                inner
+                    .conn
+                    .execute_batch("ROLLBACK TO upload; RELEASE upload")
+                    .map_err(|e| (storage(e), Vec::new()))?;
+                inner.seq = seq - 1;
+                inner.changed.borrow_mut().truncate(mark);
+                Err((error, Vec::new()))
+            }
+        }
     }
 
     /// One tick for both roles.
