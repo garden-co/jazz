@@ -7,6 +7,10 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 package="$root/crates/jazz-rn"
 relay_manifest="$root/crates/jazz-native-relay/Cargo.toml"
+# This crate can be outside the workspace while its port is in progress. Pin
+# the build output to the exact directory copied below, including when the
+# caller set CARGO_TARGET_DIR, so an older workspace archive cannot be sealed.
+relay_target="$root/target"
 platform=${1:?usage: build-relay-artifacts.sh <android|ios>}
 abi=$(sed -nE 's/^pub const NATIVE_RELAY_ABI_V1: u16 = ([0-9]+);/\1/p' \
   "$root/crates/jazz-native-relay/src/lib.rs")
@@ -102,7 +106,7 @@ case "$platform" in
     )
     for android_abi in "${!rust_targets[@]}"; do
       rust_target=${rust_targets[$android_abi]}
-      cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --release
+      cargo ndk -t "$android_abi" build --manifest-path "$relay_manifest" --target-dir "$relay_target" --release
       mkdir -p "$stage/$android_abi"
       cp "$root/target/$rust_target/release/libjazz_native_relay.a" "$stage/$android_abi/"
     done
@@ -117,7 +121,7 @@ case "$platform" in
     stage_header
     simulator_targets=(aarch64-apple-ios-sim x86_64-apple-ios)
     for target in "$device_target" "${simulator_targets[@]}"; do
-      cargo build --manifest-path "$relay_manifest" --target "$target" --release
+      cargo build --manifest-path "$relay_manifest" --target "$target" --target-dir "$relay_target" --release
     done
     staging=$(mktemp -d)
     trap 'rm -rf "$staging"' EXIT
