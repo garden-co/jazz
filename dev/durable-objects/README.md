@@ -139,3 +139,67 @@ Risks to keep an eye on:
 
 A CI job running `cargo test --workspace --features jazz/durable-object-limits`
 keeps all of this from regressing.
+
+## Single-object ceiling (an unsharded app on one object)
+
+`doc-shelf-do-ceiling` (in `examples/doc-shelf/benchmarks`) models a
+collaborative task app. Tasks live in projects of `PROJECT` rows (200 by
+default), with `GROUP` connected users per project (5), each subscribed
+to its project. A user write is one transaction updating `ROWS` tasks
+(10), so it fans out to the project's other users. The authority is a
+file store of `STORE` tasks. The bench times only the authority's tick,
+because that is the object's single thread. It runs natively: jazz-db
+does not run inside workerd until the storage seam exists, so the
+Durable Object numbers below are estimates built from native
+measurements and the DO per-statement costs measured above.
+
+Native authority, release build, on one core of a cloud dev container
+(10-row writes, groups of 5, one write per tick):
+
+| connected sessions |     stored rows | authority time per write | writes/s at 100% | idle tick |
+| -----------------: | --------------: | -----------------------: | ---------------: | --------: |
+|                 10 | 10k / 100k / 1M |       1.9 / 2.0 / 1.8 ms |  535 / 500 / 544 |  16-28 us |
+|                100 | 10k / 100k / 1M |       2.6 / 2.3 / 2.2 ms |  386 / 427 / 459 |  34-37 us |
+|              1,000 |       100k / 1M |             5.4 / 4.9 ms |        186 / 203 |  60-72 us |
+|              3,000 |            400k |                  11.1 ms |               90 |    296 us |
+|             10,000 |            400k |                  37.1 ms |               27 |    918 us |
+
+- **Store size does not matter** from 10k to 1M rows (7 MB to 279 MB).
+  Point reads and index maintenance stay flat. The tick p99 is 11-17 ms
+  at every size, from WAL checkpoints in the file store.
+- **Rows per write dominate**: a 1-row write costs 0.54 ms (1,850/s).
+  A 10-row write costs about 2 ms: about 153 statements (125 of them
+  reads), roughly 45% of the time in SQLite and the rest in the engine.
+- **Fan-out width**: 50 users on one project costs 8.3 ms per write
+  (255 KB of images out), against 2.9 ms with nobody else watching. That
+  is about 110 us per recipient.
+- **Batching does not amortize the write itself**: 10 or 50 writes per
+  tick still cost 2.0 ms each. It does amortize the per-session cost below.
+- **Every connected session costs about 3.5 us per tick** whether or not
+  the write concerns it (the tick walks every session). At 1,000 sessions
+  that is more than the write itself. Skipping sessions with nothing
+  pending is an engine fix this branch does not have yet.
+- **Memory is about 1.25 KB per (session, subscribed row)**: the
+  session's watch keys and held-row maps. 1,000 sessions over 1,000-row
+  projects take 1.3 GB, 1,000 sessions over 10-row projects take 48 MB.
+
+### On a Durable Object (estimate)
+
+- **CPU per 10-row write**: the SQLite work itself (~1 ms), plus 153 ×
+  ~2.3 us per `exec` through `ctx.storage.sql` (~0.35 ms) and the
+  wasm-to-JS crossings, plus the engine at an assumed 1.5-2× native in
+  wasm (~2-2.6 ms). That is about 3.5-4 ms, so ~250-280 writes/s with
+  the thread at 100%. To keep queueing latency low (under ~60% busy),
+  plan on **~150 sustained 10-row writes/s**, minus ~6 us per connected
+  session per tick.
+- **Memory binds first**: an isolate has 128 MB, shared with the
+  object's other state. At 1.25 KB per (session, row), with 200-row
+  subscriptions, that is **~350 concurrent sessions** in ~90 MB.
+- **Storage** (10 GB per object) is far away: 1M tasks are 279 MB.
+
+What can differ in production: production CPUs and wasm speed, and
+WebSocket hibernation (it frees an idle session's memory, but a woken
+session pays its subscription again: ~1.3 ms per 200-row session here).
+The output gate delays replies until writes are durable, which adds
+latency but not CPU. The isolate's 128 MB is shared by the objects
+placed in it.
