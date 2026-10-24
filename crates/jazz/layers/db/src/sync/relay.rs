@@ -92,7 +92,7 @@ impl Inner {
         Ok(message)
     }
 
-    fn upload_is_complete(&self, message: &SyncMessage) -> Result<bool, Error> {
+    pub(super) fn upload_is_complete(&self, message: &SyncMessage) -> Result<bool, Error> {
         for value in large_values(message) {
             if let Err(error) = crate::large::admit(&self.conn, &self.chunks, value) {
                 if error.code == ErrorCode::Storage {
@@ -218,6 +218,7 @@ impl Inner {
 
     /// The caller commits this with the authority fate and settled position.
     pub(super) fn finish_relay_upload(&self, id: UploadId) -> Result<(), Error> {
+        self.conn.execute("UPDATE _jazz_owner_initialization_v1 SET state=2 WHERE node=?1 AND tx=?2 AND state=1", rusqlite::params![id.0.as_slice(),id.1 as i64]).map_err(storage)?;
         self.conn
             .execute(
                 "UPDATE _jazz_relay_upload_v1 SET pending=0 WHERE node=?1 AND tx=?2",
@@ -259,6 +260,7 @@ impl Db {
         index: usize,
         policy: Option<AuthorSubject>,
         request: SyncMessage,
+        reservation: Option<[u8; 16]>,
     ) -> Result<(), Error> {
         let SyncMessage::Commit {
             node,
@@ -309,6 +311,7 @@ impl Db {
                 "downstream upload uses the relay owner's transaction identity",
             ));
         }
+        inner.check_owner_initialization_upload(index, (node, tx), reservation)?;
         let source = inner.sessions[index].identity.canonical().to_owned();
         // The authenticated connection, never caller-supplied session claims,
         // determines an ordinary sender's forwarded scope.
@@ -363,6 +366,13 @@ impl Db {
             let persisted = (|| {
                 inner.conn.execute("INSERT INTO _jazz_relay_upload_v1(node,tx,source,schema_id,request,commit_msg,pending) VALUES(?1,?2,?3,?4,?5,?6,1)",rusqlite::params![node.as_slice(),tx as i64,source,version.as_bytes().as_slice(),bytes,journal_bytes(&message)]).map_err(storage)?;
                 let order = inner.conn.last_insert_rowid() as u64;
+                if let Some(nonce) = reservation {
+                    let changed = inner.conn.execute("UPDATE _jazz_owner_initialization_v1 SET state=1 WHERE node=?1 AND tx=?2 AND nonce=?3 AND state=0", rusqlite::params![node.as_slice(),tx as i64,nonce.as_slice()]).map_err(storage)?;
+                    if changed != 1 {
+                        return Err(corrupt("initialization reservation was already published"));
+                    }
+                }
+
                 for value in large_values(&message) {
                     inner.conn.execute("INSERT OR IGNORE INTO _jazz_lv_relay_root_v1(node,tx,root) VALUES(?1,?2,?3)",rusqlite::params![node.as_slice(),tx as i64,value.root.locator.as_bytes().as_slice()]).map_err(storage)?;
                 }
@@ -474,6 +484,7 @@ pub struct OwnerDurabilityBarrier {
     owner: std::rc::Weak<std::cell::RefCell<Inner>>,
     uploads: Vec<UploadId>,
     own_uploads: Vec<UploadId>,
+    reservations: Vec<(usize, u64, owner_init::OwnerReservation)>,
 }
 
 impl Db {
@@ -520,12 +531,27 @@ impl Db {
                 }
             }
         }
+        let reservations = inner
+            .sessions
+            .iter()
+            .enumerate()
+            .flat_map(|(index, session)| {
+                session
+                    .initialization_reservations
+                    .iter()
+                    .filter(|(_, r)| !r.durable)
+                    .map(move |(id, r)| (index, *id, r.clone()))
+            })
+            .collect::<Vec<_>>();
         Ok(
-            (!uploads.is_empty() || !own_uploads.is_empty()).then(|| OwnerDurabilityBarrier {
-                owner: Rc::downgrade(&self.inner),
-                uploads,
-                own_uploads,
-            }),
+            (!uploads.is_empty() || !own_uploads.is_empty() || !reservations.is_empty()).then(
+                || OwnerDurabilityBarrier {
+                    owner: Rc::downgrade(&self.inner),
+                    uploads,
+                    own_uploads,
+                    reservations,
+                },
+            ),
         )
     }
 
@@ -552,6 +578,17 @@ impl Db {
             ));
         }
         inner.require_owner_subject(inner.identity.author)?;
+        for (index, id, reservation) in barrier.reservations {
+            if let Some(current) = inner
+                .sessions
+                .get_mut(index)
+                .and_then(|s| s.initialization_reservations.get_mut(&id))
+                && current.nonce == reservation.nonce
+                && current.origin == reservation.origin
+            {
+                current.durable = true;
+            }
+        }
         if let Some(client) = &mut inner.client {
             let own: BTreeSet<_> = barrier.own_uploads.into_iter().collect();
             for pending in &mut client.pending {
@@ -590,6 +627,22 @@ impl Db {
             if !session.open {
                 continue;
             }
+            session
+                .initialization_reservations
+                .retain(|id, reservation| {
+                    if reservation.durable {
+                        session
+                            .outbox
+                            .push(SyncMessage::OwnerInitializationReservedV1 {
+                                id: *id,
+                                nonce: reservation.nonce,
+                                result: Ok(reservation.origin),
+                            });
+                        false
+                    } else {
+                        true
+                    }
+                });
             for &(node, tx) in session.relay_uploads.union(&session.owner_observed) {
                 if stored.contains(&(node, tx)) && session.owner_acked.insert((node, tx)) {
                     session.outbox.push(SyncMessage::OwnerStoredV1 { node, tx });
