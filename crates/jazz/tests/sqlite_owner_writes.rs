@@ -176,6 +176,38 @@ fn admitted_writes_keep_real_storage_and_authority_receipts() {
     assert_eq!(values(&tab), ["yes"]);
 }
 
+/// Alice's Global receipt through her private owner must leave the accepted
+/// content locally readable at the start of her next E2EE transaction.
+#[test]
+fn global_receipt_preserves_local_accepted_content_for_the_next_transaction() {
+    let owner = owner(None);
+    let tab = foreground(1);
+    let server = open(90, None);
+    server.set_authority();
+    connect(&owner, &server);
+    connect(&tab, &owner);
+    turns(&[&tab, &owner, &server]);
+    let id = insert(&tab, "accepted account", true).mergeable_tx_id();
+    turns(&[&tab, &owner, &server]);
+    assert_eq!(tab.write_state(id).unwrap().fate, Fate::Accepted);
+    assert_eq!(values(&tab), ["accepted account"]);
+    let tx = jazz::tools::OpenTransactionId::new();
+    block_on(tab.begin_serializable(tx)).unwrap();
+    let read = block_on(
+        tab.all_settled(
+            tab.prepare_query(&Query::from("notes")).unwrap(),
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+            tx,
+            true,
+            None,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(read.rows.len(), 1);
+    assert_eq!(read.settlements.len(), 1);
+}
+
 /// Alice closes her original tab and reopens the durable owner. A new tab's
 /// propagated query recovers both writes of an atomic unit before editing them.
 #[test]
