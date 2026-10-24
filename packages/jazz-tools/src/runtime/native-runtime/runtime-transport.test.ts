@@ -50,6 +50,49 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("reports a live core hint only after upstream admission without a connection manager", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const admission = deferred<Transport>();
+    const hints: string[] = [];
+    const started = deferred<void>();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setRemoteLinkHint: (hint: string) => hints.push(hint),
+            connectUpstreamWithSession: () => {
+              started.resolve();
+              return admission.promise;
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      expect(hints).toEqual(["attempting"]);
+      await started.promise;
+      expect(hints).toEqual(["attempting"]);
+      admission.resolve(new FakeTransport([]));
+      await runtime.waitForUpstreamServerConnection();
+      // A SharedWorker has no foreground ConnectionManager to replace the
+      // five-second attempting hint. Its own admission must report liveness.
+      expect(hints).toEqual(["attempting", "live"]);
+      expect(runtime.remoteLinkState()).toBe("connected");
+    } finally {
+      admission.resolve(new FakeTransport([]));
+      await runtime.close();
+    }
+  });
+
   it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
     vi.useFakeTimers();
     let schedule: ((urgency: "immediate" | "deferred" | `after:${number}`) => void) | undefined;

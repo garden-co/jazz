@@ -2850,6 +2850,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Validate synchronously before retiring the current transport. Callers
     // historically observe an incompatible native binding at connect() time.
     const features = this.nativeWireFeatures();
+    // Admit the replica role before connect() returns. Writes made during the
+    // asynchronous Hello must enter its upload journal, not standalone history.
+    this.setRemoteLinkHint("connecting");
     const generation = this.serverConnectionGeneration + 1;
     const predecessorRetirement = this.invalidateServerTransport({
       rejectWaiters: false,
@@ -3063,6 +3066,9 @@ export class NativeRuntimeAdapter implements Runtime {
         this.clearServerOutage();
         attempt.transport = transport;
         this.serverTransport = transport;
+        // Worker-owned runtimes have no ConnectionManager to publish this
+        // transition. Replace the bounded attempt hint once admission succeeds.
+        this.setRemoteLinkHint("connected");
         this.remoteLink.changed();
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
