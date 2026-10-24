@@ -1004,6 +1004,7 @@ impl Owner {
                                 "permissions_head_missing: no published permissions head"
                                     .to_owned(),
                             )),
+                            held: Vec::new(),
                         });
                 }
                 Ok(

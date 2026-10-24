@@ -206,6 +206,79 @@ pub struct Image {
     pub cells: Vec<(String, Cell)>,
 }
 
+/// A row a commit writes, as the writer's replica holds it afterwards:
+/// [`echo_digest`] of its image (in the session schema's names).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Expect {
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub digest: [u8; 16],
+}
+
+/// The provenance cells the applying clock stamps: a writer's replica
+/// holds its own clock's, so the authority's travel in the Fate ([`Held`]).
+const STAMPS: [&str; 2] = ["$createdAt", "$updatedAt"];
+
+/// What a writer and the authority compare to agree on a row version
+/// without shipping it: everything in an image but its seq and
+/// [`STAMPS`].
+fn echo_digest(image: &Image) -> [u8; 16] {
+    let mut cells: Vec<&(String, Cell)> = image
+        .cells
+        .iter()
+        .filter(|(name, _)| !STAMPS.contains(&name.as_str()))
+        .collect();
+    cells.sort_by(|a, b| a.0.cmp(&b.0));
+    let bytes = postcard::to_allocvec(&(
+        &image.table,
+        &image.id,
+        &image.key,
+        image.deleted,
+        image.content,
+        cells,
+    ))
+    .expect("postcard encodes images");
+    let hash = blake3::hash(&bytes);
+    hash.as_bytes()[..16].try_into().expect("16 bytes")
+}
+
+/// A row of a commit's `expect` the server did not ship (see
+/// `SyncMessage::Fate`), with the authority's [`STAMPS`] for it: `None`
+/// where its version has no such cell.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Held {
+    pub index: u32,
+    pub created_at: Option<Cell>,
+    pub updated_at: Option<Cell>,
+}
+
+impl Held {
+    fn of(index: u32, image: &Image) -> Self {
+        let stamp = |name: &str| {
+            image
+                .cells
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, cell)| cell.clone())
+        };
+        Held {
+            index,
+            created_at: stamp(STAMPS[0]),
+            updated_at: stamp(STAMPS[1]),
+        }
+    }
+
+    /// `image` with the authority's stamps.
+    fn stamp(&self, image: &mut Image) {
+        for (name, cell) in STAMPS.iter().zip([&self.created_at, &self.updated_at]) {
+            image.cells.retain(|(n, _)| n != name);
+            if let Some(cell) = cell {
+                image.cells.push(((*name).to_owned(), cell.clone()));
+            }
+        }
+    }
+}
+
 /// Which branch a replicated write addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireTarget {
@@ -403,6 +476,10 @@ pub enum SyncMessage {
         session: Option<BTreeMap<String, Value>>,
         /// The writes' explicit provenance timestamp (Unix ms), if any.
         updated_at: Option<u64>,
+        /// The rows as the writer's replica holds them after these writes
+        /// (see [`Expect`]): the authority skips echoing a row whose new
+        /// version is exactly that. Empty when the writer does not know.
+        expect: Vec<Expect>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -461,10 +538,15 @@ pub enum SyncMessage {
         code: ErrorCode,
         message: String,
     },
+    /// `held`: the commit's `expect` entries whose row the server did not
+    /// ship because its version at `through` is what the writer expected:
+    /// the writer installs its own, with the authority's stamps, as that
+    /// version.
     Fate {
         tx: u64,
         through: u64,
         result: Result<(), WireError>,
+        held: Vec<Held>,
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
@@ -520,6 +602,20 @@ struct Pending {
     tx: u64,
     ops: Vec<StagedOp>,
     rows: Vec<(String, RowUuid, Vec<u8>)>,
+    /// The commit's `expect` rows as stored here, in its order: the server
+    /// may name them `held` instead of shipping them.
+    expected: Vec<Image>,
+}
+
+/// A row an accepted commit wrote that the writer said it holds.
+struct Echo {
+    tx: u64,
+    index: u32,
+    table: String,
+    row: RowUuid,
+    key: Vec<u8>,
+    seq: u64,
+    digest: [u8; 16],
 }
 
 /// One remote attachment: a client query the server maintains.
@@ -754,6 +850,9 @@ pub(crate) struct Session {
     /// supersedes it, so the replica holds every state its own commits
     /// produced (a snapshot naming one reads it there).
     committed: Vec<(String, RowUuid, Vec<u8>, u64)>,
+    /// This tick's accepted commits' `expect` rows: the image of each is
+    /// not shipped while it is the row's current version and matches.
+    echoes: Vec<Echo>,
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     /// The replica's coherence watches: `(table, column, value)` for every
@@ -810,6 +909,7 @@ impl Session {
             probed: BTreeSet::new(),
             revalidate: false,
             committed: Vec::new(),
+            echoes: Vec::new(),
             support: BTreeMap::new(),
             watch: HashSet::new(),
             resume: BTreeMap::new(),
@@ -1958,6 +2058,32 @@ impl Inner {
         Ok(())
     }
 
+    /// The rows of own commit `tx` the server did not ship (`held`): its
+    /// version at `through` is the one this replica wrote, so that becomes
+    /// the settled image. A newer image already received stays.
+    fn install_held(&mut self, tx: u64, through: u64, held: &[Held]) -> Result<(), Error> {
+        if held.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.as_mut().expect("client");
+        let Some(pending) = client.pending.iter_mut().find(|p| p.tx == tx) else {
+            return Ok(());
+        };
+        let expected = std::mem::take(&mut pending.expected);
+        for held in held {
+            let Some(mut image) = expected.get(held.index as usize).cloned() else {
+                return Err(unsupported(format!(
+                    "fate of commit {tx} holds row {} it did not expect",
+                    held.index
+                )));
+            };
+            held.stamp(&mut image);
+            image.seq = through;
+            self.receive_image(image)?;
+        }
+        Ok(())
+    }
+
     /// Forget that the server stopped listing a row ([`Inner::unlist`]).
     fn readmit(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<(), Error> {
         let readmitted = self
@@ -2389,8 +2515,13 @@ impl Inner {
             .map_err(storage)?;
         drop(statement);
         for (tx, commit, rows) in pending {
-            let commit: SyncMessage = postcard::from_bytes(&commit)
+            let mut commit: SyncMessage = postcard::from_bytes(&commit)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+            // The rows it expected are not kept across a reopen: the
+            // server ships them.
+            if let SyncMessage::Commit { expect, .. } = &mut commit {
+                expect.clear();
+            }
             let rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
             let SyncMessage::Commit {
@@ -2423,6 +2554,7 @@ impl Inner {
                     .into_iter()
                     .map(|(t, r, k)| (t, RowUuid::from_bytes(r), k))
                     .collect(),
+                expected: Vec::new(),
             });
             client.unsent.push(commit);
         }
@@ -2692,6 +2824,24 @@ impl Db {
             }
         }
         let wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
+        // Each written row as this replica now holds it, so the authority
+        // can skip echoing a version that is exactly this.
+        let mut expected = Vec::new();
+        let mut expect = Vec::new();
+        for (table, row, key) in &rows {
+            let Some(image) = inner.current_image(table, *row, key).ok().flatten() else {
+                continue;
+            };
+            let Some(named) = image_out(&inner.owner, image.clone()) else {
+                continue;
+            };
+            expect.push(Expect {
+                id: image.id,
+                key: image.key.clone(),
+                digest: echo_digest(&named),
+            });
+            expected.push(image);
+        }
         let client = inner.client.as_mut().expect("client");
         client.shadow.extend(shadows);
         match wire {
@@ -2716,12 +2866,14 @@ impl Db {
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
                     updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
+                    expect,
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
                     tx: seq,
                     ops,
                     rows: rows.clone(),
+                    expected,
                 });
                 inner
                     .persist_pending(seq, &commit, &rows)
@@ -2734,6 +2886,7 @@ impl Db {
                     tx: seq,
                     ops: Vec::new(),
                     rows,
+                    expected: Vec::new(),
                 });
                 drop(inner);
                 let _ = self.settle_locally(seq);
@@ -3362,10 +3515,12 @@ impl Db {
                         tx,
                         through,
                         result,
+                        held,
                     } => {
                         let accepted = result.is_ok();
                         if accepted {
                             inner.keep_unlisted_own(tx, through)?;
+                            inner.install_held(tx, through, &held)?;
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
@@ -3429,6 +3584,7 @@ impl Db {
                                     tx: session_tx,
                                     through,
                                     result: fate.clone().map_err(|error| wire_error(&error)),
+                                    held: Vec::new(),
                                 });
                             }
                         }
@@ -3997,6 +4153,7 @@ impl Db {
             let probed = std::mem::take(&mut inner.sessions[index].probed);
             let revalidate = std::mem::take(&mut inner.sessions[index].revalidate);
             let committed = std::mem::take(&mut inner.sessions[index].committed);
+            let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
             for (table, row, key) in recheck {
@@ -4226,6 +4383,9 @@ impl Db {
                 let superseded = inner
                     .current_image(&table, row, &key)?
                     .is_some_and(|current| current.seq != seq);
+                if superseded {
+                    echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
+                }
                 if superseded && readable(&inner, &table, row, &key, policy)? {
                     let id = row.0.as_bytes().to_vec();
                     images.extend(inner.images_where(
@@ -4267,6 +4427,49 @@ impl Db {
             images.retain(|image| {
                 seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
             });
+            // The writer's own rows, still at the version its commit
+            // produced and exactly as it holds them, settle by its Fate.
+            let mut held: BTreeMap<u64, Vec<Held>> = BTreeMap::new();
+            let fated: HashSet<u64> = session
+                .outbox
+                .iter()
+                .filter_map(|message| match message {
+                    SyncMessage::Fate {
+                        tx, result: Ok(()), ..
+                    } => Some(*tx),
+                    _ => None,
+                })
+                .collect();
+            echoes.retain(|echo| fated.contains(&echo.tx));
+            if !echoes.is_empty() {
+                images.retain(|image| {
+                    let Some(at) = echoes.iter().position(|e| {
+                        e.table == image.table
+                            && *e.row.0.as_bytes() == image.id
+                            && e.key == image.key
+                            && e.seq == image.seq
+                    }) else {
+                        return true;
+                    };
+                    let echo = echoes.swap_remove(at);
+                    let same = image_out(&names, image.clone())
+                        .is_some_and(|named| echo_digest(&named) == echo.digest);
+                    if same {
+                        held.entry(echo.tx)
+                            .or_default()
+                            .push(Held::of(echo.index, image));
+                    }
+                    !same
+                });
+                for message in &mut session.outbox {
+                    if let SyncMessage::Fate { tx, held: h, .. } = message
+                        && let Some(mut rows) = held.remove(tx)
+                    {
+                        rows.sort_unstable_by_key(|held| held.index);
+                        *h = rows;
+                    }
+                }
+            }
             if !images.is_empty() {
                 out.push(SyncMessage::Rows { images });
             }
@@ -4719,6 +4922,7 @@ impl Db {
                 author,
                 session,
                 updated_at,
+                expect,
             } => {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
@@ -4799,10 +5003,30 @@ impl Db {
                         .or_default()
                         .push((index, tx, rows));
                 } else {
+                    // The rows the writer holds as they now are need no
+                    // echo: fan-out drops their images if still current.
+                    if result.is_ok() {
+                        let echoes = expect.into_iter().enumerate().filter_map(|(i, expect)| {
+                            let (table, row, key) = rows.iter().find(|(_, row, key)| {
+                                *row.0.as_bytes() == expect.id && *key == expect.key
+                            })?;
+                            Some(Echo {
+                                tx,
+                                index: i as u32,
+                                table: table.clone(),
+                                row: *row,
+                                key: key.clone(),
+                                seq: through,
+                                digest: expect.digest,
+                            })
+                        });
+                        inner.sessions[index].echoes.extend(echoes);
+                    }
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
                         through,
                         result,
+                        held: Vec::new(),
                     });
                 }
             }
