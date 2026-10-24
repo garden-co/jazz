@@ -719,3 +719,214 @@ fn remote_reads_exclude_own_cached_writes_after_a_group_grant_is_removed() {
         assert!(finished, "remote read did not finish");
     }
 }
+
+fn chunked_relation(expr: RelationExpr) -> RelationExpr {
+    match expr {
+        RelationExpr::TableScan { ref table, .. } if table == "members" => RelationExpr::Filter {
+            input: Box::new(expr),
+            predicate: RelationPredicate::And(vec![
+                RelationPredicate::Cmp {
+                    left: col("members", "label"),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::json!(format!(
+                        "{}permit",
+                        "x".repeat(70 * 1024)
+                    ))),
+                },
+                RelationPredicate::Contains {
+                    left: col("members", "label"),
+                    right: RelationValueRef::Literal(serde_json::json!("permit")),
+                },
+            ]),
+        },
+        RelationExpr::Filter { input, predicate } => RelationExpr::Filter {
+            input: Box::new(chunked_relation(*input)),
+            predicate,
+        },
+        RelationExpr::Project { input, columns } => RelationExpr::Project {
+            input: Box::new(chunked_relation(*input)),
+            columns,
+        },
+        RelationExpr::Join {
+            left,
+            right,
+            on,
+            join_kind,
+        } => RelationExpr::Join {
+            left: Box::new(chunked_relation(*left)),
+            right: Box::new(chunked_relation(*right)),
+            on,
+            join_kind,
+        },
+        RelationExpr::Gather {
+            seed,
+            step,
+            frontier_key,
+            bound,
+            dedupe_key,
+        } => RelationExpr::Gather {
+            seed: Box::new(chunked_relation(*seed)),
+            step: Box::new(chunked_relation(*step)),
+            frontier_key,
+            bound,
+            dedupe_key,
+        },
+        other => other,
+    }
+}
+fn label_graph(db: &Db, label: &str) {
+    graph(db, None);
+    for n in 1..=3 {
+        block_on(db.update(
+            "members",
+            id(n),
+            BTreeMap::from([("label".into(), Value::String(label.into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+}
+fn chunked_resource(db: &Db, tx: OpenTransactionId, label: &str) {
+    block_on(db.mergeable_tx_ref(tx).insert(
+        "resources",
+        BTreeMap::from([("label".into(), Value::String(label.into()))]),
+        InsertOptions {
+            row_id: Some(id(100)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+/// Alice's recursive grant compares complete 70 KiB strings, including a
+/// suffix beyond the stored sort prefix. Mallory cannot borrow her graph.
+/// An unrelated same-unit edit still uses the original accepted hop image.
+#[test]
+fn recursive_candidate_relations_prepare_chunked_seed_and_step_values() {
+    let label = format!("{}permit", "x".repeat(70 * 1024));
+    for (who, matches, allowed) in [(1, true, true), (1, false, false), (2, true, false)] {
+        let db = open_with_relation(true, chunked_relation(relation(8)));
+        let other = format!("{}denied", "x".repeat(70 * 1024));
+        label_graph(&db, if matches { &label } else { &other });
+        let tx = begin(&db, who);
+        block_on(db.mergeable_tx_ref(tx).update(
+            "members",
+            id(2),
+            BTreeMap::from([("recipient".into(), Value::Uuid(id(99).0))]),
+            Default::default(),
+        ))
+        .unwrap();
+        chunked_resource(&db, tx, &label);
+        if allowed {
+            finish(&db, tx).unwrap();
+        } else {
+            denied(finish(&db, tx));
+        }
+        assert_eq!(count(&db, "resources"), usize::from(allowed));
+    }
+}
+
+/// Alice cannot change a required accepted chunked hop while publishing the
+/// protected resource. Bob's original grant survives the rejected unit.
+#[test]
+fn recursive_chunked_permission_checks_revalidate_post_state() {
+    let label = format!("{}permit", "x".repeat(70 * 1024));
+    let db = open_with_relation(true, chunked_relation(relation(8)));
+    label_graph(&db, &label);
+    let tx = begin(&db, 1);
+    chunked_resource(&db, tx, &label);
+    block_on(db.mergeable_tx_ref(tx).update(
+        "members",
+        id(2),
+        BTreeMap::from([(
+            "label".into(),
+            Value::String(format!("{}denied", "x".repeat(70 * 1024))),
+        )]),
+        Default::default(),
+    ))
+    .unwrap();
+    denied(finish(&db, tx));
+    assert_eq!(count(&db, "resources"), 0);
+    let tx = begin(&db, 1);
+    chunked_resource(&db, tx, &label);
+    finish(&db, tx).unwrap();
+    assert_eq!(count(&db, "resources"), 1);
+}
+
+/// Bob has an unrelated broken chunked value. Alice's bounded relation proof
+/// must never read it. Raw SQLite is used only to inject that storage fault;
+/// schema setup, writes and assertions use public APIs and isolated storage.
+#[test]
+fn recursive_chunked_preparation_does_not_read_unrelated_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("relation.sqlite");
+    let config = || {
+        DbConfig::new(
+            definition(true, chunked_relation(relation(8))),
+            DbIdentity {
+                node: NodeUuid::from_bytes([99; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+    };
+    {
+        let db = block_on(Db::open_at(config(), &path, Default::default())).unwrap();
+        db.set_authority();
+        db.initialize_authority_catalogue().unwrap();
+        let mut values = fields(id(90).0, 91, 92);
+        values.insert("label".into(), Value::String("unrelated".repeat(10_000)));
+        block_on(db.insert(
+            "members",
+            values,
+            InsertOptions {
+                row_id: Some(id(99)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert!(conn.execute("DELETE FROM _jazz_lv_node", []).unwrap() > 0);
+    }
+    let db = block_on(Db::open_at(config(), &path, Default::default())).unwrap();
+    db.set_authority();
+    let label = format!("{}permit", "x".repeat(70 * 1024));
+    label_graph(&db, &label);
+    let tx = begin(&db, 1);
+    chunked_resource(&db, tx, &label);
+    finish(&db, tx).unwrap();
+    assert_eq!(count(&db, "resources"), 1);
+}
+
+/// Alice's non-recursive relation compares the protected root with a bound
+/// accepted source by logical contents. Equal sort prefixes are insufficient.
+#[test]
+fn candidate_relation_preparation_compares_chunked_outer_columns() {
+    for matches in [true, false] {
+        let rel = RelationExpr::Filter {
+            input: Box::new(filter(
+                scan("members"),
+                col("members", "recipient"),
+                RelationValueRef::SessionRef(vec!["user".into(), "account".into()]),
+            )),
+            predicate: RelationPredicate::Cmp {
+                left: col("members", "label"),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::OuterColumn(col("resources", "label")),
+            },
+        };
+        let db = open_with_relation(true, rel);
+        let label = format!("{}permit", "x".repeat(70 * 1024));
+        label_graph(&db, &label);
+        let tx = begin(&db, 1);
+        let other = format!("{}denied", "x".repeat(70 * 1024));
+        chunked_resource(&db, tx, if matches { &label } else { &other });
+        if matches {
+            finish(&db, tx).unwrap();
+        } else {
+            denied(finish(&db, tx));
+        }
+        assert_eq!(count(&db, "resources"), usize::from(matches));
+    }
+}

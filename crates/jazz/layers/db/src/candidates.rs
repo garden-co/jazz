@@ -297,6 +297,8 @@ impl Inner {
                     schema,
                     governing,
                     &check.root,
+                    None,
+                    &session,
                     clause,
                     scope,
                     crate::compile::DEFAULT_INHERITS_DEPTH,
@@ -326,6 +328,8 @@ impl Inner {
         schema: &Schema,
         table: &Table,
         root: &[(String, Sql)],
+        outer: Option<(&Table, &[(String, Sql)])>,
+        session: &Session,
         policy: &PolicyExpr,
         scope: CandidateEvidence,
         depth: usize,
@@ -339,13 +343,16 @@ impl Inner {
         let (target, column, parent, condition, created, next_depth) = match policy {
             PolicyExpr::And(items) | PolicyExpr::Or(items) => {
                 for item in items {
-                    self.candidate_inputs(schema, table, root, item, scope, depth, budget, inputs)?;
+                    self.candidate_inputs(
+                        schema, table, root, outer, session, item, scope, depth, budget, inputs,
+                    )?;
                 }
                 return Ok(());
             }
             PolicyExpr::Not(item) => {
-                return self
-                    .candidate_inputs(schema, table, root, item, scope, depth, budget, inputs);
+                return self.candidate_inputs(
+                    schema, table, root, outer, session, item, scope, depth, budget, inputs,
+                );
             }
             PolicyExpr::Exists {
                 table: target,
@@ -427,10 +434,43 @@ impl Inner {
                     depth - 1,
                 )
             }
-            PolicyExpr::ExistsRel { .. } => {
-                return Err(unsupported(
-                    "large-value candidate permission preprocessing through relation helpers",
-                ));
+            PolicyExpr::ExistsRel { rel } => {
+                let (table, root) = outer.unwrap_or((table, root));
+                let binding = BTreeMap::new();
+                let (queries, params) = Ctx::new(schema, None, session, &binding)
+                    .with_catalogue(self)
+                    .with_candidate_evidence(Some(scope))
+                    .candidate_relation_inputs(rel, table, root, session)?;
+                charge(budget, 1 + queries.len() + params.len())?;
+                for (table, sql) in queries {
+                    let sql = format!("{sql} LIMIT {}", *budget + 1);
+                    let found = self.with_candidate_sql_budget(budget, || {
+                        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+                        let names = statement
+                            .column_names()
+                            .iter()
+                            .map(|name| (*name).to_owned())
+                            .collect::<Vec<_>>();
+                        statement
+                            .query_map(params_from_iter(params.iter()), |row| {
+                                names
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, name)| {
+                                        row.get::<_, Sql>(i).map(|value| (name.clone(), value))
+                                    })
+                                    .collect::<rusqlite::Result<Vec<_>>>()
+                            })
+                            .map_err(storage)?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .map_err(storage)
+                    })?;
+                    for row in found {
+                        charge(budget, 1 + row.len())?;
+                        inputs.push((table.clone(), row));
+                    }
+                }
+                return Ok(());
             }
             _ => return Ok(()),
         };
@@ -475,7 +515,20 @@ impl Inner {
         for found in matches {
             charge(budget, 1 + found.len())?;
             self.candidate_inputs(
-                schema, target, &found, condition, scope, next_depth, budget, inputs,
+                schema,
+                target,
+                &found,
+                matches!(
+                    policy,
+                    PolicyExpr::Exists { .. } | PolicyExpr::ExistsIncludingCreated { .. }
+                )
+                .then_some((table, root)),
+                session,
+                condition,
+                scope,
+                next_depth,
+                budget,
+                inputs,
             )?;
             inputs.push((target.stored.clone(), found));
         }

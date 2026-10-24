@@ -115,10 +115,30 @@ depth limits as the permission compiler. Baseline preparation includes exact
 historical operands when the unit also updates accepted grants. Matching final
 values cannot manufacture a grant absent from the baseline.
 
-Large-value preprocessing through uncorrelated dependencies or relation helpers
-is explicitly unsupported. Branch-view dependencies and branch moves in a marked-schema unit are
-also explicitly unsupported. These errors identify the unsupported pattern;
-they do not fall back to loading unrelated data.
+Relation helpers use the same preparation for large values. A separate input
+walk retains mandatory indexed UUID bounds, accepted/history selection and the
+recursive depth limit. It omits the remaining filters to collect a bounded
+superset of the cells the real permission query may inspect, including gather
+seed and step sources. The real query then evaluates every original predicate
+against those prepared cells. Preparation never grants permission by itself.
+Each input query and returned row consumes the unit's existing proof budget;
+SQL work uses the same instruction meter. An over-budget dependency walk fails
+closed, including when the real permission query could otherwise stop early.
+
+For example, Alice's accepted membership chain can require a 70 KiB string with
+a particular suffix. Matching prefixes with different suffixes do not grant
+access. An unrelated same-unit edit uses the prior accepted image during the
+baseline check; changing a required large value fails the post-state check and
+rolls back the whole unit. The regression selection also covers Mallory's
+separate account, root-to-source content equality and deliberately broken
+chunks on an unrelated row.
+
+Large-value preprocessing through uncorrelated dependencies remains explicitly
+unsupported. Branch-view dependencies and branch moves in a marked-schema unit
+are also explicitly unsupported. These errors identify the unsupported pattern;
+they do not fall back to loading unrelated data. This extension changes only
+in-memory query preparation: there is no new table, durable encoding or wire
+layout.
 
 ## Storage and wire compatibility
 

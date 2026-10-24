@@ -317,6 +317,8 @@ pub struct Ctx<'a> {
     candidate_evidence: Option<CandidateEvidence>,
     in_policy: bool,
     in_inherited_policy: bool,
+    /// Bounded source queries used to prepare candidate relation cells.
+    candidate_inputs: Option<Vec<(String, String)>>,
 }
 
 /// A frozen snapshot: the state as of commit `seq`, plus the open
@@ -399,6 +401,7 @@ impl<'a> Ctx<'a> {
             candidate_evidence: None,
             in_policy: false,
             in_inherited_policy: false,
+            candidate_inputs: None,
         }
     }
 
@@ -2213,7 +2216,9 @@ impl<'a> Ctx<'a> {
                     ) {
                         right.bounds.push(bound);
                     }
-                    conditions.push(format!("{l} = {r}"));
+                    if self.candidate_inputs.is_none() {
+                        conditions.push(format!("{l} = {r}"));
+                    }
                 }
                 left.ctes.extend(right.ctes);
                 left.from.extend(right.from);
@@ -2414,6 +2419,16 @@ impl<'a> Ctx<'a> {
         scope: &RelScope<'_>,
         mut bounds: Option<&mut Vec<RelBound>>,
     ) -> Result<String, Error> {
+        // Input preparation walks a bounded superset. Only mandatory indexed
+        // UUID equalities restrict it; large-value predicates are evaluated by
+        // the real permission query after these cells have been prepared.
+        if self.candidate_inputs.is_some()
+            && !matches!(predicate, RelationPredicate::And(_))
+            && !matches!(predicate, RelationPredicate::Cmp { left, op: RelationCmpOp::Eq, .. }
+                if self.rel_bound(rel, left, "0".into(), None).is_some())
+        {
+            return Ok("1".into());
+        }
         Ok(match predicate {
             RelationPredicate::True => "1".to_owned(),
             RelationPredicate::False => "0".to_owned(),

@@ -8,6 +8,44 @@ use super::*;
 const MAX_RELATION_ARMS: usize = 64;
 
 impl Ctx<'_> {
+    /// Compile indexed dependency walks, including recursive seed/step sources.
+    /// The caller supplies one captured root and meters every resulting query.
+    pub(crate) fn candidate_relation_inputs(
+        mut self,
+        relation: &RelationExpr,
+        outer: &Table,
+        root: &[(String, Sql)],
+        session: &Session,
+    ) -> Result<(Vec<(String, String)>, Vec<Sql>), Error> {
+        self.candidate_inputs = Some(Vec::new());
+        let scope = RelScope {
+            outer: Some((outer, "candidate_root")),
+            frontier: None,
+            session,
+        };
+        let rel = self.relation(relation, &scope)?;
+        self.rel_selects(&rel, "1", None, &[])?;
+        let columns = root
+            .iter()
+            .map(|(name, value)| {
+                let value = self.bind(value.clone());
+                format!("{value} AS {}", quote(name))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut ctes = vec![format!("candidate_root AS (SELECT {columns})")];
+        ctes.extend(rel.ctes);
+        let prefix = format!("WITH RECURSIVE {} ", ctes.join(", "));
+        let inputs = self.candidate_inputs.take().expect("input collection");
+        Ok((
+            inputs
+                .into_iter()
+                .map(|(table, sql)| (table, format!("{prefix}{sql}")))
+                .collect(),
+            self.params,
+        ))
+    }
+
     pub(super) fn rel_bound(
         &self,
         rel: &Rel,
@@ -61,6 +99,11 @@ impl Ctx<'_> {
         };
         // A table becomes available only after its key's source. CROSS JOIN
         // fixes that order, including the sequence-driven historical arm.
+        let input_prefix = self.candidate_inputs.as_ref().map(|_| match prefix {
+            Some(prefix) => format!("candidate_root CROSS JOIN {prefix}"),
+            None => "candidate_root".into(),
+        });
+        let prefix = input_prefix.as_deref().or(prefix);
         let mut remaining: Vec<_> = rel.from.iter().collect();
         let mut available = BTreeSet::new();
         let mut arms = vec![(
@@ -105,6 +148,23 @@ impl Ctx<'_> {
             }
             arms = expanded;
             available.insert(src.alias.clone());
+        }
+        if let Some(inputs) = &mut self.candidate_inputs {
+            for src in &rel.from {
+                let Some(table) = &src.table else { continue };
+                let table = self.schema.table(table)?;
+                for (from, wheres) in &arms {
+                    inputs.push((
+                        table.stored.clone(),
+                        format!(
+                            "SELECT {}.* FROM {} WHERE {}",
+                            src.alias,
+                            from.join(" CROSS JOIN "),
+                            and(wheres),
+                        ),
+                    ));
+                }
+            }
         }
         Ok(arms
             .into_iter()
