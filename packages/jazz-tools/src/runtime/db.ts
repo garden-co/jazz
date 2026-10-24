@@ -292,6 +292,7 @@ export type QueryOptions = ReadTierOptions & {
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
   tier?: InternalQueryExecutionOptions["tier"];
   visibility?: InternalQueryExecutionOptions["visibility"];
+  observeAcceptedEvidence?: boolean;
 };
 /**
  * Callbacks for a public live query subscription.
@@ -371,6 +372,25 @@ export interface DbSubscriptionSource {
 export type SubscriptionHandle = (() => void) & { readonly ready?: Promise<void> };
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
+const acceptedEvidenceSubscriptions = new WeakMap<
+  Db,
+  (
+    query: QueryBuilder<{ id: string }>,
+    callbacks: DbDeltaSubscriptionCallbacks<{ id: string }>,
+    options: QueryOptions,
+  ) => SubscriptionHandle
+>();
+
+/** @internal E2EE dependency invalidation; a notification is not acceptance proof. */
+export function observeAcceptedQueryDependencies(
+  db: Db,
+  query: QueryBuilder<{ id: string }>,
+  onChange: () => void,
+  onError: (error: Error) => void,
+  options: QueryOptions,
+): SubscriptionHandle {
+  return acceptedEvidenceSubscriptions.get(db)!(query, { onDelta: onChange, onError }, options);
+}
 
 /** @internal Retrieve the incremental source associated with a public Db. */
 export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
@@ -3683,6 +3703,12 @@ export class Db {
     const inspectorAttachmentRequested =
       config.runtimeSources?.browserWorkerPort !== undefined &&
       config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
+    acceptedEvidenceSubscriptions.set(this, (query, callbacks, options) =>
+      this.subscribeDelta(query, callbacks, {
+        ...lowerPublicDbQueryOptions(options),
+        observeAcceptedEvidence: true,
+      }),
+    );
     dbSubscriptionSources.set(this, {
       // Cache identity is reserved before the async worker receipt arrives so
       // an Inspector entry can never share a host application's query cache.

@@ -1,4 +1,9 @@
-import type { Db, QueryBuilder, QueryOptions } from "../runtime/db.js";
+import {
+  observeAcceptedQueryDependencies,
+  type Db,
+  type QueryBuilder,
+  type QueryOptions,
+} from "../runtime/db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { encryptedSchemas } from "./encrypted-schema.js";
@@ -21,7 +26,9 @@ export function queryKeyDependencies(
   let started = false;
   let stopped = false;
   const watch = (query: QueryBuilder<{ id: string }>) =>
-    db.subscribe(query, { onUpdate: onChange, onError }, options);
+    // An optimistic grant can keep identical contents when it settles. The
+    // subsequent evidence notification must revalidate accepted history too.
+    observeAcceptedQueryDependencies(db, query, onChange, onError, options);
   return {
     async update(required: QuerySpace[]) {
       if (stopped) return;

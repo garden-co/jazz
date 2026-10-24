@@ -314,6 +314,15 @@ impl Drop for SubscriptionStream {
 }
 
 impl SubscriptionStream {
+    /// Also notify when fresh authority evidence arrives for this query's
+    /// dependencies, even if their optimistic contents did not change. Such
+    /// notifications carry no row edits and do not qualify a read as accepted.
+    pub fn observe_accepted_evidence(&mut self) {
+        if let Some(group) = self.group.upgrade() {
+            group.borrow_mut().observe_accepted_evidence(&self.queue);
+        }
+    }
+
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         let reason = self
             .refused
@@ -448,6 +457,9 @@ struct Inner {
     fan: fanout::Fanout,
     /// Rows written since the last dispatch: (table, id, branch key).
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
+    /// In-memory frontier for accepted-evidence subscription notifications.
+    accepted_notifications_through: u64,
+    accepted_notifications_known: u64,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
@@ -1005,6 +1017,8 @@ impl Db {
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
+                accepted_notifications_through: 0,
+                accepted_notifications_known: 0,
                 tx: None,
                 publications: Vec::new(),
                 client: None,
@@ -1025,8 +1039,13 @@ impl Db {
         {
             let mut inner = db.inner.borrow_mut();
             inner.seq = seq;
+            inner.accepted_notifications_through = inner.accepted_observed()?;
             inner.restore_issued_seq()?;
             inner.load_client()?;
+            inner.accepted_notifications_known = inner
+                .client
+                .as_ref()
+                .map_or(inner.seq, |client| client.known);
             if inner.client.is_some() {
                 inner.seq = inner.seq.max(LOCAL_BASE);
             }
@@ -1469,13 +1488,16 @@ impl Db {
 
     /// Deliver the rows written since the last dispatch to the groups they
     /// wake (keyed invalidation; see `fanout`).
-    fn notify(&self) {
+    fn notify(&self) -> Result<(), Error> {
         let mut inner = self.inner();
+        let accepted = inner.accepted_notifications()?;
         let changes = std::mem::take(&mut *inner.changed.borrow_mut());
         if !inner.sessions.is_empty() {
             inner.since_tick.extend(changes.iter().cloned());
         }
         inner.dispatch(changes);
+        inner.notify_accepted_evidence(accepted);
+        Ok(())
     }
 
     // ---- writes ---------------------------------------------------------
@@ -1635,7 +1657,7 @@ impl Db {
         };
         let (notify, handle) = standalone;
         if notify {
-            self.notify();
+            self.notify()?;
         }
         Ok(handle)
     }
@@ -1716,7 +1738,7 @@ impl Db {
             .conn
             .execute_batch("RELEASE tx")
             .map_err(storage)?;
-        self.notify();
+        self.notify()?;
         Ok((value, TxReceipt(seq)))
     }
 
@@ -4863,7 +4885,7 @@ impl Db {
             Some(batch.identity),
             kind,
         )?;
-        self.notify();
+        self.notify()?;
         Ok(TxReceipt(seq))
     }
 

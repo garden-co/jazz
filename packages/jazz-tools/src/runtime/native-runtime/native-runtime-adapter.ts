@@ -5078,6 +5078,7 @@ function readOptions(
   if (tier != null) readOptions.tier = tier;
   if (includeDeleted) readOptions.include_deleted = true;
   if (options.e2ee_snapshot_at_begin === true) readOptions.e2ee_snapshot_at_begin = true;
+  if (options.observe_accepted_evidence === true) readOptions.observe_accepted_evidence = true;
   if (
     typeof options.first_load_remote_wait_ms === "number" &&
     options.first_load_remote_wait_ms > 0

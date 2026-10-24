@@ -48,6 +48,7 @@ struct Member {
     /// it was told.
     settled: sync::SettledBy,
     told: std::cell::Cell<Option<DurabilityTier>>,
+    accepted_evidence: bool,
 }
 
 /// One shared live result.
@@ -87,6 +88,17 @@ pub(super) struct Group {
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    pub(super) fn observe_accepted_evidence(&mut self, queue: &Queue) {
+        let queue = Rc::downgrade(queue);
+        if let Some(member) = self
+            .members
+            .iter_mut()
+            .find(|member| member.queue.ptr_eq(&queue))
+        {
+            member.accepted_evidence = true;
+        }
+    }
+
     /// Whether the last run waits on large-value chunks still to arrive.
     pub(super) fn awaiting(&self) -> bool {
         self.awaiting
@@ -258,6 +270,51 @@ impl Fanout {
 }
 
 impl Inner {
+    /// Reuse keyed dependency routing for fresh authority evidence. It may
+    /// qualify already-visible optimistic contents, so ordinary row diffing
+    /// cannot signal it. Only explicitly opted-in members receive an empty delta.
+    pub(super) fn notify_accepted_evidence(&self, changes: Vec<(String, RowUuid, Vec<u8>)>) {
+        let mut woken = BTreeSet::new();
+        for (table, row, key) in changes.into_iter().collect::<BTreeSet<_>>() {
+            if let Some(groups) = self.fan.tables.get(&table) {
+                woken.extend(groups);
+            }
+            let Some(columns) = self.fan.key_columns.get(&table) else {
+                continue;
+            };
+            for image in self.images(&table, row, &key, columns) {
+                for (column, value) in image {
+                    if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
+                        woken.extend(groups);
+                    }
+                }
+            }
+        }
+        for gid in woken {
+            let Some(group) = self.fan.groups.get(gid) else {
+                continue;
+            };
+            let group = group.borrow();
+            if group.awaiting || !group.opened || group.read.frozen() {
+                continue;
+            }
+            for member in group
+                .members
+                .iter()
+                .filter(|member| member.accepted_evidence)
+            {
+                if let Some(queue) = member.queue.upgrade() {
+                    let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
+                    if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
+                        *settled = member.settled.get();
+                        *tier = member.settled.tier();
+                    }
+                    queue.borrow_mut().push_back(event);
+                }
+            }
+        }
+    }
+
     /// Open a subscription: join the group with identical SQL, or start one.
     pub(super) fn subscribe_member(
         &mut self,
@@ -282,6 +339,7 @@ impl Inner {
             bound: !prepared.binding.is_empty(),
             settled: settled.clone(),
             told: std::cell::Cell::new(now.then(|| settled.tier())),
+            accepted_evidence: false,
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {

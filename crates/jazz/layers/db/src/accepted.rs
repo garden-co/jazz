@@ -41,7 +41,9 @@ impl AcceptedContent {
 pub(super) const ACCEPTED_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_accepted_rows_v1 (\
         observed INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, id BLOB NOT NULL,\
-        k BLOB NOT NULL, seq INTEGER NOT NULL, content BLOB NOT NULL, UNIQUE (t,id,k,seq));";
+        k BLOB NOT NULL, seq INTEGER NOT NULL, content BLOB NOT NULL, UNIQUE (t,id,k,seq));\
+    CREATE INDEX IF NOT EXISTS _jazz_accepted_rows_by_seq_v1 \
+        ON _jazz_accepted_rows_v1(seq,observed);";
 
 impl Inner {
     pub(super) fn accepted_content(
@@ -170,7 +172,7 @@ impl Inner {
 impl Inner {
     /// The local evidence frontier, distinct from the authority's commit order.
     /// Duplicate proof deliveries do not move it; rollback reverts it with rows.
-    fn accepted_observed(&self) -> Result<u64, Error> {
+    pub(super) fn accepted_observed(&self) -> Result<u64, Error> {
         self.conn
             .query_row(
                 "SELECT COALESCE(MAX(observed),0) FROM _jazz_accepted_rows_v1",
@@ -179,6 +181,52 @@ impl Inner {
             )
             .map(|n| n as u64)
             .map_err(storage)
+    }
+
+    /// Newly usable evidence: both its proof and its authority coordinate must
+    /// have arrived. Separate indexed ranges cover late proofs at a known cut
+    /// and earlier proofs whose cut just became known. Neither visits unrelated
+    /// retained history; rollback and duplicate delivery cannot advance them.
+    pub(super) fn accepted_notifications(
+        &mut self,
+    ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
+        let through = self.accepted_observed()?;
+        let known = self.client.as_ref().map_or(self.seq, |client| client.known);
+        let rows = {
+            let mut statement = self
+                .conn
+                .prepare_cached(
+                    "SELECT t,id,k FROM _jazz_accepted_rows_v1 WHERE observed>?1 AND observed<=?2 AND seq<=?4 \
+                     UNION ALL SELECT t,id,k FROM _jazz_accepted_rows_v1 INDEXED BY _jazz_accepted_rows_by_seq_v1 \
+                     WHERE seq>?3 AND seq<=?4 AND observed<=?1",
+                )
+                .map_err(storage)?;
+            statement
+                .query_map(
+                    rusqlite::params![
+                        self.accepted_notifications_through as i64,
+                        through as i64,
+                        self.accepted_notifications_known as i64,
+                        known as i64
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, [u8; 16]>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .map_err(storage)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(storage)?
+        };
+        self.accepted_notifications_through = through;
+        self.accepted_notifications_known = known;
+        Ok(rows
+            .into_iter()
+            .map(|(table, id, key)| (table, RowUuid::from_bytes(id), key))
+            .collect())
     }
 
     pub(super) fn accepted_cut(&self, seq: u64) -> Result<Cut, Error> {

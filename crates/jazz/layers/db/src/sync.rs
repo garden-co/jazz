@@ -4097,7 +4097,7 @@ impl Db {
         };
         applied?;
         self.inner().refresh_authenticated_views()?;
-        self.notify();
+        self.notify()?;
         let arrived = {
             let mut inner = self.inner.borrow_mut();
             let client = inner.client.as_mut().expect("client");
@@ -5035,7 +5035,7 @@ impl Db {
         self.progress_relay_uploads()?;
         self.progress_owner_input_fates()?;
         self.progress_owner_durability();
-        self.notify();
+        self.notify()?;
         let mut inner = self.inner.borrow_mut();
         // A relay's optimistic sequence is not an authority cut. Even its
         // owner-local answer carries at most the accepted prefix it has seen.
@@ -6707,7 +6707,7 @@ impl Db {
             inner.seq = seq;
             seq
         };
-        self.notify();
+        self.notify().map_err(|error| (error, Vec::new()))?;
         let inner = self.inner.borrow();
         Ok(inner.written_rows(&ops, seq).unwrap_or_default())
     }

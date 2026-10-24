@@ -1361,13 +1361,18 @@ impl Binding {
         author: Option<&[u8]>,
         claims: Option<serde_json::Value>,
     ) -> HostResult<SubscriptionStream> {
+        let observe_accepted = opts
+            .get("observe_accepted_evidence")?
+            .map(|value| O::boolean(&value).ok_or("observe_accepted_evidence must be a boolean"))
+            .transpose()?
+            .unwrap_or(false);
         let opts = read_opts(opts)?;
         let explicit = author.is_some();
         let author = self.read_author(author)?;
         let query: Query = postcard::from_bytes(query)
             .map_err(|error| HostError::Argument(format!("undecodable query: {error}")))?;
         let mut prepared = self.db.prepare_query(&query)?;
-        let stream = match author {
+        let mut stream = match author {
             Some(author) => {
                 if explicit {
                     let claims = self::claims(author, claims.unwrap_or(serde_json::Value::Null))?;
@@ -1377,6 +1382,9 @@ impl Binding {
             }
             None => block_on(self.db.subscribe(&prepared, opts)),
         }?;
+        if observe_accepted {
+            stream.observe_accepted_evidence();
+        }
         self.hooks.schedule_tick();
         Ok(stream)
     }

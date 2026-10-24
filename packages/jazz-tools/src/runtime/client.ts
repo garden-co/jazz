@@ -557,6 +557,8 @@ export function isPublicQueryReadTier(value: unknown): value is ReadTier {
 /** @internal Low-level read controls that are not part of the product-facing query API. */
 export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> & {
   settlementMetadata?: boolean | "with-rows";
+  /** Internal invalidation when authority evidence arrives without a row edit. */
+  observeAcceptedEvidence?: boolean;
   /** @internal Preserve the public transaction's immutable accepted begin cut. */
   e2eeSnapshotAtBegin?: boolean;
   tier?: InternalReadTier;
@@ -574,6 +576,8 @@ export interface ResolvedQueryExecutionOptions {
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
   settlementMetadata?: boolean | "with-rows";
+  /** Internal invalidation when authority evidence arrives without a row edit. */
+  observeAcceptedEvidence?: boolean;
   /** @internal Preserve the public transaction's immutable accepted begin cut. */
   e2eeSnapshotAtBegin?: boolean;
   openTransactionId?: OpenTransactionId;
@@ -755,6 +759,7 @@ function encodeQueryExecutionOptions(
 ): string | undefined {
   const payload: {
     settlement_metadata?: boolean | "with-rows";
+    observe_accepted_evidence?: boolean;
     e2ee_snapshot_at_begin?: boolean;
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
@@ -773,6 +778,7 @@ function encodeQueryExecutionOptions(
     payload.transaction_id = options.openTransactionId;
   }
   if (options.settlementMetadata) payload.settlement_metadata = options.settlementMetadata;
+  if (options.observeAcceptedEvidence) payload.observe_accepted_evidence = true;
   if (options.e2eeSnapshotAtBegin) payload.e2ee_snapshot_at_begin = true;
   if (options.firstLoadRemoteWaitMs !== undefined && options.firstLoadRemoteWaitMs > 0) {
     payload.first_load_remote_wait_ms = options.firstLoadRemoteWaitMs;
@@ -789,7 +795,12 @@ function encodeQueryExecutionOptions(
     };
   }
 
-  if (!payload.transaction_id && !payload.first_load_remote_wait_ms && !payload.read_view) {
+  if (
+    !payload.transaction_id &&
+    !payload.first_load_remote_wait_ms &&
+    !payload.read_view &&
+    !payload.observe_accepted_evidence
+  ) {
     return undefined;
   }
 
@@ -1568,13 +1579,10 @@ export class JazzClient {
     options?: InternalQueryExecutionOptions,
   ): ResolvedInternalQueryExecutionOptions {
     const resolved = resolveEffectiveQueryExecutionOptions(this.context, options);
-    if (!options?.openTransactionId) {
-      return resolved;
-    }
-    const result: ResolvedInternalQueryExecutionOptions = {
-      ...resolved,
-      openTransactionId: options.openTransactionId,
-    };
+    const result: ResolvedInternalQueryExecutionOptions = { ...resolved };
+    if (options?.observeAcceptedEvidence) result.observeAcceptedEvidence = true;
+    if (!options?.openTransactionId) return result;
+    result.openTransactionId = options.openTransactionId;
     if (options.settlementMetadata) result.settlementMetadata = options.settlementMetadata;
     if (options.e2eeSnapshotAtBegin) result.e2eeSnapshotAtBegin = true;
     return result;

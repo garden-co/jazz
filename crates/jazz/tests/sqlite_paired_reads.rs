@@ -1090,3 +1090,157 @@ fn ordinary_cache_answer_cannot_satisfy_an_accepted_request() {
     assert_eq!(block_on(read).unwrap_err().code, ErrorCode::NotObserved);
     assert!(block_on(alice.commit_serializable_handle(tx)).is_err());
 }
+
+/// Alice observes a provisional grant through a root or nested query. When
+/// Bob's authority accepts it, only opted-in dependency observers receive a
+/// second, empty notification; duplicate evidence and unrelated keys stay quiet.
+///
+/// alice: optimistic delta -> bob accepts -> evidence notification -> revalidate
+#[test]
+fn accepted_dependency_notifications_follow_fresh_evidence_without_row_edits() {
+    use jazz::db::{SubscriptionEvent, SubscriptionStream};
+    use jazz::query::{ArraySubquery, col, eq, lit};
+    fn drain(stream: &mut SubscriptionStream) -> Vec<SubscriptionEvent> {
+        std::iter::from_fn(|| stream.try_next_event()).collect()
+    }
+    for relay in [false, true] {
+        for nested in [false, true] {
+            let server = open(3, true);
+            insert(&server, "notes", "tracked");
+            let owner = open(2, false);
+            connect(&owner, &server);
+            let alice = open(1, false);
+            connect(&alice, if relay { &owner } else { &server });
+            let dbs = [&alice, &owner, &server];
+            let query = if nested {
+                Query::from("notes")
+                    .filter(eq(col("text"), lit("tracked")))
+                    .array_subquery(ArraySubquery::new("grants", "refs", "text", "text"))
+            } else {
+                Query::from("refs").filter(eq(col("text"), lit("tracked")))
+            };
+            let prepared = alice.prepare_query(&query).unwrap();
+            let mut plain = block_on(alice.subscribe(&prepared, options(false, false))).unwrap();
+            let mut observed = block_on(alice.subscribe(&prepared, options(false, false))).unwrap();
+            observed.observe_accepted_evidence();
+            let unrelated = alice
+                .prepare_query(&Query::from("refs").filter(eq(col("text"), lit("unrelated"))))
+                .unwrap();
+            let mut quiet = block_on(alice.subscribe(&unrelated, options(false, false))).unwrap();
+            quiet.observe_accepted_evidence();
+            for _ in 0..12 {
+                turn(&dbs);
+            }
+            assert!(!drain(&mut observed).is_empty());
+            drain(&mut plain);
+            drain(&mut quiet);
+            let write = insert(&alice, "refs", "tracked");
+            assert!(!drain(&mut observed).is_empty());
+            assert!(!drain(&mut plain).is_empty());
+            assert!(drain(&mut quiet).is_empty());
+            drive(
+                &dbs,
+                alice.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global),
+            )
+            .unwrap();
+            for _ in 0..12 {
+                turn(&dbs);
+            }
+            let events = drain(&mut observed);
+            assert!(
+                !events.is_empty(),
+                "no acceptance notification (relay={relay}, nested={nested})"
+            );
+            for event in events {
+                let SubscriptionEvent::Delta {
+                    reset,
+                    added,
+                    updated,
+                    removed,
+                    ..
+                } = event
+                else {
+                    panic!("unexpected event: {event:?}")
+                };
+                assert!(!reset);
+                assert!(added.is_empty() && updated.is_empty() && removed.is_empty());
+            }
+            assert!(
+                drain(&mut plain).is_empty(),
+                "ordinary stream received a duplicate update"
+            );
+            assert!(drain(&mut quiet).is_empty(), "unrelated key was notified");
+            fetch(&alice, &dbs, Query::from("refs"));
+            for _ in 0..12 {
+                turn(&dbs);
+            }
+            assert!(
+                drain(&mut observed).is_empty(),
+                "duplicate evidence notified again"
+            );
+        }
+    }
+}
+
+/// Alice receives Bob's proof, row and authority frontier in separate transport
+/// turns. An early proof must not consume the notification needed once that
+/// evidence is eligible for Alice's accepted-at-begin read.
+#[test]
+fn accepted_notification_survives_separate_proof_and_receipt_delivery() {
+    use jazz::db::{SubscriptionEvent, Transport};
+    fn step(
+        alice: &Db,
+        server: &Db,
+        down: &mut dyn Transport,
+        up: &mut dyn Transport,
+        mut delivered: impl FnMut(),
+    ) {
+        block_on(alice.tick()).unwrap();
+        while let Some(message) = down.try_recv() {
+            up.send(message).unwrap();
+        }
+        block_on(server.tick()).unwrap();
+        while let Some(message) = up.try_recv() {
+            down.send(message).unwrap();
+            block_on(alice.tick()).unwrap();
+            delivered();
+        }
+    }
+    let server = open(3, true);
+    insert(&server, "notes", "initial frontier");
+    let alice = open(1, false);
+    let (client, mut down) = duplex();
+    let (mut up, authority) = duplex();
+    block_on(alice.connect_upstream(client));
+    server.accept_subscriber(authority, AuthorSubject::SYSTEM);
+    let prepared = alice.prepare_query(&Query::from("refs")).unwrap();
+    let mut observed = block_on(alice.subscribe(&prepared, options(false, false))).unwrap();
+    observed.observe_accepted_evidence();
+    for _ in 0..12 {
+        step(&alice, &server, &mut *down, &mut *up, || {});
+    }
+    while observed.try_next_event().is_some() {}
+    let write = insert(&alice, "refs", "accepted grant");
+    assert!(observed.try_next_event().is_some());
+    while observed.try_next_event().is_some() {}
+    let mut revalidated = false;
+    for _ in 0..12 {
+        step(&alice, &server, &mut *down, &mut *up, || {
+            while let Some(event) = observed.try_next_event() {
+                assert!(matches!(event, SubscriptionEvent::Delta { .. }));
+                let tx = begin(&alice);
+                let read = block_on(paired(&alice, tx, "refs", true, true, false)).unwrap();
+                revalidated |= texts(&read) == ["accepted grant"];
+                alice.abandon_transaction_handle(tx).unwrap();
+            }
+        });
+    }
+    assert_eq!(
+        alice.write_state(write.mergeable_tx_id()).unwrap().fate,
+        jazz::tx::Fate::Accepted
+    );
+    assert!(
+        revalidated,
+        "authority evidence became usable without notifying the dependency observer"
+    );
+}
