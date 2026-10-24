@@ -54,7 +54,15 @@ pnpm --filter jazz-wasm build:fast
 pnpm --filter jazz-tools test:browser:sqlite-e2ee
 ```
 
-This dedicated Chromium suite verifies the current WASM producer manifest,
+Select another installed Playwright engine with `JAZZ_BROWSER`:
+
+```sh
+pnpm exec playwright install firefox webkit
+JAZZ_BROWSER=firefox pnpm --filter jazz-tools test:browser:sqlite-e2ee
+JAZZ_BROWSER=webkit pnpm --filter jazz-tools test:browser:sqlite-e2ee
+```
+
+The dedicated suite verifies the current WASM producer manifest,
 generates its SDK fingerprint expectation from that verified manifest, and
 checks provenance again after the run. It builds the actual `jazz-tools` server
 binary from this checkout and starts it on an ephemeral port. It bundles the
@@ -62,13 +70,26 @@ production SharedWorker into a private test directory. It neither loads NAPI nor
 substitutes a test worker for the application worker. The ordinary dual-artifact
 correctness runner is unchanged.
 
-The browser tests use local-first accounts and separate persistent owner roots
-in one browser origin. They cover encrypted chat creation, global settlement,
-reopening and decryption, sharing with a second account, a reply delivered through
-a live subscription, and refusal to decrypt for an unshared third account. The
-four existing SQLite browser-storage tests also run in this suite. These cases
-do not establish independent-profile interoperability, crash recovery at every
-instruction boundary, all encrypted query shapes or mobile support.
+The suite has three encrypted-chat tests and four existing SQLite storage tests.
+All seven pass in the installed Playwright Chromium, Firefox and WebKit builds
+on Linux. They cover encrypted chat creation, global settlement, reopening and
+decryption, sharing with a second account, a reply delivered through a live
+subscription, and refusal to decrypt for an unshared third account.
+
+The profile scenario opens Alice, Bob and Mallory in separate browser contexts
+at the same origin, using identical database names. It checks independent account
+IDs and localStorage, secure contexts and Web Crypto availability. Alice shares
+with Bob; Bob replies and Alice receives the plaintext through her subscription.
+Bob then closes his application page and opens a fresh JavaScript realm. His
+account selection and encryption keys restore through the ordinary browser
+stores. The harness never copies an account secret or encryption key between
+pages or profiles. Mallory remains unable to decrypt before and after the reply.
+
+The private context stays open during Bob's page replacement. WebKit keeps an
+inert, opaque-origin anchor page for this purpose; it owns no application worker
+or keys. Closing the entire private session can discard its storage. These tests
+do not promise persistence beyond that session, qualify Safari on Apple devices,
+or cover every crash schedule, encrypted query shape, React UI or mobile runtime.
 
 The Rust tests cover runtime admission, direct session permissions, forged
 attribution and claims, backend-only request rejection over WebSocket, and

@@ -1,13 +1,13 @@
 /// <reference types="vite/client" />
 import { expect, inject, it } from "vitest";
 import { commands } from "vitest/browser";
-import { schema as s } from "../../src/schema-namespace.js";
-import { definePermissions } from "../../src/permissions/index.js";
+import { chatSchema } from "./chat-schema.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import wasmUrl from "../../../../crates/jazz-wasm/pkg/jazz_wasm_bg.wasm?url";
 import type {} from "./setup.js";
+import type { ProfileScenarioResult } from "./profiles-node.js";
 
 async function workerUrl(): Promise<string> {
   const command = Reflect.get(commands, "sqliteE2eeWorkerUrl");
@@ -15,28 +15,6 @@ async function workerUrl(): Promise<string> {
   const url: unknown = await command.call(commands);
   if (typeof url !== "string") throw new Error("SQLite browser worker URL is invalid");
   return url;
-}
-
-function chatSchema() {
-  const app = s.defineApp({
-    chats: s.table({ ownerId: s.uuid() }, {}),
-    messages: s
-      .table({ chatId: s.uuid(), text: s.string() }, { chat: s.rel("chats", "chatId") })
-      .encrypted({ space: "chatId", columns: ["text"] }),
-  });
-  const permissions = definePermissions(app, ({ policy, session }) => {
-    policy.chats.allowRead.always();
-    policy.chats.allowInsert.where({ ownerId: session.user.account });
-    policy.messages.allowRead.always();
-    policy.messages.allowInsert.where({ "$createdBy.account": session.user.account });
-    policy.__e2ee_spaces.allowRead.always();
-    policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
-    policy.__e2ee_space_grants.allowRead.always();
-    policy.__e2ee_space_grants.allowInsert.where({ authorAccountId: session.user.account });
-    policy.__e2ee_space_deliveries.allowRead.always();
-    policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
-  });
-  return { app, permissions };
 }
 
 it("creates and reopens an encrypted chat through the SQLite authority and browser owner", async () => {
@@ -164,3 +142,47 @@ it("shares a chat between browser owners, streams replies and keeps Mallory lock
     for (const db of clients) await db.shutdown();
   }
 });
+
+// A separate Playwright context has independent browser storage and workers,
+// just like an independent browser profile/private window while it remains open.
+it("shares and restores encrypted chat across independent private browser profiles", async () => {
+  const server = inject("sqliteE2eeServer");
+  const { app, permissions } = chatSchema();
+  await deploy({ ...server, schema: app, permissions });
+  const command = Reflect.get(commands, "sqliteE2eeProfileScenario");
+  if (typeof command !== "function") throw new Error("Independent profile command is missing");
+  const result: ProfileScenarioResult = await command.call(commands, {
+    appId: server.appId,
+    serverUrl: server.serverUrl,
+    runtimeSources: {
+      wasmUrl: new URL(wasmUrl, location.href).href,
+      brokerWorkerUrl: new URL(await workerUrl(), location.href).href,
+      wasmVersion: "sqlite-e2ee-test",
+    },
+  });
+  expect(result.profiles).toHaveLength(3);
+  expect(new Set(result.profiles.map((profile) => profile.accountId)).size).toBe(3);
+  for (const profile of result.profiles) {
+    expect(profile).toMatchObject({
+      restored: false,
+      previousLabel: null,
+      secureContext: true,
+      subtleCrypto: true,
+    });
+  }
+  expect(result.bobBeforeGrant).toBe("key-not-shared");
+  expect(result.bobAfterGrant).toEqual([result.first]);
+  expect(result.first.text).toBe("Hello from Alice's profile");
+  expect(result.reply.text).toBe("Reply from Bob's private profile");
+  expect(result.aliceSubscription).toEqual(expect.arrayContaining([result.first, result.reply]));
+  expect(result.aliceSubscription).toHaveLength(2);
+  expect(result.bobReopened).toEqual({
+    ...result.profiles[1],
+    restored: true,
+    previousLabel: "Bob",
+  });
+  expect(result.bobAfterReopen).toEqual(expect.arrayContaining([result.first, result.reply]));
+  expect(result.bobAfterReopen).toHaveLength(2);
+  expect(result.malloryBeforeReply).toBe("key-not-shared");
+  expect(result.malloryAfterReply).toBe("key-not-shared");
+}, 120_000);
