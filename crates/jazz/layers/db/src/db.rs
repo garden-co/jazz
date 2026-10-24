@@ -835,6 +835,11 @@ impl Db {
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
+        // Before the first statement, so both see all of them.
+        #[cfg(feature = "durable-object-limits")]
+        crate::durable_object_limits::apply(&conn);
+        #[cfg(feature = "sql-trace")]
+        crate::sql_trace::install(&conn);
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
@@ -843,10 +848,6 @@ impl Db {
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
-        #[cfg(feature = "durable-object-limits")]
-        crate::durable_object_limits::apply(&conn);
-        #[cfg(feature = "sql-trace")]
-        crate::sql_trace::install(&conn);
         conn.execute_batch(crate::large::DDL).map_err(storage)?;
         // Nodes a transaction writes stay cached until it ends: until then
         // the reader connection cannot see them.

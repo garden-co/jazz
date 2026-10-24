@@ -1930,6 +1930,7 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "serde_json",
  "tempfile",
 ]
 
