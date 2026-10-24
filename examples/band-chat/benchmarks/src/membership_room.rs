@@ -12,17 +12,15 @@ use std::time::Instant;
 
 use jazz::account_registry::AccountId;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, ReadOpts, ReadTier,
-    SubscriptionEvent, SubscriptionStream, WriteIdentity, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, ReadTier, SubscriptionEvent,
+    SubscriptionStream, WriteIdentity, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::policy_expr::{all_of, any_of, exists, session, table};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 pub const USERS: usize = 32;
 pub const CHATS: usize = 64;
@@ -147,11 +145,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> BenchDb {
     let schema = schema();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xc0; 16]),
             author: AuthorSubject::SYSTEM,
@@ -403,10 +398,11 @@ impl SendFixture {
         count
     }
 
-    /// Untimed oracle: a non-member cannot post into the private chat.
+    /// Untimed oracle: a non-member cannot post into the private chat. This
+    /// Db is the authority, so its insert policy rejects the write itself.
     pub fn non_member_send_is_denied(&self) -> bool {
         let outsider = outsider_index();
-        let write = block_on(self.db.insert(
+        block_on(self.db.insert(
             "messages",
             message_cells(OPEN_CHAT, outsider, usize::MAX),
             InsertOptions {
@@ -414,10 +410,6 @@ impl SendFixture {
                 ..Default::default()
             },
         ))
-        .expect("a denied write is still recorded locally");
-        self.db
-            .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-            .expect("authority decides the outsider's message");
-        block_on(write.wait(DurabilityTier::Global)).is_err()
+        .is_err()
     }
 }

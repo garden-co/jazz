@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use groove::records::{RecordDescriptor, Value, ValueType};
+use jazz_types::records::{RecordDescriptor, Value, ValueType};
 
 use crate::ids::NodeUuid;
 use crate::time::{GlobalTime, TxTime};
@@ -69,7 +69,7 @@ pub enum BranchCodecError {
     TypeMismatch,
     /// Groove rejected the declared-type payload.
     #[error("invalid Groove branch column payload: {0}")]
-    Groove(#[from] groove::records::Error),
+    Groove(#[from] jazz_types::records::Error),
 }
 
 const BRANCH_COLUMN_CODEC_VERSION: u8 = 1;

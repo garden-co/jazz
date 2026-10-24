@@ -14,7 +14,6 @@ use jazz::tools::{
     SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
@@ -279,9 +278,6 @@ fn make_context(
         server_url,
         data_dir,
         storage: ClientStorage::Persistent,
-        storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        )),
         account_id: None,
         jwt_token: Some(jwt_token),
         backend_secret: None,
@@ -473,7 +469,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         server_url: String::new(),
         data_dir: data_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
-        storage_factory: None,
         account_id: Some(AccountId(uuid::Uuid::from_bytes([0xa9; 16]))),
         jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,

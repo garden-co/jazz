@@ -117,8 +117,8 @@ pub struct InternedAuthor {
     issuer: String,
     subject: String,
     canonical: String,
-    row_record: std::sync::OnceLock<crate::groove::records::OwnedRecord>,
-    session_record: std::sync::OnceLock<crate::groove::records::OwnedRecord>,
+    row_record: std::sync::OnceLock<crate::records::OwnedRecord>,
+    session_record: std::sync::OnceLock<crate::records::OwnedRecord>,
 }
 
 // Derived caches must not change diagnostic identity as they initialize.
@@ -268,8 +268,8 @@ pub enum AuthorSubjectError {
 
 /// The `(issuer, subject)` principal record shared by row authors and the
 /// account registry.
-pub(crate) fn author_identity_descriptor() -> crate::groove::records::RecordDescriptor {
-    use crate::groove::records::{RecordDescriptor, ValueType};
+pub(crate) fn author_identity_descriptor() -> crate::records::RecordDescriptor {
+    use crate::records::{RecordDescriptor, ValueType};
     static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
         RecordDescriptor::new([
@@ -379,12 +379,12 @@ impl RowAuthor {
     }
 
     /// Native record type exposed for persisted row and transaction metadata.
-    pub fn value_type() -> crate::groove::records::ValueType {
-        crate::groove::records::ValueType::Record(Box::new(Self::record_descriptor()))
+    pub fn value_type() -> crate::records::ValueType {
+        crate::records::ValueType::Record(Box::new(Self::record_descriptor()))
     }
 
-    fn record_descriptor() -> crate::groove::records::RecordDescriptor {
-        use crate::groove::records::{RecordDescriptor, ValueType};
+    fn record_descriptor() -> crate::records::RecordDescriptor {
+        use crate::records::{RecordDescriptor, ValueType};
         static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
         *DESCRIPTOR.get_or_init(|| {
             RecordDescriptor::new([
@@ -398,20 +398,20 @@ impl RowAuthor {
     }
 
     /// Structured durable attribution value.
-    pub fn to_value(self) -> crate::groove::records::Value {
-        crate::groove::records::Value::Record(self.encoded_record().clone())
+    pub fn to_value(self) -> crate::records::Value {
+        crate::records::Value::Record(self.encoded_record().clone())
     }
 
     /// The cached groove record encoding of this row author.
-    pub fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+    pub fn encoded_record(self) -> &'static crate::records::OwnedRecord {
         let author = match self.0 {
             RowAuthorKind::SystemAt(author) | RowAuthorKind::Account(author) => author.as_ref(),
         };
         author.row_record.get_or_init(|| self.build_record())
     }
 
-    fn build_record(self) -> crate::groove::records::OwnedRecord {
-        use crate::groove::records::{OwnedRecord, Value};
+    fn build_record(self) -> crate::records::OwnedRecord {
+        use crate::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
         let identity = author_identity_descriptor();
         let raw = identity
@@ -426,8 +426,8 @@ impl RowAuthor {
     }
 
     /// Decode durable metadata without granting the system capability.
-    pub fn from_value(value: crate::groove::records::Value) -> Result<Self, AuthorSubjectError> {
-        use crate::groove::records::Value;
+    pub fn from_value(value: crate::records::Value) -> Result<Self, AuthorSubjectError> {
+        use crate::records::Value;
         let bad = || AuthorSubjectError::InvalidCanonical("invalid row author record".into());
         let Value::Record(record) = value else {
             return Err(bad());
@@ -437,7 +437,7 @@ impl RowAuthor {
 
     /// Decode an author subject from its groove record encoding.
     pub fn from_record(
-        record: crate::groove::records::BorrowedRecord<'_>,
+        record: crate::records::BorrowedRecord<'_>,
     ) -> Result<Self, AuthorSubjectError> {
         let bad = || AuthorSubjectError::InvalidCanonical("invalid row author record".into());
         let expected = Self::record_descriptor();
@@ -657,12 +657,12 @@ impl AuthorSubject {
     }
 
     /// Native record type exposed for structured author metadata.
-    pub fn value_type() -> crate::groove::records::ValueType {
-        crate::groove::records::ValueType::Record(Box::new(Self::record_descriptor()))
+    pub fn value_type() -> crate::records::ValueType {
+        crate::records::ValueType::Record(Box::new(Self::record_descriptor()))
     }
 
-    fn record_descriptor() -> crate::groove::records::RecordDescriptor {
-        use crate::groove::records::{RecordDescriptor, ValueType};
+    fn record_descriptor() -> crate::records::RecordDescriptor {
+        use crate::records::{RecordDescriptor, ValueType};
         static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
         *DESCRIPTOR.get_or_init(|| {
             RecordDescriptor::new([
@@ -687,8 +687,8 @@ impl AuthorSubject {
     }
 
     /// Declared native type for an author root or an explicit nested field.
-    pub fn metadata_type(column: &str) -> Option<&'static crate::groove::records::ValueType> {
-        use crate::groove::records::ValueType;
+    pub fn metadata_type(column: &str) -> Option<&'static crate::records::ValueType> {
+        use crate::records::ValueType;
         let (root, path) = if matches!(column, "$createdBy" | "$updatedBy" | "$deletedBy") {
             (column, &[][..])
         } else {
@@ -722,15 +722,15 @@ impl AuthorSubject {
     }
 
     /// Structured native author value; intern handles are never serialized.
-    pub fn to_value(self) -> crate::groove::records::Value {
-        crate::groove::records::Value::Record(self.encoded_record().clone())
+    pub fn to_value(self) -> crate::records::Value {
+        crate::records::Value::Record(self.encoded_record().clone())
     }
 
     /// The cached groove record encoding of this author.
-    pub fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+    pub fn encoded_record(self) -> &'static crate::records::OwnedRecord {
         match self {
             Self::System => {
-                static RECORD: std::sync::OnceLock<crate::groove::records::OwnedRecord> =
+                static RECORD: std::sync::OnceLock<crate::records::OwnedRecord> =
                     std::sync::OnceLock::new();
                 RECORD.get_or_init(|| self.build_record())
             }
@@ -741,8 +741,8 @@ impl AuthorSubject {
         }
     }
 
-    fn build_record(self) -> crate::groove::records::OwnedRecord {
-        use crate::groove::records::{OwnedRecord, Value};
+    fn build_record(self) -> crate::records::OwnedRecord {
+        use crate::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
         let identity = author_identity_descriptor();
         let raw = identity
@@ -761,8 +761,8 @@ impl AuthorSubject {
     }
 
     /// Decode structured provenance using its exact native descriptor.
-    pub fn from_value(value: crate::groove::records::Value) -> Result<Self, AuthorSubjectError> {
-        use crate::groove::records::Value;
+    pub fn from_value(value: crate::records::Value) -> Result<Self, AuthorSubjectError> {
+        use crate::records::Value;
         let bad = || AuthorSubjectError::InvalidCanonical("invalid author record".into());
         let Value::Record(record) = value else {
             return Err(bad());
@@ -1158,7 +1158,7 @@ mod tests {
 
     #[test]
     fn system_capability_decode_is_limited_to_the_nullable_permission_descriptor() {
-        use crate::groove::records::{OwnedRecord, Value, ValueType};
+        use crate::records::{OwnedRecord, Value, ValueType};
 
         assert_eq!(
             AuthorSubject::from_value(AuthorSubject::SYSTEM.to_value()).unwrap(),
@@ -1196,7 +1196,7 @@ mod tests {
 
     #[test]
     fn row_author_rejects_noncanonical_system_origin() {
-        use crate::groove::records::{OwnedRecord, Value, ValueType};
+        use crate::records::{OwnedRecord, Value, ValueType};
         let ValueType::Record(descriptor) = RowAuthor::value_type() else {
             unreachable!()
         };
@@ -1362,63 +1362,63 @@ mod tests {
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
-groove::impl_record_field_u64!(NodeAlias);
-groove::impl_record_field_u64!(SchemaVersionAlias);
-groove::impl_record_field_uuid!(NodeUuid);
-groove::impl_record_field_uuid!(SchemaFamilyId);
-groove::impl_record_field_uuid!(RowUuid);
-groove::impl_record_field_uuid!(SchemaVersionId);
+crate::impl_record_field_u64!(NodeAlias);
+crate::impl_record_field_u64!(SchemaVersionAlias);
+crate::impl_record_field_uuid!(NodeUuid);
+crate::impl_record_field_uuid!(SchemaFamilyId);
+crate::impl_record_field_uuid!(RowUuid);
+crate::impl_record_field_uuid!(SchemaVersionId);
 
-impl groove::records::RecordField for AuthorSubject {
+impl crate::records::RecordField for AuthorSubject {
     fn read_raw(
         bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
+        value_type: &crate::records::ValueType,
+    ) -> Result<Self, crate::records::Error> {
         AuthorSubject::from_value(
-            <groove::records::Value as groove::records::RecordField>::read_raw(bytes, value_type)?,
+            <crate::records::Value as crate::records::RecordField>::read_raw(bytes, value_type)?,
         )
-        .map_err(|_| groove::records::Error::NonCanonicalRecord)
+        .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
     fn read(
-        record: &groove::records::BorrowedRecord<'_>,
+        record: &crate::records::BorrowedRecord<'_>,
         idx: usize,
-    ) -> Result<Self, groove::records::Error> {
+    ) -> Result<Self, crate::records::Error> {
         AuthorSubject::from_value(record.get_idx(idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+            .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
 
-    fn to_value(&self) -> groove::records::Value {
+    fn to_value(&self) -> crate::records::Value {
         (*self).to_value()
     }
 
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Record;
+    const COLUMN_KIND: crate::records::FieldKind = crate::records::FieldKind::Record;
 }
 
-impl groove::records::RecordField for RowAuthor {
+impl crate::records::RecordField for RowAuthor {
     fn read_raw(
         bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
-        let groove::records::ValueType::Record(descriptor) = value_type else {
-            return Err(groove::records::Error::TypeMismatch {
+        value_type: &crate::records::ValueType,
+    ) -> Result<Self, crate::records::Error> {
+        let crate::records::ValueType::Record(descriptor) = value_type else {
+            return Err(crate::records::Error::TypeMismatch {
                 expected: value_type.clone(),
             });
         };
         RowAuthor::from_record(descriptor.bind(bytes))
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+            .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
 
     fn read(
-        record: &groove::records::BorrowedRecord<'_>,
+        record: &crate::records::BorrowedRecord<'_>,
         idx: usize,
-    ) -> Result<Self, groove::records::Error> {
+    ) -> Result<Self, crate::records::Error> {
         RowAuthor::from_record(record.get_record(idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+            .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
 
-    fn to_value(&self) -> groove::records::Value {
+    fn to_value(&self) -> crate::records::Value {
         (*self).to_value()
     }
 
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Record;
+    const COLUMN_KIND: crate::records::FieldKind = crate::records::FieldKind::Record;
 }

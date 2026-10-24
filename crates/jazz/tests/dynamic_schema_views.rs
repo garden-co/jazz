@@ -1,10 +1,10 @@
+// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 mod common;
 
-use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, SerializableTxOps};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, col, gt, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, ObjectId, OpenTransactionId, PolicyExpr,
@@ -130,12 +130,9 @@ fn empty_schema() -> JazzSchema {
 }
 
 async fn open_owner(schema: JazzSchema) -> Db {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     Db::open(
         DbConfig::new(
             schema,
-            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x31; 16]),
                 author: AuthorSubject::for_test_bytes([0xa1; 16]),

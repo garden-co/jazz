@@ -13,18 +13,15 @@ mod common;
 
 use common::{allow_all_policies, compile_schema};
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, SerializableTxOps, UpdateOptions,
-    UpsertOptions,
-};
-use jazz::groove::large_values::{
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, UpdateOptions, UpsertOptions};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::large_values::{
     ContentHash, FORMAT_VERSION, INLINE_VALUE_MAX_BYTES, LargeValueKind, LargeValueRef, Locator,
     NodeRef,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::tools::OpenTransactionId;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 const LARGE_BYTES: usize = 200 * 1024;
@@ -47,11 +44,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> Db {
     let schema = schema();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x35; 16]),
             author: AuthorSubject::SYSTEM,
@@ -151,20 +145,34 @@ fn transaction_update_of_small_column_keeps_large_values() {
     let row = seed(&db);
     let table = schema().tables()[0].clone();
     let query = db.prepare_query(&db.table("docs")).expect("prepare");
+    let point = db
+        .prepare_query(&db.table("docs").filter(jazz::query::eq(
+            jazz::query::col("id"),
+            jazz::query::lit(Value::Uuid(row.0)),
+        )))
+        .expect("prepare point read");
 
     let ((point, rows), _) = block_on(db.transaction(async |tx| {
         tx.update("docs", row, rank_patch(0), UpdateOptions::default())
             .await?;
-        let point = tx.read("docs", row).await?;
+        let point = tx
+            .all_prepared(&point)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row);
         let rows = tx.all_prepared(&query).await?;
         Ok((point, rows))
     }))
     .expect("transactional small-column update commits");
 
-    // Read-your-writes inside the transaction, through both read surfaces.
+    // Read-your-writes inside the transaction, through a point query and a
+    // listing.
     let point = point.expect("row visible in its own transaction");
-    assert_eq!(point.get("rank"), Some(&Value::I32(0)));
-    assert_eq!(point.get("body"), Some(&Value::String(big_text('b'))));
+    assert_eq!(point.cell(&table, "rank"), Some(Value::I32(0)));
+    assert_eq!(
+        point.cell(&table, "body"),
+        Some(Value::String(big_text('b')))
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].cell(&table, "rank"), Some(Value::I32(0)));
     assert_eq!(
@@ -300,4 +308,27 @@ fn caller_authored_descriptor_is_still_rejected() {
     let after = committed(&db, row);
     assert_eq!(after["rank"], Value::I32(4));
     assert_large_values_intact(&after);
+}
+
+/// Contract: a restore staged in an open transaction brings a deleted row
+/// back with its large values, and only at commit.
+#[test]
+fn transaction_restore_brings_back_large_values() {
+    let db = open_db();
+    let row = seed(&db);
+    block_on(db.delete("docs", row, Default::default())).expect("delete");
+    let batch = OpenTransactionId::new();
+    block_on(db.begin_mergeable(batch)).expect("begin");
+    block_on(
+        db.mergeable_tx_ref(batch)
+            .restore("docs", row, None, Default::default()),
+    )
+    .expect("stage restore");
+    let query = db.prepare_query(&db.table("docs")).expect("prepare");
+    assert!(
+        db.read(&query).expect("read").is_empty(),
+        "nothing lands before the commit"
+    );
+    block_on(db.commit_mergeable_handle(batch)).expect("commit");
+    assert_large_values_intact(&committed(&db, row));
 }

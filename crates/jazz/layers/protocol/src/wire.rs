@@ -42,8 +42,6 @@ pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
 /// Authority-owned authorization scope hydration.  Unlike the first receipt
 /// experiment this never accepts caller supplied support query identities.
 pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
-/// Peers support Groove chunk misses on the independently driven auxiliary lane.
-pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 /// The endpoint understands a server-admitted, scope-isolated client-relay
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
@@ -787,7 +785,6 @@ fn default_transport_compression_features() -> WireFeatures {
 /// Base sync frame features plus any runtime-enabled transport compression.
 pub fn current_wire_features() -> WireFeatures {
     FEATURE_AUTHORIZATION_SCOPE_VIEWS
-        | FEATURE_AUXILIARY_CHUNKS
         | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
         | runtime_transport_compression_features()
 }
@@ -957,22 +954,20 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use groove::schema::ColumnType;
+    use jazz_types::column_schema::ColumnType;
     use serde_json::json;
 
     use super::*;
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        AuthorizationSupportScopeKey, ChunkRequestBatch, ChunkRequestEntry,
-        PermissionAdviceRequestId, RegisterShapeOptions, ShapeAst, Subscribe,
-        SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
+        AuthorizationSupportScopeKey, PermissionAdviceRequestId, RegisterShapeOptions, ShapeAst,
+        Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
         VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons, expand_version_carriers,
     };
     use crate::protocol_limits::{
-        MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES,
-        MAX_WIRE_FRAME_BYTES,
+        MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, MAX_WIRE_FRAME_BYTES,
     };
     use crate::query::{BindingId, Operand, Predicate, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
@@ -1136,8 +1131,8 @@ mod tests {
         );
 
         let canonical_payload = encode_sync_message(&message).expect("message encodes");
-        assert_eq!(canonical_payload[0], 4, "FateUpdate is tag 4");
-        let nonminimal_payload = [vec![0x84, 0], canonical_payload[1..].to_vec()].concat();
+        assert_eq!(canonical_payload[0], 2, "FateUpdate is tag 2");
+        let nonminimal_payload = [vec![0x82, 0], canonical_payload[1..].to_vec()].concat();
         assert!(
             postcard::from_bytes::<SyncMessage>(&nonminimal_payload).is_ok(),
             "planted sensitivity: postcard accepts the overlong SyncMessage tag"
@@ -1259,7 +1254,7 @@ mod tests {
     #[test]
     fn transaction_fate_receipt_has_one_canonical_postcard_spelling() {
         const ACCEPTED_GLOBAL_RECEIPT_HEX: &str =
-            "040c10111111111111111111111111111111110101070102";
+            "020c10111111111111111111111111111111110101070102";
         let tx_id = TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]));
         let expected = SyncMessage::FateUpdate {
             tx_id,
@@ -1284,7 +1279,7 @@ mod tests {
     #[test]
     fn transaction_fate_receipt_rejects_trailing_and_noncanonical_bytes() {
         let canonical =
-            hex::decode("040c10111111111111111111111111111111110101070102").expect("fixture hex");
+            hex::decode("020c10111111111111111111111111111111110101070102").expect("fixture hex");
 
         let mut trailing = canonical.clone();
         trailing.push(0);
@@ -1296,37 +1291,6 @@ mod tests {
         let mut noncanonical = canonical;
         noncanonical.splice(1..2, [0x8c, 0x00]);
         assert!(decode_sync_message(&noncanonical).is_err());
-    }
-
-    #[test]
-    fn oversized_chunk_request_batches_are_rejected_during_decode() {
-        let request = |request_id| ChunkRequestEntry {
-            request_id,
-            locator: groove::large_values::Locator::random(),
-            expected_hash: [0x22; 32],
-            remaining_hops: 1,
-        };
-        let at_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
-            requests: (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
-                .map(request)
-                .collect(),
-        });
-        let encoded = encode_sync_message(&at_limit).expect("encode limit request fixture");
-        assert_eq!(
-            decode_sync_message(&encoded).expect("limit request fixture remains valid"),
-            at_limit
-        );
-
-        let mut requests = (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
-            .map(request)
-            .collect::<Vec<_>>();
-        requests.push(request(MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64));
-        let over_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch { requests });
-        let encoded = encode_sync_message(&over_limit).expect("encode oversized request fixture");
-        assert!(
-            decode_sync_message(&encoded).is_err(),
-            "remote request cardinality must be bounded before storage work"
-        );
     }
 
     fn nested_policy_predicate(nodes: usize) -> Predicate {
@@ -1470,43 +1434,6 @@ mod tests {
     }
 
     #[test]
-    fn chunk_request_locator_decode_requires_exactly_256_bits() {
-        #[derive(serde::Serialize)]
-        struct RawChunkRequestBatch {
-            requests: Vec<RawChunkRequestEntry>,
-        }
-        #[derive(serde::Serialize)]
-        struct RawChunkRequestEntry {
-            request_id: u64,
-            locator: Vec<u8>,
-            expected_hash: [u8; 32],
-            remaining_hops: u8,
-        }
-
-        for length in [31, 32, 33] {
-            let encoded = postcard::to_allocvec(&RawChunkRequestBatch {
-                requests: vec![RawChunkRequestEntry {
-                    request_id: 1,
-                    locator: vec![0x11; length],
-                    expected_hash: [0x22; 32],
-                    remaining_hops: 1,
-                }],
-            })
-            .unwrap();
-            assert_eq!(
-                postcard::from_bytes::<ChunkRequestBatch>(&encoded).is_ok(),
-                length == groove::large_values::LOCATOR_BYTES,
-                "locator length {length} must {}decode",
-                if length == groove::large_values::LOCATOR_BYTES {
-                    ""
-                } else {
-                    "not "
-                }
-            );
-        }
-    }
-
-    #[test]
     fn shared_view_update_payload_preserves_postcard_shape() {
         #[allow(dead_code)]
         #[derive(serde::Serialize)]
@@ -1522,8 +1449,6 @@ mod tests {
             V8,
             V9,
             V10,
-            V11,
-            V12,
             ViewUpdate {
                 subscription: SubscriptionKey,
                 settled_through: GlobalTime,
@@ -1782,7 +1707,7 @@ mod tests {
                 bundle
             })
             .collect::<Vec<_>>();
-        let descriptor = groove::records::encode_persisted_record_descriptor(
+        let descriptor = jazz_types::records::encode_persisted_record_descriptor(
             bundles[0].versions[0].record().descriptor(),
         )
         .unwrap();
@@ -2251,7 +2176,7 @@ mod tests {
         let remote = WireHello {
             min_protocol_version: 6,
             max_protocol_version: 6,
-            features: FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS,
+            features: FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_PAYLOAD_ZSTD,
             role: WirePeerRole::Relay,
             authority: None,
         };

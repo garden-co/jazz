@@ -3,7 +3,7 @@
 //! clock mutation and skew checks live in `jazz::node::ingest` and
 //! `jazz::node::open_tx`, while merge/currency interpretation lives in
 //! `jazz::node::currency`. The types flow from facade writes through protocol
-//! records down into groove storage keys.
+//! records down into storage keys.
 
 use crate::ids::NodeUuid;
 
@@ -272,16 +272,6 @@ mod tests {
             u64::MAX
         );
         assert!(TxTime::new(0, HLC_MAX_LOGICAL_COUNTER) < TxTime::new(1, 0));
-
-        // These are the actual ordered-primary-key bytes, not merely the
-        // in-memory integer ordering.  The leading tag is Groove's U64 key
-        // arm; the remaining bytes must preserve packed HLC order.
-        let first = groove::db::PrimaryKeyValue::U64(TxTime::new(0, HLC_MAX_LOGICAL_COUNTER).0)
-            .into_bytes();
-        let second = groove::db::PrimaryKeyValue::U64(TxTime::new(1, 0).0).into_bytes();
-        assert_eq!(first, vec![3, 0, 0, 0, 0, 0, 3, 255, 255]);
-        assert_eq!(second, vec![3, 0, 0, 0, 0, 0, 4, 0, 0]);
-        assert!(first < second);
     }
 
     #[test]
@@ -384,5 +374,5 @@ mod tests {
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
-groove::impl_record_field_u64!(TxTime);
-groove::impl_record_field_u64!(GlobalTime);
+crate::impl_record_field_u64!(TxTime);
+crate::impl_record_field_u64!(GlobalTime);

@@ -42,6 +42,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-workspace": "test-rust-workspace",
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
+  "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
   "react-native": "test-react-native",
 });
@@ -278,6 +279,18 @@ export const ciPartitions = Object.freeze({
   // again here only to open one IndexedDB fixture cost ~3 minutes per run.
   "storage-compat": Object.freeze([
     command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
+  ]),
+  // The whole suite on native SQLite with Cloudflare Durable Object SQLite's
+  // limits (100 bound parameters, 100 KB statements, expression depth 100,
+  // ...), so SQL that would fail there fails here. See
+  // dev/durable-objects/README.md.
+  "durable-object-limits": Object.freeze([
+    command("Durable Object SQLite limits", "cargo", [
+      "test",
+      "--workspace",
+      "--features",
+      "jazz/durable-object-limits",
+    ]),
   ]),
 });
 

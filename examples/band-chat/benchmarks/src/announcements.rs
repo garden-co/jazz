@@ -15,18 +15,16 @@ use std::time::Instant;
 
 use jazz::account_registry::AccountId;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, ReadOpts, ReadTier,
-    SubscriptionEvent, SubscriptionStream, WriteIdentity, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, ReadTier, SubscriptionEvent,
+    SubscriptionStream, WriteIdentity, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::policy_claims::canonical_policy_binding_claims;
 use jazz::tools::policy_expr::{SessionWhere, always, session_where};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 pub const GENERAL_ROOM: &str = "general";
 pub const ANNOUNCEMENTS_ROOM: &str = "announcements";
@@ -100,11 +98,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> Db {
     let schema = schema();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xa9; 16]),
             author: AuthorSubject::SYSTEM,
@@ -266,10 +261,10 @@ impl AnnouncementsFixture {
         open_room_as(&self.db, &self.query, author).1
     }
 
-    /// Untimed oracle: a member's announcement is recorded locally but the
-    /// authority's insert policy rejects it.
+    /// Untimed oracle: this Db is the authority, so its insert policy
+    /// rejects a member's announcement at the write.
     pub fn member_announcement_is_denied(&self) -> bool {
-        let write = block_on(self.db.insert(
+        block_on(self.db.insert(
             "messages",
             message_cells(ANNOUNCEMENTS_ROOM, usize::MAX, 0),
             InsertOptions {
@@ -277,11 +272,7 @@ impl AnnouncementsFixture {
                 ..Default::default()
             },
         ))
-        .expect("a denied write is still recorded locally");
-        self.db
-            .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-            .expect("authority decides the announcement");
-        block_on(write.wait(DurabilityTier::Global)).is_err()
+        .is_err()
     }
 }
 

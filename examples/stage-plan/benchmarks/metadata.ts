@@ -2,9 +2,9 @@ import type { BenchmarkMetadata } from "../../../dev/benchmarks/metadata/types.t
 
 const source = "examples/stage-plan/benchmarks/benches/walltime.rs";
 
-// --- One show's task list: RocksDB worker + in-memory foreground (former todo suite) ---
+// --- One show's task list: file-backed worker + in-memory foreground (former todo suite) ---
 const taskList = {
-  storage: "RocksDB worker + in-memory foreground; WAL without fsync",
+  storage: "File-backed SQLite worker + in-memory foreground; WAL, synchronous=NORMAL",
   source,
   excludes: [
     "Fixture seeding",
@@ -18,7 +18,7 @@ const profileS =
   "3,000 tasks across 30 shows, 12,000 discussion comments and 9,000 activity rows, plus 10 crew members.";
 const board = (
   name: string,
-  backend: "memory" | "rocksdb",
+  backend: "memory" | "file",
   title: string,
   description: string,
   fixture: string,
@@ -31,7 +31,10 @@ const board = (
   description,
   fixture,
   includes,
-  storage: backend === "memory" ? "In-memory Jazz database" : "RocksDB; WAL without fsync",
+  storage:
+    backend === "memory"
+      ? "In-memory Jazz database"
+      : "File-backed SQLite; WAL, synchronous=NORMAL",
   excludes: [
     "Fixture seeding and database opening",
     "Real-network latency and JS/browser scheduling",
@@ -114,7 +117,7 @@ export const stagePlanBenchmarks: BenchmarkMetadata[] = [
   },
   board(
     "stage_plan_open_board",
-    "rocksdb",
+    "file",
     "StagePlan · open a show's board",
     "Execute one prepared board read, filtering and ordering one show's tasks with a bounded result.",
     profileS,
@@ -124,7 +127,7 @@ export const stagePlanBenchmarks: BenchmarkMetadata[] = [
   ),
   board(
     "stage_plan_open_task_detail",
-    "rocksdb",
+    "file",
     "StagePlan · open a task",
     "Read a task's discussion and activity using two prepared, ordered, bounded one-shot queries.",
     profileS,
@@ -134,7 +137,7 @@ export const stagePlanBenchmarks: BenchmarkMetadata[] = [
   ),
   board(
     "stage_plan_activity_page[30000]",
-    "rocksdb",
+    "file",
     "StagePlan · activity page from a large log",
     "Read a 50-row activity page using two indexed equality predicates from a 30,000-row activity log. Page cost should not depend on the log's size (#2026).",
     "3,000 tasks, 12,000 comments and 30,000 activity rows.",
@@ -144,7 +147,7 @@ export const stagePlanBenchmarks: BenchmarkMetadata[] = [
   ),
   board(
     "stage_plan_move_card_to_done",
-    "rocksdb",
+    "file",
     "StagePlan · move a card to Done",
     "Flip one row's indexed status so it enters or leaves an already-hydrated live filtered view, and drain the resulting events.",
     profileS,
@@ -160,12 +163,12 @@ export const stagePlanBenchmarks: BenchmarkMetadata[] = [
       name: `stage_plan_crew_dashboard[(${rows}, ${lists})]`,
       title: `StagePlan · crew dashboard with ${lists} live lists`,
       description:
-        "Open a crew member's dashboard: one overview plus 60 department lists, each an independent subscription through Core, a scope-isolated relay and a foreground; wait for every list to settle.",
+        "Open a crew member's dashboard: one overview plus 60 department lists, each an independent subscription from Core to an in-memory foreground; wait for every list to settle.",
       fixture: `Two crews of ${rows.toLocaleString("en-US")} tasks each; 60 departments per crew. Inherited crew-member permission excludes the other crew's rows. One overview plus ${lists} separately opened department lists.`,
       storage: "Three independent in-memory Jazz runtimes",
       includes: [
         "Query preparation and subscription admission",
-        "Core, relay and foreground progress",
+        "Core and foreground progress",
         "Initial result consumption",
       ],
       excludes: [

@@ -1,10 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::groove::records::{
-    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as GrooveValue,
-};
-use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
     PolicyBranch, Predicate, Query,
@@ -12,6 +8,10 @@ use crate::query::{
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
     TableSchema as CoreTableSchema, WritePolicies,
+};
+use jazz_types::column_schema::ColumnType as GrooveColumnType;
+use jazz_types::records::{
+    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as GrooveValue,
 };
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
@@ -862,7 +862,7 @@ fn convert_column_type(
         ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
         ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
         ColumnType::ScalarEnum { name, variants } => {
-            groove::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
+            jazz_types::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
                 .map(GrooveColumnType::EnumTag)
                 .map_err(|error| column_err(table, column, error.to_string()))
         }
@@ -3725,9 +3725,11 @@ mod tests {
                         cases: (0..257)
                             .map(|ordinal| EnumCaseDescriptor {
                                 name: format!("case-{ordinal}"),
-                                fields: (ordinal == 256)
-                                    .then(|| vec![ColumnDescriptor::new("text", ColumnType::Text)])
-                                    .unwrap_or_default(),
+                                fields: if ordinal == 256 {
+                                    vec![ColumnDescriptor::new("text", ColumnType::Text)]
+                                } else {
+                                    Vec::new()
+                                },
                             })
                             .collect(),
                     },
@@ -3927,35 +3929,35 @@ mod tests {
         assert_eq!(score_span.end - score_span.start - 1, 4);
     }
 
-    fn sample_groove_value(value_type: &crate::groove::records::ValueType) -> GrooveValue {
+    fn sample_groove_value(value_type: &jazz_types::records::ValueType) -> GrooveValue {
         match value_type {
-            crate::groove::records::ValueType::U8 => GrooveValue::U8(1),
-            crate::groove::records::ValueType::U16 => GrooveValue::U16(2),
-            crate::groove::records::ValueType::U32 => GrooveValue::U32(3),
-            crate::groove::records::ValueType::U64 => GrooveValue::U64(4),
-            crate::groove::records::ValueType::U48 => GrooveValue::U48(4),
-            crate::groove::records::ValueType::I32 => GrooveValue::I32(-5),
-            crate::groove::records::ValueType::I64 => GrooveValue::I64(-6),
-            crate::groove::records::ValueType::F64 => GrooveValue::F64(7.0),
-            crate::groove::records::ValueType::Bool => GrooveValue::Bool(true),
-            crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
-            crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            jazz_types::records::ValueType::U8 => GrooveValue::U8(1),
+            jazz_types::records::ValueType::U16 => GrooveValue::U16(2),
+            jazz_types::records::ValueType::U32 => GrooveValue::U32(3),
+            jazz_types::records::ValueType::U64 => GrooveValue::U64(4),
+            jazz_types::records::ValueType::U48 => GrooveValue::U48(4),
+            jazz_types::records::ValueType::I32 => GrooveValue::I32(-5),
+            jazz_types::records::ValueType::I64 => GrooveValue::I64(-6),
+            jazz_types::records::ValueType::F64 => GrooveValue::F64(7.0),
+            jazz_types::records::ValueType::Bool => GrooveValue::Bool(true),
+            jazz_types::records::ValueType::String => GrooveValue::String("value".to_owned()),
+            jazz_types::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
             // Author columns hold dictionary codes.
             value_type if value_type.as_interned().is_some() => GrooveValue::U32(0),
-            crate::groove::records::ValueType::Internal(_) => {
+            jazz_types::records::ValueType::Internal(_) => {
                 panic!("public schemas must not contain Groove internal storage types")
             }
-            crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
-            crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
-            crate::groove::records::ValueType::Tuple(members) => {
+            jazz_types::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
+            jazz_types::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
+            jazz_types::records::ValueType::Tuple(members) => {
                 GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
             }
-            crate::groove::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
-            crate::groove::records::ValueType::Nullable(inner) => {
+            jazz_types::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
+            jazz_types::records::ValueType::Nullable(inner) => {
                 GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
             }
-            crate::groove::records::ValueType::Record(descriptor) => {
-                GrooveValue::Record(crate::groove::records::OwnedRecord::new(
+            jazz_types::records::ValueType::Record(descriptor) => {
+                GrooveValue::Record(jazz_types::records::OwnedRecord::new(
                     descriptor
                         .create(
                             &descriptor
@@ -3968,7 +3970,7 @@ mod tests {
                     **descriptor,
                 ))
             }
-            crate::groove::records::ValueType::Enum(_) => {
+            jazz_types::records::ValueType::Enum(_) => {
                 panic!("Jazz public schema conversion must not receive whole-row Groove enums")
             }
         }
@@ -5972,7 +5974,7 @@ mod tests {
             reachable.edge_filters,
             vec![Predicate::Eq(
                 Operand::Column("enabled".to_owned()),
-                Operand::Literal(crate::groove::records::Value::Bool(true)),
+                Operand::Literal(jazz_types::records::Value::Bool(true)),
             )]
         );
         assert_eq!(reachable.bound, crate::query::RecursionBound::MaxDepth(8));
@@ -5980,7 +5982,7 @@ mod tests {
             reachable.access_filters,
             vec![Predicate::Eq(
                 Operand::Column("grant_role".to_owned()),
-                Operand::Literal(crate::groove::records::Value::String("viewer".to_owned())),
+                Operand::Literal(jazz_types::records::Value::String("viewer".to_owned())),
             )]
         );
         let seed = reachable.seed.as_ref().unwrap();

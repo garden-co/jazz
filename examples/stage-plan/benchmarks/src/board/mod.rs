@@ -7,28 +7,23 @@ pub mod crew_dashboard;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CommitUnitTrust, Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, MergeableTxOps,
-    PeerIoPump, PreparedQuery, ReadOpts, ReadTier, RestoreOptions, ResumeCursor, SubscriptionEvent,
-    SubscriptionStream, UpdateOptions, WireTransportAdapter, WriteIdentity, block_on,
+    Db, DbConfig, DbIdentity, DeleteOptions, FileOptions, InsertOptions, PreparedQuery, ReadOpts,
+    ReadTier, RestoreOptions, SubscriberId, SubscriptionEvent, SubscriptionStream, UpdateOptions,
+    Upstream, WireTransportAdapter, WriteIdentity, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
+use jazz::db::{TransportError, WireTransport};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
     CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
     Value as PublicValue,
 };
 use jazz::tx::DurabilityTier;
-use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireSession, WireTransport};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
-use jazz_storage_sqlite::SqliteStorage;
 use tempfile::TempDir;
 
 const USERS: usize = 10;
@@ -41,7 +36,7 @@ fn policy_bench_identity() -> AuthorSubject {
 }
 
 /// Seeded W1 read fixture. Setup is deliberately outside measured closures.
-pub struct Fixture<S: OrderedKvStorage> {
+pub struct Fixture {
     db: Db,
     board: PreparedQuery,
     comments: PreparedQuery,
@@ -53,92 +48,43 @@ pub struct Fixture<S: OrderedKvStorage> {
     task_transition_row: RowUuid,
     activity_transition_matching: bool,
     activity_update_identity: WriteIdentity,
-    /// Which storage backend the fixture was built over; Db itself erases it.
-    storage: std::marker::PhantomData<fn() -> S>,
 }
 
-pub struct MaintainedActivityFixture<S: OrderedKvStorage> {
-    fixture: Fixture<S>,
+pub struct MaintainedActivityFixture {
+    fixture: Fixture,
     subscription: SubscriptionStream,
 }
 
-/// Prepared byte-wire reconnect with one disconnected task update pending.
+/// Prepared byte-wire reconnect with one task update made at the authority
+/// while the client was away.
 pub struct ResumeFixture {
     server: Db,
     client: Db,
     subscription: SubscriptionStream,
-    cursor: Option<ResumeCursor>,
     fresh_post_update_bytes: usize,
     task_schema: jazz::schema::TableSchema,
     rows: ResumeRows,
     expected_rows: ResumeRows,
     resume_events: Vec<SubscriptionEvent>,
+    /// The current link, kept alive while the client is connected.
+    _link: Option<(Upstream, SubscriberId)>,
 }
 
 type ResumeRows = BTreeMap<RowUuid, BTreeMap<String, Option<Value>>>;
 
+/// One direction of an in-memory byte link; the server-to-client side counts
+/// the bytes it sends.
 struct ByteDuplexTransport {
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
-}
-
-fn pump_aux(left: &PeerIoPump, right: &PeerIoPump) {
-    loop {
-        let mut progressed = false;
-        while let Some(frame) = left
-            .take_outbound_wire_frame()
-            .expect("drain W1 left wire pump")
-        {
-            assert!(
-                block_on(right.route_incoming_wire_frame(frame))
-                    .expect("route W1 left wire frame")
-                    .is_none()
-            );
-            progressed = true;
-        }
-        while let Some(frame) = right
-            .take_outbound_wire_frame()
-            .expect("drain W1 right wire pump")
-        {
-            assert!(
-                block_on(left.route_incoming_wire_frame(frame))
-                    .expect("route W1 right wire frame")
-                    .is_none()
-            );
-            progressed = true;
-        }
-        if !progressed {
-            break;
-        }
-    }
-}
-
-// Empty carrier queues do not establish remote settlement: adapters can still
-// own accepted messages waiting for credits. Keep driving both real wire pumps
-// until the public write wait proves the authority has applied the frontier.
-fn pump_until_settled(
-    writer: &Db,
-    server: &Db,
-    writer_pump: &PeerIoPump,
-    server_pump: &PeerIoPump,
-    max_turns: usize,
-) {
-    let mut settled = std::pin::pin!(writer.wait_for_pending_writes(DurabilityTier::Global));
-    let mut context = Context::from_waker(Waker::noop());
-    for _ in 0..max_turns {
-        block_on(writer.tick()).expect("ship W1 pending writes");
-        block_on(server.tick()).expect("ingest W1 pending writes");
-        pump_aux(writer_pump, server_pump);
-        if let Poll::Ready(result) = settled.as_mut().poll(&mut context) {
-            result.expect("settle W1 writes at the authority");
-            return;
-        }
-    }
-    panic!("W1 writes must reach global settlement within bounded pump turns");
+    sent: Option<Rc<RefCell<usize>>>,
 }
 
 impl WireTransport for ByteDuplexTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        if let Some(sent) = &self.sent {
+            *sent.borrow_mut() += frame.len();
+        }
         self.outbound.borrow_mut().push_back(frame);
         Ok(())
     }
@@ -148,100 +94,98 @@ impl WireTransport for ByteDuplexTransport {
     }
 }
 
-impl Fixture<MemoryStorage> {
-    pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
-        let schema = schema(false);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        Self::new(
-            tasks,
-            comments,
-            activity_events,
-            schema,
-            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
-            WriteIdentity::Database,
-        )
-    }
+/// Client side, server side, and the bytes the server side has sent.
+type ByteLink = (
+    Box<dyn jazz::db::Transport>,
+    Box<dyn jazz::db::Transport>,
+    Rc<RefCell<usize>>,
+);
 
-    pub fn memory_profile_s() -> Self {
-        Self::memory(3_000, 12_000, 9_000)
-    }
+fn byte_duplex() -> ByteLink {
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let sent = Rc::new(RefCell::new(0));
+    let client = ByteDuplexTransport {
+        outbound: Rc::clone(&up),
+        inbound: Rc::clone(&down),
+        sent: None,
+    };
+    let server = ByteDuplexTransport {
+        outbound: down,
+        inbound: up,
+        sent: Some(Rc::clone(&sent)),
+    };
+    (
+        Box::new(WireTransportAdapter::current(client)),
+        Box::new(WireTransportAdapter::current(server)),
+        sent,
+    )
+}
 
-    pub fn memory_profile_s_policy_update() -> Self {
-        Self::memory_policy_update(3_000, 12_000, 9_000)
-    }
+/// Connect `client` to `server` over a fresh counted byte link.
+fn connect(client: &Db, server: &Db) -> ((Upstream, SubscriberId), Rc<RefCell<usize>>) {
+    let (client_side, server_side, sent) = byte_duplex();
+    let upstream = block_on(client.connect_upstream(client_side));
+    let subscriber = server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    ((upstream, subscriber), sent)
+}
 
-    pub fn memory_policy_update(tasks: usize, comments: usize, activity_events: usize) -> Self {
-        let schema = schema(true);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        Self::new(
-            tasks,
-            comments,
-            activity_events,
-            schema,
-            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
-            WriteIdentity::Session(policy_bench_identity()),
-        )
-    }
+fn pump(client: &Db, server: &Db) {
+    block_on(client.tick()).expect("announce W1 subscription");
+    block_on(server.tick()).expect("serve W1 subscription");
+    block_on(client.tick()).expect("apply W1 answer");
+    block_on(client.tick()).expect("materialize W1 answer");
+}
+
+fn task_schema() -> jazz::schema::TableSchema {
+    schema(false)
+        .tables()
+        .iter()
+        .find(|table| table.name == "tasks")
+        .unwrap()
+        .clone()
+}
+
+fn subscribe_tasks(client: &Db) -> SubscriptionStream {
+    let prepared = client
+        .prepare_query(&Query::from("tasks"))
+        .expect("prepare W1 tasks query");
+    block_on(client.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: ReadTier::Remote,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe W1 tasks")
+}
+
+fn update_target_task(fixture: &Fixture) {
+    let write = block_on(fixture.db.update(
+        "tasks",
+        fixture.task_transition_row,
+        BTreeMap::from([(
+            "status".to_owned(),
+            Value::String("resume-canary".to_owned()),
+        )]),
+        UpdateOptions::default(),
+    ))
+    .expect("write W1 task update");
+    block_on(write.wait(DurabilityTier::Local)).expect("settle W1 task update");
 }
 
 impl ResumeFixture {
+    /// The authority is the seeded board itself; the client syncs every task,
+    /// disconnects, and the authority updates one task meanwhile.
     pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
-        let writer = Fixture::<MemoryStorage>::memory(tasks, comments, activity_events);
-        let task_schema = schema(false)
-            .tables()
-            .iter()
-            .find(|table| table.name == "tasks")
-            .unwrap()
-            .clone();
-        let server = open_memory_node(schema(false), 0x72, true);
+        let board = Fixture::memory(tasks, comments, activity_events);
+        let task_schema = task_schema();
         let client = open_memory_node(schema(false), 0x73, false);
-
-        let (writer_transport, server_writer_transport) = byte_duplex(1);
-        let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
-        // These fixture writes are database-authored SYSTEM work, admitted by
-        // the synthetic host as a backend rather than an ordinary user session.
-        let writer_subscriber = server.accept_subscriber_with_claims_and_trust(
-            server_writer_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
-        let writer_pump = block_on(writer_upstream.lock()).io_pump();
-        let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
-        pump_until_settled(
-            &writer.db,
-            &server,
-            &writer_pump,
-            &server_writer_pump,
-            10_000,
-        );
-        assert!(writer.db.detach_connection(&writer_upstream));
-        assert!(server.detach_connection(&writer_subscriber));
-        let (client_transport, server_transport) = byte_duplex(2);
-        let upstream = block_on(client.connect_upstream(client_transport));
-        let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
-        let client_pump = block_on(upstream.lock()).io_pump();
-        let server_pump = block_on(subscriber.lock()).io_pump();
-        let prepared = client
-            .prepare_query(&Query::from("tasks"))
-            .expect("prepare W1 resumed tasks query");
-        let mut subscription = block_on(client.subscribe(
-            &prepared,
-            ReadOpts {
-                tier: ReadTier::Remote,
-                ..ReadOpts::default()
-            },
-        ))
-        .expect("subscribe W1 resumed tasks");
+        let (link, _) = connect(&client, &board.db);
+        let mut subscription = subscribe_tasks(&client);
         let mut rows = ResumeRows::new();
         for _ in 0..512 {
-            block_on(client.tick()).expect("announce W1 resumed tasks subscription");
-            block_on(server.tick()).expect("serve W1 full task snapshot");
-            block_on(client.tick()).expect("apply W1 full task snapshot");
-            block_on(client.tick()).expect("materialize W1 full task snapshot");
-            pump_aux(&client_pump, &server_pump);
+            pump(&client, &board.db);
             while let Some(event) = subscription.try_next_event() {
                 apply_resume_event(&mut rows, &task_schema, event);
             }
@@ -250,106 +194,46 @@ impl ResumeFixture {
             }
         }
         assert_eq!(rows.len(), tasks);
-        let initial_snapshot_bytes = block_on(subscriber.lock())
-            .last_resume_bytes()
-            .expect("W1 full snapshot bytes");
-        assert!(initial_snapshot_bytes > 0);
-        block_on(server.tick()).expect("refresh W1 served cursor state");
-        block_on(client.tick()).expect("apply W1 served cursor state");
-        while let Some(event) = subscription.try_next_event() {
-            apply_resume_event(&mut rows, &task_schema, event);
-        }
-        assert_eq!(rows.len(), tasks);
         let mut expected_rows = rows.clone();
         let target = expected_rows
-            .get_mut(&writer.task_transition_row)
+            .get_mut(&board.task_transition_row)
             .expect("updated task was in the initial snapshot");
         let expected_status = Some(Value::String("resume-canary".to_owned()));
         assert_ne!(target.get("status"), Some(&expected_status));
         target.insert("status".to_owned(), expected_status);
-        let cursor = block_on(subscriber.lock())
-            .take_resume_cursor()
-            .expect("take W1 subscriber resume cursor");
-        assert!(client.detach_connection(&upstream));
-        assert!(server.detach_connection(&subscriber));
+        assert!(client.detach_connection(&link.0));
+        board.db.disconnect_subscriber(link.1);
 
-        let write = block_on(writer.db.update(
-            "tasks",
-            writer.task_transition_row,
-            BTreeMap::from([(
-                "status".to_owned(),
-                Value::String("resume-canary".to_owned()),
-            )]),
-            UpdateOptions::default(),
-        ))
-        .expect("write disconnected W1 task update");
-        block_on(write.wait(DurabilityTier::Local)).expect("settle disconnected W1 task update");
-        let (writer_transport, server_writer_transport) = byte_duplex(3);
-        let writer_upstream = block_on(writer.db.connect_upstream(writer_transport));
-        let writer_subscriber = server.accept_subscriber_with_claims_and_trust(
-            server_writer_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
-        let writer_pump = block_on(writer_upstream.lock()).io_pump();
-        let server_writer_pump = block_on(writer_subscriber.lock()).io_pump();
-        pump_until_settled(
-            &writer.db,
-            &server,
-            &writer_pump,
-            &server_writer_pump,
-            1_000,
-        );
-        assert!(writer.db.detach_connection(&writer_upstream));
-        assert!(server.detach_connection(&writer_subscriber));
+        update_target_task(&board);
 
-        // Compare the same post-update frontier. A new usage site rebuilds its
-        // complete CoveredInput closure; delta-sized reconnect is not promised
-        // for this reference-bearing query (performance follow-up: #2372).
-        // Use isolated control nodes so setup does not reconcile or warm the
-        // measured server's retained evaluator before resume_once.
+        // Compare with a fresh client's full subscription at the same
+        // post-update state, on an isolated control authority.
         let fresh_post_update_bytes = fresh_task_snapshot_bytes(tasks, comments, activity_events);
 
         Self {
-            server,
+            server: board.db,
             client,
             subscription,
-            cursor: Some(cursor),
             fresh_post_update_bytes,
             task_schema,
             rows,
             expected_rows,
             resume_events: Vec::new(),
+            _link: None,
         }
     }
 
+    /// The timed operation: reconnect and apply the catch-up. Returns the
+    /// bytes the authority sent.
     pub fn resume_once(&mut self) -> usize {
-        let cursor = self.cursor.take().expect("W1 resume fixture is single-use");
-        let (client_transport, server_transport) = byte_duplex(4);
-        let _upstream = block_on(self.client.connect_upstream(client_transport));
-        let resumed = self.server.accept_subscriber_with_resume(
-            server_transport,
-            AuthorSubject::SYSTEM,
-            cursor,
-        );
-        let client_pump = block_on(_upstream.lock()).io_pump();
-        let server_pump = block_on(resumed.lock()).io_pump();
-        block_on(self.client.tick()).expect("announce resumed W1 subscription");
-        block_on(self.server.tick()).expect("serve W1 resume catch-up");
-        pump_aux(&client_pump, &server_pump);
-        block_on(self.client.tick()).expect("apply W1 resume catch-up");
-        block_on(self.client.tick()).expect("materialize W1 resume event");
-        let resume_bytes = block_on(resumed.lock())
-            .last_resume_bytes()
-            .expect("W1 resume catch-up bytes");
-        let event =
-            block_on(self.subscription.next_event()).expect("W1 resume stream remains open");
-        self.resume_events.push(event);
+        assert!(self._link.is_none(), "W1 resume fixture is single-use");
+        let (link, sent) = connect(&self.client, &self.server);
+        self._link = Some(link);
+        pump(&self.client, &self.server);
         while let Some(event) = self.subscription.try_next_event() {
             self.resume_events.push(event);
         }
-        resume_bytes
+        *sent.borrow()
     }
 
     /// Correctness-only validation, deliberately outside the timed closure.
@@ -359,10 +243,8 @@ impl ResumeFixture {
         for event in self.resume_events.drain(..) {
             apply_resume_event(&mut self.rows, &self.task_schema, event);
         }
-        // A reconnect may publish a complete reset even when IVM computed one
-        // terminal change. Assert the actual application result: identical
-        // membership and every column unchanged except the one expected status.
-        // Full-reset reconnect cost remains measured here (follow-up #2372).
+        // Identical membership and every column unchanged except the one
+        // expected status.
         assert_eq!(self.rows, self.expected_rows);
         assert!(resume_bytes > 0);
         assert!(
@@ -383,13 +265,11 @@ fn apply_resume_event(
         added,
         updated,
         removed,
-        settled,
         ..
     } = event
     else {
         panic!("W1 subscription must remain open and authorized: {event:?}");
     };
-    assert!(settled);
     if reset {
         rows.clear();
         assert!(updated.is_empty(), "reset must supply complete rows");
@@ -425,71 +305,22 @@ fn apply_resume_event(
 }
 
 fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usize) -> usize {
-    let fixture = Fixture::<MemoryStorage>::memory(tasks, comments, activity_events);
-    let writer = &fixture.db;
-    let write = block_on(writer.update(
-        "tasks",
-        fixture.task_transition_row,
-        BTreeMap::from([(
-            "status".to_owned(),
-            Value::String("resume-canary".to_owned()),
-        )]),
-        UpdateOptions::default(),
-    ))
-    .expect("write W1 fresh control update");
-    block_on(write.wait(DurabilityTier::Local)).expect("settle W1 fresh control update");
-    let control_schema = schema(false);
-    let task_schema = control_schema
-        .tables()
-        .iter()
-        .find(|table| table.name == "tasks")
-        .unwrap();
-    let server = open_memory_node(schema(false), 0x74, true);
+    let board = Fixture::memory(tasks, comments, activity_events);
+    update_target_task(&board);
+    let task_schema = task_schema();
     let client = open_memory_node(schema(false), 0x75, false);
-    let (transport, server_transport) = byte_duplex(5);
-    let upstream = block_on(writer.connect_upstream(transport));
-    let subscriber = server.accept_subscriber_with_claims_and_trust(
-        server_transport,
-        AuthorSubject::SYSTEM,
-        BTreeMap::new(),
-        CommitUnitTrust::TrustedBackend,
-    );
-    let writer_pump = block_on(upstream.lock()).io_pump();
-    let server_pump = block_on(subscriber.lock()).io_pump();
-    pump_until_settled(writer, &server, &writer_pump, &server_pump, 10_000);
-    assert!(writer.detach_connection(&upstream));
-    assert!(server.detach_connection(&subscriber));
-
-    let (transport, server_transport) = byte_duplex(6);
-    let upstream = block_on(client.connect_upstream(transport));
-    let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
-    let client_pump = block_on(upstream.lock()).io_pump();
-    let server_pump = block_on(subscriber.lock()).io_pump();
-    let prepared = client
-        .prepare_query(&Query::from("tasks"))
-        .expect("prepare W1 fresh control");
-    let mut subscription = block_on(client.subscribe(
-        &prepared,
-        ReadOpts {
-            tier: ReadTier::Remote,
-            ..ReadOpts::default()
-        },
-    ))
-    .expect("subscribe W1 fresh control");
+    let (_link, sent) = connect(&client, &board.db);
+    let mut subscription = subscribe_tasks(&client);
     let mut rows = 0;
     let mut updated_rows = 0;
     for _ in 0..512 {
-        block_on(client.tick()).expect("announce W1 fresh control");
-        block_on(server.tick()).expect("serve W1 fresh control");
-        block_on(client.tick()).expect("apply W1 fresh control");
-        block_on(client.tick()).expect("materialize W1 fresh control");
-        pump_aux(&client_pump, &server_pump);
+        pump(&client, &board.db);
         while let Some(event) = subscription.try_next_event() {
             if let SubscriptionEvent::Delta { added, .. } = &event {
                 updated_rows += added
                     .iter()
                     .filter(|row| {
-                        row.row.cell(task_schema, "status")
+                        row.row.cell(&task_schema, "status")
                             == Some(Value::String("resume-canary".to_owned()))
                     })
                     .count();
@@ -505,80 +336,71 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
         updated_rows, 1,
         "fresh control must observe the post-update frontier"
     );
-    block_on(subscriber.lock())
-        .last_resume_bytes()
-        .expect("W1 fresh post-update bytes")
+    *sent.borrow()
 }
 
-impl Fixture<RocksDbStorage> {
-    pub fn rocksdb(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
-        let schema = schema(false);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        let dir = tempfile::tempdir().expect("create W1 RocksDB benchmark directory");
-        let storage =
-            RocksDbStorage::open_with_durability(dir.path(), &family_refs, Durability::WalNoSync)
-                .expect("open W1 RocksDB benchmark storage");
-        (
-            dir,
-            Self::new(
-                tasks,
-                comments,
-                activity_events,
-                schema,
-                storage,
-                WriteIdentity::Database,
-            ),
+impl Fixture {
+    pub fn memory(tasks: usize, comments: usize, activity_events: usize) -> Self {
+        Self::new(
+            tasks,
+            comments,
+            activity_events,
+            open_memory_node(schema(false), 0x71, true),
+            WriteIdentity::Database,
         )
     }
 
-    pub fn rocksdb_profile_s() -> (TempDir, Self) {
-        Self::rocksdb(3_000, 12_000, 9_000)
+    pub fn memory_profile_s() -> Self {
+        Self::memory(3_000, 12_000, 9_000)
     }
-}
 
-/// The mobile store (the native relay's SQLite, WAL with `synchronous=NORMAL`).
-impl Fixture<SqliteStorage> {
-    pub fn sqlite(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
-        let schema = schema(false);
-        let families = schema.column_families();
-        let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        let dir = tempfile::tempdir().expect("create W1 SQLite benchmark directory");
-        let storage = SqliteStorage::open_with_durability(
-            dir.path().join("board.sqlite"),
-            &family_refs,
-            jazz_storage_sqlite::Durability::WalNoSync,
-        )
-        .expect("open W1 SQLite benchmark storage");
-        (
-            dir,
-            Self::new(
-                tasks,
-                comments,
-                activity_events,
-                schema,
-                storage,
-                WriteIdentity::Database,
-            ),
+    pub fn memory_profile_s_policy_update() -> Self {
+        Self::memory_policy_update(3_000, 12_000, 9_000)
+    }
+
+    pub fn memory_policy_update(tasks: usize, comments: usize, activity_events: usize) -> Self {
+        Self::new(
+            tasks,
+            comments,
+            activity_events,
+            open_memory_node(schema(true), 0x71, true),
+            WriteIdentity::Session(policy_bench_identity()),
         )
     }
 
-    pub fn sqlite_profile_s() -> (TempDir, Self) {
-        Self::sqlite(3_000, 12_000, 9_000)
+    /// A file-backed board: SQLite with WAL and `synchronous=NORMAL`.
+    pub fn file(tasks: usize, comments: usize, activity_events: usize) -> (TempDir, Self) {
+        let dir = tempfile::tempdir().expect("create W1 benchmark directory");
+        let db = block_on(Db::open_at(
+            DbConfig::new(schema(false), board_identity(0x71)),
+            &dir.path().join("board.sqlite"),
+            FileOptions::default(),
+        ))
+        .expect("open W1 benchmark database");
+        let fixture = Self::new(
+            tasks,
+            comments,
+            activity_events,
+            db,
+            WriteIdentity::Database,
+        );
+        (dir, fixture)
+    }
+
+    pub fn file_profile_s() -> (TempDir, Self) {
+        Self::file(3_000, 12_000, 9_000)
     }
 }
 
-impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
+impl Fixture {
     fn new(
         tasks: usize,
         comments: usize,
         activity_events: usize,
-        schema: JazzSchema,
-        storage: S,
+        db: Db,
         activity_update_identity: WriteIdentity,
     ) -> Self {
         assert!(tasks > 0 && comments > 0 && activity_events > 0);
-        let db = open_db(schema, storage);
         let users = (0..USERS).map(|i| row_id(1, i)).collect::<Vec<_>>();
         let projects = (0..PROJECTS).map(|i| row_id(2, i)).collect::<Vec<_>>();
         let task_ids = (0..tasks).map(|i| row_id(3, i)).collect::<Vec<_>>();
@@ -725,7 +547,6 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
             task_transition_row: task_ids[0],
             activity_transition_matching: false,
             activity_update_identity,
-            storage: std::marker::PhantomData,
         };
         assert_eq!(fixture.board_count(), tasks.div_ceil(PROJECTS).min(200));
         assert_eq!(fixture.comments_count(), comments.div_ceil(tasks).min(200));
@@ -760,7 +581,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
         self.read_count(&self.bounded_activity_page)
     }
 
-    pub fn into_maintained_activity(self) -> MaintainedActivityFixture<S> {
+    pub fn into_maintained_activity(self) -> MaintainedActivityFixture {
         let subscription = block_on(self.db.subscribe(
             &self.maintained_activity,
             ReadOpts {
@@ -842,7 +663,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> Fixture<S> {
     }
 }
 
-impl<S: OrderedKvStorage + ReopenableStorage + 'static> MaintainedActivityFixture<S> {
+impl MaintainedActivityFixture {
     pub fn toggle_indexed_predicate(&mut self) -> usize {
         self.fixture.toggle_activity_indexed_predicate();
         let mut changed = 0;
@@ -915,71 +736,21 @@ fn schema(policy_activity_updates: bool) -> JazzSchema {
     JazzSchema::new(&public).expect("W1 public schema compiles")
 }
 
-fn open_db<S: OrderedKvStorage + ReopenableStorage + 'static>(
-    schema: JazzSchema,
-    storage: S,
-) -> Db {
-    block_on(Db::open(DbConfig::new(
-        schema,
-        storage,
-        DbIdentity {
-            node: NodeUuid::from_bytes([0x71; 16]),
-            author: AuthorSubject::SYSTEM,
-        },
-    )))
-    .expect("open W1 benchmark database")
+fn board_identity(node: u8) -> DbIdentity {
+    DbIdentity {
+        node: NodeUuid::from_bytes([node; 16]),
+        author: AuthorSubject::SYSTEM,
+    }
 }
 
 fn open_memory_node(schema: JazzSchema, node: u8, history_complete: bool) -> Db {
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    let config = DbConfig::new(
-        schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
-        DbIdentity {
-            node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
-        },
-    );
+    let config = DbConfig::new(schema, board_identity(node));
     if history_complete {
         block_on(Db::open_history_complete(config))
     } else {
         block_on(Db::open(config))
     }
-    .expect("open W1 resume database")
-}
-
-fn byte_duplex(epoch: u64) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
-    let left = Rc::new(RefCell::new(VecDeque::new()));
-    let right = Rc::new(RefCell::new(VecDeque::new()));
-    let left_transport = ByteDuplexTransport {
-        outbound: Rc::clone(&left),
-        inbound: Rc::clone(&right),
-    };
-    let right_transport = ByteDuplexTransport {
-        outbound: Rc::clone(&right),
-        inbound: Rc::clone(&left),
-    };
-    let session = WireSession {
-        session_id: "w1-resume-benchmark".to_owned(),
-        epoch,
-        identity: Some(AuthorSubject::SYSTEM),
-    };
-    let features = 0;
-    (
-        Box::new(WireTransportAdapter::new(
-            left_transport,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            Some(session.clone()),
-        )),
-        Box::new(WireTransportAdapter::new(
-            right_transport,
-            WIRE_PROTOCOL_VERSION,
-            features,
-            Some(session),
-        )),
-    )
+    .expect("open W1 database")
 }
 
 fn prepare_page(
@@ -1020,8 +791,8 @@ mod resume_tests {
     use super::*;
 
     /// Exercises the benchmark's exact public-result assertion outside timing.
-    /// Alice seeds, disconnects Bob, updates one task, then Bob resumes. This
-    /// intentionally reuses the byte-wire benchmark harness so CI checks the
+    /// Bob syncs, disconnects, the authority updates one task, then Bob
+    /// resumes. This reuses the byte-wire benchmark harness so CI checks the
     /// very same reset/delta consumer; it is not a second transport model.
     #[test]
     fn resumed_task_update_preserves_every_other_row_and_column() {

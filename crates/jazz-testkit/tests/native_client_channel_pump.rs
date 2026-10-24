@@ -1,39 +1,40 @@
 //! Physical channel progress must not depend on a suspended semantic query.
+use jazz::db::SyncMessage;
 use jazz::query::Query;
 use jazz::tools::native_transport_connector::{
     NativeTransportConnector, NativeTransportFuture, NativeTransportRequest,
 };
 use jazz::tools::test_support::{AllowAll, ordinary_rows};
 use jazz::tools::{ColumnType, ReadTier, SchemaBuilder, TableSchema, Value};
-use jazz::wire::channels::ChannelClass;
-use jazz::wire::{TransportError, WireFrame, WireTransport};
+use jazz::wire::{TransportError, WireTransport};
 use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-// Public socket-adapter instrumentation is necessary to establish an upload
-// has reached the server and remains in progress without wall-clock races.
-// Model a slow receiver by retaining the first bulk consumption grant and all
-// later grants (their sequence is connection-global). Query/control data still
-// flows using its separate initial window; release replays grants unchanged.
+// Public socket-adapter instrumentation establishes that an upload has
+// reached the server and remains in progress without wall-clock races. The
+// SQLite wire carries one sync message per frame, with no channel credits:
+// model an upload whose chunks reached the server while its commit is still
+// in flight by withholding the uploader's commit (and any later write) until
+// release, while reads go through.
 type WireWake = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Default)]
-struct BulkCreditGate {
+struct CommitGate {
     held: Mutex<VecDeque<Vec<u8>>>,
     observed: tokio::sync::Notify,
-    bulk_charge: std::sync::atomic::AtomicUsize,
+    pushed: std::sync::atomic::AtomicUsize,
     released: std::sync::atomic::AtomicBool,
     wake: Mutex<Option<WireWake>>,
 }
-impl BulkCreditGate {
+impl CommitGate {
+    /// The upload's chunks went out and its commit is withheld.
     async fn received_by_server(&self) {
         loop {
             let notified = self.observed.notified();
             if !self.held.lock().unwrap().is_empty()
-                && self.bulk_charge.load(std::sync::atomic::Ordering::SeqCst)
-                    > 4 * 1024 * 1024 - jazz::wire::channels::MAX_CHANNEL_FRAME_PAYLOAD - 256
+                && self.pushed.load(std::sync::atomic::Ordering::SeqCst) > 4 * 1024 * 1024
             {
                 return;
             }
@@ -46,7 +47,7 @@ impl BulkCreditGate {
         self.wake.lock().unwrap().as_ref().unwrap()();
     }
 }
-struct GatedConnector(Arc<BulkCreditGate>);
+struct GatedConnector(Arc<CommitGate>);
 impl NativeTransportConnector for GatedConnector {
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         let gate = self.0.clone();
@@ -65,50 +66,47 @@ impl NativeTransportConnector for GatedConnector {
 }
 struct GatedWire {
     inner: Box<dyn WireTransport + Send>,
-    gate: Arc<BulkCreditGate>,
+    gate: Arc<CommitGate>,
+}
+impl GatedWire {
+    fn flush_released(&mut self) -> Result<(), TransportError> {
+        if self.gate.released.load(std::sync::atomic::Ordering::SeqCst) {
+            while let Some(frame) = self.gate.held.lock().unwrap().pop_front() {
+                self.inner.send_frame(frame)?;
+            }
+        }
+        Ok(())
+    }
 }
 impl WireTransport for GatedWire {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        let bulk_charge = match jazz::wire::decode_frame(&frame).unwrap() {
-            WireFrame::Channel(channel)
-                if matches!(
-                    channel.extent.class,
-                    ChannelClass::Writes | ChannelClass::LargeValue
-                ) =>
-            {
-                jazz::wire::channel_credit::channel_frame_credit_cost(frame.len())
+        self.flush_released()?;
+        let message: SyncMessage = postcard::from_bytes(&frame).unwrap();
+        let write = matches!(
+            message,
+            SyncMessage::Commit { .. } | SyncMessage::PushChunks { .. }
+        );
+        let withhold = !self.gate.released.load(std::sync::atomic::Ordering::SeqCst)
+            && (matches!(message, SyncMessage::Commit { .. })
+                || (write && !self.gate.held.lock().unwrap().is_empty()));
+        if withhold {
+            self.gate.held.lock().unwrap().push_back(frame);
+        } else {
+            if let SyncMessage::PushChunks { nodes } = &message {
+                let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
+                self.gate
+                    .pushed
+                    .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
             }
-            _ => 0,
-        };
-        self.inner.send_frame(frame)?;
-        self.gate
-            .bulk_charge
-            .fetch_add(bulk_charge, std::sync::atomic::Ordering::SeqCst);
+            self.inner.send_frame(frame)?;
+        }
         self.gate.observed.notify_one();
         Ok(())
     }
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        if self.gate.released.load(std::sync::atomic::Ordering::SeqCst) {
-            if let Some(frame) = self.gate.held.lock().unwrap().pop_front() {
-                return Some(frame);
-            }
-            return self.inner.try_recv_frame();
-        }
-        while let Some(frame) = self.inner.try_recv_frame() {
-            if matches!(jazz::wire::decode_frame(&frame).unwrap(), WireFrame::ChannelCredit(ref credit) if credit.class == ChannelClass::Writes || !self.gate.held.lock().unwrap().is_empty())
-            {
-                let mut held = self.gate.held.lock().unwrap();
-                assert!(
-                    held.len() < 512,
-                    "credit gate remains bounded by initial per-class windows"
-                );
-                held.push_back(frame);
-                self.gate.observed.notify_one();
-            } else {
-                return Some(frame);
-            }
-        }
-        None
+        // Released writes go out on the next poll.
+        self.flush_released().ok()?;
+        self.inner.try_recv_frame()
     }
 }
 
@@ -162,21 +160,21 @@ async fn fresh_native_client_reads_indirect_text_and_json() {
                 context.backend_secret = None;
                 context.admin_secret = None;
                 jazz_testkit::enroll_test_context(&mut context).await.unwrap();
-                let gate = Arc::new(BulkCreditGate::default());
+                let gate = Arc::new(CommitGate::default());
                 let uploader = jazz::tools::JazzClient::connect_with_native_transport(context, Arc::new(GatedConnector(gate.clone()))).await.unwrap();
                 jazz_testkit::wait_for_remote_query_ready(&uploader, "ready", Duration::from_secs(30)).await;
                 let (probe, _, tx) = writer.insert("probe", jazz::row_input!("label" => "fresh server row")).unwrap();
                 wait_for_global_txs(&writer, &[tx.unwrap()]).await;
                 let (_, _, upload) = uploader.insert("documents", jazz::row_input!("label" => "upload", "text" => text, "json" => json)).unwrap();
                 let upload = upload.unwrap();
-                tokio::time::timeout(Duration::from_secs(30), gate.received_by_server()).await.expect("server consumed upload frames");
-                let result = tokio::time::timeout(Duration::from_secs(30), uploader.query(Query::from("probe").select(["label"]), ReadTier::Remote)).await.expect("fresh remote query progresses while bulk credits withheld").unwrap();
+                tokio::time::timeout(Duration::from_secs(30), gate.received_by_server()).await.expect("upload chunks reached the server");
+                let result = tokio::time::timeout(Duration::from_secs(30), uploader.query(Query::from("probe").select(["label"]), ReadTier::Remote)).await.expect("fresh remote query progresses while the upload is in flight").unwrap();
                 assert_eq!(ordinary_rows(result), vec![(probe, vec![Value::Text("fresh server row".into())])]);
                 {
                     use std::future::Future;
                     let mut settlement = Box::pin(uploader.wait_for_transaction(upload, jazz::tools::DurabilityTier::GlobalServer));
                     std::future::poll_fn(|cx| {
-                        assert!(settlement.as_mut().poll(cx).is_pending(), "upload must remain incomplete until bulk credits return");
+                        assert!(settlement.as_mut().poll(cx).is_pending(), "upload must remain incomplete until its commit is released");
                         std::task::Poll::Ready(())
                     }).await;
                 }

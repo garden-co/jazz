@@ -3,14 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, SerializableTxOps, UpdateOptions,
-    block_on,
-};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, UpdateOptions, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -38,11 +34,8 @@ pub struct Fixture {
 impl Fixture {
     pub fn new(order_count: usize) -> Self {
         let schema = schema();
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x6a; 16]),
                 author: AuthorSubject::SYSTEM,

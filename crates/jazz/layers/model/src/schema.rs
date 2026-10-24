@@ -9,16 +9,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
-use groove::records::{
+use jazz_types::column_schema::{
+    ColumnType as GrooveColumnType, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
+    PrimaryKeyColumn, TableSchema as GrooveTableSchema,
+};
+use jazz_types::records::{
     EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value,
     ValueType,
 };
-use groove::schema::{
-    ColumnType as GrooveColumnType, DatabaseSchema as GrooveDatabaseSchema,
-    DirectRecordStoreSchema, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
-    PrimaryKeyColumn, TableSchema as GrooveTableSchema,
-};
-use groove::storage::StorageLayout;
 
 use crate::ids::SchemaVersionId;
 use crate::model::branch::{BranchColumnValue, BranchKey, BranchSelector};
@@ -479,60 +477,6 @@ impl RuntimeSchema {
         self
     }
 
-    /// Lower the Jazz schema into groove storage tables.
-    pub fn lower_to_groove(&self) -> GrooveDatabaseSchema {
-        self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(self.storage_tables()))
-    }
-
-    /// Lower only the fixed metadata tables needed for the first open stage.
-    pub fn lower_catalogue_meta_to_groove(&self) -> GrooveDatabaseSchema {
-        self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(
-            self.catalogue_meta_storage_tables(),
-        ))
-    }
-
-    /// Return the required RocksDB column-family names.
-    pub fn column_families(&self) -> Vec<String> {
-        let lowered = self.lower_to_groove();
-        StorageLayout::jazz_class_v3().physical_column_families(
-            lowered
-                .column_families()
-                .into_iter()
-                .chain(std::iter::once("indices"))
-                // A schema-independent runtime may open before its first typed
-                // application view is registered. Keep the shared physical
-                // row classes available even for the empty bootstrap schema.
-                .chain(std::iter::once("jazz_physical_history"))
-                .chain(std::iter::once("jazz_physical_global_current"))
-                .chain(std::iter::once("jazz_physical_ahead_current")),
-        )
-    }
-
-    /// Return physical storage column-family names for Jazz's class-CF layout.
-    pub fn physical_column_families(&self) -> Vec<String> {
-        self.column_families()
-    }
-
-    /// Return all storage tables used by Jazz.
-    pub fn storage_tables(&self) -> Vec<GrooveTableSchema> {
-        vec![
-            nodes_table(),
-            schema_versions_table(),
-            catalogue_table(),
-            transactions_table(),
-            pending_transactions_table(),
-            tx_provenance_table(),
-            tx_touched_rows_table(),
-            rejected_transactions_table(),
-            history_horizon_table(),
-        ]
-    }
-
-    /// Return the version-independent metadata tables used by staged catalogue open.
-    pub fn catalogue_meta_storage_tables(&self) -> Vec<GrooveTableSchema> {
-        vec![nodes_table(), schema_versions_table(), catalogue_table()]
-    }
-
     /// Return the canonical byte encoding used to address this schema version.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         canonical_schema_bytes(self)
@@ -544,55 +488,6 @@ impl RuntimeSchema {
             &SCHEMA_VERSION_NAMESPACE,
             &self.canonical_bytes(),
         ))
-    }
-
-    fn with_jazz_direct_record_stores(&self, schema: GrooveDatabaseSchema) -> GrooveDatabaseSchema {
-        // Ordered direct-store key audit (storage format V1): every authority
-        // result is addressed by three UUIDs, a scope discriminator and a
-        // fixed 256-bit policy-binding directory ID. Application-shaped
-        // claims remain in the collision-checked directory value, never in
-        // an ordered B-tree key.
-        schema
-            .with_dictionary(groove::schema::DictionarySchema::new(
-                AUTHORS_DICTIONARY,
-                crate::ids::RowAuthor::value_type(),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                AUTHORITY_POLICY_BINDINGS_STORE,
-                RecordDescriptor::new([("policy_binding_digest", ValueType::Bytes)]),
-                RecordDescriptor::new([
-                    ("subject", ValueType::String),
-                    (
-                        "claims_v1",
-                        crate::model::policy_directory::policy_binding_directory_claims_value_type(
-                        ),
-                    ),
-                ]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                SUBSCRIPTION_WATERMARKS_STORE,
-                subscription_watermark_key_descriptor(),
-                subscription_watermark_value_descriptor(),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                LOCAL_ROW_AVAILABILITY_STORE,
-                RecordDescriptor::new([
-                    ("policy_binding_digest", ValueType::Bytes),
-                    ("global_table", ValueType::Uuid),
-                    ("row", ValueType::Uuid),
-                ]),
-                local_availability_record_descriptor(),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                SUPERSEDED_WRITES_STORE,
-                RecordDescriptor::new([
-                    ("physical_table_id", ValueType::U64),
-                    ("branch_key", ValueType::Bytes),
-                    ("row", ValueType::Uuid),
-                    ("node", ValueType::Uuid),
-                ]),
-                RecordDescriptor::new([("superseded_through", ValueType::U64)]),
-            ))
     }
 }
 
@@ -806,15 +701,15 @@ fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemant
 /// JSON descriptor cannot be mistaken for text.
 pub fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
     match column.large_value_kind {
-        LargeValueSemanticKind::Json => groove::large_values::physical_storage_value_type(
-            groove::large_values::LargeValueKind::Json,
+        LargeValueSemanticKind::Json => jazz_types::large_values::physical_storage_value_type(
+            jazz_types::large_values::LargeValueKind::Json,
         ),
         _ => column.column_type.clone(),
     }
 }
 
-impl From<groove::schema::ColumnSchema> for ColumnSchema {
-    fn from(column: groove::schema::ColumnSchema) -> Self {
+impl From<jazz_types::column_schema::ColumnSchema> for ColumnSchema {
+    fn from(column: jazz_types::column_schema::ColumnSchema) -> Self {
         Self {
             name: column.name,
             large_value_kind: large_value_kind_for_type(&column.column_type),
@@ -1220,19 +1115,6 @@ impl TableSchema {
     }
 }
 
-/// Key of a subscription watermark record v1: the canonical binding view
-/// and its policy scope (`0` unscoped with an empty digest, `1` scoped by the
-/// policy-binding directory digest).
-pub(crate) fn subscription_watermark_key_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([
-        ("shape_id", ValueType::Uuid),
-        ("binding_id", ValueType::Uuid),
-        ("read_view_id", ValueType::Uuid),
-        ("policy_scope", ValueType::U8),
-        ("policy_binding_digest", ValueType::Bytes),
-    ])
-}
-
 /// Value of a subscription watermark record v1 (format byte `1`).
 #[doc(hidden)]
 pub fn subscription_watermark_value_descriptor() -> RecordDescriptor {
@@ -1241,51 +1123,6 @@ pub fn subscription_watermark_value_descriptor() -> RecordDescriptor {
         ("settled_through", ValueType::U64),
         ("supporting_revision", ValueType::Bytes),
     ])
-}
-
-fn schema_versions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_schema_versions",
-        [
-            // node-local-derived: allocated by schema-version alias interning.
-            column("id", GrooveColumnType::U64),
-            column("uuid", GrooveColumnType::Uuid),
-            // node-local: mapping from a schema version's logical table & column names to stable
-            // physical storage identities. Stored as serialized JSON bytes containing `SchemaPhysicalMapping`:
-            // {
-            //   tables: {
-            //     "todos": {
-            //       table_id: 7,
-            //       columns: {
-            //         "title": 12,
-            //         "body": 19
-            //       }
-            //     }
-            //   }
-            // }
-            column("physical_mapping", GrooveColumnType::Bytes),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
-}
-
-fn catalogue_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_catalogue",
-        [
-            // The only hard-coded catalogue schema is a small, epoch-pinned
-            // kernel. Its record kind is a permanent numeric discriminator;
-            // all ordinary Jazz system and application descriptors live in
-            // the catalogue itself.
-            column("kind", GrooveColumnType::U64),
-            column("id", GrooveColumnType::Uuid),
-            column("payload", GrooveColumnType::Bytes),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("kind", IntegerKeyType::U64),
-        PrimaryKeyColumn::uuid("id"),
-    ]))
 }
 
 /// Policy-shape constructors.
@@ -1307,7 +1144,6 @@ fn storage_enum(name: &str, variants: &[&str]) -> GrooveColumnType {
 }
 
 fn tx_kind_column() -> GrooveColumnType {
-    // The stored case keeps the pre-rename spelling for format compatibility.
     storage_enum("jazz_tx_kind", &["mergeable", "exclusive"])
 }
 
@@ -1361,8 +1197,11 @@ pub fn history_base_pending_storage_type() -> GrooveColumnType {
 #[doc(hidden)]
 pub const COUNTER_SIGNS_FIELD: &str = "counter_signs";
 
-fn column(name: impl Into<String>, column_type: GrooveColumnType) -> groove::schema::ColumnSchema {
-    groove::schema::ColumnSchema::new(name, column_type)
+fn column(
+    name: impl Into<String>,
+    column_type: GrooveColumnType,
+) -> jazz_types::column_schema::ColumnSchema {
+    jazz_types::column_schema::ColumnSchema::new(name, column_type)
 }
 
 /// Frozen carrier namespace used by schema-owned stored/current/wire fields.
@@ -1399,18 +1238,6 @@ pub fn global_current_composite_index_name(columns: &[String]) -> String {
             .collect::<Vec<_>>()
             .join("_")
     )
-}
-
-fn nodes_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_nodes",
-        [
-            // node-local-derived: allocated by node alias interning.
-            column("id", GrooveColumnType::U64),
-            column("uuid", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
 }
 
 /// `jazz_transactions` (`jazz.tx-record.v2`): the permanent record of one
@@ -1465,108 +1292,7 @@ fn transactions_table() -> GrooveTableSchema {
     .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
 }
 
-/// The rejection reason of a rejected transaction: its reason tag, the
-/// transaction whose rejection cascaded to it, and a diagnostic detail.
-/// `jazz_pending_transactions`: what a transaction needs only until it has a
-/// seq or a rejection, keyed `(time, node_id)` like its `jazz_transactions`
-/// record. A record exists only for an unsettled transaction that has
-/// something to keep here; the batch that stores its seq or rejection deletes
-/// it. Slots 2 to 5 hold its serializable read evidence
-/// (`jazz.exclusive-read-evidence.v1`) while its fate is pending.
-fn pending_transactions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_pending_transactions",
-        [
-            column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
-            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
-            column("row_read_set", GrooveColumnType::Bytes.nullable()),
-            column("absent_read_set", GrooveColumnType::Bytes.nullable()),
-            column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
-    ]))
-}
-
-/// `jazz_tx_provenance`: a transaction's calculated-merge and branch-write
-/// provenance (`ContributionMergeProvenance`), keyed `(time, node_id)`. It
-/// grows with the transaction's writes, so it is kept apart from the
-/// `jazz_transactions` record that fate, seq and durability reads load; a
-/// record exists exactly when that record's flags say so (garden-co/jazz#4012).
-fn tx_provenance_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        TX_PROVENANCE_TABLE,
-        [
-            column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
-            column("contribution_merge", contribution_merge_column()),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
-    ]))
-}
-
 const TX_PROVENANCE_TABLE: &str = "jazz_tx_provenance";
-
-/// `jazz_history_horizon`: the seq at or below which this node may have
-/// truncated history (SPEC 2 §2.8). At most one record, keyed `id = 0`; no
-/// record means the horizon is 0 and history is complete. This release never
-/// truncates and refuses to open a store whose horizon is above 0, so a later
-/// release can truncate below a horizon without another format change.
-fn history_horizon_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_history_horizon",
-        [
-            column("id", GrooveColumnType::U8),
-            column("horizon", GrooveColumnType::U64),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U8))
-}
-
-/// `jazz_tx_touched_rows`: node-local bookkeeping, one record per transaction
-/// `(tx_time, tx_node_id)`, listing the history rows this node stored for it.
-/// It replaces a `by_tx` index over every history version (SPEC 2 §2.8).
-///
-/// It is deliberately not part of `jazz_transactions`: a transaction record is
-/// the transaction's replicated identity and is compared with incoming copies,
-/// and it is read on hot paths (fates, view updates, covered-input checks).
-/// This list differs between nodes, grows as history arrives, and is written
-/// only when a batch that wrote history rows is applied.
-fn tx_touched_rows_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_tx_touched_rows",
-        [
-            column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
-            column("touched_rows", touched_rows_column()),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
-    ]))
-}
-
-/// `jazz_tx_touched_rows.touched_rows`: the rows this node stored in history for
-/// one transaction, as canonical groups `(physical_table_id, branch_key,
-/// row_uuids)`. Groups are strictly increasing by `(physical_table_id,
-/// branch_key bytes)`, every group is non-empty, and each group's row UUIDs are
-/// strictly increasing. A fixed-width `Array<Uuid>` has no count or offsets, so
-/// each touched row costs its 16 UUID bytes plus a small per-group header.
-fn touched_rows_column() -> GrooveColumnType {
-    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
-        ("physical_table_id", ValueType::U64),
-        ("branch_key", ValueType::Bytes),
-        ("row_uuids", ValueType::Uuid.array_of()),
-    ])))
-    .array_of()
-}
 
 fn contribution_component_column() -> GrooveColumnType {
     GrooveColumnType::Enum(Box::new(
@@ -1918,24 +1644,6 @@ fn put_u64(bytes: &mut Vec<u8>, value: u64) {
     bytes.extend_from_slice(&value.to_be_bytes());
 }
 
-fn rejected_transactions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_rejected_transactions",
-        [
-            column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
-            column("kind", tx_kind_column()),
-            column("made_by", interned_author_type()),
-            column("rejection_reason", rejection_reason_column()),
-            column("user_metadata", GrooveColumnType::String.nullable()),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
-        PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
-    ]))
-}
-
 /// Whether a stored column's physical encoding stays readable under another
 /// table schema's column: same merge strategy and a value type that only
 /// appends enum variants or cases.
@@ -1967,10 +1675,10 @@ pub fn physical_column_epoch_is_compatible(
 
 #[doc(hidden)]
 pub fn physical_value_epoch_is_compatible(
-    source: &groove::records::ValueType,
-    target: &groove::records::ValueType,
+    source: &jazz_types::records::ValueType,
+    target: &jazz_types::records::ValueType,
 ) -> bool {
-    use groove::records::ValueType;
+    use jazz_types::records::ValueType;
     match (source, target) {
         (ValueType::EnumTag(left), ValueType::EnumTag(right)) => {
             right.variants.starts_with(&left.variants)
@@ -2000,8 +1708,8 @@ pub fn physical_value_epoch_is_compatible(
 }
 
 fn physical_record_epoch_is_compatible(
-    source: &groove::records::RecordDescriptor,
-    target: &groove::records::RecordDescriptor,
+    source: &jazz_types::records::RecordDescriptor,
+    target: &jazz_types::records::RecordDescriptor,
 ) -> bool {
     source.fields().len() == target.fields().len()
         && source.fields().iter().zip(target.fields()).all(|(a, b)| {
@@ -2010,23 +1718,23 @@ fn physical_record_epoch_is_compatible(
 }
 
 /// Record layout of a row's local-availability receipt column.
-pub fn local_availability_record_descriptor() -> groove::records::RecordDescriptor {
-    groove::records::RecordDescriptor::new([
-        ("format_v1", groove::records::ValueType::U8),
-        ("unavailable", groove::records::ValueType::Bool),
-        ("core", groove::records::ValueType::Uuid),
-        ("core_epoch", groove::records::ValueType::U64),
-        ("claims_revision", groove::records::ValueType::U64),
-        ("policy_epoch", groove::records::ValueType::U64),
-        ("settled_through", groove::records::ValueType::U64),
-        ("evaluation_seq", groove::records::ValueType::U64),
+pub fn local_availability_record_descriptor() -> jazz_types::records::RecordDescriptor {
+    jazz_types::records::RecordDescriptor::new([
+        ("format_v1", jazz_types::records::ValueType::U8),
+        ("unavailable", jazz_types::records::ValueType::Bool),
+        ("core", jazz_types::records::ValueType::Uuid),
+        ("core_epoch", jazz_types::records::ValueType::U64),
+        ("claims_revision", jazz_types::records::ValueType::U64),
+        ("policy_epoch", jazz_types::records::ValueType::U64),
+        ("settled_through", jazz_types::records::ValueType::U64),
+        ("evaluation_seq", jazz_types::records::ValueType::U64),
     ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::schema::ColumnType;
+    use jazz_types::column_schema::ColumnType;
 
     #[test]
     fn string_branch_columns_are_accepted() {
@@ -2062,43 +1770,6 @@ mod tests {
         assert_eq!(
             schema.validate_authored_branch_key(table, &key).unwrap()["phase"],
             Value::EnumTag(1)
-        );
-    }
-
-    #[test]
-    fn logical_history_descriptor_has_composite_primary_key() {
-        let schema = RuntimeSchema::new([TableSchema::new(
-            "todos",
-            [ColumnSchema::new("title", ColumnType::String)],
-        )]);
-
-        let groove = schema.lower_to_groove();
-        assert!(groove.table("jazz_nodes").is_some());
-        assert!(groove.table("jazz_schema_versions").is_some());
-        assert!(groove.table("jazz_transactions").is_some());
-        assert!(groove.table("jazz_todos_history").is_none());
-        let table = schema.tables[0].history_storage_table();
-        let primary_key = table.primary_key.as_ref().unwrap();
-
-        // Keyed by seq so "the row at seq S" and "the row's writes after S"
-        // are prefix and range reads (SPEC 4 §4.6, "Durable layout").
-        assert_eq!(primary_key.columns.len(), 5);
-        assert_eq!(primary_key.columns[0].column, "branch_key");
-        assert_eq!(primary_key.columns[1].column, "row_uuid");
-        assert_eq!(primary_key.columns[2].column, "seq");
-        assert_eq!(primary_key.columns[3].column, "tx_time");
-        assert_eq!(primary_key.columns[4].column, "tx_node_id");
-        assert!(
-            table
-                .columns
-                .iter()
-                .any(|column| column.name == "_app_title")
-        );
-        assert!(
-            table
-                .columns
-                .iter()
-                .any(|column| column.name == "schema_version")
         );
     }
 
@@ -2201,199 +1872,6 @@ mod tests {
     }
 
     #[test]
-    fn storage_lowering_declares_system_columns_by_shape() {
-        let schema = RuntimeSchema::new([TableSchema::new(
-            "todos",
-            [ColumnSchema::new("title", ColumnType::String)],
-        )]);
-        let tables = schema.storage_tables();
-        let transactions = tables
-            .iter()
-            .find(|table| table.name == "jazz_transactions")
-            .unwrap();
-        assert!(
-            tables
-                .iter()
-                .all(|table| table.name != "jazz_todos_history"
-                    && table.name != "jazz_todos_register")
-        );
-        let history = schema.tables[0].history_storage_table();
-        assert!(tables.iter().all(|table| {
-            table.name != "jazz_todos_global_current"
-                && table.name != "jazz_todos_register_global_current"
-                && table.name != "jazz_todos_ahead_current"
-                && table.name != "jazz_todos_register_ahead_current"
-        }));
-        let global_current = &schema.tables[0].global_current_storage_table();
-        let ahead_current = &schema.tables[0].ahead_current_storage_table();
-
-        for table in [&history, global_current, ahead_current] {
-            for name in ["created_by", "updated_by"] {
-                // Every carrier stores both authors, interned into the
-                // authors dictionary.
-                let expected = interned_author_type();
-                assert_eq!(
-                    table
-                        .columns
-                        .iter()
-                        .find(|column| column.name == name)
-                        .map(|column| &column.column_type),
-                    Some(&expected),
-                    "{name} must store an interned author record in {}",
-                    table.name
-                );
-            }
-        }
-
-        for table in [&history, global_current, ahead_current] {
-            assert_eq!(
-                table
-                    .columns
-                    .iter()
-                    .find(|column| column.name == "authored_columns")
-                    .map(|column| &column.column_type),
-                Some(&GrooveColumnType::U64.array_of().nullable()),
-                "authored_columns must remain a native physical-id array in {}",
-                table.name
-            );
-        }
-
-        assert!(
-            transactions
-                .columns
-                .iter()
-                .any(|column| column.name == "fate")
-        );
-        assert!(
-            transactions
-                .columns
-                .iter()
-                .any(|column| column.name == "durability")
-        );
-        for table in [transactions, &rejected_transactions_table()] {
-            assert_eq!(
-                table
-                    .columns
-                    .iter()
-                    .find(|column| column.name == "made_by")
-                    .map(|column| &column.column_type),
-                Some(&interned_author_type()),
-                "made_by must store an interned author record in {}",
-                table.name
-            );
-        }
-        // Both open stages declare the dictionary: a rebuild may not declare
-        // one the first stage did not load.
-        for lowered in [
-            schema.lower_catalogue_meta_to_groove(),
-            schema.lower_to_groove(),
-        ] {
-            assert_eq!(
-                lowered
-                    .dictionary(AUTHORS_DICTIONARY)
-                    .map(|dictionary| &dictionary.value_type),
-                Some(&crate::ids::RowAuthor::value_type())
-            );
-        }
-        for table in [&history, global_current, ahead_current] {
-            assert!(
-                table
-                    .columns
-                    .iter()
-                    .any(|column| column.name == "_deletion"),
-                "row images carry their deletion state in {}",
-                table.name
-            );
-        }
-        assert_eq!(
-            global_current
-                .primary_key
-                .as_ref()
-                .unwrap()
-                .columns
-                .iter()
-                .map(|column| column.column.as_str())
-                .collect::<Vec<_>>(),
-            vec!["branch_key", "row_uuid"]
-        );
-    }
-
-    #[test]
-    fn contribution_merge_uses_native_nested_records_and_groove_enums() {
-        // Internal storage-shape coverage is necessary here because the public
-        // transaction API intentionally hides Groove's durable descriptor.
-        // Provenance lives beside the transaction record (garden-co/jazz#4012):
-        // a `jazz_tx_provenance` record exists exactly when there is some, so
-        // its column is not nullable and the transaction record has none.
-        assert!(
-            transactions_table()
-                .columns
-                .iter()
-                .all(|column| column.name != "contribution_merge")
-        );
-        let provenance_table = tx_provenance_table();
-        let column = provenance_table
-            .columns
-            .iter()
-            .find(|column| column.name == "contribution_merge")
-            .unwrap();
-        let GrooveColumnType::Record(provenance) = &column.column_type else {
-            panic!("contribution provenance must be a native record");
-        };
-        assert_eq!(
-            provenance
-                .fields()
-                .iter()
-                .map(|field| field.name.as_deref().unwrap())
-                .collect::<Vec<_>>(),
-            [
-                "source",
-                "target",
-                "substitutions",
-                "branch_view_copy_v1",
-                "branch_write_intent_v1",
-            ]
-        );
-
-        let GrooveColumnType::Array(substitution) = &provenance.fields()[2].value_type else {
-            panic!("contribution substitutions must be an array");
-        };
-        let GrooveColumnType::Record(substitution) = substitution.as_ref() else {
-            panic!("contribution substitutions must contain records");
-        };
-        let GrooveColumnType::Record(coordinate) = &substitution.fields()[0].value_type else {
-            panic!("contribution target must be a coordinate record");
-        };
-        let GrooveColumnType::EnumTag(layer) = &coordinate.fields()[3].value_type else {
-            panic!("contribution layer must be a Groove enum");
-        };
-        assert_eq!(layer.variants, ["content", "deletion"]);
-        let GrooveColumnType::Enum(component) = &coordinate.fields()[4].value_type else {
-            panic!("contribution component must be a Groove payload enum");
-        };
-        assert_eq!(
-            component
-                .cases
-                .iter()
-                .map(|case| case.name.as_str())
-                .collect::<Vec<_>>(),
-            ["column", "operation", "register"]
-        );
-        assert_eq!(component.tag("column").unwrap(), 0);
-        assert_eq!(component.tag("operation").unwrap(), 1);
-        assert_eq!(component.tag("register").unwrap(), 2);
-        assert_eq!(
-            component.cases[1]
-                .payload
-                .fields()
-                .iter()
-                .map(|field| field.name.as_deref().unwrap())
-                .collect::<Vec<_>>(),
-            ["physical_column_id", "identity"]
-        );
-    }
-
-    #[test]
     fn system_deletion_registry_survives_storage_rebinding_but_user_enums_do_not() {
         let state = ScalarEnumSchema::new("state", ["open", "done"]).unwrap();
         let left = TableSchema::new(
@@ -2435,8 +1913,8 @@ mod tests {
 
     #[test]
     fn deserializing_a_schema_rejects_internal_storage_types_and_kind_spoofing() {
-        let internal = groove::large_values::physical_storage_value_type(
-            groove::large_values::LargeValueKind::Json,
+        let internal = jazz_types::large_values::physical_storage_value_type(
+            jazz_types::large_values::LargeValueKind::Json,
         );
         let internal_column = serde_json::json!({
             "name": "body",

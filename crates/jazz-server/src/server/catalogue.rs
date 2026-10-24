@@ -24,7 +24,7 @@ use jazz::tools::metadata::{MetadataKey, ObjectType};
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
 use jazz::tools::schema_lens::Lens;
 #[cfg(test)]
-use jazz::tools::sync::DurabilityTier;
+use jazz::tx::DurabilityTier;
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

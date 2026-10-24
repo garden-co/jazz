@@ -26,8 +26,6 @@ mod client;
 
 #[cfg(feature = "runtime")]
 use std::path::PathBuf;
-#[cfg(feature = "runtime")]
-use std::sync::Arc;
 
 #[cfg(feature = "runtime")]
 use thiserror::Error;
@@ -68,8 +66,6 @@ pub struct AppContext {
     pub data_dir: PathBuf,
     /// Local storage backend.
     pub storage: ClientStorage,
-    /// Target-shell factory for persistent local storage.
-    pub storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
 
     // Authentication fields
     /// Registry-resolved account metadata for this low-level native client.
@@ -97,7 +93,6 @@ impl AppContext {
             server_url: String::new(),
             data_dir: std::env::temp_dir(),
             storage: crate::tools::ClientStorage::Memory,
-            storage_factory: None,
             account_id: None,
             jwt_token: None,
             backend_secret: None,
@@ -110,7 +105,7 @@ impl AppContext {
 #[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientStorage {
-    /// Persist client state to disk under `AppContext::data_dir`.
+    /// Persist client state to `jazz.sqlite` under `AppContext::data_dir`.
     #[default]
     Persistent,
     /// Keep all client state in memory for the lifetime of the process only.
@@ -139,26 +134,11 @@ pub enum JazzError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// The persistent local store was written with a storage format this
-    /// build does not read. The store is left untouched. There is no
-    /// migration: delete the data directory and resync from Core. Writes in
-    /// the old store that never reached Core are lost.
-    ///
-    /// Codec IDs carry their format version (`name.vN`): `missing` names
-    /// formats this build requires that the store lacks, and `unknown` names
-    /// formats the store was written with that this build does not read.
-    #[error(
-        "Unsupported storage format: this epoch-{epoch} store lacks codec families {missing:?} \
-         required by this build and declares {unknown:?} that this build does not read"
-    )]
-    UnsupportedStorageCodecs {
-        /// Storage epoch the refused store declares.
-        epoch: u16,
-        /// Codec families this build requires and the store lacks.
-        missing: Vec<String>,
-        /// Codec families the store declares and this build does not read.
-        unknown: Vec<String>,
-    },
+    /// The data directory holds a store from before the SQLite engine.
+    /// It is left untouched; delete it and resync from Core. Writes in it
+    /// that never reached Core are lost.
+    #[error("Unsupported storage format: {0}")]
+    UnsupportedStorage(String),
 
     #[error("Schema error: {0}")]
     Schema(String),

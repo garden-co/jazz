@@ -1,10 +1,12 @@
 //! Native HTTP/WebSocket server adapter for Jazz's semantic runtime.
 
-pub mod loopback;
+mod kv;
 pub mod middleware;
 pub mod profiling;
 pub mod resources;
+pub mod runtime;
 pub mod server;
+pub mod storage_cache;
 mod tcp;
 
 pub use middleware::AuthConfig;
@@ -59,26 +61,14 @@ pub async fn run(
         "WebSocket connection cap: {}",
         limits.max_websocket_connections
     );
-    if !in_memory {
-        let budget = limits.rocksdb_memory_budget();
-        jazz_storage_rocksdb::configure_process_memory_budget(budget).map_err(|current| {
-            format!("RocksDB memory budget was already fixed at {current:?} before startup")
-        })?;
-        info!(
-            "Storage cache budget: {} MiB",
-            budget.block_cache_bytes / (1024 * 1024)
-        );
-    }
-    // Before any runtime exists, so every runtime reads stored tables by key
-    // and records the buckets it uses from its first evaluation.
-    jazz::groove::ivm::set_process_stored_arrangements(limits.stored_arrangements);
-    let ceiling = limits.query_cache_ceiling_bytes();
-    jazz::groove::ivm::set_process_cache_budget(ceiling);
     if !limits.stored_arrangements {
-        info!("Query cache: off, query indexes of stored tables are held in memory");
-    } else if let Some(ceiling) = ceiling {
+        tracing::warn!("--no-stored-arrangements has no effect: SQLite reads stored tables by key");
+    }
+    let ceiling = limits.query_cache_ceiling_bytes();
+    storage_cache::set_budget(ceiling);
+    if let Some(ceiling) = ceiling {
         info!(
-            "Query cache budget: {} MiB{}",
+            "Storage cache budget: {} MiB{}",
             ceiling / (1024 * 1024),
             if limits.memory_limit_bytes.is_some() {
                 ", lowered under memory pressure"
@@ -105,9 +95,6 @@ pub async fn run(
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
         builder
-            .with_storage_factory(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.into(),
             })
@@ -168,29 +155,15 @@ pub async fn run(
             })
         });
     #[cfg(feature = "otel")]
-    let _rocksdb_memory_gauge = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .is_ok()
-        .then(|| {
-            let meter = opentelemetry::global::meter("jazz-server");
-            jazz_otel::register_rocksdb_memory_gauge(&meter, || {
-                let usage = jazz_storage_rocksdb::process_memory_usage()?;
-                Some(vec![
-                    ("block_cache", usage.block_cache_bytes),
-                    ("block_cache_pinned", usage.block_cache_pinned_bytes),
-                    ("memtables", usage.memtable_bytes),
-                    ("table_readers", usage.table_reader_bytes),
-                ])
-            })
-        });
-    #[cfg(feature = "otel")]
     let _query_cache_gauges = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .is_ok()
         .then(|| {
             let meter = opentelemetry::global::meter("jazz-server");
             jazz_otel::register_query_cache_metrics(&meter, || jazz_otel::QueryCacheUsage {
-                budget_bytes: jazz::groove::ivm::process_cache_budget().map(|bytes| bytes as u64),
-                resident_bytes: jazz::groove::ivm::process_cache_resident_bytes() as u64,
-                evicted_buckets: jazz::groove::ivm::process_cache_evicted_buckets(),
+                budget_bytes: storage_cache::budget().map(|bytes| bytes as u64),
+                resident_bytes: storage_cache::resident_bytes() as u64,
+                // SQLite recycles pages rather than evicting buckets.
+                evicted_buckets: 0,
                 process_rss_bytes: resources::process_rss_bytes(),
             })
         });
@@ -300,22 +273,20 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Resets the process-wide query cache settings when its server stops.
+/// Resets the process-wide storage cache budget when its server stops.
 struct CacheBudgetGuard(#[allow(dead_code)] Option<AbortOnDrop>);
 
 impl Drop for CacheBudgetGuard {
     fn drop(&mut self) {
-        jazz::groove::ivm::set_process_cache_budget(None);
-        jazz::groove::ivm::set_process_stored_arrangements(false);
+        storage_cache::set_budget(None);
     }
 }
 
-/// How often the query cache budget follows the resident set.
+/// How often the storage cache budget follows the resident set.
 const CACHE_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Keep the process-wide query cache budget in step with memory pressure.
+/// Keep the process-wide storage cache budget in step with memory pressure.
 async fn govern_cache_budget(mut governor: resources::CacheBudgetGovernor) {
-    use jazz::groove::ivm::{process_cache_resident_bytes, set_process_cache_budget};
     let ceiling = governor.ceiling_bytes();
     let floor = governor.floor_bytes();
     let mib = |bytes: usize| bytes / (1024 * 1024);
@@ -327,32 +298,32 @@ async fn govern_cache_budget(mut governor: resources::CacheBudgetGovernor) {
             return;
         };
         let current = governor.budget_bytes();
-        let next = governor.step(rss, process_cache_resident_bytes());
+        let next = governor.step(rss, storage_cache::resident_bytes());
         if next == current {
             continue;
         }
-        set_process_cache_budget(Some(next));
+        storage_cache::set_budget(Some(next));
         let rss_mib = rss / (1024 * 1024);
         if current == ceiling {
             tracing::info!(
                 rss_mib,
                 budget_mib = mib(next),
-                "memory pressure: query cache budget lowered, queries read more from storage"
+                "memory pressure: storage cache budget lowered, queries read more from disk"
             );
         } else if next == floor {
             tracing::warn!(
                 rss_mib,
                 budget_mib = mib(next),
-                "memory pressure: query cache budget at its floor"
+                "memory pressure: storage cache budget at its floor"
             );
         } else if next == ceiling {
             tracing::info!(
                 rss_mib,
                 budget_mib = mib(next),
-                "query cache budget back at its ceiling"
+                "storage cache budget back at its ceiling"
             );
         } else {
-            tracing::debug!(rss_mib, budget_mib = mib(next), "query cache budget");
+            tracing::debug!(rss_mib, budget_mib = mib(next), "storage cache budget");
         }
     }
 }
@@ -445,7 +416,7 @@ mod tests {
 
     #[test]
     fn semantic_runtime_facade_is_consumable_without_core_state_access() {
-        let _boundary = |runtime: &jazz::serving::ServerRuntimeHandle| {
+        let _boundary = |runtime: &crate::runtime::ServerRuntimeHandle| {
             let _activity = runtime.subscribe_activity();
             runtime.notify_activity();
         };

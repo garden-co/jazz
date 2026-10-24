@@ -1,3 +1,4 @@
+// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! One-shot Global UUID pages remain exact after authorization and deletion.
 //! The fixture uses public schema, mutation, and read APIs; expected IDs are
 //! independent of the query engine's complete-source plan.
@@ -5,9 +6,9 @@
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, block_on};
-use jazz::groove::{records::Value, storage::TestStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
+use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 mod common;
@@ -39,11 +40,8 @@ fn open_db() -> Db {
             )
             .build(),
     );
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x73; 16]),
             author: AuthorSubject::SYSTEM,

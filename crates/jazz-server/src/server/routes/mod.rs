@@ -35,8 +35,8 @@ use http::{
     schema_hashes_handler,
 };
 use utils::parse_app_id_param;
+pub(crate) use websocket::WebSocketAdmissionState;
 use websocket::ws_handler;
-pub(crate) use websocket::{WebSocketAdmissionState, encode_ws_frame_batches};
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
@@ -1647,7 +1647,6 @@ mod tests {
     fn persistent_dynamic_builder(dir: &std::path::Path, name: &str) -> ServerBuilder {
         ServerBuilder::new(AppId::from_name(name))
             .with_auth_config(test_auth_config())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: dir.to_path_buf(),
             })

@@ -1,3 +1,4 @@
+// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::{BTreeMap, BTreeSet};
 
 mod common;
@@ -7,10 +8,9 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SeededRowIdSource, SubscriptionEvent,
     SubscriptionStream,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, all_of, claim, col, eq, param, provider_claim_key};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -41,15 +41,9 @@ fn open_db() -> Db {
 
 fn open_db_as(author: AuthorSubject) -> Db {
     let schema = schema();
-    let column_families = schema.column_families();
-    let column_family_refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            TestStorage::new(&column_family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
                 author,

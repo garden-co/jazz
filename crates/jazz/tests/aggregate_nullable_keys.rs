@@ -1,15 +1,14 @@
 use std::collections::BTreeMap;
 
 use jazz::block_on;
+use jazz::db::CurrentRow;
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent,
     SubscriptionOutputRow, UpdateOptions,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{Aggregate, OrderDirection, Query};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 
@@ -40,12 +39,8 @@ fn apply_event(rows: &mut Vec<SubscriptionOutputRow>, event: SubscriptionEvent, 
         rows.clear();
     }
     rows.retain(|row| {
-        !removed
-            .iter()
-            .any(|item| item.occurrence_id == row.occurrence_id)
-            && !updated
-                .iter()
-                .any(|item| item.occurrence_id == row.occurrence_id)
+        !removed.iter().any(|item| item.row_uuid == row.row_uuid())
+            && !updated.iter().any(|item| item.row_uuid() == row.row_uuid())
     });
     let mut incoming = added.into_iter().chain(updated).collect::<Vec<_>>();
     incoming.sort_by_key(|row| row.index);
@@ -71,11 +66,15 @@ fn assert_rows<'a>(
         );
         assert_eq!(
             row.cell_at(0),
-            key,
-            "{context}: positional keys have one public nullable layer"
+            Some(nullable(key)),
+            "{context}: a positional key has the same declared type as the named one"
         );
         assert_eq!(row.cell_at(1), Some(Value::U64(*count)), "{context}: count");
-        assert_eq!(row.cell_at(2), sum.map(Value::I32), "{context}: sum");
+        assert_eq!(
+            row.cell_at(2),
+            Some(nullable(sum.map(Value::I32))),
+            "{context}: sum"
+        );
     }
 }
 
@@ -83,7 +82,7 @@ fn assert_rows<'a>(
 /// present, all read paths expose the same cells, and live changes preserve
 /// group identity while sums become NULL or a group disappears and returns.
 ///
-/// alice -- seed NULL/alpha --> read / snapshot / subscription --> same cells
+/// alice -- seed NULL/alpha --> read / subscription --> same cells
 /// alice -- change score --> NULL / non-NULL sums --> same group occurrence
 /// alice -- move row to alpha and back --> group removal / original identity
 #[test]
@@ -102,11 +101,8 @@ fn nullable_group_keys_agree_across_reads_and_live_subscription() {
         )
         .build();
     let schema = JazzSchema::new(&source).unwrap();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema.clone(),
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x72; 16]),
             author: AuthorSubject::SYSTEM,
@@ -189,22 +185,17 @@ fn nullable_group_keys_agree_across_reads_and_live_subscription() {
         );
         for row in &rows {
             let key = match row.cell_at(0) {
-                None => None,
-                Some(Value::String(key)) => Some(key),
+                Some(Value::Nullable(None)) => None,
+                Some(Value::Nullable(Some(key))) => match *key {
+                    Value::String(key) => Some(key),
+                    other => panic!("unexpected group key: {other:?}"),
+                },
                 other => panic!("unexpected group key: {other:?}"),
             };
-            let original = identities.entry(key).or_insert(row.occurrence_id.clone());
-            assert_eq!(*original, row.occurrence_id);
+            let original = identities.entry(key).or_insert(row.row_uuid());
+            assert_eq!(*original, row.row_uuid());
         }
         let read = block_on(db.all(&query, local())).unwrap();
         assert_rows(&format!("stage {stage} read"), &read, &schema, &expected);
-        let snapshot = block_on(db.all_relation_snapshot(&query, local())).unwrap();
-        assert_eq!(snapshot.root_count, expected.len());
-        assert_rows(
-            &format!("stage {stage} snapshot"),
-            &snapshot.rows,
-            &schema,
-            &expected,
-        );
     }
 }
