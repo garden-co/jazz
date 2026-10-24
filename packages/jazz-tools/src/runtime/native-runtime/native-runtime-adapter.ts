@@ -984,7 +984,7 @@ export class NativeRuntimeAdapter implements Runtime {
   // admission deadlines). Mutation admission stays closed, but core progress
   // must continue, or the HLC readout waits behind them forever.
   private foregroundLeaseDraining = false;
-  private physicalCloseStarted = false;
+  private physicalClose: Promise<void> | null = null;
   private physicalCloseRetryable = false;
   private nextSubscriptionId = 1;
 
@@ -1565,9 +1565,29 @@ export class NativeRuntimeAdapter implements Runtime {
       this.closeRuntimeState();
       return;
     }
-    if (this.physicalCloseStarted) return;
+    if (this.physicalClose) return await this.physicalClose;
     if (this.closed && !this.foregroundLeaseQuiesced && !this.physicalCloseRetryable) return;
-    this.physicalCloseStarted = true;
+    // Publish before cancellation callbacks can re-enter close. Every caller
+    // observes the same physical disposal, including its failure.
+    let resolveClose!: (result: Promise<void>) => void;
+    const closing = new Promise<void>((resolve) => {
+      resolveClose = resolve;
+    });
+    this.physicalClose = closing;
+    this.physicalCloseRetryable = false;
+    resolveClose(
+      this.closeOwnedRuntime().catch((error: unknown) => {
+        // Retry disposal, never application work: the closed admission fence
+        // remains set even when native cleanup or storage retirement fails.
+        this.physicalClose = null;
+        this.physicalCloseRetryable = true;
+        throw error;
+      }),
+    );
+    return await closing;
+  }
+
+  private async closeOwnedRuntime(): Promise<void> {
     const cataloguePublication = this.cataloguePublication;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
@@ -1583,16 +1603,10 @@ export class NativeRuntimeAdapter implements Runtime {
       await Promise.all(this.pendingLocalSettlements);
     }
     await this.coreOperation?.completion.catch(() => undefined);
-    try {
-      await cataloguePublication;
-      // A previous failed publication still owns its moved capture. Retry only
-      // those retained bytes; shutdown must never admit another observation.
-      await this.publishPendingCatalogueCapture();
-    } catch (error) {
-      this.physicalCloseStarted = false;
-      this.physicalCloseRetryable = true;
-      throw error;
-    }
+    await cataloguePublication;
+    // A previous failed publication still owns its moved capture. Retry only
+    // those retained bytes; shutdown must never admit another observation.
+    await this.publishPendingCatalogueCapture();
     this.closeRuntimeState(true);
     await this.db.close?.();
     // wasm-bindgen futures may retain this receiver after logical closure.
