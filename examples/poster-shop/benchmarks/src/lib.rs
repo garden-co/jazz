@@ -317,7 +317,8 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("layers")
                     .fk_column("canvas", "canvases")
                     .column("z_index", ColumnType::Integer)
-                    .index_only(["canvas", "z_index"]),
+                    .index_only(["canvas", "z_index"])
+                    .composite_index(["canvas", "z_index"]),
             )
             .table(
                 TableSchemaBuilder::new("shapes")
@@ -330,7 +331,9 @@ fn schema() -> JazzSchema {
                     // Mirrors the app's `indexOnly([canvasId, zIndex])` and
                     // `indexOnly([layerId, zIndex])` paths. Do not collapse
                     // this to an imagined triple-key workload.
-                    .index_only(["canvas", "layer", "z_index"]),
+                    .index_only(["canvas", "layer", "z_index"])
+                    .composite_index(["canvas", "z_index"])
+                    .composite_index(["layer", "z_index"]),
             )
             .table(
                 TableSchemaBuilder::new("cursors")
@@ -338,20 +341,23 @@ fn schema() -> JazzSchema {
                     .column("editor", ColumnType::Integer)
                     .column("x", ColumnType::Integer)
                     .column("y", ColumnType::Integer)
-                    .index_only(["canvas", "editor"]),
+                    .index_only(["canvas", "editor"])
+                    .composite_index(["canvas", "editor"]),
             )
             .table(
                 TableSchemaBuilder::new("assets")
                     .fk_column("canvas", "canvases")
                     .column("name", ColumnType::Text)
                     .column("byte_length", ColumnType::Integer)
-                    .index_only(["canvas", "name"]),
+                    .index_only(["canvas", "name"])
+                    .composite_index(["canvas", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("checkpoints")
                     .fk_column("canvas", "canvases")
                     .column("label", ColumnType::Text)
-                    .index_only(["canvas", "label"]),
+                    .index_only(["canvas", "label"])
+                    .composite_index(["canvas", "label"]),
             )
             .build(),
     )

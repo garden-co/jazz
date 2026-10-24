@@ -241,7 +241,8 @@ fn schema() -> JazzSchema {
                     .column("ordinal", ColumnType::Integer)
                     .column("role", ColumnType::Text)
                     .column("body", ColumnType::Text)
-                    .index_only(["conversation", "ordinal"]),
+                    .index_only(["conversation", "ordinal"])
+                    .composite_index(["conversation", "ordinal"]),
             )
             .table(
                 TableSchemaBuilder::new("attachments")

@@ -513,7 +513,8 @@ fn schema() -> JazzSchema {
             TableSchemaBuilder::new("sessions")
                 .column("title", ColumnType::Text)
                 .column("tempo_bpm", ColumnType::Integer)
-                .column("loop_steps", ColumnType::Integer),
+                .column("loop_steps", ColumnType::Integer)
+                .index_only(["$createdAt"]),
         )
         .table(
             TableSchemaBuilder::new("session_members")
@@ -528,7 +529,8 @@ fn schema() -> JazzSchema {
                 .column("position", ColumnType::Integer)
                 .column("name", ColumnType::Text)
                 .column("color", ColumnType::Text)
-                .index_only(["session_id", "position"]),
+                .index_only(["session_id", "position"])
+                .composite_index(["session_id", "position"]),
         )
         .table(
             TableSchemaBuilder::new("steps")
@@ -537,7 +539,8 @@ fn schema() -> JazzSchema {
                 .column("velocity", ColumnType::Integer)
                 .column("enabled", ColumnType::Boolean)
                 .column("probability", ColumnType::Integer)
-                .index_only(["track_id", "position"]),
+                .index_only(["track_id", "position"])
+                .composite_index(["track_id", "position"]),
         )
         .table(
             TableSchemaBuilder::new("transport_observations")
@@ -545,7 +548,8 @@ fn schema() -> JazzSchema {
                 .column("playing", ColumnType::Boolean)
                 .column("bar", ColumnType::Integer)
                 .column("observed_at", ColumnType::Timestamp)
-                .index_only(["session_id", "observed_at"]),
+                .index_only(["session_id", "observed_at"])
+                .composite_index(["session_id", "observed_at"]),
         )
         .table(
             TableSchemaBuilder::new("presence")

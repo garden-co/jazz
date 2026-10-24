@@ -204,7 +204,8 @@ fn schema() -> JazzSchema {
                 .fk_column("member", "users")
                 .column("unread", ColumnType::Boolean)
                 .column("last_activity", ColumnType::Timestamp)
-                .index_only(["room", "member", "unread", "last_activity"]),
+                .index_only(["room", "member", "unread", "last_activity"])
+                .composite_index(["member", "unread", "last_activity"]),
         )
         .table(
             TableSchemaBuilder::new("messages")
@@ -212,7 +213,9 @@ fn schema() -> JazzSchema {
                 .fk_column("author", "users")
                 .column("body", ColumnType::Text)
                 .column("sent_at", ColumnType::Timestamp)
-                .index_only(["room", "author", "sent_at"]),
+                .index_only(["room", "author", "sent_at"])
+                .composite_index(["room", "sent_at"])
+                .composite_index(["author", "sent_at"]),
         )
         .build();
     JazzSchema::new(&source).expect("BandChat benchmark schema compiles")

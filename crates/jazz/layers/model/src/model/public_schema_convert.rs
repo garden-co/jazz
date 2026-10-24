@@ -603,10 +603,14 @@ fn convert_table(
         let mut seen = BTreeSet::new();
         for column in group {
             let column_name = column.as_str();
-            if !column_names.contains(column_name) || !seen.insert(column_name) {
+            // Provenance timestamps are stored on every row, so they can
+            // order an index too (e.g. a chat's messages by `$createdAt`).
+            let declared = column_names.contains(column_name)
+                || matches!(column_name, "$createdAt" | "$updatedAt");
+            if !declared || !seen.insert(column_name) {
                 return Err(err(
                     format!("$.{}.composite_indexes.{index}", name.as_str()),
-                    "composite index columns must be distinct declared columns",
+                    "composite index columns must be distinct declared columns or provenance timestamps",
                 ));
             }
             if table.columns.column(column_name).is_some_and(|descriptor| {

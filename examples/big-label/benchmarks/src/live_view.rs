@@ -161,7 +161,8 @@ fn schema() -> JazzSchema {
                     .column("published", ColumnType::Boolean)
                     .column("released_at", ColumnType::Timestamp)
                     .column("title", ColumnType::Text)
-                    .index_only(["label"]),
+                    .index_only(["label"])
+                    .composite_index(["label", "published", "released_at"]),
             )
             .build(),
     )

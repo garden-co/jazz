@@ -638,7 +638,8 @@ fn schema() -> JazzSchema {
                     .fk_column("warehouse_id", "warehouses")
                     .column("name", ColumnType::Text)
                     .column("next_order_number", ColumnType::Integer)
-                    .index_only(["warehouse_id", "name"]),
+                    .index_only(["warehouse_id", "name"])
+                    .composite_index(["warehouse_id", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("items")
@@ -654,7 +655,8 @@ fn schema() -> JazzSchema {
                     .fk_column("item_id", "items")
                     .column("on_hand", ColumnType::Integer)
                     .column("reorder_level", ColumnType::Integer)
-                    .index_only(["warehouse_id", "item_id", "on_hand"]),
+                    .index_only(["warehouse_id", "item_id", "on_hand"])
+                    .composite_index(["warehouse_id", "on_hand"]),
             )
             .table(
                 TableSchemaBuilder::new("customers")
@@ -662,7 +664,8 @@ fn schema() -> JazzSchema {
                     .fk_column("district_id", "districts")
                     .column("name", ColumnType::Text)
                     .column("balance_cents", ColumnType::Integer)
-                    .index_only(["warehouse_id", "district_id", "name"]),
+                    .index_only(["warehouse_id", "district_id", "name"])
+                    .composite_index(["warehouse_id", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("orders")
@@ -679,7 +682,8 @@ fn schema() -> JazzSchema {
                         "district_id",
                         "status",
                         "order_number",
-                    ]),
+                    ])
+                    .composite_index(["warehouse_id", "order_number"]),
             )
             .table(
                 TableSchemaBuilder::new("order_lines")

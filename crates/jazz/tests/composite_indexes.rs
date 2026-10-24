@@ -627,6 +627,62 @@ fn physical_global_current_composite_index_entry_keys_are_pinned() {
     );
 }
 
+/// A composite index may end in a provenance timestamp: a chat's newest
+/// page by `$createdAt` (or `$updatedAt`, read as its create stamp until
+/// the first update) is served from the index, without sorting the chat.
+#[test]
+fn composite_indexes_can_order_by_provenance_timestamps() {
+    for stamp in ["$createdAt", "$updatedAt"] {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(tasks_table().composite_index(["owner", stamp]))
+                .build(),
+        )
+        .unwrap();
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        for n in 0..20u8 {
+            block_on(db.insert(
+                "tasks",
+                BTreeMap::from([
+                    ("owner".to_owned(), Value::String("ada".to_owned())),
+                    ("rank".to_owned(), Value::I32(i32::from(n))),
+                    ("title".to_owned(), Value::String(format!("t{n}"))),
+                ]),
+                InsertOptions {
+                    row_id: Some(row(n + 1)),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        let page = db
+            .prepare_query(
+                &Query::from("tasks")
+                    .filter(eq(col("owner"), lit(Value::String("ada".to_owned()))))
+                    .order_by(stamp, OrderDirection::Desc)
+                    .limit(3),
+            )
+            .unwrap();
+        let (_, plan) = db.explain_query_plan(&page, None).unwrap();
+        assert!(plan.contains("tasks__ix"), "{stamp}: {plan}");
+        assert!(
+            !plan.contains("TEMP B-TREE FOR ORDER BY"),
+            "{stamp}: {plan}"
+        );
+        assert_eq!(
+            block_on(db.all(&page, ReadOpts::default())).unwrap().len(),
+            3
+        );
+    }
+}
+
 /// A single-column index that a composite one leads is not created (the
 /// composite serves its reads, and writes keep one entry fewer), and a read
 /// that names row ids seeks them rather than scanning a declared index that

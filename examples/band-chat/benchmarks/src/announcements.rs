@@ -90,6 +90,7 @@ fn schema() -> JazzSchema {
                 .column("text", ColumnType::Text)
                 .column("sent_at", ColumnType::Timestamp)
                 .index_only(["chat_id", "sent_at"])
+                .composite_index(["chat_id", "sent_at"])
                 .policies(policies),
         )
         .build();

@@ -249,7 +249,8 @@ fn schema() -> JazzSchema {
                     .fk_column("venueId", "venues")
                     .column("date", ColumnType::Timestamp)
                     .column("status", ColumnType::Text)
-                    .column("publicDescription", ColumnType::Text),
+                    .column("publicDescription", ColumnType::Text)
+                    .index_only(["date"]),
             )
             .build(),
     )

@@ -253,7 +253,8 @@ fn schema() -> JazzSchema {
                     .column("ordinal", ColumnType::Integer)
                     .column("duration_ms", ColumnType::Integer)
                     .nullable_column("audio_bytes", ColumnType::Bytea)
-                    .index_only(["album_id", "ordinal"]),
+                    .index_only(["album_id", "ordinal"])
+                    .composite_index(["album_id", "ordinal"]),
             )
             .table(TableSchemaBuilder::new("playlists").column("name", ColumnType::Text))
             .table(
@@ -261,7 +262,8 @@ fn schema() -> JazzSchema {
                     .fk_column("playlist_id", "playlists")
                     .fk_column("track_id", "tracks")
                     .column("position", ColumnType::Double)
-                    .index_only(["playlist_id", "position"]),
+                    .index_only(["playlist_id", "position"])
+                    .composite_index(["playlist_id", "position"]),
             )
             .build(),
     )
