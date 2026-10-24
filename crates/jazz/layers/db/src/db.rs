@@ -1042,6 +1042,17 @@ impl Db {
             .map_err(storage)
     }
 
+    /// Roll back the open SQLite transaction behind the database's back, as
+    /// SQLite itself does after some errors (a full disk, an I/O error).
+    #[cfg(feature = "testing")]
+    #[doc(hidden)]
+    pub fn rollback_sqlite_transaction_for_test(&self) {
+        self.inner()
+            .conn
+            .execute_batch("ROLLBACK")
+            .expect("an open SQLite transaction");
+    }
+
     /// Diagnostics: the chunks reads needed that nothing local holds.
     #[doc(hidden)]
     pub fn take_missing_chunks_for_test(&self) -> usize {
@@ -1435,7 +1446,12 @@ impl Db {
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
         self.with_upload(|| {
             let table = op.table().to_owned();
-            let handle = self.write(&table, |inner, seq| {
+            let (prior, mark) = {
+                let inner = self.inner();
+                let mark = inner.changed.borrow().len();
+                (inner.seq, mark)
+            };
+            let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
                 inner.pending_nodes.extend(edits.pending_nodes);
@@ -1443,7 +1459,17 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
-            self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable);
+            // The upload record joins the write's SQLite transaction: if it
+            // fails, `with_upload` rolls both back, and nobody has been told.
+            if let Err(error) = self.record_upload(vec![op], handle.seq, 0, sync::Kind::Mergeable) {
+                let mut inner = self.inner();
+                inner.seq = prior;
+                inner.changed.borrow_mut().truncate(mark);
+                return Err(error);
+            }
+            if notify {
+                self.notify();
+            }
             Ok(handle)
         })
     }
@@ -1478,12 +1504,14 @@ impl Db {
     }
 
     /// Run one write atomically. Inside a transaction it joins the
-    /// transaction's seq; standalone it commits and notifies at once.
-    fn write(
+    /// transaction's seq; standalone it commits. Returns whether a
+    /// standalone commit happened, which the caller notifies subscribers of
+    /// once its upload record is in.
+    fn write_unnotified(
         &self,
         table: &str,
         apply: impl FnOnce(&mut Inner, u64) -> Result<WriteHandle, Error>,
-    ) -> Result<WriteHandle, Error> {
+    ) -> Result<(bool, WriteHandle), Error> {
         let standalone = {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
@@ -1514,11 +1542,7 @@ impl Db {
                 }
             }
         };
-        let (notify, handle) = standalone;
-        if notify {
-            self.notify();
-        }
-        Ok(handle)
+        Ok(standalone)
     }
 
     // ---- transactions ---------------------------------------------------
@@ -1554,10 +1578,12 @@ impl Db {
         };
         let result = callback(&mut tx).await;
         let captured;
+        let prior;
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
             captured = std::mem::take(&mut inner.capture);
+            prior = inner.seq;
             match &result {
                 Ok(_) => {
                     if !tables.is_empty() {
@@ -1566,11 +1592,7 @@ impl Db {
                     Some((seq, tables))
                 }
                 Err(_) => {
-                    inner
-                        .conn
-                        .execute_batch("ROLLBACK TO tx; RELEASE tx")
-                        .map_err(storage)?;
-                    inner.changed.borrow_mut().clear();
+                    inner.abandon_savepoint("tx")?;
                     None
                 }
             }
@@ -1578,7 +1600,12 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        self.record_upload(captured, seq, 0, sync::Kind::Mergeable);
+        if let Err(error) = self.record_upload(captured, seq, 0, sync::Kind::Mergeable) {
+            let mut inner = self.inner();
+            inner.seq = prior;
+            inner.abandon_savepoint("tx")?;
+            return Err(error);
+        }
         self.inner
             .borrow()
             .conn
@@ -1845,6 +1872,23 @@ impl MergeableTx<'_> {
 }
 
 impl Inner {
+    /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
+    /// first, so no subscriber hears of them whatever happens next. SQLite
+    /// rolls a whole transaction back by itself after some errors (a full
+    /// disk, an I/O error); then the savepoint is gone and there is nothing
+    /// left to undo.
+    fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
+        self.changed.borrow_mut().clear();
+        match self
+            .conn
+            .execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"))
+        {
+            Ok(()) => Ok(()),
+            Err(_) if self.conn.is_autocommit() => Ok(()),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
     /// An admitted schema under the names this store keeps it by.
     fn named(&self, schema: &JazzSchema) -> Schema {
         match self.names.get(&schema.version_id()) {
@@ -4365,7 +4409,7 @@ impl Db {
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         let ops = &batch.ops;
-        let seq = {
+        let (seq, prior, mark) = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
             inner
@@ -4386,12 +4430,22 @@ impl Db {
                 .conn
                 .execute_batch("RELEASE commit_batch")
                 .map_err(storage)?;
+            let prior = inner.seq;
             if !ops.is_empty() {
                 inner.seq = seq;
             }
-            seq
+            (seq, prior, mark)
         };
-        self.record_upload(ops.iter().map(|(_, op)| op.clone()).collect(), seq, 0, kind);
+        // `commit_ops` holds the upload record and the commit in one SQLite
+        // transaction and rolls both back on an error.
+        if let Err(error) =
+            self.record_upload(ops.iter().map(|(_, op)| op.clone()).collect(), seq, 0, kind)
+        {
+            let mut inner = self.inner();
+            inner.seq = prior;
+            inner.changed.borrow_mut().truncate(mark);
+            return Err(error);
+        }
         self.notify();
         Ok(TxReceipt(seq))
     }
