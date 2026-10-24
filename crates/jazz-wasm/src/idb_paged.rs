@@ -58,6 +58,8 @@ pub(crate) struct Stats {
     pub idb_txs: u64,
     pub pages_loaded: u64,
     pub pages_evicted: u64,
+    /// Pages the hint preloaded at attach.
+    pub hot_pages: u64,
     /// Highest resident page bytes seen.
     pub peak_resident: usize,
 }
@@ -77,6 +79,15 @@ struct PageFile {
     sync_notified: bool,
     /// Pages a read needed and did not find.
     misses: RefCell<BTreeSet<usize>>,
+    /// Last use of every page this file has used, resident or not, seeded
+    /// from the stored hint: the next session's hot set.
+    recency: RefCell<HashMap<usize, u64>>,
+}
+
+impl PageFile {
+    fn touch(&self, addr: usize, at: u64) {
+        self.recency.borrow_mut().insert(addr, at);
+    }
 }
 
 impl PageFile {
@@ -180,7 +191,9 @@ impl VfsFile for PageFile {
             let len = (self.page_size - within).min(buf.len() - done);
             match self.pages.get(&addr) {
                 Some(page) => {
-                    page.used.set(now());
+                    let at = now();
+                    page.used.set(at);
+                    self.touch(addr, at);
                     page.data
                         .subarray(within as u32, (within + len) as u32)
                         .copy_to(&mut buf[done..done + len]);
@@ -226,6 +239,7 @@ impl VfsFile for PageFile {
             }
         }
         self.misses.borrow_mut().remove(&offset);
+        self.touch(offset, now());
         self.dirty.insert(offset);
         self.page_size = page_size;
         self.file_size = self.file_size.max(offset + page_size);
@@ -235,6 +249,7 @@ impl VfsFile for PageFile {
     fn truncate(&mut self, size: usize) -> VfsResult<()> {
         self.file_size = size;
         self.pages.retain(|addr, _| *addr < size);
+        self.recency.borrow_mut().retain(|addr, _| *addr < size);
         Ok(())
     }
 
@@ -303,6 +318,14 @@ impl VfsFile for PagedFile {
 
 fn key_range(file: &str, from: usize, to: f64) -> std::ops::RangeInclusive<[JsValue; 2]> {
     [JsValue::from(file), JsValue::from(from)]..=[JsValue::from(file), JsValue::from(to)]
+}
+
+/// The hint record sits below every page's key, outside relaxed-idb's
+/// `[path, 0..]` ranges.
+const HINT_OFFSET: f64 = -1.0;
+
+fn hint_key(file: &str) -> [JsValue; 2] {
+    [JsValue::from(file), JsValue::from(HINT_OFFSET)]
 }
 
 fn block_data(value: &JsValue) -> (usize, Uint8Array) {
@@ -549,8 +572,9 @@ pub(crate) struct PagedUtil {
 }
 
 impl PagedUtil {
-    /// Make the stored file at `path` openable: its size and page 1.
-    pub(crate) async fn attach(&self, path: &str) -> Result<(), JsValue> {
+    /// Make the stored file at `path` openable: its size, page 1, and the
+    /// most recently used `hot_bytes` of pages its last sessions used.
+    pub(crate) async fn attach(&self, path: &str, hot_bytes: usize) -> Result<(), JsValue> {
         if self.pool.files.borrow().contains_key(path) {
             return Ok(());
         }
@@ -572,6 +596,20 @@ impl PagedUtil {
             .with_query(key_range(path, 0, 0.0))
             .await
             .map_err(idb_error)?;
+        let hint: Vec<usize> = store
+            .get::<JsValue, _, _>(hint_key(path))
+            .await
+            .map_err(idb_error)?
+            .and_then(|record| Reflect::get(&record, &JsValue::from("hint")).ok())
+            .filter(|hint| hint.is_object())
+            .map(|hint| {
+                js_sys::Float64Array::from(hint)
+                    .to_vec()
+                    .into_iter()
+                    .map(|addr| addr as usize)
+                    .collect()
+            })
+            .unwrap_or_default();
         self.pool.stat(|s| s.idb_txs += 1);
         let mut file = PageFile::default();
         for block in first {
@@ -589,11 +627,89 @@ impl PagedUtil {
             return Ok(());
         }
         file.file_size = count * file.page_size;
+        // The hint is most recent first; its order carries over as the
+        // oldest uses of this session.
+        let hint: Vec<usize> = hint
+            .into_iter()
+            .filter(|addr| *addr < file.file_size && addr % file.page_size == 0)
+            .collect();
+        let base = self.pool.clock.get();
+        for (rank, addr) in hint.iter().enumerate() {
+            file.touch(*addr, base + (hint.len() - rank) as u64);
+        }
+        self.pool.clock.set(base + hint.len() as u64 + 1);
+        let hot_pages = hot_bytes / file.page_size;
+        let mut hot: Vec<usize> = hint
+            .iter()
+            .copied()
+            .filter(|addr| !file.pages.contains_key(addr))
+            .take(hot_pages)
+            .collect();
+        hot.sort_unstable();
         self.pool
             .files
             .borrow_mut()
             .insert(path.to_owned(), PagedFile::Main(file));
+        let loaded = self.fetch(path, hot).await?;
+        self.pool.stat(|s| s.hot_pages += loaded as u64);
+        // Preloaded pages keep their rank from the hint, not this load.
+        if let Some(PagedFile::Main(file)) = self.pool.files.borrow().get(path) {
+            let recency = file.recency.borrow();
+            for (addr, page) in &file.pages {
+                page.used.set(recency.get(addr).copied().unwrap_or(0));
+            }
+        }
         self.pool.note_resident();
+        Ok(())
+    }
+
+    /// Store the most recently used `max_pages` page addresses of `path`,
+    /// for the next session's [`Self::attach`]. It is only a hint: a stale
+    /// or wrong address loads a page that is not needed, nothing more.
+    pub(crate) async fn save_hint(&self, path: &str, max_pages: usize) -> Result<(), JsValue> {
+        let hint: Vec<f64> = {
+            let files = self.pool.files.borrow();
+            let Some(PagedFile::Main(file)) = files.get(path) else {
+                return Ok(());
+            };
+            let mut used: Vec<(u64, usize)> = file
+                .recency
+                .borrow()
+                .iter()
+                .map(|(addr, at)| (*at, *addr))
+                .collect();
+            used.sort_unstable_by(|a, b| b.cmp(a));
+            used.into_iter()
+                .take(max_pages)
+                .map(|(_, addr)| addr as f64)
+                .collect()
+        };
+        let transaction = self
+            .pool
+            .idb
+            .transaction("blocks")
+            .with_mode(TransactionMode::Readwrite)
+            .build()
+            .map_err(idb_error)?;
+        let store = transaction.object_store("blocks").map_err(idb_error)?;
+        let record = Object::new();
+        let _ = Reflect::set(&record, &JsValue::from("path"), &JsValue::from(path));
+        let _ = Reflect::set(
+            &record,
+            &JsValue::from("offset"),
+            &JsValue::from(HINT_OFFSET),
+        );
+        let _ = Reflect::set(
+            &record,
+            &JsValue::from("hint"),
+            &js_sys::Float64Array::from(&hint[..]),
+        );
+        store
+            .put(&JsValue::from(record))
+            .build()
+            .map_err(idb_error)?;
+        transaction.commit().await.map_err(idb_error)?;
+        self.pool.stat(|s| s.idb_txs += 1);
         Ok(())
     }
 
@@ -636,56 +752,7 @@ impl PagedUtil {
         };
         let mut loaded = 0;
         for (path, addrs) in wanted {
-            if addrs.is_empty() {
-                continue;
-            }
-            let transaction = self
-                .pool
-                .idb
-                .transaction("blocks")
-                .with_mode(TransactionMode::Readonly)
-                .build()
-                .map_err(idb_error)?;
-            let store = transaction.object_store("blocks").map_err(idb_error)?;
-            // Contiguous runs go as one range request each.
-            let mut runs: Vec<(usize, usize)> = Vec::new();
-            let page_size = match self.pool.files.borrow().get(&path) {
-                Some(PagedFile::Main(file)) => file.page_size,
-                _ => continue,
-            };
-            for addr in addrs {
-                match runs.last_mut() {
-                    Some((_, end)) if *end + page_size == addr => *end = addr,
-                    _ => runs.push((addr, addr)),
-                }
-            }
-            let mut requests = Vec::with_capacity(runs.len());
-            for (start, end) in &runs {
-                requests.push(
-                    store
-                        .get_all::<JsValue>()
-                        .with_query(key_range(&path, *start, *end as f64))
-                        .into_future(),
-                );
-            }
-            let results = futures_util::future::join_all(requests).await;
-            self.pool.stat(|s| s.idb_txs += 1);
-            let mut files = self.pool.files.borrow_mut();
-            let Some(PagedFile::Main(file)) = files.get_mut(&path) else {
-                continue;
-            };
-            for result in results {
-                for block in result.map_err(idb_error)? {
-                    let (offset, data) = block_data(&block.map_err(idb_error)?);
-                    file.pages.entry(offset).or_insert_with(|| {
-                        loaded += 1;
-                        Page {
-                            data,
-                            used: Cell::new(now()),
-                        }
-                    });
-                }
-            }
+            loaded += self.fetch(&path, addrs).await?;
         }
         if loaded > 0 {
             self.pool.stat(|s| {
@@ -695,6 +762,62 @@ impl PagedUtil {
         }
         self.pool.note_resident();
         self.pool.evict();
+        Ok(loaded)
+    }
+
+    /// Load `addrs` (sorted, not resident) of `path` in one readonly
+    /// IndexedDB transaction, contiguous runs as one range request each.
+    async fn fetch(&self, path: &str, addrs: Vec<usize>) -> Result<usize, JsValue> {
+        if addrs.is_empty() {
+            return Ok(0);
+        }
+        let page_size = match self.pool.files.borrow().get(path) {
+            Some(PagedFile::Main(file)) => file.page_size,
+            _ => return Ok(0),
+        };
+        let transaction = self
+            .pool
+            .idb
+            .transaction("blocks")
+            .with_mode(TransactionMode::Readonly)
+            .build()
+            .map_err(idb_error)?;
+        let store = transaction.object_store("blocks").map_err(idb_error)?;
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for addr in addrs {
+            match runs.last_mut() {
+                Some((_, end)) if *end + page_size == addr => *end = addr,
+                _ => runs.push((addr, addr)),
+            }
+        }
+        let mut requests = Vec::with_capacity(runs.len());
+        for (start, end) in &runs {
+            requests.push(
+                store
+                    .get_all::<JsValue>()
+                    .with_query(key_range(path, *start, *end as f64))
+                    .into_future(),
+            );
+        }
+        let results = futures_util::future::join_all(requests).await;
+        self.pool.stat(|s| s.idb_txs += 1);
+        let mut files = self.pool.files.borrow_mut();
+        let Some(PagedFile::Main(file)) = files.get_mut(path) else {
+            return Ok(0);
+        };
+        let mut loaded = 0;
+        for result in results {
+            for block in result.map_err(idb_error)? {
+                let (offset, data) = block_data(&block.map_err(idb_error)?);
+                file.pages.entry(offset).or_insert_with(|| {
+                    loaded += 1;
+                    Page {
+                        data,
+                        used: Cell::new(now()),
+                    }
+                });
+            }
+        }
         Ok(loaded)
     }
 

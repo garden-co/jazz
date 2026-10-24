@@ -13,6 +13,7 @@ node serve.cjs "$PWD" &                 # COOP/COEP on 127.0.0.1:8767
 node drive.cjs s,m 3                    # sizes, repetitions[, mode indexes, results file]
 NOCOUNT=1 node drive.cjs l 2            # the 400 MB store: skip the full-scan row count
 node analyze.cjs results.json           # median tables
+node drive-hot.cjs s,m,l 4096,16384,65536 2   # hot-page hint: sizes, hint KiB, repetitions
 ```
 
 Sizes: `s` (one 3.8 MB document, 500 messages), `m` (5 documents, 60,000

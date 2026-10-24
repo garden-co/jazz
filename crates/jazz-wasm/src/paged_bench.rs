@@ -40,6 +40,8 @@ thread_local! {
     /// Operations whose run succeeded although a read faulted inside it:
     /// something swallowed the I/O error. Writes cannot be retried then.
     static SWALLOWED: Cell<u32> = const { Cell::new(0) };
+    /// The open file, for saving its hot-page hint at close.
+    static PATH: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 fn schema() -> JazzSchema {
@@ -228,6 +230,7 @@ pub async fn paged_bench_open(
     mode: String,
     budget_kib: f64,
     readahead: u32,
+    hot_kib: f64,
 ) -> Result<JsValue, JsValue> {
     let out = Out::new();
     let start = Instant::now();
@@ -246,7 +249,11 @@ pub async fn paged_bench_open(
             util.configure(budget, readahead as usize);
             util.reset_stats();
             let path = absolute(&path);
-            util.attach(&path).await?;
+            PATH.with(|p| *p.borrow_mut() = path.clone());
+            let hot_start = Instant::now();
+            util.attach(&path, (hot_kib * 1024.0) as usize).await?;
+            out.set("attachMs", ms(hot_start));
+            out.set("hotPages", util.stats().hot_pages as f64);
             let mut rounds = 0;
             util.begin_op();
             let db = loop {
@@ -572,10 +579,14 @@ pub async fn paged_bench_count() -> Result<JsValue, JsValue> {
 }
 
 #[wasm_bindgen(js_name = pagedBenchClose)]
-pub async fn paged_bench_close() -> Result<JsValue, JsValue> {
+pub async fn paged_bench_close(hint_pages: u32) -> Result<JsValue, JsValue> {
     // Closing reads too (it can fault like any operation).
     let ran = run(true, |db| jazz::db::block_on(db.close())).await?;
     flush().await?;
+    if let Some(util) = paged_util() {
+        let path = PATH.with(|p| p.borrow().clone());
+        util.save_hint(&path, hint_pages as usize).await?;
+    }
     OPEN.with(|open| open.borrow_mut().take());
     let out = Out::new();
     out.set("closeMs", ran.ms);

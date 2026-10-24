@@ -73,7 +73,7 @@ const MODES = [
       for (const [mode, budget, readahead] of modes) {
         const seed = rep * 100 + 7;
         const r = await session(size, [
-          ["open", "pagedBenchOpen", PATH, mode, budget, readahead],
+          ["open", "pagedBenchOpen", PATH, mode, budget, readahead, 0],
           ["memOpen", "memory"],
           ["doc", "pagedBenchDoc", rep % cfg.logs],
           ["room", "pagedBenchRoom", (seed * 13) % cfg.rooms],
@@ -88,7 +88,7 @@ const MODES = [
           ],
           ...(process.env.NOCOUNT ? [] : [["count", "pagedBenchCount"]]),
           ["memEnd", "memory"],
-          ["close", "pagedBenchClose"],
+          ["close", "pagedBenchClose", 0],
         ]);
         const run = { size, mode, budget, readahead, rep, ...r };
         results[size].runs.push(run);
