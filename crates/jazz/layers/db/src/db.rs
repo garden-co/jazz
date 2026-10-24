@@ -40,6 +40,10 @@ pub use large_ops::{
 #[path = "catalogue.rs"]
 mod catalogue;
 pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
+#[path = "catalogue_policy.rs"]
+mod catalogue_policy;
+pub use catalogue_policy::PolicyDescriptorV1;
+
 #[path = "catalogue_cache.rs"]
 mod catalogue_cache;
 pub use catalogue_cache::{AuthenticatedCatalogueState, validate_catalogue_capture_replacement};
@@ -936,6 +940,7 @@ impl Db {
         conn.execute_batch(accepted::ACCEPTED_DDL)
             .map_err(storage)?;
         conn.execute_batch(catalogue::DDL).map_err(storage)?;
+        conn.execute_batch(catalogue_policy::DDL).map_err(storage)?;
         conn.execute_batch(catalogue_cache::DDL).map_err(storage)?;
         conn.execute_batch(initialization::DDL).map_err(storage)?;
         let catalogue_cache_required = conn
