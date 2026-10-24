@@ -15,7 +15,7 @@ afterEach(() => {
   status.mockReset();
 });
 
-function fixture() {
+function fixture(promote: () => Promise<void> = async () => {}) {
   vi.useFakeTimers();
   let offline = false;
   let shutdown!: () => void;
@@ -60,7 +60,7 @@ function fixture() {
     },
     "scope",
     () => {},
-    async () => {},
+    promote,
     async () => {
       throw new Error("Unexpected space initialization in founder fixture");
     },
@@ -157,4 +157,66 @@ it("coalesces concurrent status probes and retains reconnect wakes during an in-
   await vi.advanceTimersByTimeAsync(1);
   expect(status).toHaveBeenCalledTimes(2);
   f.shutdown();
+});
+
+it("waits for durable promotion when the founder was accepted before the readiness check", async () => {
+  let finish!: () => void;
+  const promotion = vi.fn(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const f = fixture(promotion);
+  try {
+    status.mockResolvedValue([
+      { ...f.pending[0], fate: { kind: "accepted" }, durability: "global" },
+    ]);
+    await f.journal.reconcile();
+    expect((await f.journal.entries())[0]).toMatchObject({ outcome: "accepted" });
+    let ready = false;
+    const pending = f.journal.waitForFounderAcceptance().then(() => {
+      ready = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(promotion).toHaveBeenCalledTimes(1);
+    expect(ready).toBe(false);
+    expect((await f.journal.entries())[0]?.promoted).not.toBe(true);
+    finish();
+    await pending;
+    expect((await f.journal.entries())[0]).toMatchObject({ outcome: "accepted", promoted: true });
+    await f.journal.waitForFounderAcceptance();
+    expect(promotion).toHaveBeenCalledTimes(1);
+  } finally {
+    f.shutdown();
+  }
+});
+
+it("surfaces failed founder promotion and retries it without replacing the accepted proposal", async () => {
+  const promotion = vi
+    .fn()
+    .mockRejectedValueOnce(new Error("Promotion storage unavailable"))
+    .mockResolvedValue(undefined);
+  const f = fixture(promotion);
+  try {
+    status.mockResolvedValue([
+      { ...f.pending[0], fate: { kind: "accepted" }, durability: "global" },
+    ]);
+    await f.journal.reconcile();
+    const proposal = (await f.journal.entries())[0]!.proposal;
+    await expect(f.journal.waitForFounderAcceptance()).rejects.toThrow(
+      "Promotion storage unavailable",
+    );
+    expect((await f.journal.entries())[0]).toMatchObject({ proposal, outcome: "accepted" });
+    expect((await f.journal.entries())[0]?.promoted).not.toBe(true);
+    await f.journal.waitForFounderAcceptance();
+    expect((await f.journal.entries())[0]).toMatchObject({
+      proposal,
+      outcome: "accepted",
+      promoted: true,
+    });
+    expect(promotion).toHaveBeenCalledTimes(2);
+  } finally {
+    f.shutdown();
+  }
 });

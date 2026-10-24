@@ -930,10 +930,15 @@ export class E2ee {
         throw new E2eeHistoryUnavailable("Missing retained E2EE device readiness");
       return;
     }
-    await (this.preparation ??= this.prepareRequest(false).catch((error) => {
-      this.preparation = undefined;
-      throw error;
-    }));
+    // A fast authority may have accepted the founder before local preparation
+    // inspected its fate, leaving no provisional flag but unfinished promotion.
+    await (this.preparation ??= this.journal
+      .waitForFounderAcceptance()
+      .then(() => this.prepareRequest(false))
+      .catch((error) => {
+        this.preparation = undefined;
+        throw error;
+      }));
     this.assertOpen();
   }
 

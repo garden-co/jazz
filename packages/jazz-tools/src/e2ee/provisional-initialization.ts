@@ -456,7 +456,13 @@ export class InitializationJournal {
     this.assertOpen();
     await this.founder();
     const entry = (await this.entries()).find((entry) => entry.proposal.kind === "founder");
-    if (!entry || entry.outcome === "accepted") return;
+    if (!entry) return;
+    // Acceptance can precede this foreground check. Readiness still requires
+    // promotion's durable transfer from the pending owner to accepted history.
+    if (entry.outcome === "accepted") {
+      await this.promoteAccepted(entry.proposal.id);
+      return;
+    }
     if (!entry.local || (await this.db.e2eeIsExplicitlyOffline()))
       throw new E2eeInitializationNotReady("The original founder is not accepted while offline");
     await this.completion(entry.proposal.id);

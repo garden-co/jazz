@@ -585,7 +585,6 @@ impl Db {
             let BatchKind::Serializable {
                 snapshot,
                 pinned,
-                own,
                 reads,
                 ..
             } = &mut batch.kind
@@ -602,8 +601,12 @@ impl Db {
                 *pinned = true;
                 begin.clone()
             } else {
-                let (snapshot, own) = (*snapshot, own.clone());
-                inner.serializable_cut(snapshot, &own)?
+                // Paired reads return only the authority's pinned state. Own
+                // writes pending at begin may settle after that cut; including
+                // them would disagree with the authority answer or substitute
+                // later content for a row whose id still matches. Ordinary
+                // transaction reads retain their read-your-writes overlay.
+                Cut::at(*snapshot)
             }
         };
         poll_fn(|cx| {

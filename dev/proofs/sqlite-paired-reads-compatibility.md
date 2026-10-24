@@ -11,7 +11,10 @@ on a decision. A successful read alone does not mean its transaction committed.
 A Remote read obtains a typed authority answer. The first queued read pins the
 transaction's cut; subsequent paired reads request that cut. The replica checks
 that its ordered root ids equal the authority result and that every returned
-row state has authority-issued content evidence. Pagination hydrates the normal
+row state has authority-issued content evidence. The cut excludes commits that
+were pending locally at begin and later settled beyond that authority position.
+Ordinary transaction reads keep their own-write overlay; paired accepted reads
+do not extend the authority result with it. Pagination hydrates the normal
 bounded prefix, then applies the original offset locally. The read set records
 the original query, including its window, for authority validation. Large values
 hydrate through ordinary chunk transport, including at a relay. Requests have a
@@ -54,6 +57,13 @@ changes row state at position 8. Alice's paired read including deleted rows
 returns D's retained content with B's writer transaction and position 7. A
 content-free restore keeps B; newly written content gets a new witness. An
 identical payload written in another transaction is still a different witness.
+
+Alice pins position 7 while her own insert, update or delete is pending. That
+write settles at position 8 before a second paired read. The second read still
+returns the position-7 contents and their original authority evidence. Its read
+set remains subject to normal commit validation: a decision changed by the
+position-8 write conflicts and must be retried. A later own commit cannot cause
+a false incomplete-result error or silently replace content at a matching id.
 
 Alice begins while she has accepted evidence only for A. She later receives B,
 even if B was accepted upstream before begin. Her LocalOnly observation retains

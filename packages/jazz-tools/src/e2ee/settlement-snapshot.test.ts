@@ -68,7 +68,7 @@ it.each(["warm", "cold", "concurrent", "immediate commit"])(
       });
       if (scenario === "concurrent") {
         await expect(read.wait({ tier: "global" })).rejects.toMatchObject({
-          code: "exclusive_conflict",
+          code: "transaction_conflict",
         });
         return;
       }
@@ -80,7 +80,7 @@ it.each(["warm", "cold", "concurrent", "immediate commit"])(
         // an empty or partial history would let a valid approval be omitted.
         if (scenario !== "cold") throw error;
         expect(error).toBeInstanceOf(PersistedWriteRejectedError);
-        expect(error).toMatchObject({ code: "exclusive_conflict" });
+        expect(error).toMatchObject({ code: "transaction_conflict" });
         return;
       }
       expect(snapshot.rows).toHaveLength(3);

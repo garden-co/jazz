@@ -304,6 +304,63 @@ fn concurrent_queries_share_one_authority_snapshot() {
     );
 }
 
+/// Alice pins an accepted snapshot while her own write is still pending.
+/// When Bob's authority later accepts it, subsequent paired reads must retain
+/// the pinned contents; committing that stale decision must still conflict.
+///
+/// alice: pending write -> begin -> pin -> authority accepts -> paired read
+#[test]
+fn remote_pair_excludes_own_commits_accepted_after_its_pinned_cut() {
+    for action in ["insert", "update", "delete"] {
+        let server = open(3, true);
+        insert(&server, "notes", "pin");
+        let reference = insert(&server, "refs", "before");
+        let alice = open(1, false);
+        connect(&alice, &server);
+        fetch(&alice, &[&alice, &server], Query::from("notes"));
+        fetch(&alice, &[&alice, &server], Query::from("refs"));
+        let write = match action {
+            "insert" => insert(&alice, "refs", "after"),
+            "update" => block_on(alice.update(
+                "refs",
+                reference.row_uuid(),
+                cells("after"),
+                Default::default(),
+            ))
+            .unwrap(),
+            _ => block_on(alice.delete("refs", reference.row_uuid(), Default::default())).unwrap(),
+        };
+        assert_eq!(
+            alice.write_state(write.mergeable_tx_id()).unwrap().fate,
+            jazz::tx::Fate::Pending
+        );
+        let tx = begin(&alice);
+        assert_eq!(
+            texts(&block_on(paired(&alice, tx, "notes", true, true, false)).unwrap()),
+            ["pin"]
+        );
+        drive(
+            &[&alice, &server],
+            alice.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        let read = drive(
+            &[&alice, &server],
+            paired(&alice, tx, "refs", false, false, false),
+        )
+        .unwrap();
+        assert_eq!(texts(&read), ["before"], "{action}");
+        assert_eq!(read.settlements[0].0.node, NodeUuid::from_bytes([3; 16]));
+        assert_eq!(read.settlements[0].0.time.0, reference.mergeable_tx_id());
+        assert_eq!(
+            block_on(alice.commit_serializable_handle(tx))
+                .unwrap_err()
+                .code,
+            ErrorCode::TransactionConflict
+        );
+    }
+}
+
 /// A local server's writer origins are not acceptance. Alice's offline
 /// observation omits them and her online request cannot promote local coverage.
 #[test]

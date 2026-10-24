@@ -123,7 +123,7 @@ async function firstWriterRace(grantLoser: boolean) {
     const loserIndex = 1 - winnerIndex;
     expect(outcomes[loserIndex]).toMatchObject({
       status: "rejected",
-      reason: { code: "exclusive_conflict" },
+      reason: { code: "transaction_conflict" },
     });
     const winner = writers[winnerIndex]!;
     const loser = writers[loserIndex]!;

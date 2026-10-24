@@ -189,7 +189,7 @@ it("protects every inherited path and restores both groups without ordinary deli
       removals++;
     };
     await expect(recovered.e2ee.explain({ groupId: child.id })).rejects.toMatchObject({
-      code: "exclusive_conflict",
+      code: "transaction_conflict",
     });
     expect(signedDelivery).toBe(true);
     expect(removals).toBe(1);
