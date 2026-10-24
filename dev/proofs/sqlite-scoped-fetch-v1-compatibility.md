@@ -74,10 +74,12 @@ cache under its existing deadline semantics.
 
 ## Supported boundary and validation
 
-This version supports a single table with row-local SELECT policies, ordinary
-filters, projection, ordering, pagination and explicit deleted-row reads. It
-rejects relationship and cross-row permission evidence, joins, aggregates,
-history and branched-table reads with typed query errors. Relays forward the
+The original response path supports a single table with row-local SELECT policies,
+ordinary filters, projection, ordering, pagination and explicit deleted-row reads.
+The [scoped evidence extension](sqlite-scoped-evidence-v1-compatibility.md) adds
+bounded cross-row permission inputs with response tag 36 and its own deployment
+requirements. Joins, aggregates, history and branched-table scoped reads remain
+unsupported. Relays forward the
 same identity, claims and query under a fresh upstream request ID. Different
 downstream connections cannot share an answer slot, even with matching local
 request IDs. Each hop waits for the upstream authority answer, then uses the same

@@ -53,7 +53,7 @@ impl Ctx<'_> {
         value: String,
         dependency: Option<String>,
     ) -> Option<RelBound> {
-        self.candidate_evidence?;
+        self.permission_evidence?;
         let src = self.resolve_src(rel, column).ok()?;
         let table = self.schema.table(src.table.as_ref()?).ok()?;
         let uuid = column.column == "id"
@@ -87,7 +87,7 @@ impl Ctx<'_> {
     ) -> Result<Vec<String>, Error> {
         let mut wheres = rel.wheres.clone();
         wheres.extend_from_slice(extra);
-        let Some(evidence) = self.candidate_evidence else {
+        let Some(evidence) = self.permission_evidence else {
             let from = match prefix {
                 Some(p) => format!("{p}, {}", rel.sql_from_clause()),
                 None => rel.sql_from_clause(),
@@ -182,11 +182,24 @@ impl Ctx<'_> {
         &mut self,
         src: &Src,
         bound: &RelBound,
-        evidence: CandidateEvidence,
+        evidence: PermissionEvidence,
     ) -> Result<Vec<(String, String)>, Error> {
         let table = self
             .schema
             .table(src.table.as_ref().expect("physical source"))?;
+        let evidence = match evidence {
+            PermissionEvidence::Accepted { through, own } => {
+                return self.accepted_permission_arms(
+                    table,
+                    &bound.column,
+                    &bound.value,
+                    &src.alias,
+                    through,
+                    own,
+                );
+            }
+            PermissionEvidence::Candidate(scope) => scope,
+        };
         if self.view.is_some() && !table.branch_by.is_empty() {
             return Err(unsupported(
                 "branch-view relation dependencies in candidate authorization units",

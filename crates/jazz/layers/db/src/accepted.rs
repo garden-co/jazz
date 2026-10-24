@@ -578,6 +578,8 @@ impl Db {
             (*snapshot, *pinned, accepted_begin.clone(), batch.reader())
         };
         let mut expected = None;
+        let mut scoped = None;
+        let mut bound_prepared = prepared.clone();
         if !local && self.is_client() {
             let scope = reader.map(|author| {
                 (
@@ -603,7 +605,17 @@ impl Db {
             .await?
             .ok_or_else(|| not_observed("authority coverage unavailable for paired read"))?;
             self.check_read_guard(id, guard)?;
-            let (through, rows) = answer;
+            let (through, rows, evidence) = answer;
+            bound_prepared.authority_policies =
+                self.inner().needs_authority_policies(prepared, reader)?;
+            if let Some(evidence) = evidence {
+                bound_prepared.authority_policies = true;
+                scoped = Some(ScopedReadSnapshot {
+                    through,
+                    roots: rows.clone(),
+                    evidence,
+                });
+            }
             let mut inner = self.inner();
             let batch = inner.batches.get_mut(&id).expect("guarded");
             if let BatchKind::Serializable {
@@ -627,6 +639,7 @@ impl Db {
                     .collect::<Vec<_>>(),
             );
         }
+        let prepared = &bound_prepared;
         let cut = {
             let mut inner = self.inner();
             let batch = inner.batches.get_mut(&id).expect("guarded");
@@ -657,40 +670,119 @@ impl Db {
                 Cut::at(*snapshot)
             }
         };
+        let overlay_checked = if scoped.is_some() {
+            let needs_check = {
+                let inner = self.inner();
+                let dependencies = inner
+                    .compile(
+                        prepared,
+                        reader,
+                        &ReadSpec {
+                            cut: Some(cut.clone()),
+                            include_deleted,
+                            ..ReadSpec::default()
+                        },
+                    )?
+                    .tables;
+                inner
+                    .batches
+                    .get(&id)
+                    .expect("guarded")
+                    .ops
+                    .iter()
+                    .any(|(schema, op)| {
+                        schema
+                            .stored_table(op.table())
+                            .is_ok_and(|table| dependencies.contains(table))
+                    })
+            };
+            if needs_check {
+                let (count, ops) = self.accepted_overlay_ops(id)?;
+                let mut check = std::pin::pin!(self.check_accepted_overlay(
+                    prepared,
+                    cut.seq,
+                    include_deleted,
+                    deadline,
+                    ops
+                ));
+                poll_fn(|cx| {
+                    guard.watch(cx.waker());
+                    if let Err(error) = self.check_read_guard(id, guard) {
+                        return Poll::Ready(Err(error));
+                    }
+                    check.as_mut().poll(cx)
+                })
+                .await?;
+                self.check_read_guard(id, guard)?;
+                Some(count)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         poll_fn(|cx| {
             guard.watch(cx.waker());
             let result = (|| {
                 self.check_read_guard(id, guard)?;
-                // The overlay includes only staged writes beyond the selected cut.
-                // Committed pending writes are deliberately absent from LocalOnly cuts.
-                let actual = self.in_overlay(id, None, |inner, overlay| {
-                    let mut overlaid = cut.clone();
-                    overlaid.own = overlay.map_or(0, |cut| cut.own);
-                    inner.run(
+                let rows = if let Some(scoped) = &scoped {
+                    let inner = self.inner();
+                    let dependencies = inner
+                        .compile(
+                            prepared,
+                            reader,
+                            &ReadSpec {
+                                cut: Some(cut.clone()),
+                                include_deleted,
+                                ..ReadSpec::default()
+                            },
+                        )?
+                        .tables;
+                    let batch = inner.batches.get(&id).expect("guarded");
+                    let touches = batch.ops.iter().any(|(schema, op)| {
+                        schema
+                            .stored_table(op.table())
+                            .is_ok_and(|table| dependencies.contains(table))
+                    });
+                    if touches && overlay_checked != Some(batch.ops.len()) {
+                        return Err(not_observed(
+                            "staged writes changed while awaiting authority overlay evidence",
+                        ));
+                    }
+                    inner.run_scoped_snapshot(prepared, reader, include_deleted, scoped)?
+                } else {
+                    // Existing local/ordinary paired reads compare their full
+                    // staged projection with the accepted snapshot.
+                    let actual = self.in_overlay(id, None, |inner, overlay| {
+                        let mut overlaid = cut.clone();
+                        overlaid.own = overlay.map_or(0, |cut| cut.own);
+                        inner.run(
+                            prepared,
+                            reader,
+                            &ReadSpec {
+                                cut: Some(overlaid),
+                                include_deleted,
+                                ..ReadSpec::default()
+                            },
+                        )
+                    })?;
+                    let rows = self.inner().run(
                         prepared,
                         reader,
                         &ReadSpec {
-                            cut: Some(overlaid),
+                            cut: Some(cut.clone()),
                             include_deleted,
                             ..ReadSpec::default()
                         },
-                    )
-                })?;
+                    )?;
+                    if rows != actual {
+                        return Err(not_observed(
+                            "paired read contains staged or provisional content",
+                        ));
+                    }
+                    rows
+                };
                 let mut inner = self.inner();
-                let rows = inner.run(
-                    prepared,
-                    reader,
-                    &ReadSpec {
-                        cut: Some(cut.clone()),
-                        include_deleted,
-                        ..ReadSpec::default()
-                    },
-                )?;
-                if rows != actual {
-                    return Err(not_observed(
-                        "paired read contains staged or provisional content",
-                    ));
-                }
                 if let Some(expected) = &expected {
                     let actual: Vec<_> = rows.iter().map(|row| *row.id.0.as_bytes()).collect();
                     if actual.as_slice() != expected.as_slice() {
@@ -723,6 +815,7 @@ impl Db {
                 };
                 reads.push(ReadRecord {
                     prepared: prepared.clone(),
+                    scoped: scoped.clone(),
                     include_deleted,
                     rows: versions(&rows),
                     content: read_contents(&rows)?,

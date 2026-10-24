@@ -192,6 +192,7 @@ impl Inner {
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
+            authority_policies: false,
             schema: None,
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;

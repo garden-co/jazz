@@ -1,6 +1,6 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ids::RowUuid;
@@ -753,6 +753,9 @@ impl Schema {
                             physical.indexes.push(index);
                         }
                     }
+                    // Also install the additive derived index on stores created
+                    // before scoped historical permission reads were available.
+                    ddl.push_str(&table.permission_history_indexes_ddl());
                 }
             }
         }
@@ -824,6 +827,47 @@ impl Table {
         )
     }
 
+    /// jazz.sqlite.permission-history-index.v1: a derived UUID lookup over
+    /// historical images. The row bytes and primary key are unchanged.
+    pub(crate) fn permission_history_index_name(&self, column: &str) -> Option<String> {
+        if !self.branch_by.is_empty()
+            || !self
+                .indexes
+                .iter()
+                .any(|index| index.first().is_some_and(|first| first == column))
+        {
+            return None;
+        }
+        let field = self.column(column)?;
+        let ty = match &field.ty {
+            ValueType::Nullable(inner) => inner.as_ref(),
+            ty => ty,
+        };
+        matches!(ty, ValueType::Uuid)
+            .then(|| format!("{}__h_permission_v1({})", self.stored, field.stored))
+    }
+
+    fn permission_history_indexes_ddl(&self) -> String {
+        self.indexes
+            .iter()
+            .filter_map(|index| index.first())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|column| {
+                self.permission_history_index_name(column)
+                    .map(|name| (column, name))
+            })
+            .map(|(column, name)| {
+                format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {}({},id,_b,_seq);\n",
+                    quote(&name),
+                    quote(&format!("{}__h", self.stored)),
+                    quote(self.stored_name(column))
+                )
+            })
+            .collect()
+    }
+
     /// DDL for one table. Columns are declared without a type so SQLite
     /// keeps every value's storage class as bound (no affinity coercion).
     pub fn ddl(&self) -> String {
@@ -854,6 +898,7 @@ impl Table {
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));
         }
+        sql.push_str(&table.permission_history_indexes_ddl());
         let large: Vec<&Column> = table
             .stored()
             .filter(|c| crate::large::large_capable(c))

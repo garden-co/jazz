@@ -772,6 +772,46 @@ fn order_runs(
     Ok(())
 }
 
+/// Rank only the supplied chunked cells. Callers choose their evidence scope;
+/// this helper does not enumerate any table or column.
+fn rank_cells(
+    conn: &Connection,
+    chunks: &Chunks,
+    slot: i64,
+    cells: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<bool, Error> {
+    let mut insert = conn
+        .prepare_cached(
+            "INSERT OR REPLACE INTO _jazz_lv_scratch (slot, cell, v) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(storage)?;
+    let mut groups: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    for cell in cells {
+        groups
+            .entry(cell_prefix(&cell)?.to_vec())
+            .or_default()
+            .push(cell);
+    }
+    let mut ties = false;
+    for (_, cells) in groups {
+        if cells.len() < 2 {
+            continue;
+        }
+        ties = true;
+        let mut runs = Vec::new();
+        order_runs(chunks, cells, 0, &mut runs)?;
+        // Cells of one logical value share a rank.
+        for (rank, run) in runs.iter().enumerate() {
+            for cell in run {
+                insert
+                    .execute(rusqlite::params![slot, cell, rank as i64])
+                    .map_err(storage)?;
+            }
+        }
+    }
+    Ok(ties)
+}
+
 /// Answer one prep into `_jazz_lv_scratch`. Returns whether a rank prep
 /// found chunked values that share a sort key.
 pub(crate) fn answer(
@@ -781,6 +821,14 @@ pub(crate) fn answer(
 ) -> Result<bool, Error> {
     use crate::compile::{MatchTest, Prep};
     use crate::tools::CmpOp;
+    if let Prep::Rank { table, column, .. } = prep {
+        return rank_cells(
+            conn,
+            chunks,
+            prep.slot(),
+            chunked_cells(conn, table, column)?,
+        );
+    }
     let mut insert = conn
         .prepare_cached(
             "INSERT OR REPLACE INTO _jazz_lv_scratch (slot, cell, v) VALUES (?1, ?2, ?3)",
@@ -818,33 +866,7 @@ pub(crate) fn answer(
             }
             Ok(false)
         }
-        Prep::Rank { table, column, .. } => {
-            let mut groups: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
-            for cell in chunked_cells(conn, table, column)? {
-                groups
-                    .entry(cell_prefix(&cell)?.to_vec())
-                    .or_default()
-                    .push(cell);
-            }
-            let mut ties = false;
-            for (_, cells) in groups {
-                if cells.len() < 2 {
-                    continue;
-                }
-                ties = true;
-                let mut runs = Vec::new();
-                order_runs(chunks, cells, 0, &mut runs)?;
-                // Cells of one logical value share a rank.
-                for (rank, run) in runs.iter().enumerate() {
-                    for cell in run {
-                        insert
-                            .execute(rusqlite::params![slot, cell, rank as i64])
-                            .map_err(storage)?;
-                    }
-                }
-            }
-            Ok(ties)
-        }
+        Prep::Rank { .. } => unreachable!("rank preparation handled above"),
         Prep::Class { columns, .. } => {
             for (table, column) in columns {
                 for cell in chunked_cells(conn, table, column)? {
@@ -1037,16 +1059,27 @@ pub(crate) fn end_upload(conn: &Connection, id: &[u8; 32]) -> Result<(), Error> 
     Ok(())
 }
 
-/// End every upload not touched since `before` (ms); returns how many.
-/// Prepare permission comparisons for an explicitly bounded set of dependency
+/// Prepare comparisons and ordering for an explicitly bounded set of dependency
 /// cells. Unlike `answer`, this never enumerates a table or column's contents.
+/// Returns whether a rank prep found chunked cells sharing a sort prefix.
 pub(crate) fn answer_cells(
     conn: &Connection,
     chunks: &Chunks,
     prep: &crate::compile::Prep,
     cells: &BTreeSet<Vec<u8>>,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     use crate::compile::{MatchTest, Prep};
+    if matches!(prep, Prep::Rank { .. }) {
+        return rank_cells(
+            conn,
+            chunks,
+            prep.slot(),
+            cells
+                .iter()
+                .filter(|cell| cell.first() == Some(&CHUNKED))
+                .cloned(),
+        );
+    }
     let mut insert = conn
         .prepare_cached("INSERT OR REPLACE INTO _jazz_lv_scratch(slot,cell,v) VALUES(?1,?2,?3)")
         .map_err(storage)?;
@@ -1079,17 +1112,13 @@ pub(crate) fn answer_cells(
                 }
                 None
             }
-            Prep::Rank { .. } => {
-                return Err(crate::values::unsupported(
-                    "rank preparations in candidate-created permission proofs",
-                ));
-            }
+            Prep::Rank { .. } => unreachable!("rank preparation handled above"),
         };
         insert
             .execute(rusqlite::params![prep.slot(), cell, value])
             .map_err(storage)?;
     }
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]

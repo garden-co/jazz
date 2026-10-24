@@ -2,7 +2,7 @@
 //! checks. SQLite supplies atomic absence and the complete serializable unit;
 //! the proof is a bounded least fixed point, followed by post-state revalidation.
 use super::*;
-use crate::compile::CandidateEvidence;
+use crate::compile::{CandidateEvidence, PermissionEvidence};
 
 // Connection-local scratch data, never persisted or sent to another runtime.
 pub(super) const TEMP_DDL: &str = "CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_created_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_qualified_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID;";
@@ -300,7 +300,7 @@ impl Inner {
                     None,
                     &session,
                     clause,
-                    scope,
+                    scope.into(),
                     crate::compile::DEFAULT_INHERITS_DEPTH,
                     budget,
                     &mut inputs,
@@ -319,11 +319,11 @@ impl Inner {
     }
 }
 
-type PolicyInput = (String, Vec<(String, Sql)>);
+pub(super) type PolicyInput = (String, Vec<(String, Sql)>);
 
 impl Inner {
     #[allow(clippy::too_many_arguments)]
-    fn candidate_inputs(
+    pub(super) fn candidate_inputs(
         &self,
         schema: &Schema,
         table: &Table,
@@ -331,7 +331,7 @@ impl Inner {
         outer: Option<(&Table, &[(String, Sql)])>,
         session: &Session,
         policy: &PolicyExpr,
-        scope: CandidateEvidence,
+        scope: PermissionEvidence,
         depth: usize,
         budget: &mut usize,
         inputs: &mut Vec<PolicyInput>,
@@ -439,7 +439,7 @@ impl Inner {
                 let binding = BTreeMap::new();
                 let (queries, params) = Ctx::new(schema, None, session, &binding)
                     .with_catalogue(self)
-                    .with_candidate_evidence(Some(scope))
+                    .with_permission_evidence(scope)
                     .candidate_relation_inputs(rel, table, root, session)?;
                 charge(budget, 1 + queries.len() + params.len())?;
                 for (table, sql) in queries {
@@ -488,7 +488,7 @@ impl Inner {
         let binding = BTreeMap::new();
         let mut ctx = Ctx::new(schema, None, &claims, &binding)
             .with_catalogue(self)
-            .with_candidate_evidence(Some(scope));
+            .with_permission_evidence(scope);
         ctx.params.push(value.clone());
         let bound = format!("?{}", ctx.params.len());
         let source = ctx.candidate_source(target, created, column, &bound)?;
@@ -538,7 +538,7 @@ impl Inner {
     /// Count VM work as well as Rust proof steps. Recursive relation queries
     /// can revisit a finite graph many times before their depth bound, so each
     /// batch of 256 SQLite instructions also consumes one unit of proof budget.
-    fn with_candidate_sql_budget<T>(
+    pub(super) fn with_candidate_sql_budget<T>(
         &self,
         budget: &mut usize,
         body: impl FnOnce() -> Result<T, Error>,
@@ -586,29 +586,45 @@ impl Inner {
         result
     }
 
-    fn with_candidate_preps<T>(
+    pub(super) fn with_candidate_preps<T>(
         &self,
         preps: &[crate::compile::Prep],
         inputs: &[PolicyInput],
         body: impl FnOnce() -> Result<T, Error>,
     ) -> Result<T, Error> {
+        if preps
+            .iter()
+            .any(|prep| matches!(prep, crate::compile::Prep::Rank { .. }))
+        {
+            return Err(unsupported(
+                "rank preparations in candidate-created permission proofs",
+            ));
+        }
+        self.with_bounded_preps(preps, inputs, |_| body())
+    }
+
+    /// Prepare comparisons and ordering from an explicit evidence set. The body
+    /// receives whether distinct chunked cells tie on their stored sort prefix.
+    pub(super) fn with_bounded_preps<T>(
+        &self,
+        preps: &[crate::compile::Prep],
+        inputs: &[PolicyInput],
+        body: impl FnOnce(bool) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         if preps.is_empty() {
-            return body();
+            return body(false);
         }
         self.conn
             .execute_batch("SAVEPOINT jazz_candidate_scratch")
             .map_err(storage)?;
         let result = (|| {
+            let mut ties = false;
             for prep in preps {
                 let columns = match prep {
                     crate::compile::Prep::Class { columns, .. } => columns.clone(),
-                    crate::compile::Prep::Match { table, column, .. } => {
+                    crate::compile::Prep::Match { table, column, .. }
+                    | crate::compile::Prep::Rank { table, column, .. } => {
                         vec![(table.clone(), column.clone())]
-                    }
-                    crate::compile::Prep::Rank { .. } => {
-                        return Err(unsupported(
-                            "rank preparations in candidate-created permission proofs",
-                        ));
                     }
                 };
                 let mut cells = BTreeSet::new();
@@ -621,9 +637,9 @@ impl Inner {
                         }
                     }
                 }
-                crate::large::answer_cells(&self.conn, &self.chunks, prep, &cells)?;
+                ties |= crate::large::answer_cells(&self.conn, &self.chunks, prep, &cells)?;
             }
-            body()
+            body(ties)
         })();
         for prep in preps {
             self.conn

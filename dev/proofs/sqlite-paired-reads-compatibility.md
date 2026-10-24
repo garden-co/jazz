@@ -50,6 +50,13 @@ roots, explicit query traversals, relationship output, flat joins and aggregates
 return a typed unsupported error. Policies still use the normal policy compiler;
 missing supporting evidence cannot qualify an incomplete result as complete.
 
+The [accepted scoped extension](sqlite-accepted-scoped-evidence-v1-compatibility.md)
+adds bounded permission evidence for trusted backends, including historical
+indexed dependencies and recursive helpers. The
+[accepted overlay check](sqlite-accepted-overlay-v1-compatibility.md) allows
+staged writes when the authority verifies that their projection leaves the
+original accepted result unchanged.
+
 ## Worked cases
 
 Bob's content write B is accepted at authority position 7. A later deletion D

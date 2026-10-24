@@ -930,3 +930,190 @@ fn candidate_relation_preparation_compares_chunked_outer_columns() {
         assert_eq!(count(&db, "resources"), usize::from(matches));
     }
 }
+
+/// Alice's trusted backend receives a bounded recursive permission closure,
+/// including through another backend relay. A revoked grant cannot survive in
+/// the backend's cached result; Mallory cannot borrow Alice's request scope.
+#[test]
+fn scoped_backend_reads_recheck_recursive_authority_evidence() {
+    use jazz::db::{ReadTier, SerializedReadResult, duplex};
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    fn drive<T>(nodes: &[&Db], future: impl Future<Output = T>) -> T {
+        let mut future = pin!(future);
+        for _ in 0..100 {
+            if let Poll::Ready(value) = future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                return value;
+            }
+            for node in nodes {
+                block_on(node.tick()).unwrap();
+            }
+        }
+        panic!("scoped read did not settle");
+    }
+    for relayed in [false, true] {
+        let server = open(true);
+        graph(&server, None);
+        block_on(server.insert(
+            "resources",
+            BTreeMap::from([("label".into(), Value::String("secret".into()))]),
+            InsertOptions {
+                row_id: Some(id(100)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let replica = |node| {
+            block_on(Db::open(DbConfig::new(
+                definition(true, relation(8)).without_permissions(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )))
+            .unwrap()
+        };
+        let relay = replica(93);
+        let backend = replica(94);
+        let (up, down) = duplex();
+        block_on(backend.connect_upstream(up));
+        if relayed {
+            relay.accept_subscriber(down, AuthorSubject::SYSTEM);
+            let (up, down) = duplex();
+            block_on(relay.connect_upstream(up));
+            server.accept_subscriber(down, AuthorSubject::SYSTEM);
+        } else {
+            server.accept_subscriber(down, AuthorSubject::SYSTEM);
+        }
+        let nodes = [&server, &relay, &backend];
+        let query = postcard::to_allocvec(&Query::from("resources")).unwrap();
+        let read = |who| {
+            backend.all_serialized_query(
+                &query,
+                ReadOpts::for_read_tier(ReadTier::Remote),
+                None,
+                Some((author(who), BTreeMap::new())),
+                Some(author(who)),
+                false,
+                || false,
+                |_| {},
+            )
+        };
+        let SerializedReadResult::Rows(rows) = drive(&nodes, read(1)).unwrap() else {
+            panic!("rows")
+        };
+        assert_eq!(rows.len(), 1, "relayed={relayed}");
+        let SerializedReadResult::Rows(rows) = drive(&nodes, read(2)).unwrap() else {
+            panic!("rows")
+        };
+        assert!(rows.is_empty(), "Mallory cannot borrow Alice's evidence");
+        block_on(server.update(
+            "members",
+            id(1),
+            BTreeMap::from([("activeAccount".into(), Value::Nullable(None))]),
+            Default::default(),
+        ))
+        .unwrap();
+        let SerializedReadResult::Rows(rows) = drive(&nodes, read(1)).unwrap() else {
+            panic!("rows")
+        };
+        assert!(rows.is_empty(), "relayed={relayed}: revoked grant survived");
+    }
+}
+
+/// Alice pins a recursive permission graph through a trusted backend. Bob then
+/// revokes the account seed and retargets both a recursive edge and the resource
+/// grant. Her second accepted read must use the graph at the pinned cut.
+#[test]
+fn accepted_scoped_recursive_permissions_keep_their_historical_graph() {
+    use jazz::db::{ReadTier, duplex};
+    use std::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    fn drive<T>(nodes: &[&Db], future: impl Future<Output = T>) -> T {
+        let mut future = pin!(future);
+        for _ in 0..200 {
+            if let Poll::Ready(value) = future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                return value;
+            }
+            for node in nodes {
+                block_on(node.tick()).unwrap();
+            }
+        }
+        panic!("accepted recursive read did not settle");
+    }
+    let server = open(true);
+    graph(&server, None);
+    block_on(server.insert(
+        "resources",
+        BTreeMap::from([("label".into(), Value::String("secret".into()))]),
+        InsertOptions {
+            row_id: Some(id(100)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let backend = block_on(Db::open(DbConfig::new(
+        definition(true, relation(8)).without_permissions(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([111; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let (up, down) = duplex();
+    block_on(backend.connect_upstream(up));
+    server.accept_subscriber(down, AuthorSubject::SYSTEM);
+    let nodes = [&server, &backend];
+    let tx = OpenTransactionId::new();
+    block_on(backend.begin_serializable_for_identity(tx, author(1))).unwrap();
+    let read = || {
+        backend
+            .all_settled(
+                backend
+                    .prepare_query(&Query::from("resources"))
+                    .unwrap()
+                    .with_identity_claims(author(1), BTreeMap::new()),
+                ReadOpts::for_read_tier(ReadTier::Remote),
+                tx,
+                false,
+                Some(author(1)),
+            )
+            .unwrap()
+    };
+    let first = drive(&nodes, read()).unwrap();
+    assert_eq!(first.rows.len(), 1);
+    block_on(server.update(
+        "members",
+        id(1),
+        BTreeMap::from([("activeAccount".into(), Value::Nullable(None))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.update(
+        "members",
+        id(2),
+        BTreeMap::from([("child".into(), Value::Uuid(id(999).0))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.update(
+        "access",
+        id(4),
+        BTreeMap::from([("resource".into(), Value::Uuid(id(101).0))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(drive(&nodes, read()).unwrap(), first);
+}

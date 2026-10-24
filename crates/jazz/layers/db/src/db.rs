@@ -64,6 +64,7 @@ use crate::values::{
     AuthorKey, Schema, Sql, Table, author_key, from_sql, quote, storage, to_sql, unsupported,
 };
 pub use accepted::{AcceptedContent, AcceptedRow, BindingSettledRead};
+pub use sync::ScopedReadRowV1;
 pub use sync::{
     Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, OwnerDurabilityBarrier,
     OwnerFrozenBaseV1, OwnerInputBaseV1, QueryAttachment, RelationSnapshot, RemoteLinkHint,
@@ -101,6 +102,8 @@ pub struct PreparedQuery {
     shape: Shape,
     binding_id: Binding,
     request_claims: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    /// This trusted-backend read uses the authenticated catalogue governor.
+    authority_policies: bool,
     /// The schema view that prepared it; `None` follows the owner schema.
     schema: Option<Rc<Schema>>,
 }
@@ -245,6 +248,9 @@ pub enum SubscriptionEvent {
 /// What a read observes: deletions and the branch view.
 #[derive(Clone, Debug, Default)]
 struct ReadSpec {
+    scoped_evidence: bool,
+    permission_cut: Option<u64>,
+    permission_own: u64,
     include_deleted: bool,
     /// A replica's read of the server's view (`ReadTier::Remote`).
     members_only: bool,
@@ -278,6 +284,9 @@ impl ReadSpec {
             }
         };
         Ok(Self {
+            scoped_evidence: false,
+            permission_cut: None,
+            permission_own: 0,
             include_deleted: opts.read_view.include_deleted,
             members_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
@@ -1229,6 +1238,7 @@ impl Db {
             shape: Shape(short(shape)),
             binding_id: Binding(short(bound)),
             request_claims: None,
+            authority_policies: false,
             schema: self.view.clone(),
         })
     }
@@ -2075,6 +2085,23 @@ impl Inner {
         (policy, claims)
     }
 
+    /// Retained authenticated views already refresh their policy governor in
+    /// effective_schema. Only a bootstrap query needs to acquire it here.
+    fn needs_authority_policies(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+    ) -> Result<bool, Error> {
+        if identity.is_none_or(|identity| identity == AuthorSubject::SYSTEM) {
+            return Ok(false);
+        }
+        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
+        if schema.policies_from.is_some() && self.view_policy_source.is_some() {
+            return Ok(false);
+        }
+        Ok(self.policy_descriptor()?.is_some())
+    }
+
     fn compile(
         &self,
         prepared: &PreparedQuery,
@@ -2084,9 +2111,26 @@ impl Inner {
         self.require_owner_subject(identity.unwrap_or(self.identity.author))?;
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
+        let schema = if read.scoped_evidence || prepared.authority_policies {
+            let descriptor = self.policy_descriptor()?.ok_or_else(|| {
+                Error::new(
+                    ErrorCode::NotObserved,
+                    "scoped permission policy descriptor is not resident",
+                )
+            })?;
+            Rc::new(
+                (*schema)
+                    .clone()
+                    .with_policies_of(Rc::new(self.named_policy_schema(&descriptor.schema.schema))),
+            )
+        } else {
+            schema
+        };
         self.require_catalogue_schema(&schema)?;
         let compiled = Ctx::new(&schema, policy.as_ref(), &claims, &prepared.binding)
+            .with_scoped_evidence(read.scoped_evidence)
             .with_candidate_evidence(self.candidate_read_evidence)
+            .with_permission_cut(read.permission_cut, read.permission_own)
             .with_catalogue(self)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
@@ -4189,8 +4233,16 @@ enum BatchKind {
 
 /// One read of a serializable transaction: what it returned (row ids and
 /// versions) at the snapshot, re-checked at commit.
+#[derive(Clone)]
+struct ScopedReadSnapshot {
+    through: u64,
+    roots: Vec<[u8; 16]>,
+    evidence: Vec<ScopedReadRowV1>,
+}
+
 struct ReadRecord {
     prepared: PreparedQuery,
+    scoped: Option<ScopedReadSnapshot>,
     include_deleted: bool,
     rows: Vec<(RowUuid, u64)>,
     /// Publication aliases may move, or retain their number while replay changes
@@ -4732,7 +4784,32 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let current = inner.read_rows(&read.prepared, batch.reader(), &spec)?;
+                    let current = if let Some(scoped) = &read.scoped {
+                        let schema = read.prepared.schema.as_ref().unwrap_or(&inner.owner);
+                        let table = schema.stored_table(&read.prepared.query.table)?;
+                        for (row, seq) in &read.rows {
+                            if inner
+                                .settled_seq(table, *row)?
+                                .is_some_and(|current| current > *seq)
+                            {
+                                return Err(conflict(
+                                    "an accepted scoped read row changed since its snapshot",
+                                ));
+                            }
+                        }
+                        // A partial cache cannot prove a fresh query result. Recheck
+                        // the exact admitted snapshot here; the normal authority
+                        // commit path still validates the original full query and
+                        // its content against current state, including phantoms.
+                        inner.run_scoped_snapshot(
+                            &read.prepared,
+                            batch.reader(),
+                            read.include_deleted,
+                            scoped,
+                        )?
+                    } else {
+                        inner.read_rows(&read.prepared, batch.reader(), &spec)?
+                    };
                     let now = versions(&current);
                     let mut changed =
                         now.len() != read.rows.len() || read_contents(&current)? != read.content;
@@ -5041,6 +5118,7 @@ impl Db {
         {
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
+                scoped: None,
                 include_deleted,
                 rows,
                 content,

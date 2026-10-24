@@ -32,6 +32,14 @@
 //!   A stale or partial replica can only cause a conflict, never a
 //!   non-serializable commit.
 
+#[path = "sync/accepted_overlay.rs"]
+mod accepted_overlay;
+#[path = "sync/scoped_reads.rs"]
+mod scoped_reads;
+use scoped_reads::ScopedEvidence;
+pub use scoped_reads::ScopedReadRowV1;
+type FetchAnswer = (u64, Vec<[u8; 16]>, Option<Vec<ScopedReadRowV1>>);
+
 use crate::schema::history::{history_source_table, is_history_table};
 use crate::values::query_error;
 use rusqlite::OptionalExtension;
@@ -649,6 +657,65 @@ pub enum SyncMessage {
         nonce: [u8; 16],
         commit: Vec<u8>,
     },
+    /// Tag 36, jazz.sqlite.sync.scoped-evidence-answer.v1. Exact versions of
+    /// the bounded permission closure, only for trusted backend scoped reads.
+    /// Row contents still arrive through ordinary Rows/chunk synchronization.
+    ScopedEvidenceAnswerV1 {
+        id: u64,
+        through: u64,
+        rows: Vec<[u8; 16]>,
+        evidence: Vec<ScopedReadRowV1>,
+    },
+    /// Tag 37, jazz.sqlite.sync.accepted-scoped-evidence-answer.v1.
+    /// Accepted query coverage plus exact permission inputs at the requested cut.
+    AcceptedScopedEvidenceAnswerV1 {
+        id: u64,
+        through: u64,
+        rows: Vec<[u8; 16]>,
+        evidence: Vec<ScopedReadRowV1>,
+    },
+    /// Tag 38, jazz.sqlite.sync.accepted-overlay-check.v1. A trusted backend
+    /// asks whether its staged writes preserve an accepted query at one cut.
+    AcceptedOverlayCheckV1 {
+        id: u64,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        through: u64,
+        include_deleted: bool,
+        author: String,
+        claims: BTreeMap<String, Value>,
+        ops: Vec<WireOp>,
+    },
+    /// Tag 39, jazz.sqlite.sync.accepted-overlay-checked.v1. No rows or writes
+    /// are published; the matching request's staged projection was unchanged.
+    AcceptedOverlayCheckedV1 {
+        id: u64,
+        through: u64,
+    },
+}
+
+fn evidence_answer(
+    accepted: bool,
+    id: u64,
+    through: u64,
+    rows: Vec<[u8; 16]>,
+    evidence: Vec<ScopedReadRowV1>,
+) -> SyncMessage {
+    if accepted {
+        SyncMessage::AcceptedScopedEvidenceAnswerV1 {
+            id,
+            through,
+            rows,
+            evidence,
+        }
+    } else {
+        SyncMessage::ScopedEvidenceAnswerV1 {
+            id,
+            through,
+            rows,
+            evidence,
+        }
+    }
 }
 
 // ---- client state ---------------------------------------------------------
@@ -747,7 +814,9 @@ pub(crate) struct Client {
     pub(crate) known: u64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
-    answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
+    answers: HashMap<u64, Option<Result<FetchAnswer, Error>>>,
+    scoped_answers: HashSet<u64>,
+    overlay_answers: HashSet<u64>,
     accepted_answers: HashSet<u64>,
     catalogue_answers:
         HashMap<u64, Option<Result<(CatalogueHeadV1, crate::ids::SchemaVersionId), Error>>>,
@@ -881,6 +950,8 @@ struct ForwardedFetch {
     identity: AuthorSubject,
     include_deleted: bool,
     accepted: bool,
+    scoped_evidence: bool,
+    overlay: bool,
     // Retain the timer so missing content cannot leave a relay request open forever.
     deadline: Option<Rc<Instant>>,
 }
@@ -3100,6 +3171,8 @@ impl Inner {
 impl Client {
     fn cancel_fetch(&mut self, id: u64) {
         self.answers.remove(&id);
+        self.scoped_answers.remove(&id);
+        self.overlay_answers.remove(&id);
         self.accepted_answers.remove(&id);
         self.catalogue_answers.remove(&id);
         self.outbox.retain(|message| {
@@ -3107,6 +3180,7 @@ impl Client {
                 SyncMessage::Fetch { id: request, .. }
                     | SyncMessage::ScopedFetchV1 { id: request, .. }
                     | SyncMessage::AcceptedFetchV1 { id: request, .. }
+                    | SyncMessage::AcceptedOverlayCheckV1 { id: request, .. }
                     | SyncMessage::CatalogueFetchV1 { id: request, .. }
                     if *request == id)
         });
@@ -3147,6 +3221,8 @@ impl Client {
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
+            scoped_answers: HashSet::new(),
+            overlay_answers: HashSet::new(),
             accepted_answers: HashSet::new(),
             catalogue_answers: HashMap::new(),
             advice: HashMap::new(),
@@ -3218,6 +3294,7 @@ impl Db {
                     | SyncMessage::Fetch { .. }
                     | SyncMessage::ScopedFetchV1 { .. }
                     | SyncMessage::AcceptedFetchV1 { .. }
+                    | SyncMessage::AcceptedOverlayCheckV1 { .. }
                     | SyncMessage::CatalogueFetchV1 { .. }
             )
         });
@@ -3677,7 +3754,7 @@ impl Db {
     ) -> Result<Option<u64>, Error> {
         self.fetch_answer(prepared, at, include_deleted, deadline, None, false)
             .await
-            .map(|answer| answer.map(|(through, _)| through))
+            .map(|answer| answer.map(|(through, _, _)| through))
     }
 
     pub(super) async fn fetch_answer(
@@ -3688,7 +3765,7 @@ impl Db {
         deadline: Option<Instant>,
         scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         accepted: bool,
-    ) -> Result<Option<(u64, Vec<[u8; 16]>)>, Error> {
+    ) -> Result<Option<FetchAnswer>, Error> {
         let (id, connection) = {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
@@ -3700,6 +3777,9 @@ impl Db {
             let id = client.next_id;
             client.next_id += 1;
             client.answers.insert(id, None);
+            if scope.is_some() {
+                client.scoped_answers.insert(id);
+            }
             if accepted {
                 client.accepted_answers.insert(id);
             }
@@ -4058,12 +4138,13 @@ impl Db {
                 client.persisted_known,
             )
         };
-        let applied = self.client_apply().and_then(|()| {
+        let applied = self.client_apply().and_then(|answers| {
             self.inner
                 .borrow()
                 .conn
                 .execute_batch("RELEASE sync_tick")
-                .map_err(storage)
+                .map_err(storage)?;
+            Ok(answers)
         });
         let ready = {
             let mut inner = self.inner.borrow_mut();
@@ -4095,7 +4176,21 @@ impl Db {
             }
             ready
         };
-        applied?;
+        // A receipt cannot outlive a rolled-back batch of its evidence rows.
+        // Stage only this tick's answers, without copying unrelated requests.
+        for (id, answer) in applied? {
+            if let Some(slot) = self
+                .inner
+                .borrow_mut()
+                .client
+                .as_mut()
+                .expect("client")
+                .answers
+                .get_mut(&id)
+            {
+                *slot = Some(answer);
+            }
+        }
         self.inner().refresh_authenticated_views()?;
         self.notify()?;
         let arrived = {
@@ -4113,14 +4208,15 @@ impl Db {
         self.client_send()
     }
 
-    fn client_apply(&self) -> Result<(), Error> {
+    fn client_apply(&self) -> Result<Vec<(u64, Result<FetchAnswer, Error>)>, Error> {
+        let mut answers = Vec::new();
         let mut rebase = false;
         let mut answered_remotes = Vec::new();
         let mut shadow_changed = false;
         {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
-                return Ok(());
+                return Ok(answers);
             };
             let mut inbound = Vec::new();
             if let Some(transport) = client.transport.as_mut() {
@@ -4144,6 +4240,8 @@ impl Db {
             // sort key its indexes need. Pending operations must first fetch the
             // verified prefixes needed to reconstruct those index keys.
             while let Some(message) = queue.pop_front() {
+                let accepted_evidence =
+                    matches!(&message, SyncMessage::AcceptedScopedEvidenceAnswerV1 { .. });
                 if let SyncMessage::OwnerInputsV1 { schema, units, .. } = &message
                     && !inner.owner_input_chunks_ready(*schema, units)?
                 {
@@ -4365,6 +4463,58 @@ impl Db {
                             *slot = Some(advice);
                         }
                     }
+                    SyncMessage::ScopedEvidenceAnswerV1 {
+                        id,
+                        through,
+                        rows,
+                        mut evidence,
+                    }
+                    | SyncMessage::AcceptedScopedEvidenceAnswerV1 {
+                        id,
+                        through,
+                        rows,
+                        mut evidence,
+                    } => {
+                        if !inner
+                            .client
+                            .as_ref()
+                            .expect("client")
+                            .answers
+                            .contains_key(&id)
+                        {
+                            continue;
+                        }
+                        let client = inner.client.as_ref().expect("client");
+                        if client.overlay_answers.contains(&id)
+                            || !client.scoped_answers.contains(&id)
+                            || client.accepted_answers.contains(&id) != accepted_evidence
+                        {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "scoped evidence answered a different request kind",
+                            ));
+                        }
+                        scoped_reads::validate_evidence(through, &evidence)?;
+                        for row in &mut evidence {
+                            row.table = inner.owner.stored_table(&row.table)?.to_owned();
+                        }
+                        let client = inner.client.as_mut().expect("client");
+                        client.known = client.known.max(through);
+                        answers.push((id, Ok((through, rows, Some(evidence)))));
+                    }
+                    SyncMessage::AcceptedOverlayCheckedV1 { id, through } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if !client.answers.contains_key(&id) {
+                            continue;
+                        }
+                        if !client.overlay_answers.contains(&id) || through >= LOCAL_BASE {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "accepted overlay response answered a different request kind or invalid cut",
+                            ));
+                        }
+                        answers.push((id, Ok((through, Vec::new(), None))));
+                    }
                     SyncMessage::AcceptedAnswerV1 { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
                         if through >= LOCAL_BASE {
@@ -4373,27 +4523,34 @@ impl Db {
                                 "accepted answer has an optimistic cut",
                             ));
                         }
-                        if client.accepted_answers.contains(&id) {
+                        if client.accepted_answers.contains(&id)
+                            && !client.overlay_answers.contains(&id)
+                        {
                             client.known = client.known.max(through);
-                            if let Some(slot) = client.answers.get_mut(&id) {
-                                *slot = Some(Ok((through, rows)));
+                            if client.answers.contains_key(&id) {
+                                answers.push((id, Ok((through, rows, None))));
                             }
                         }
                     }
                     SyncMessage::Answer { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
-                        if client.accepted_answers.contains(&id) {
-                            if let Some(slot) = client.answers.get_mut(&id) {
-                                *slot = Some(Err(Error::new(
-                                    ErrorCode::NotObserved,
-                                    "ordinary cache answer cannot cover an accepted read",
-                                )));
+                        if client.accepted_answers.contains(&id)
+                            || client.overlay_answers.contains(&id)
+                        {
+                            if client.answers.contains_key(&id) {
+                                answers.push((
+                                    id,
+                                    Err(Error::new(
+                                        ErrorCode::NotObserved,
+                                        "ordinary cache answer cannot cover an accepted read",
+                                    )),
+                                ));
                             }
                             continue;
                         }
                         client.known = client.known.max(through);
-                        if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((through, rows)));
+                        if client.answers.contains_key(&id) {
+                            answers.push((id, Ok((through, rows, None))));
                         }
                     }
                     SyncMessage::Refused { id, code, message } => {
@@ -4401,8 +4558,8 @@ impl Db {
                         let error = Error::new(code, message);
                         if let Some(slot) = client.catalogue_answers.get_mut(&id) {
                             *slot = Some(Err(error));
-                        } else if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Err(error));
+                        } else if client.answers.contains_key(&id) {
+                            answers.push((id, Err(error)));
                         } else if let Some(key) = client.remote_ids.get(&id)
                             && let Some(remote) = client.remote.get(key)
                         {
@@ -4517,10 +4674,11 @@ impl Db {
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
         if known == client.persisted_known {
-            return Ok(());
+            return Ok(answers);
         }
         client.persisted_known = known;
-        inner.persist_meta("known", known)
+        inner.persist_meta("known", known)?;
+        Ok(answers)
     }
 
     fn client_send(&self) -> Result<(), Error> {
@@ -5009,6 +5167,7 @@ impl Db {
                     | SyncMessage::Fetch { id, .. }
                     | SyncMessage::ScopedFetchV1 { id, .. }
                     | SyncMessage::AcceptedFetchV1 { id, .. }
+                    | SyncMessage::AcceptedOverlayCheckV1 { id, .. }
                     | SyncMessage::CatalogueFetchV1 { id, .. } => Some(*id),
                     _ => None,
                 };
@@ -5411,7 +5570,9 @@ impl Db {
                         let mut ids = session.subs.keys().copied().collect::<BTreeSet<_>>();
                         ids.extend(session.outbox.iter().filter_map(|message| match message {
                             SyncMessage::Answer { id, .. }
-                            | SyncMessage::AcceptedAnswerV1 { id, .. } => Some(*id),
+                            | SyncMessage::AcceptedAnswerV1 { id, .. }
+                            | SyncMessage::ScopedEvidenceAnswerV1 { id, .. }
+                            | SyncMessage::AcceptedScopedEvidenceAnswerV1 { id, .. } => Some(*id),
                             _ => None,
                         }));
                         for id in ids {
@@ -5489,6 +5650,7 @@ impl Db {
         include_deleted: bool,
         accepted: bool,
         expected: Option<&[[u8; 16]]>,
+        evidence: Option<ScopedEvidence>,
     ) -> Result<(), Error> {
         let mut inner = self.inner();
         // A history read ships versions of its source table.
@@ -5499,10 +5661,28 @@ impl Db {
             .to_owned();
         let read = ReadSpec {
             cut: at.map(Cut::at),
+            permission_cut: matches!(&evidence, Some(ScopedEvidence::Collect))
+                .then_some(at.unwrap_or(inner.seq)),
             include_deleted,
             ..ReadSpec::default()
         };
-        let rows = inner.run(prepared, policy, &read)?;
+        let publish_evidence = inner.sessions[index].identity == AuthorSubject::SYSTEM;
+        if matches!(&evidence, Some(ScopedEvidence::Collect)) && !publish_evidence {
+            return Err(rejected(
+                "scoped permission evidence requires a trusted backend connection",
+            ));
+        }
+        let rows = match &evidence {
+            Some(ScopedEvidence::Supplied(evidence)) => {
+                inner.run_scoped_evidence(prepared, policy, &read, evidence)?
+            }
+            Some(ScopedEvidence::Collect) => {
+                let mut budget = scoped_reads::MAX_EVIDENCE;
+                inner
+                    .with_candidate_sql_budget(&mut budget, || inner.run(prepared, policy, &read))?
+            }
+            None => inner.run(prepared, policy, &read)?,
+        };
         if let Some(expected) = expected {
             let actual: Vec<_> = rows.iter().map(|row| *row.id.0.as_bytes()).collect();
             if actual != expected {
@@ -5547,6 +5727,32 @@ impl Db {
                 images.extend(found);
             }
         }
+        let scoped_evidence = match evidence {
+            Some(ScopedEvidence::Collect) => {
+                if inner.client.is_some() {
+                    return Err(unsupported(
+                        "collecting scoped permission evidence away from the current authority",
+                    ));
+                }
+                let evidence = inner.scoped_permission_evidence(
+                    prepared,
+                    policy,
+                    &images,
+                    at.unwrap_or(inner.seq),
+                )?;
+                for row in &evidence {
+                    images.extend(inner.scoped_evidence_image(row)?);
+                }
+                Some(evidence)
+            }
+            Some(ScopedEvidence::Supplied(evidence)) if publish_evidence => {
+                for row in &evidence {
+                    images.extend(inner.scoped_evidence_image(row)?);
+                }
+                Some(evidence)
+            }
+            None | Some(ScopedEvidence::Supplied(_)) => None,
+        };
         let support = inner.support_of(query)?;
         let mut extra = Vec::new();
         let mut watch = std::mem::take(&mut inner.sessions[index].watch);
@@ -5628,11 +5834,15 @@ impl Db {
         }
         session.outbox.extend(owner_inputs);
         let rows = rows.iter().map(|r| *r.id.0.as_bytes()).collect();
-        session.outbox.push(if accepted {
-            SyncMessage::AcceptedAnswerV1 { id, through, rows }
-        } else {
-            SyncMessage::Answer { id, through, rows }
-        });
+        session
+            .outbox
+            .push(if let Some(evidence) = scoped_evidence {
+                evidence_answer(accepted, id, through, rows, evidence)
+            } else if accepted {
+                SyncMessage::AcceptedAnswerV1 { id, through, rows }
+            } else {
+                SyncMessage::Answer { id, through, rows }
+            });
         Ok(())
     }
 
@@ -5646,6 +5856,8 @@ impl Db {
         include_deleted: bool,
         at: Option<u64>,
         accepted: bool,
+        scoped_evidence: bool,
+        overlay_ops: Option<Vec<WireOp>>,
     ) -> Result<(), Error> {
         let deadline = self
             .read_deadline(accepted.then(|| Instant::now() + std::time::Duration::from_secs(15)));
@@ -5684,10 +5896,24 @@ impl Db {
             .1
             .clone();
         client.answers.insert(upstream, None);
+        client.scoped_answers.insert(upstream);
         if accepted {
             client.accepted_answers.insert(upstream);
         }
-        let message = if accepted {
+        let overlay = overlay_ops.is_some();
+        let message = if let Some(ops) = overlay_ops {
+            client.overlay_answers.insert(upstream);
+            SyncMessage::AcceptedOverlayCheckV1 {
+                id: upstream,
+                query: prepared.query.clone(),
+                binding: prepared.binding.clone(),
+                through: at.expect("overlay cut"),
+                include_deleted,
+                author: identity.canonical().to_owned(),
+                claims,
+                ops,
+            }
+        } else if accepted {
             SyncMessage::AcceptedFetchV1 {
                 id: upstream,
                 query: prepared.query.clone(),
@@ -5718,6 +5944,8 @@ impl Db {
                 identity,
                 include_deleted,
                 accepted,
+                scoped_evidence,
+                overlay,
                 deadline,
             },
         );
@@ -5780,18 +6008,46 @@ impl Db {
                             })
                     });
                     if let Some(answer) = answer {
-                        if request.accepted
-                            && let Ok((through, rows)) = &answer
+                        if !request.overlay
+                            && (request.accepted
+                                || request.scoped_evidence
+                                || matches!(&answer, Ok((_, _, Some(_)))))
+                            && let Ok((through, rows, evidence)) = &answer
                         {
                             // Rows can precede their chunks. Keep the request alive while
                             // normal chunk demand hydrates this exact authority result.
-                            let exact = scoped_result_query(&request.prepared, rows.clone());
+                            let mut exact = scoped_result_query(&request.prepared, rows.clone());
+                            exact.authority_policies = match inner
+                                .needs_authority_policies(&exact, Some(request.identity))
+                            {
+                                Ok(needed) => needed,
+                                Err(error) => {
+                                    completed.push((id, Err(error)));
+                                    continue;
+                                }
+                            };
                             let read = ReadSpec {
                                 cut: Some(Cut::at(*through)),
                                 include_deleted: request.include_deleted,
                                 ..ReadSpec::default()
                             };
-                            if let Err(error) = inner.run(&exact, Some(request.identity), &read) {
+                            let evaluated = if request.scoped_evidence || evidence.is_some() {
+                                match evidence {
+                                    Some(evidence) => inner.run_scoped_evidence(
+                                        &exact,
+                                        Some(request.identity),
+                                        &read,
+                                        evidence,
+                                    ),
+                                    None => Err(Error::new(
+                                        ErrorCode::NotObserved,
+                                        "authority omitted scoped permission evidence",
+                                    )),
+                                }
+                            } else {
+                                inner.run(&exact, Some(request.identity), &read)
+                            };
+                            if let Err(error) = evaluated {
                                 if crate::large::is_missing(&error) {
                                     continue;
                                 }
@@ -5816,9 +6072,19 @@ impl Db {
             ready
         };
         for (index, id, request, answer) in ready {
-            let result = answer.and_then(|(through, rows)| {
-                let expected = request.accepted.then_some(rows.clone());
-                let exact = scoped_result_query(&request.prepared, rows);
+            let result = answer.and_then(|(through, rows, evidence)| {
+                if request.overlay {
+                    self.inner().sessions[index]
+                        .outbox
+                        .push(SyncMessage::AcceptedOverlayCheckedV1 { id, through });
+                    return Ok(());
+                }
+                let expected = (request.accepted || request.scoped_evidence || evidence.is_some())
+                    .then_some(rows.clone());
+                let mut exact = scoped_result_query(&request.prepared, rows);
+                exact.authority_policies = self
+                    .inner()
+                    .needs_authority_policies(&exact, Some(request.identity))?;
                 self.session_db(index).serve_fetch(
                     index,
                     id,
@@ -5829,6 +6095,7 @@ impl Db {
                     request.include_deleted,
                     request.accepted,
                     expected.as_deref(),
+                    evidence.map(ScopedEvidence::Supplied),
                 )
             });
             if let Err(error) = result {
@@ -5883,6 +6150,57 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
         let connection_identity = self.inner.borrow().sessions[index].identity;
+        if let SyncMessage::AcceptedOverlayCheckV1 {
+            id,
+            query,
+            binding,
+            through,
+            include_deleted,
+            author,
+            claims,
+            ops,
+        } = &message
+        {
+            if connection_identity != AuthorSubject::SYSTEM {
+                return Err(rejected(
+                    "accepted overlay checks require a trusted backend connection",
+                ));
+            }
+            let author =
+                AuthorSubject::from_canonical(author).map_err(|e| query_error(e.to_string()))?;
+            if author == AuthorSubject::SYSTEM {
+                return Err(rejected(
+                    "accepted overlay checks require a session identity",
+                ));
+            }
+            let db = self.session_db(index);
+            let prepared = db
+                .prepare_query_bound(query, binding.clone())?
+                .with_identity_claims(author, claims.clone());
+            db.check_accepted_query(&prepared)?;
+            accepted_overlay::validate_ops(ops)?;
+            if self.is_client() {
+                return db.forward_scoped_fetch(
+                    index,
+                    *id,
+                    prepared,
+                    author,
+                    *include_deleted,
+                    Some(*through),
+                    true,
+                    false,
+                    Some(ops.clone()),
+                );
+            }
+            db.validate_accepted_overlay(&prepared, author, *through, *include_deleted, ops)?;
+            self.inner().sessions[index]
+                .outbox
+                .push(SyncMessage::AcceptedOverlayCheckedV1 {
+                    id: *id,
+                    through: *through,
+                });
+            return Ok(());
+        }
         // Delegation changes only this request, never the connection identity
         // or the authority's cached claims for another request.
         let accepted = matches!(&message, SyncMessage::AcceptedFetchV1 { .. });
@@ -6257,11 +6575,16 @@ impl Db {
                 include_deleted,
             } => {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
-                if accepted {
+                let scoped_evidence = if accepted {
                     db.check_accepted_query(&prepared)?;
+                    scoped
+                        && connection_identity == AuthorSubject::SYSTEM
+                        && db.check_scoped_fetch(&prepared)?
                 } else if scoped {
-                    db.check_scoped_fetch(&prepared)?;
-                }
+                    db.check_scoped_fetch(&prepared)?
+                } else {
+                    false
+                };
                 if (scoped || accepted) && self.is_client() {
                     let claims = prepared
                         .request_claims
@@ -6283,6 +6606,8 @@ impl Db {
                         include_deleted,
                         at,
                         accepted,
+                        scoped_evidence,
+                        None,
                     )?;
                 } else {
                     if accepted {
@@ -6306,6 +6631,7 @@ impl Db {
                         include_deleted,
                         accepted,
                         None,
+                        scoped_evidence.then_some(ScopedEvidence::Collect),
                     )?;
                 }
             }
@@ -6624,6 +6950,7 @@ impl Db {
                     shape: Shape([0; 16]),
                     binding_id: Binding([0; 16]),
                     request_claims: None,
+                    authority_policies: false,
                     schema: self.view.clone(),
                 };
                 let spec = ReadSpec {
@@ -6830,6 +7157,7 @@ fn overtakes_writes(message: &SyncMessage) -> bool {
             | SyncMessage::Fetch { .. }
             | SyncMessage::ScopedFetchV1 { .. }
             | SyncMessage::AcceptedFetchV1 { .. }
+            | SyncMessage::AcceptedOverlayCheckV1 { .. }
             | SyncMessage::CatalogueFetchV1 { .. }
             | SyncMessage::Advise { .. }
     )
@@ -6879,7 +7207,31 @@ fn image_in(schema: &Schema, mut image: Image) -> Option<Image> {
 
 /// A server message as the session's schema names rows.
 fn message_out(schema: &Schema, message: SyncMessage) -> Option<SyncMessage> {
+    let accepted_evidence = matches!(&message, SyncMessage::AcceptedScopedEvidenceAnswerV1 { .. });
     Some(match message {
+        SyncMessage::ScopedEvidenceAnswerV1 {
+            id,
+            through,
+            rows,
+            mut evidence,
+        }
+        | SyncMessage::AcceptedScopedEvidenceAnswerV1 {
+            id,
+            through,
+            rows,
+            mut evidence,
+        } => {
+            for row in &mut evidence {
+                let Some(table) = schema.by_stored(&row.table) else {
+                    return Some(SyncMessage::Refused {
+                        id, code: ErrorCode::Query,
+                        message: "scoped permission evidence across a schema view missing a dependency table is unsupported".into(),
+                    });
+                };
+                row.table = table.name.clone();
+            }
+            evidence_answer(accepted_evidence, id, through, rows, evidence)
+        }
         SyncMessage::Rows { images } => SyncMessage::Rows {
             images: images
                 .into_iter()
@@ -6974,7 +7326,7 @@ fn row_local_policy(policy: &PolicyExpr) -> bool {
 }
 
 impl Db {
-    fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<(), Error> {
+    fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<bool, Error> {
         let query = &prepared.query;
         if history_source_table(&query.table).is_some()
             || !query.joins.is_empty()
@@ -7001,12 +7353,26 @@ impl Db {
             .policy_schema()
             .by_stored(&table.stored)
             .and_then(|table| table.policy(crate::tools::Operation::Select));
-        if policy.is_some_and(|policy| !row_local_policy(policy)) {
-            return Err(unsupported(
-                "scoped remote reads with cross-row permission evidence",
-            ));
+        let needs_evidence = policy.is_some_and(|policy| !row_local_policy(policy));
+        if needs_evidence {
+            // Reject unbounded dependency shapes even for an empty result,
+            // before the authority executes its ordinary permission query.
+            let identity = prepared
+                .request_claims
+                .as_ref()
+                .map(|(author, _)| *author)
+                .unwrap_or(inner.identity.author);
+            let (_, session) = inner.read_sessions(prepared, Some(identity));
+            Ctx::new(&schema, None, &session, &prepared.binding)
+                .with_catalogue(&*inner)
+                .with_candidate_evidence(Some(crate::compile::CandidateEvidence {
+                    accepted: inner.seq,
+                    publication: inner.seq + 1,
+                    post: false,
+                }))
+                .operation_policy(table, crate::tools::Operation::Select, "t", &session)?;
         }
-        Ok(())
+        Ok(needs_evidence)
     }
 
     pub fn detach_query(&self, _attachment: QueryAttachment) {}
@@ -7166,7 +7532,7 @@ impl Db {
                 author != AuthorSubject::SYSTEM && author != self.inner().identity.author
             }) || prepared.request_claims.is_some()
             {
-                self.check_scoped_fetch(&prepared)?;
+                let scoped_evidence = self.check_scoped_fetch(&prepared)?;
                 let identity = author.unwrap_or(self.inner().identity.author);
                 let claims = match &prepared.request_claims {
                     Some((requested, claims)) if *requested == identity => claims.clone(),
@@ -7193,18 +7559,56 @@ impl Db {
                         false,
                     )
                     .await?;
-                if let Some((through, rows)) = answer {
+                if let Some((through, rows, evidence)) = answer {
+                    let scoped_evidence = scoped_evidence
+                        || evidence.is_some()
+                        || self.check_scoped_fetch(&prepared)?;
+                    let expected = rows.clone();
                     // Only these authority-approved roots, at this cut, belong
                     // to this request. Other cached or pending rows do not.
-                    let exact = scoped_result_query(&prepared, rows);
+                    let mut exact = scoped_result_query(&prepared, rows);
+                    // This query may have been prepared before the authority's
+                    // policy descriptor arrived with its answer. Recheck simple
+                    // row-local policies under that authenticated governor too.
+                    exact.authority_policies = self
+                        .inner()
+                        .needs_authority_policies(&exact, Some(identity))?;
                     let read = ReadSpec {
                         cut: Some(Cut::at(through)),
                         include_deleted: opts.read_view.include_deleted,
                         ..ReadSpec::default()
                     };
                     let rows = self
-                        .hydrate_one_shot(wait, || self.inner().run(&exact, Some(identity), &read))
+                        .hydrate_one_shot(wait, || {
+                            if scoped_evidence {
+                                let evidence = evidence.as_ref().ok_or_else(|| {
+                                    Error::new(
+                                        ErrorCode::NotObserved,
+                                        "authority omitted scoped permission evidence",
+                                    )
+                                })?;
+                                self.inner().run_scoped_evidence(
+                                    &exact,
+                                    Some(identity),
+                                    &read,
+                                    evidence,
+                                )
+                            } else {
+                                self.inner().run(&exact, Some(identity), &read)
+                            }
+                        })
                         .await?;
+                    if rows
+                        .iter()
+                        .map(|row| *row.id.as_bytes())
+                        .collect::<Vec<_>>()
+                        != expected
+                    {
+                        return Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "scoped permission evidence does not reproduce the authority result",
+                        ));
+                    }
                     return Ok(result(rows));
                 }
                 if opts.tier == ReadTier::Remote {
@@ -7228,7 +7632,7 @@ impl Db {
                     )
                     .await?;
                 if opts.tier == ReadTier::Remote
-                    && let Some((_, rows)) = answer
+                    && let Some((_, rows, _)) = answer
                 {
                     // The answer names this read's roots, including an empty
                     // result. Own cached writes need not have been subscribed

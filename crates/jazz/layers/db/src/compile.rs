@@ -288,6 +288,23 @@ pub(crate) struct CandidateEvidence {
     pub post: bool,
 }
 
+/// A bounded policy lookup either observes one candidate authorization unit or
+/// the authority's complete state at an arbitrary accepted cut.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PermissionEvidence {
+    Candidate(CandidateEvidence),
+    Accepted { through: u64, own: u64 },
+}
+
+impl From<CandidateEvidence> for PermissionEvidence {
+    fn from(value: CandidateEvidence) -> Self {
+        Self::Candidate(value)
+    }
+}
+
+#[path = "compile/accepted_permissions.rs"]
+mod accepted_permissions;
+
 /// SQL text plus its positional parameters.
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
@@ -314,9 +331,10 @@ pub struct Ctx<'a> {
     /// listing for it (`_jazz_revoked`) are left out.
     pub members_only: bool,
     next_alias: usize,
-    candidate_evidence: Option<CandidateEvidence>,
+    permission_evidence: Option<PermissionEvidence>,
     in_policy: bool,
     in_inherited_policy: bool,
+    scoped_evidence: bool,
     /// Bounded source queries used to prepare candidate relation cells.
     candidate_inputs: Option<Vec<(String, String)>>,
 }
@@ -398,9 +416,10 @@ impl<'a> Ctx<'a> {
             history_origin: None,
             members_only: false,
             next_alias: 0,
-            candidate_evidence: None,
+            permission_evidence: None,
             in_policy: false,
             in_inherited_policy: false,
+            scoped_evidence: false,
             candidate_inputs: None,
         }
     }
@@ -447,7 +466,19 @@ impl<'a> Ctx<'a> {
     }
 
     pub(crate) fn with_candidate_evidence(mut self, evidence: Option<CandidateEvidence>) -> Self {
-        self.candidate_evidence = evidence;
+        self.permission_evidence = evidence.map(PermissionEvidence::Candidate);
+        self
+    }
+
+    pub(crate) fn with_permission_evidence(mut self, evidence: PermissionEvidence) -> Self {
+        self.permission_evidence = Some(evidence);
+        self
+    }
+
+    pub(crate) fn with_permission_cut(mut self, through: Option<u64>, own: u64) -> Self {
+        if let Some(through) = through {
+            self.permission_evidence = Some(PermissionEvidence::Accepted { through, own });
+        }
         self
     }
 
@@ -472,6 +503,11 @@ impl<'a> Ctx<'a> {
 
     pub fn with_view(mut self, view: Option<View>) -> Self {
         self.view = view;
+        self
+    }
+
+    pub(crate) fn with_scoped_evidence(mut self, scoped: bool) -> Self {
+        self.scoped_evidence = scoped;
         self
     }
 
@@ -568,7 +604,7 @@ impl<'a> Ctx<'a> {
     /// mask), then base rows the head does not override. Filters, policies,
     /// ordering and windows all apply after this masking.
     fn source(&mut self, table: &Table) -> Result<String, Error> {
-        if self.in_policy && self.candidate_evidence.is_some() {
+        if self.in_policy && self.permission_evidence.is_some() {
             return Err(unsupported(
                 "permission dependencies without a bounded scalar correlation in candidate authorization units",
             ));
@@ -585,11 +621,52 @@ impl<'a> Ctx<'a> {
         column: &str,
         value: &str,
     ) -> Result<String, Error> {
-        let scope = self.candidate_evidence.ok_or_else(|| {
+        let scope = self.permission_evidence.ok_or_else(|| {
             unsupported(
                 "ExistsIncludingCreated permission checks without a SQLite authorization unit",
             )
         })?;
+        let scope = match scope {
+            PermissionEvidence::Accepted { through, own } => {
+                if include_created {
+                    return Err(unsupported(
+                        "candidate-created sources in accepted permission evidence",
+                    ));
+                }
+                let alias = self.alias("accepted_permission");
+                let projection = |historical| {
+                    let mut columns = vec![if historical {
+                        "NULL".to_owned()
+                    } else {
+                        format!("{alias}.rid")
+                    }];
+                    columns
+                        .extend(["id", "_b", "_seq", "_del"].map(|name| format!("{alias}.{name}")));
+                    columns.extend(
+                        table
+                            .stored()
+                            .map(|column| format!("{alias}.{}", quote(&column.stored))),
+                    );
+                    columns.join(", ")
+                };
+                let arms =
+                    self.accepted_permission_arms(table, column, value, &alias, through, own)?;
+                return Ok(format!(
+                    "({})",
+                    arms.into_iter()
+                        .enumerate()
+                        .map(|(i, (from, condition))| {
+                            format!(
+                                "SELECT {} FROM {from} WHERE {condition}",
+                                projection(i == 1)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" UNION ALL ")
+                ));
+            }
+            PermissionEvidence::Candidate(scope) => scope,
+        };
         let lookup_index = if column == "id" {
             String::new()
         } else {
@@ -691,6 +768,37 @@ impl<'a> Ctx<'a> {
         let mut columns = "rid, id, _b, _seq, _del".to_owned();
         for column in table.stored() {
             columns.push_str(&format!(", {}", quote(&column.stored)));
+        }
+        if self.scoped_evidence {
+            if !table.branch_by.is_empty() {
+                return Err(unsupported("branched permission evidence in scoped reads"));
+            }
+            let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
+            let current = quote(&table.stored);
+            let history = quote(&format!("{}__h", table.stored));
+            let projection = |alias: &str, historical: bool| {
+                let mut fields = vec![if historical {
+                    "NULL".to_owned()
+                } else {
+                    format!("{alias}.rid")
+                }];
+                fields.extend(["id", "_b", "_seq", "_del"].map(|name| format!("{alias}.{name}")));
+                fields.extend(
+                    table
+                        .stored()
+                        .map(|column| format!("{alias}.{}", quote(&column.stored))),
+                );
+                fields.join(", ")
+            };
+            return Ok(format!(
+                "(SELECT {} FROM _jazz_scoped_read_evidence_v1 e CROSS JOIN {current} c \
+                 WHERE e.t={stored} AND c.id=e.id AND c._b=e.k AND c._seq=e.seq \
+                 UNION ALL SELECT {} FROM _jazz_scoped_read_evidence_v1 e CROSS JOIN {history} h \
+                 WHERE e.t={stored} AND h.id=e.id AND h._b=e.k AND h._seq=e.seq \
+                 AND NOT EXISTS (SELECT 1 FROM {current} c WHERE c.id=e.id AND c._b=e.k AND c._seq=e.seq))",
+                projection("c", false),
+                projection("h", true),
+            ));
         }
         let view = self.view.clone().filter(|_| !table.branch_by.is_empty());
         let Some(view) = view else {
@@ -2032,7 +2140,7 @@ impl<'a> Ctx<'a> {
                 let e = self.alias("e");
                 let inner =
                     self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
-                let source = if self.candidate_evidence.is_some() {
+                let source = if self.permission_evidence.is_some() {
                     self.candidate_dependency(target, table, alias, condition, false)?
                 } else {
                     self.source(target)?
@@ -2062,7 +2170,7 @@ impl<'a> Ctx<'a> {
                 let target = self.table(target_name)?;
                 let p = self.alias("p");
                 let inner = self.inherited_policy(target, *operation, &p, session, depth - 1)?;
-                let source = if self.candidate_evidence.is_some() {
+                let source = if self.permission_evidence.is_some() {
                     if is_array(table, via_column) {
                         return Err(unsupported(
                             "array-reference inheritance in candidate authorization units",
@@ -2091,7 +2199,7 @@ impl<'a> Ctx<'a> {
                 let source = self.table(source_table)?;
                 let s = self.alias("s");
                 let inner = self.inherited_policy(source, *operation, &s, session, depth - 1)?;
-                let from = if self.candidate_evidence.is_some() {
+                let from = if self.permission_evidence.is_some() {
                     if is_array(source, via_column) {
                         return Err(unsupported(
                             "array-reference inheritance in candidate authorization units",
@@ -2164,7 +2272,7 @@ impl<'a> Ctx<'a> {
                     ctes: Vec::new(),
                     wheres: vec![format!("{r}._del = 0")],
                     from: vec![Src {
-                        sql: if self.candidate_evidence.is_some() {
+                        sql: if self.permission_evidence.is_some() {
                             quote(&table.stored)
                         } else {
                             self.source(table)?
