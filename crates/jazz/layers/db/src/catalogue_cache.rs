@@ -130,8 +130,11 @@ impl Inner {
             )
             .map_err(storage)
     }
+    pub(super) fn needs_catalogue_schema(&self, schema: &Schema) -> Result<bool, Error> {
+        Ok(self.catalogue_cache_required && !self.catalogue_ready(schema)?)
+    }
     pub(super) fn require_catalogue_schema(&self, schema: &Schema) -> Result<(), Error> {
-        if self.catalogue_cache_required && !self.catalogue_ready(schema)? {
+        if self.needs_catalogue_schema(schema)? {
             return Err(Error::new(
                 ErrorCode::Schema,
                 "requested schema is not admitted by the authenticated catalogue",
