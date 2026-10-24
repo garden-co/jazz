@@ -3901,6 +3901,38 @@ impl Db {
         .await
     }
 
+    /// A remote one-shot must not overtake its preceding uploads, including
+    /// commits held behind streamed chunks. Capture only this opening's writes;
+    /// later writes cannot extend its wait. Either terminal fate releases the
+    /// barrier: rejected writes are absent from the authority's ensuing answer.
+    async fn wait_for_preceding_read_writes(&self) {
+        let mut pending: Vec<UploadId> = {
+            let inner = self.inner.borrow();
+            let Some(client) = &inner.client else {
+                return;
+            };
+            client.pending.iter().map(|p| (p.node, p.tx)).collect()
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let _attempt = self.read_attempt_deadline();
+        self.schedule_pending_tick();
+        poll_fn(|_| {
+            let inner = self.inner.borrow();
+            let Some(client) = &inner.client else {
+                return Poll::Ready(());
+            };
+            pending.retain(|id| !client.fates.contains_key(id));
+            if pending.is_empty() || client.transport.is_none() || !may_wait(client.hint.get()) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
     /// Freeze everything this database has committed, its own unsettled
     /// writes included, as a persistable reference for snapshot reads and
     /// frozen branch bases. A replica whose link can answer first lets its
@@ -7567,6 +7599,14 @@ impl Db {
         F: Fn(QueryAttachment),
         E: Fn() -> bool,
     {
+        if open_tx.is_none()
+            && opts.tier == ReadTier::Remote
+            && !ReadSpec::of(&opts, &self.inner())?.frozen()
+        {
+            // This is upload ordering, not query coverage. In particular, a
+            // large upload cannot consume the binding's coverage deadline.
+            self.wait_for_preceding_read_writes().await;
+        }
         let read = self.read_serialized_query(query, opts, open_tx, request_scope, author);
         let mut read = std::pin::pin!(read);
         let mut deadline = None;
