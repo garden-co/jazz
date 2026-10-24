@@ -355,7 +355,7 @@ impl Inner {
             } => {
                 let target = schema.table(target)?;
                 let (column,parent)=crate::compile::candidate_correlation(condition,table,target)
-                    .ok_or_else(||unsupported("large-value candidate permission dependencies without a scalar declared-reference correlation"))?;
+                    .ok_or_else(||unsupported("large-value candidate permission dependencies without a scalar declared-reference correlation or indexed UUID equality"))?;
                 (
                     target,
                     column,

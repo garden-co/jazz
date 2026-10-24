@@ -236,8 +236,10 @@ fn scratch_value(slot: i64, cell: &str) -> String {
     format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))")
 }
 
-/// A mandatory scalar declared-reference correlation. Extra predicates retain
-/// their SQL meaning; this key bounds every accepted and created source lookup.
+/// A mandatory UUID equality with an indexed target. The public policy
+/// validator checks reference compatibility; the SQLite source needs a bounded
+/// lookup, including when both endpoints refer to a third table (an account) or
+/// an extra scope UUID supplies a narrower key. Every other predicate remains.
 pub(crate) fn candidate_correlation<'a>(
     condition: &'a PolicyExpr,
     outer: &Table,
@@ -253,8 +255,23 @@ pub(crate) fn candidate_correlation<'a>(
             value: crate::tools::PolicyValue::SessionRef(path),
         } if path.len() == 2 && path[0] == "__jazz_outer_row" => {
             let parent = path[1].as_str();
-            ((column == "id" && outer.references.get(parent) == Some(&target.name))
-                || (parent == "id" && target.references.get(column) == Some(&outer.name)))
+            let uuid = |table: &Table, column: &str| {
+                column == "id"
+                    || table.column(column).is_some_and(|column| {
+                        let ty = match &column.ty {
+                            ValueType::Nullable(inner) => inner.as_ref(),
+                            ty => ty,
+                        };
+                        matches!(ty, ValueType::Uuid)
+                    })
+            };
+            (uuid(outer, parent)
+                && uuid(target, column)
+                && (column == "id"
+                    || target
+                        .indexes
+                        .iter()
+                        .any(|index| index.first() == Some(column))))
             .then_some((column.as_str(), parent))
         }
         _ => None,
@@ -659,7 +676,7 @@ impl<'a> Ctx<'a> {
         condition: &PolicyExpr,
         include_created: bool,
     ) -> Result<String, Error> {
-        let (column,parent)=candidate_correlation(condition,outer,table).ok_or_else(|| unsupported("permission dependencies without a scalar declared-reference correlation in candidate authorization units"))?;
+        let (column,parent)=candidate_correlation(condition,outer,table).ok_or_else(|| unsupported("permission dependencies without a scalar declared-reference correlation or indexed UUID equality in candidate authorization units"))?;
         let value = column_sql(outer, alias, parent)?;
         self.candidate_source(table, include_created, column, &value)
     }

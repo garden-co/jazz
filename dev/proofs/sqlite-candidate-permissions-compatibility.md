@@ -70,9 +70,12 @@ Each unit has a 16,384-step proof/dependency budget, including repeated checks
 and scoped preprocessing. Exhausting it rejects the whole unit. There is no
 unbounded retry or unchecked remainder.
 
-Every policy dependency requires a mandatory scalar declared-reference
-correlation. Each current-source UNION arm contains that key filter and uses a
-leading index. Baseline history is driven by this unit's publication sequence,
+Every policy dependency requires a mandatory UUID equality whose target is a
+primary key or the leading column of a declared index. This includes references
+to a shared account table and generic scope identifiers; the public policy
+validator still checks reference compatibility. All additional predicates remain
+part of the proof. Each current-source UNION arm contains that key filter and
+uses its index. Baseline history is driven by this unit's publication sequence,
 then looked up by exact coordinate; it never starts from all accepted rows.
 Uncorrelated dependency sources, relation helpers and array-reference
 inheritance in these scoped units return an explicit unsupported error. Reverse references
@@ -81,7 +84,7 @@ are refused.
 
 String and byte comparisons prepare only exact root and related dependency
 cells, including historical images used by the baseline proof. Dependency
-lookups require a mandatory scalar declared-reference correlation. They stop at
+lookups require the same mandatory indexed UUID equality. They stop at
 the remaining budget rather than enumerating a whole large-value column. A
 corrupted unrelated chunked value cannot poison an independent proof. Equal
 chunked values compare by logical content; a common prefix is not equality.
