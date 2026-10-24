@@ -32,6 +32,14 @@ an unpublished owner view. This check uses an indexed descriptor-presence query,
 not a manifest decode or application-row scan on every operation. Ordinary
 uncached local opens retain their existing admission behaviour.
 
+A one-shot binding read at the remote tier, or a local-first read that may wait
+for the authority, can refresh missing admission before preparing its query. This uses the normal
+catalogue coverage request with the requested schema and read identity, then
+rechecks admission through the ordinary query path. Local-only, immediate,
+frozen and transaction reads do not fetch admission. A local-first timeout
+includes the metadata wait; unavailable or unpublished schemas stay unusable.
+The guard remains an indexed descriptor lookup and no encoding changes.
+
 For example, Alice captures Bob's `notes.text` descriptor and opens offline
 under a proposed `drafts.text` schema. She can look up the cached `notes` UUID,
 but cannot use it to admit `drafts`, even after a SQLite restart. A typed `notes`
