@@ -287,7 +287,17 @@ impl Db {
             .conn
             .execute_batch("SAVEPOINT catalogue_install")
             .map_err(storage)?;
-        let result = inner.record_catalogue(&head, &records);
+        let result = inner.record_catalogue(&head, &records).and_then(|()| {
+            let schema = snapshot
+                .schemas
+                .iter()
+                .find(|s| s.id == head.current)
+                .ok_or_else(|| invalid("current catalogue schema is missing"))?;
+            inner.record_policy_descriptor(&PolicyDescriptorV1 {
+                head: head.clone(),
+                schema: schema.clone(),
+            })
+        });
         if result.is_ok() {
             inner
                 .conn
