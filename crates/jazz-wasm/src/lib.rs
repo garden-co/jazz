@@ -35,7 +35,11 @@ use wasm_bindgen_futures::future_to_promise;
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
+mod idb_paged;
 mod identity;
+#[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
+pub mod paged_bench;
 
 #[cfg(feature = "bench-probes")]
 pub mod bench_probes;
