@@ -109,6 +109,18 @@ impl Inner {
         roots: &[Image],
         through: u64,
     ) -> Result<Vec<ScopedReadRowV1>, Error> {
+        let mut budget = MAX_EVIDENCE;
+        self.permission_evidence_with_budget(prepared, identity, roots, through, &mut budget)
+    }
+
+    pub(super) fn permission_evidence_with_budget(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        roots: &[Image],
+        through: u64,
+        budget: &mut usize,
+    ) -> Result<Vec<ScopedReadRowV1>, Error> {
         if !self.authority || self.client.is_some() || through > self.seq || through >= LOCAL_BASE {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -127,7 +139,6 @@ impl Inner {
         } else {
             PermissionEvidence::Accepted { through, own: 0 }
         };
-        let mut budget = MAX_EVIDENCE;
         let mut inputs = Vec::new();
         for root in roots {
             let coordinate = ScopedReadRowV1 {
@@ -137,7 +148,7 @@ impl Inner {
                 seq: root.seq,
             };
             let input = self.scoped_input(&coordinate)?;
-            budget = budget.checked_sub(1 + input.1.len()).ok_or_else(|| {
+            *budget = budget.checked_sub(1 + input.1.len()).ok_or_else(|| {
                 unsupported("scoped permission evidence exceeds its bounded work limit")
             })?;
             let table = governing.by_stored(&root.table).ok_or_else(|| {
@@ -153,7 +164,7 @@ impl Inner {
                     policy,
                     scope,
                     crate::compile::DEFAULT_INHERITS_DEPTH,
-                    &mut budget,
+                    budget,
                     &mut inputs,
                 )?;
             }

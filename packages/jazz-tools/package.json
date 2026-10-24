@@ -183,6 +183,8 @@
     "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "test:browser:sqlite-e2ee": "pnpm exec vitest run --config vitest.config.browser-e2ee-sqlite.ts",
+    "test:browser:sqlite-e2ee-quickstart": "pnpm exec vitest run --config vitest.config.browser-e2ee-quickstart.ts",
+    "typecheck:sqlite-e2ee": "tsc --project tests/sqlite-e2ee/tsconfig.json",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:transport": "node --test scripts/evaluate-harness.test.mjs",
     "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
