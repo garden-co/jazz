@@ -30,6 +30,10 @@ server URL to the browser.
   ../examples/e2ee-chat/quickstart/vite.config.ts
 </include>
 
+Keep the Jazz server port stable: the account registry URL includes it. A new
+port selects a separate account store. If port `4200` is already in use, choose
+another port and keep it for this project.
+
 ## 2. Declare the encrypted messages
 
 Create `schema.ts` at the project root. Each chat is an encryption space;
