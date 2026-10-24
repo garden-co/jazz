@@ -4,7 +4,9 @@
 //! statement text, its bound-parameter count, and what its bound values
 //! need from the host (largest blob or text, integers beyond 2^53). With
 //! `JAZZ_SQL_TRACE_EXPANDED=1` it also logs the text with parameters
-//! expanded, for replaying writes.
+//! expanded, for replaying writes. With `JAZZ_SQL_PROFILE=1` each
+//! statement's run time follows it as `{"conn", "ns"}` (SQLite's profile
+//! event), to split a workload's time between SQLite and the engine.
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
 use std::io::Write;
@@ -37,24 +39,35 @@ pub(crate) fn install(conn: &Connection) {
         CONNECTIONS.fetch_add(1, Ordering::Relaxed)
     );
     let context = Box::into_raw(Box::new(id)) as *mut c_void;
+    let mut mask = ffi::SQLITE_TRACE_STMT as c_uint;
+    if std::env::var_os("JAZZ_SQL_PROFILE").is_some() {
+        mask |= ffi::SQLITE_TRACE_PROFILE as c_uint;
+    }
     // SAFETY: the callback only reads the statement it is handed; the
     // context string is leaked for the connection's (and process's) life.
     unsafe {
-        ffi::sqlite3_trace_v2(
-            conn.handle(),
-            ffi::SQLITE_TRACE_STMT as c_uint,
-            Some(record),
-            context,
-        );
+        ffi::sqlite3_trace_v2(conn.handle(), mask, Some(record), context);
     }
 }
 
 unsafe extern "C" fn record(
-    _event: c_uint,
+    event: c_uint,
     context: *mut c_void,
     statement: *mut c_void,
     text: *mut c_void,
 ) -> c_int {
+    if event == ffi::SQLITE_TRACE_PROFILE as c_uint {
+        // SAFETY: SQLITE_TRACE_PROFILE hands the run time as an i64 of ns.
+        let (id, ns) = unsafe { (&*(context as *const String), *(text as *const i64)) };
+        let mut line = serde_json::json!({ "conn": id, "ns": ns })
+            .to_string()
+            .into_bytes();
+        line.push(b'\n');
+        if let Some(file) = SINK.lock().unwrap().as_mut() {
+            let _ = file.write_all(&line);
+        }
+        return 0;
+    }
     // SAFETY: SQLITE_TRACE_STMT hands the statement and its text.
     let (id, sql) = unsafe {
         (

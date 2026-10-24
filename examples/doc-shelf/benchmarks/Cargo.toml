@@ -24,3 +24,7 @@ path = "src/bin/footprint.rs"
 [[bin]]
 name = "doc-shelf-do-cost"
 path = "src/bin/do_cost.rs"
+
+[[bin]]
+name = "doc-shelf-do-ceiling"
+path = "src/bin/do_ceiling.rs"
