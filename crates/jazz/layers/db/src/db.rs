@@ -4331,7 +4331,24 @@ pub(crate) struct LargeEdits {
     pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
 }
 
+/// An admitted read's boundary in the batch's append-only staging buffers.
+/// Capturing lengths is constant time and retains no copy of unrelated writes.
+#[derive(Clone, Copy)]
+struct BatchPrefix {
+    ops: usize,
+    derived: usize,
+    pending_nodes: usize,
+}
+
 impl Batch {
+    fn prefix(&self) -> BatchPrefix {
+        BatchPrefix {
+            ops: self.ops.len(),
+            derived: self.edits.derived.len(),
+            pending_nodes: self.edits.pending_nodes.len(),
+        }
+    }
+
     fn reader(&self) -> Option<AuthorSubject> {
         match who(self.identity) {
             Who::Session(author) => Some(author),
@@ -5102,15 +5119,48 @@ impl Db {
         extra: Option<StagedOp>,
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        self.in_overlay_prefix(id, None, extra, read)
+    }
+
+    /// An asynchronous read observes only writes admitted before its first poll,
+    /// even when a prior read or authority hydration delays its evaluation.
+    fn in_overlay_prefix<R>(
+        &self,
+        id: OpenTransactionId,
+        prefix: Option<BatchPrefix>,
+        extra: Option<StagedOp>,
+        read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let mut inner = self.inner();
         let batch = inner
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
-        let mut ops = batch.ops.clone();
+        let prefix = prefix.unwrap_or_else(|| batch.prefix());
+        let unavailable = || {
+            Error::new(
+                ErrorCode::NotObserved,
+                "transaction staged prefix is no longer available",
+            )
+        };
+        let mut ops = batch
+            .ops
+            .get(..prefix.ops)
+            .ok_or_else(unavailable)?
+            .to_vec();
         let edits = LargeEdits {
-            derived: batch.edits.derived.clone(),
-            pending_nodes: batch.edits.pending_nodes.clone(),
+            derived: batch
+                .edits
+                .derived
+                .get(..prefix.derived)
+                .ok_or_else(unavailable)?
+                .to_vec(),
+            pending_nodes: batch
+                .edits
+                .pending_nodes
+                .get(..prefix.pending_nodes)
+                .ok_or_else(unavailable)?
+                .to_vec(),
         };
         let snapshot = match &batch.kind {
             BatchKind::Mergeable => None,
@@ -5339,6 +5389,15 @@ impl TxRef<'_> {
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut guard = self.db.transaction_read_guard(self.id, false)?;
+        // Capture before waiting for earlier reads. Their authority round trip
+        // must not make later staging visible to this already-admitted read.
+        let prefix = self
+            .db
+            .inner()
+            .batches
+            .get(&self.id)
+            .ok_or_else(|| rejected("transaction is not open"))?
+            .prefix();
         guard.wait().await?;
         self.db.check_read_guard(self.id, &guard)?;
         let scope = self
@@ -5364,7 +5423,7 @@ impl TxRef<'_> {
             None => prepared.clone(),
         };
         let result = self
-            .all_prepared_with_inner(&prepared, include_deleted, &guard)
+            .all_prepared_with_inner(&prepared, include_deleted, &guard, prefix)
             .await;
         guard.finish(&result);
         result
@@ -5375,6 +5434,7 @@ impl TxRef<'_> {
         prepared: &PreparedQuery,
         include_deleted: bool,
         guard: &accepted::ReadGuard,
+        prefix: BatchPrefix,
     ) -> Result<Vec<CurrentRow>, Error> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
@@ -5449,19 +5509,21 @@ impl TxRef<'_> {
             }
         }
         // Relations nest inside the overlay, so they see staged rows too.
-        let rows = self.db.in_overlay(self.id, None, |inner, cut| {
-            let reader = inner.batches.get(&self.id).and_then(Batch::reader);
-            let roots = inner.run(
-                prepared,
-                reader,
-                &ReadSpec {
-                    include_deleted,
-                    cut,
-                    ..ReadSpec::default()
-                },
-            )?;
-            inner.nest_relations(prepared, reader, roots)
-        })?;
+        let rows = self
+            .db
+            .in_overlay_prefix(self.id, Some(prefix), None, |inner, cut| {
+                let reader = inner.batches.get(&self.id).and_then(Batch::reader);
+                let roots = inner.run(
+                    prepared,
+                    reader,
+                    &ReadSpec {
+                        include_deleted,
+                        cut,
+                        ..ReadSpec::default()
+                    },
+                )?;
+                inner.nest_relations(prepared, reader, roots)
+            })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)
     }
