@@ -671,7 +671,10 @@ impl WasmDbInner {
         action: HostResult<jazz::protocol::PermissionAdviceAction>,
     ) -> Result<WasmPermissionAdviceRequest, JsValue> {
         let action = action.map_err(host_error)?;
-        let (id, advice) = self.binding.request_permission_advice(action);
+        let (id, advice) = self
+            .binding
+            .request_permission_advice(action, None, None)
+            .map_err(host_error)?;
         Ok(WasmPermissionAdviceRequest {
             promise: host_promise(advice, JsValue::from_str),
             db: self.clone(),

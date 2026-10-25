@@ -377,9 +377,13 @@ fn two_bindings_sync_over_frames_the_host_carries() {
             Value::String("hello".to_owned())
         ]
     );
-    let (_, advice) = client.request_permission_advice(
-        binding_host::advice::insert("notes".to_owned(), &title("may I")).unwrap(),
-    );
+    let (_, advice) = client
+        .request_permission_advice(
+            binding_host::advice::insert("notes".to_owned(), &title("may I")).unwrap(),
+            None,
+            None,
+        )
+        .unwrap();
     assert_eq!(drive(&links, advice).unwrap(), "allowed");
     let snapshot = drive(&links, client.capture_snapshot()).unwrap();
     assert!(

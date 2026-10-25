@@ -554,10 +554,13 @@ pub enum SyncMessage {
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
-    /// `action` right now? Never writes.
+    /// `action` right now? Never writes. `author` and `session` name the
+    /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
     Advise {
         id: u64,
         action: PermissionAdviceAction,
+        author: Option<String>,
+        session: Option<BTreeMap<String, Value>>,
     },
     // server → client
     Advice {
@@ -3252,10 +3255,16 @@ impl Db {
     }
 
     /// Ask the upstream authority whether `action` would be allowed for
-    /// this replica's session; wait with [`Db::permission_advice`]. Without
-    /// a connected upstream the answer is `Unknown`: a replica's own policy
-    /// evidence may be incomplete, so it never decides locally.
-    pub fn request_permission_advice(&self, action: PermissionAdviceAction) -> u64 {
+    /// this replica's session, or for `session` (an identity a trusted
+    /// backend acts for, with its claims); wait with
+    /// [`Db::permission_advice`]. Without a connected upstream the answer
+    /// is `Unknown`: a replica's own policy evidence may be incomplete, so
+    /// it never decides locally.
+    pub fn request_permission_advice(
+        &self,
+        action: PermissionAdviceAction,
+        session: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> u64 {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return 0;
@@ -3264,7 +3273,16 @@ impl Db {
         client.next_id += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
-            client.outbox.push(SyncMessage::Advise { id, action });
+            let (author, session) = match session {
+                Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
+                None => (None, None),
+            };
+            client.outbox.push(SyncMessage::Advise {
+                id,
+                action,
+                author,
+                session,
+            });
         } else {
             client.advice.insert(id, Some(PermissionAdvice::Unknown));
         }
@@ -4587,6 +4605,25 @@ impl Db {
         result
     }
 
+    /// Run `f` with a vouched session's claims standing for its identity's.
+    fn with_claims<R>(
+        &self,
+        vouched: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let Some((author, claims)) = vouched else {
+            return f();
+        };
+        let previous = self.inner.borrow_mut().claims.insert(author, claims);
+        let result = f();
+        let mut inner = self.inner.borrow_mut();
+        match previous {
+            Some(previous) => inner.claims.insert(author, previous),
+            None => inner.claims.remove(&author),
+        };
+        result
+    }
+
     fn serve_as(
         &self,
         index: usize,
@@ -4802,8 +4839,25 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::Advise { id, action } => {
-                let advice = self.advise(policy, action);
+            SyncMessage::Advise {
+                id,
+                action,
+                author,
+                session,
+            } => {
+                // As for a commit: a trusted link may ask for a session it
+                // vouches for; a session link only for its own.
+                let advice = match commit_who(policy, author.as_deref(), session.is_some()) {
+                    Ok(who) => {
+                        let identity = match who {
+                            Who::Session(author) => Some(author),
+                            _ => policy,
+                        };
+                        let vouched = vouched(policy, who, session);
+                        self.with_claims(vouched, || self.advise(identity, action))
+                    }
+                    Err(_) => PermissionAdvice::Denied,
+                };
                 self.inner.borrow_mut().sessions[index]
                     .outbox
                     .push(SyncMessage::Advice { id, advice });
@@ -4987,32 +5041,10 @@ impl Db {
                     None => match commit_who(policy, author.as_deref(), session.is_some())
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
-                            // A trusted link's session write is checked
-                            // with the claims the link vouches for.
-                            let vouched = match (who, session) {
-                                (Who::Session(author), Some(claims)) if policy.is_none() => {
-                                    Some((author, claims))
-                                }
-                                _ => None,
-                            };
-                            let previous = vouched.as_ref().map(|(author, claims)| {
-                                (
-                                    *author,
-                                    self.inner
-                                        .borrow_mut()
-                                        .claims
-                                        .insert(*author, claims.clone()),
-                                )
-                            });
-                            let result = db.authorize_commit(who, policy, kind, ops, (node, tx));
-                            if let Some((author, previous)) = previous {
-                                let mut inner = self.inner.borrow_mut();
-                                match previous {
-                                    Some(previous) => inner.claims.insert(author, previous),
-                                    None => inner.claims.remove(&author),
-                                };
-                            }
-                            result
+                            let vouched = vouched(policy, who, session);
+                            self.with_claims(vouched, || {
+                                db.authorize_commit(who, policy, kind, ops, (node, tx))
+                            })
                         }) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
@@ -5357,6 +5389,19 @@ impl Db {
 /// attribute to another author; a trusted link (no policy identity) writes
 /// as the session it names (impersonation: checked as it), or unchecked,
 /// attributed to the author it names or as itself.
+/// The session and claims a trusted link (no `policy` of its own) vouches
+/// for: its session writes and preflights are checked with them.
+fn vouched(
+    policy: Option<AuthorSubject>,
+    who: Who,
+    session: Option<BTreeMap<String, Value>>,
+) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+    match (who, session) {
+        (Who::Session(author), Some(claims)) if policy.is_none() => Some((author, claims)),
+        _ => None,
+    }
+}
+
 fn commit_who(
     policy: Option<AuthorSubject>,
     author: Option<&str>,
