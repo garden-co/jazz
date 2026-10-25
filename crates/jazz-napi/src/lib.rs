@@ -1099,21 +1099,12 @@ impl NapiDb {
 
 /// The SQLite file of a persistent store in directory `data_path`.
 ///
-/// A directory the Groove engine wrote (RocksDB) is refused rather than
-/// opened empty next to its data.
+/// A directory the Groove engine wrote (RocksDB) is refused with the
+/// `unsupported_storage_codecs` code rather than opened empty next to its
+/// data.
 fn store_file(data_path: &str) -> napi::Result<std::path::PathBuf> {
     let dir = std::path::Path::new(data_path);
-    let groove_store = dir.join("CURRENT").is_file()
-        && std::fs::read_dir(dir).is_ok_and(|entries| {
-            entries
-                .flatten()
-                .any(|entry| entry.file_name().to_string_lossy().starts_with("MANIFEST-"))
-        });
-    if groove_store {
-        return Err(not_supported(&format!(
-            "opening {data_path}, a store written by the Groove engine (RocksDB),"
-        )));
-    }
+    jazz::format::refuse_groove_store(dir).map_err(|error| host_error(HostError::Engine(error)))?;
     std::fs::create_dir_all(dir)
         .map_err(|error| napi::Error::from_reason(format!("create {data_path}: {error}")))?;
     Ok(dir.join("jazz.sqlite"))

@@ -506,7 +506,12 @@ impl JazzClient {
                 .await
             }
         }
-        .map_err(|error| JazzError::Storage(error.to_string()))?;
+        .map_err(|error| match error.code {
+            crate::db::ErrorCode::UnsupportedStorageCodecs => {
+                JazzError::UnsupportedStorage(error.message)
+            }
+            _ => JazzError::Storage(error.to_string()),
+        })?;
         if let Some(session) = default_session.as_ref() {
             db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?);
         }

@@ -64,8 +64,8 @@ const toolBundleValidator = fs.readFileSync(
   path.join(root, "dev/ci/validate-tool-bundle.mjs"),
   "utf8",
 );
-const m3Differential = fs.readFileSync(
-  path.join(root, "crates/jazz/layers/node/src/node/tests/m3_differential.rs"),
+const differentialOracle = fs.readFileSync(
+  path.join(root, "crates/jazz/tests/maintained_differential.rs"),
   "utf8",
 );
 const jobs = (() => {
@@ -732,7 +732,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
 
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.match(storageCompat, /local-ci-equivalent\.mjs --ci-partition storage-compat/);
-  // The oracle reuses the lib-test unit the native corpus just built, and it
+  // The oracle links the jazz library the native corpus just built, and it
   // still reports when the corpus step fails.
   assert.match(
     storageCompat,
@@ -744,16 +744,16 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   );
   assert.match(
     localCi,
-    /cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
+    /cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
-  assert.match(localCi, /message\.target\.name === "jazz_node"/);
+  assert.match(localCi, /message\.target\.name === "maintained_differential"/);
   assert.match(
     localCi,
-    /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\S]*m3_maintained_one_shot_differential_oracle --exact --ignored/,
+    /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=60[\s\S]*maintained_one_shot_differential_oracle --exact --ignored/,
   );
   assert.match(
-    m3Differential,
-    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+    differentialOracle,
+    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn maintained_one_shot_differential_oracle\(/,
   );
   assert.match(aggregate, /if: always\(\)/);
   assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat\]/);

@@ -524,6 +524,10 @@ impl Inner {
             None
         } else {
             root_key(query, &prepared.binding)
+                // Only an application column is in a changed row's image;
+                // a key on anything else (`$createdBy.identity.subject`,
+                // `id`) would never be hit.
+                .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
                 .map(|(column, value)| (root.stored_name(&column).to_owned(), value))
                 .or(policy_root_key)
         }

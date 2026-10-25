@@ -458,6 +458,14 @@ impl Chunks {
         }
     }
 
+    /// Close the read-only connection. The store's own connection must be
+    /// the last one on the file when it closes: only the last connection
+    /// checkpoints the WAL into the file and removes it, and a read-only one
+    /// cannot.
+    pub(crate) fn close_reader(&self) {
+        self.state.lock().expect("chunk cache").reader = None;
+    }
+
     /// The open transaction ended: its nodes are readable from the file (or
     /// were rolled back, and are unreferenced but still correct bytes).
     pub(crate) fn unpin(&self) {

@@ -11,8 +11,10 @@ export const UNSUPPORTED_STORAGE_CODECS_ERROR_CODE = "unsupported_storage_codecs
  *
  * Codec IDs carry their format version (`name.vN`): `missing` names formats
  * this build requires that the store lacks, and `unknown` names formats the
- * store was written with that this build does not read. This mirrors Groove's
- * `Error::UnsupportedStorageCodecs`.
+ * store was written with that this build does not read. The browser's store
+ * manifest declares codec IDs; the native SQLite engine stamps one storage
+ * format number instead, names it in the message, and leaves both lists
+ * empty.
  *
  * Class identity does not survive native bindings or browser worker
  * messages, so detect the refusal with {@link isUnsupportedStorageCodecsError},
@@ -54,13 +56,14 @@ export function isUnsupportedStorageCodecsError(error: unknown): error is Error 
 /**
  * Rebuild a storage-format refusal that crossed a binding or relay as an
  * {@link UnsupportedStorageCodecsError}, keeping its message and codec lists.
- * Any other value, or a refusal without well-formed codec lists, is returned
- * unchanged.
+ * A refusal that carries no lists (the native SQLite engine's, whose message
+ * names the formats) gets empty ones. Any other value, or a refusal with
+ * malformed lists, is returned unchanged.
  */
 export function asUnsupportedStorageCodecsError(error: unknown): unknown {
   if (error instanceof UnsupportedStorageCodecsError) return error;
   if (!isUnsupportedStorageCodecsError(error)) return error;
-  const { missing, unknown } = error;
+  const { missing = [], unknown = [] } = error;
   if (!isStringArray(missing) || !isStringArray(unknown)) return error;
   return new UnsupportedStorageCodecsError([...missing], [...unknown], error.message, {
     cause: error,
