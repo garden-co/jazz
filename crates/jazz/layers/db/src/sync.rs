@@ -2489,6 +2489,63 @@ impl Inner {
         Ok(cut)
     }
 
+    /// Whether this store answers to an upstream it relays for: a replica,
+    /// unless its host says it has no server (then it is the last word on
+    /// what its sessions commit).
+    fn relays_upstream(&self) -> bool {
+        self.client.as_ref().is_some_and(|client| {
+            let link = client.hint.get();
+            !(link.reported && link.hint == RemoteLinkHint::NoServer)
+        })
+    }
+
+    /// The seq this store tells its sessions it is complete through. A
+    /// relay tells them the authority's seq it knows (its own local seqs
+    /// number nothing the authority can check), so a session's snapshot
+    /// is one the authority validates against as it is.
+    fn served_through(&self) -> u64 {
+        match &self.client {
+            Some(client) if self.relays_upstream() => client.known,
+            _ => self.seq,
+        }
+    }
+
+    /// A session's serializable commit as this relay uploads it: the
+    /// session's own commits it names, and its reads of their versions,
+    /// become this store's commits that carry them (the authority places
+    /// each where it settled). Its snapshot and every other read version
+    /// are already the authority's seqs ([`Self::served_through`]).
+    fn relayed_serializable(
+        &self,
+        origin: [u8; 16],
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+    ) -> Result<Kind, Error> {
+        let mut carried = BTreeMap::new();
+        for tx in own {
+            if let Some(Some(seq)) = self.settled(origin, tx)? {
+                carried.insert(tx, seq);
+            }
+        }
+        let reads = reads
+            .into_iter()
+            .map(|read| WireRead {
+                rows: read
+                    .rows
+                    .into_iter()
+                    .map(|(row, seq)| (row, carried.get(&seq).copied().unwrap_or(seq)))
+                    .collect(),
+                ..read
+            })
+            .collect();
+        Ok(Kind::Serializable {
+            snapshot,
+            reads,
+            own: carried.into_values().collect(),
+        })
+    }
+
     /// The own commits a replica's serializable transaction began over:
     /// those still unsettled (none on the authority).
     pub(crate) fn unsettled_own(&self) -> Vec<u64> {
@@ -4125,7 +4182,7 @@ impl Db {
         }
         self.notify();
         let mut inner = self.inner.borrow_mut();
-        let through = inner.seq;
+        let through = inner.served_through();
         let mut cache: HashMap<(String, RowUuid, u64), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
@@ -4994,7 +5051,7 @@ impl Db {
                     )));
                 }
                 let origins = inner.origins(&seqs)?;
-                let through = at.unwrap_or(inner.seq);
+                let through = at.unwrap_or(inner.served_through());
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
                 session.held = held;
@@ -5049,7 +5106,7 @@ impl Db {
                 // resend gets the recorded one), so the replica learns it.
                 let through = match (&result, inner.settled(node, tx)?) {
                     (Ok(()), Some(Some(seq))) => seq,
-                    _ => inner.seq,
+                    _ => inner.served_through(),
                 };
                 let session = &mut inner.sessions[index];
                 if result.is_ok() {
@@ -5177,7 +5234,7 @@ impl Db {
         &self,
         who: Who,
         identity: Option<AuthorSubject>,
-        kind: WireKind,
+        mut kind: WireKind,
         ops: Vec<WireOp>,
         origin: ([u8; 16], u64),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
@@ -5185,19 +5242,28 @@ impl Db {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
-        // A relay uploads what its sessions commit as its own. Its
-        // sessions' snapshots and read seqs are in its numbering, which the
-        // upstream cannot check a serializable commit against.
+        // A relay uploads what its sessions commit as its own. A
+        // serializable one goes up as serializable, and its upstream
+        // validates it; this store applies it optimistically meanwhile, as
+        // any replica applies its own.
         let relay = self.is_client();
-        if relay && matches!(kind, WireKind::Serializable { .. }) {
-            return Err((
-                Error::new(
-                    ErrorCode::WriteRejected,
-                    "serializable transactions through a relay are not supported yet",
-                ),
-                Vec::new(),
-            ));
-        }
+        let forward =
+            matches!(kind, WireKind::Serializable { .. }) && self.inner.borrow().relays_upstream();
+        let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } if forward => self
+                .inner
+                .borrow()
+                .relayed_serializable(origin.0, snapshot, reads, own)
+                .map_err(|e| (e, Vec::new()))?,
+            unchanged => {
+                kind = unchanged;
+                Kind::Mergeable
+            }
+        };
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
             for op in &ops {
@@ -5325,7 +5391,7 @@ impl Db {
         // are read before the commit is released, so a storage error
         // rejects it whole instead of leaving it applied but not relayed.
         let finished = if relay {
-            self.record_upload(ops.clone(), seq, 0, Kind::Mergeable)
+            self.record_upload(ops.clone(), seq, 0, upload)
         } else {
             Ok(())
         }
