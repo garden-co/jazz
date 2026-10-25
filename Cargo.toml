@@ -43,6 +43,7 @@ exclude = [
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
   "vendor/ruzstd",
+  "vendor/sqlite-wasm-vfs",
   "crates/jazz-native-relay",
   "crates/jazz-sim",
   "crates/jazz-napi",

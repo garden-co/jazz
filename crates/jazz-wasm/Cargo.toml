@@ -32,7 +32,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
 sqlite-wasm-rs = { version = "0.5", default-features = false }
-sqlite-wasm-vfs = "0.2"
+sqlite-wasm-vfs = { path = "../../vendor/sqlite-wasm-vfs" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

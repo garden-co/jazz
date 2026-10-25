@@ -23,9 +23,6 @@ use wasm_bindgen::prelude::*;
 const IDB_VFS: &str = "jazz-idb";
 const OPFS_VFS: &str = "jazz-opfs";
 const OPFS_DIRECTORY: &str = "jazz";
-/// Deleting this never-opened file is queued behind every pending commit,
-/// so its completion is a flush barrier.
-const IDB_BARRIER: &str = "/.jazz-flush-barrier";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -120,20 +117,23 @@ impl StoreSpec {
 /// The open file's backing storage, kept by the database's host.
 #[derive(Clone)]
 pub(crate) enum Store {
-    IndexedDb(Rc<RelaxedIdbUtil>),
+    IndexedDb {
+        util: Rc<RelaxedIdbUtil>,
+        path: String,
+    },
     Opfs,
 }
 
 impl Store {
     pub(crate) fn needs_flush(&self) -> bool {
-        matches!(self, Self::IndexedDb(_))
+        matches!(self, Self::IndexedDb { .. })
     }
 
     /// Resolves once every commit so far is in the backing storage.
     pub(crate) async fn flush(&self) -> Result<(), JsValue> {
         match self {
-            Store::IndexedDb(util) => util
-                .delete_db(IDB_BARRIER)
+            Store::IndexedDb { util, path } => util
+                .flush_db(path)
                 .map_err(vfs_error)?
                 .await
                 .map_err(vfs_error),
@@ -193,7 +193,10 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
                 return Err(JsValue::from_str("Admitted SQLite browser file is missing; reset this storage root before reopening"));
             }
             (
-                Store::IndexedDb(Rc::new(util)),
+                Store::IndexedDb {
+                    util: Rc::new(util),
+                    path: spec.path.clone(),
+                },
                 FileOptions {
                     vfs: Some(IDB_VFS),
                     journal: Journal::Memory,
