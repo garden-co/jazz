@@ -220,7 +220,10 @@ test("jazz-rn relay production builds are SQLite-only on every artifact target",
       }),
     );
     const dependencies = productionDependencyNames(metadata, "jazz-native-relay");
-    assert.ok(dependencies.has("jazz-storage-sqlite"), `${target} relay must retain SQLite`);
+    // SQLite now lives directly in jazz-db through rusqlite. Keep checking
+    // every production target and both the Rust wrapper and native engine.
+    for (const sqlite of ["rusqlite", "libsqlite3-sys"])
+      assert.ok(dependencies.has(sqlite), `${target} relay must retain ${sqlite}`);
     for (const forbidden of ["jazz-storage-rocksdb", "jazz-benchmark-guard", "tempfile"])
       assert.ok(!dependencies.has(forbidden), `${target} relay must exclude ${forbidden}`);
   }
@@ -2628,7 +2631,10 @@ ${
     }
 
     for (const transitiveInput of [
-      "crates/idb-tree/",
+      "crates/jazz/layers/db/",
+      "crates/jazz/layers/model/",
+      "crates/jazz/layers/protocol/",
+      "crates/jazz/layers/types/",
       "crates/jazz-compression/",
       "crates/jazz-native-transport/",
     ]) {

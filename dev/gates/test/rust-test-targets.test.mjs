@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +12,6 @@ const root = path.resolve(import.meta.dirname, "../../..");
 // own there, so a new flat file that nobody lists would silently never compile
 // or run. Every flat file must be a declared [[test]] target or be included by
 // exactly one declared target's `#[path = "../<file>.rs"]` module.
-const MERGED_TEST_CRATES = ["crates/jazz", "crates/groove", "crates/jazz-testkit"];
 
 function declaredTestPaths(manifest) {
   // A [[test]] without `path` is inferred from its name, as Cargo does.
@@ -51,10 +51,40 @@ export function unlistedFlatTests(crateDir) {
   return { autotests: false, problems };
 }
 
-test("every flat integration-test file in a merged-binary crate is built exactly once", () => {
-  for (const crate of MERGED_TEST_CRATES) {
-    const { autotests, problems } = unlistedFlatTests(path.join(root, crate));
-    assert.equal(autotests, false, `${crate} is expected to build merged test binaries`);
+test("every flat workspace integration-test file is built exactly once", () => {
+  const metadata = JSON.parse(
+    execFileSync("cargo", ["metadata", "--no-deps", "--format-version", "1"], {
+      cwd: root,
+      encoding: "utf8",
+    }),
+  );
+  const members = new Set(metadata.workspace_members);
+  const packages = metadata.packages.filter((pkg) => members.has(pkg.id));
+  assert.ok(packages.some((pkg) => pkg.name === "jazz"));
+  assert.ok(packages.some((pkg) => pkg.name === "jazz-native-relay"));
+  for (const pkg of packages) {
+    const crateDir = path.dirname(pkg.manifest_path);
+    const testsDir = path.join(crateDir, "tests");
+    if (!fs.existsSync(testsDir)) continue;
+    const { autotests, problems } = unlistedFlatTests(crateDir);
+    if (autotests) {
+      // Ask Cargo which binaries exist: merely enabling discovery must not
+      // hide an omitted or duplicated flat source from this contract.
+      const targets = pkg.targets.filter((target) => target.kind.includes("test"));
+      const included = targets.flatMap((target) =>
+        [
+          ...fs.readFileSync(target.src_path, "utf8").matchAll(/#\[path = "(\.\.\/[^"/]+\.rs)"\]/g),
+        ].map(([, file]) => path.resolve(path.dirname(target.src_path), file)),
+      );
+      for (const entry of fs.readdirSync(testsDir, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith(".rs")) continue;
+        const source = path.join(testsDir, entry.name);
+        const owners =
+          targets.filter((target) => path.resolve(target.src_path) === source).length +
+          included.filter((file) => file === source).length;
+        assert.equal(owners, 1, `${path.relative(root, source)} is built by ${owners} targets`);
+      }
+    }
     assert.deepEqual(problems, [], problems.join("\n"));
   }
 });
