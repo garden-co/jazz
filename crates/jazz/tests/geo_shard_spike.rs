@@ -688,3 +688,389 @@ fn b2b_live_windows() {
         }
     }
 }
+
+// ---- B3/B4: cross-shard commits (discrete-event model) ----------------------
+//
+// Shards hold versioned keys; clients in three regions run transactions
+// through their region's router. Times are virtual microseconds from the
+// RTT matrix above (one-way = RTT / 2), plus a fixed apply cost per shard
+// step. The model measures the protocol: round trips, aborts under
+// contention, and how long writers stall behind prepared transactions.
+
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+
+const APPLY_US: u64 = 200;
+
+fn one_way(a: Region, b: Region) -> u64 {
+    (rtt(a, b) * 500.0) as u64
+}
+
+#[derive(Clone, Debug)]
+struct Tx {
+    id: usize,
+    region: Region,
+    serializable: bool,
+    /// (shard, key, version seen at read time)
+    reads: Vec<(usize, u32, u64)>,
+    writes: Vec<(usize, u32)>,
+    start: u64,
+}
+
+impl Tx {
+    fn shards(&self) -> Vec<usize> {
+        let mut s: Vec<usize> = self
+            .reads
+            .iter()
+            .map(|r| r.0)
+            .chain(self.writes.iter().map(|w| w.0))
+            .collect();
+        s.sort_unstable();
+        s.dedup();
+        s
+    }
+}
+
+#[derive(Debug)]
+enum Ev {
+    /// A participant receives its prepare (or, single-shard, the commit).
+    Prepare { tx: usize, shard: usize },
+    /// The router has a vote.
+    Vote { tx: usize, yes: bool },
+    /// A participant learns the decision.
+    Decide {
+        tx: usize,
+        shard: usize,
+        commit: bool,
+    },
+    /// A mergeable write reaches its shard.
+    Mergeable { tx: usize, shard: usize },
+}
+
+#[derive(Default)]
+struct ShardState {
+    versions: HashMap<u32, u64>,
+    /// key -> prepared tx holding a guard on it
+    guards: HashMap<u32, usize>,
+    /// Mergeable writes waiting for a guard: (tx, arrival time)
+    waiting: Vec<(usize, u64)>,
+}
+
+#[derive(Default, Debug)]
+struct CommitStats {
+    latencies: Vec<u64>,
+    aborts: usize,
+    commits: usize,
+    stalls: Vec<u64>,
+    mergeable_latencies: Vec<u64>,
+    cross_latencies: Vec<u64>,
+}
+
+fn pct(v: &mut [u64], p: f64) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_unstable();
+    v[((v.len() - 1) as f64 * p) as usize] as f64 / 1000.0
+}
+
+struct Workload2 {
+    shards: usize,
+    keys_per_shard: u32,
+    hot_keys: u32,
+    hot_share: f64,
+    cross_share: f64,
+    serializable_share: f64,
+    txs: usize,
+    /// Mean gap between transaction starts, µs.
+    gap_us: u64,
+    /// Time between a transaction's reads and its commit, µs.
+    think_us: u64,
+}
+
+fn run_commits(w: &Workload2, seed: u64) -> CommitStats {
+    let mut rng = Rng(seed);
+    let shard_region = |s: usize| REGIONS[s % REGIONS.len()];
+    let mut shards: Vec<ShardState> = (0..w.shards).map(|_| ShardState::default()).collect();
+    let mut stats = CommitStats::default();
+    let mut events: BinaryHeap<Reverse<(u64, usize, usize)>> = BinaryHeap::new();
+    let mut payloads: Vec<Ev> = Vec::new();
+    let push = |events: &mut BinaryHeap<Reverse<(u64, usize, usize)>>,
+                payloads: &mut Vec<Ev>,
+                t: u64,
+                ev: Ev| {
+        payloads.push(ev);
+        events.push(Reverse((t, payloads.len() - 1, 0)));
+    };
+    let mut txs: Vec<Tx> = Vec::new();
+    let mut votes: HashMap<usize, (usize, bool)> = HashMap::new();
+    let pick_key = |rng: &mut Rng| -> u32 {
+        if rng.unit() < w.hot_share {
+            rng.below(w.hot_keys as usize) as u32
+        } else {
+            w.hot_keys + rng.below((w.keys_per_shard - w.hot_keys) as usize) as u32
+        }
+    };
+    // Generate transactions up front; reads see versions at read time, so
+    // record the read time and resolve versions when the reads "happen".
+    let mut t = 0u64;
+    let mut planned = Vec::new();
+    for id in 0..w.txs {
+        t += 1 + rng.below((2 * w.gap_us) as usize) as u64;
+        let region = REGIONS[rng.below(REGIONS.len())];
+        // The client's home shard is one in its region.
+        let home_candidates: Vec<usize> = (0..w.shards)
+            .filter(|&s| shard_region(s) == region)
+            .collect();
+        let home = home_candidates[rng.below(home_candidates.len())];
+        let cross = rng.unit() < w.cross_share && w.shards > 1;
+        let other = loop {
+            let s = rng.below(w.shards);
+            if s != home || w.shards == 1 {
+                break s;
+            }
+        };
+        let serializable = rng.unit() < w.serializable_share;
+        let mut reads = Vec::new();
+        let mut writes = Vec::new();
+        for (i, shard) in [home, other].into_iter().enumerate() {
+            if i == 1 && !cross {
+                break;
+            }
+            let k = pick_key(&mut rng);
+            if serializable {
+                reads.push((shard, k, 0));
+            }
+            writes.push((shard, k));
+        }
+        planned.push(Tx {
+            id,
+            region,
+            serializable,
+            reads,
+            writes,
+            start: t,
+        });
+    }
+    // Reads happen at `start`; the commit leaves after `think_us`. Resolve
+    // reads lazily by processing starts in time order alongside events.
+    let mut next_start = 0usize;
+    loop {
+        let next_event_t = events.peek().map(|Reverse((t, _, _))| *t);
+        let start_t = planned.get(next_start).map(|tx: &Tx| tx.start);
+        let take_start = match (start_t, next_event_t) {
+            (Some(s), Some(e)) => s <= e,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_start {
+            let mut tx = planned[next_start].clone();
+            next_start += 1;
+            // Reads: the client's replica is assumed fresh at read time
+            // (a cold read would add a round trip; it does not change
+            // the commit protocol).
+            for r in &mut tx.reads {
+                r.2 = *shards[r.0].versions.get(&r.1).unwrap_or(&0);
+            }
+            let commit_at = tx.start + w.think_us;
+            let parts = tx.shards();
+            for &s in &parts {
+                let arrive = commit_at + one_way(tx.region, shard_region(s));
+                if tx.serializable {
+                    push(
+                        &mut events,
+                        &mut payloads,
+                        arrive,
+                        Ev::Prepare {
+                            tx: tx.id,
+                            shard: s,
+                        },
+                    );
+                } else {
+                    push(
+                        &mut events,
+                        &mut payloads,
+                        arrive,
+                        Ev::Mergeable {
+                            tx: tx.id,
+                            shard: s,
+                        },
+                    );
+                }
+            }
+            votes.insert(tx.id, (parts.len(), true));
+            txs.push(tx);
+            continue;
+        }
+        let Reverse((now, idx, _)) = events.pop().unwrap();
+        let ev = std::mem::replace(
+            &mut payloads[idx],
+            Ev::Vote {
+                tx: usize::MAX,
+                yes: true,
+            },
+        );
+        match ev {
+            Ev::Prepare { tx, shard } => {
+                let t = &txs[tx];
+                let st = &mut shards[shard];
+                let reads_ok = t
+                    .reads
+                    .iter()
+                    .filter(|r| r.0 == shard)
+                    .all(|r| st.versions.get(&r.1).copied().unwrap_or(0) == r.2);
+                let keys: Vec<u32> = t
+                    .reads
+                    .iter()
+                    .filter(|r| r.0 == shard)
+                    .map(|r| r.1)
+                    .chain(t.writes.iter().filter(|w| w.0 == shard).map(|w| w.1))
+                    .collect();
+                let guarded = keys
+                    .iter()
+                    .any(|k| st.guards.get(k).is_some_and(|&o| o != tx));
+                let yes = reads_ok && !guarded;
+                let single = t.shards().len() == 1;
+                if yes {
+                    if single {
+                        // One shard validates and applies at once.
+                        for w in t.writes.iter().filter(|w| w.0 == shard) {
+                            *st.versions.entry(w.1).or_default() += 1;
+                        }
+                    } else {
+                        for k in keys {
+                            st.guards.insert(k, tx);
+                        }
+                    }
+                }
+                let back = now + APPLY_US + one_way(shard_region(shard), t.region);
+                push(&mut events, &mut payloads, back, Ev::Vote { tx, yes });
+            }
+            Ev::Vote { tx, yes } => {
+                if tx == usize::MAX {
+                    continue;
+                }
+                let entry = votes.get_mut(&tx).unwrap();
+                entry.0 -= 1;
+                entry.1 &= yes;
+                if entry.0 == 0 {
+                    let commit = entry.1;
+                    let t = &txs[tx];
+                    let commit_at = t.start + w.think_us;
+                    if !t.serializable {
+                        stats.mergeable_latencies.push(now - commit_at);
+                    } else if commit {
+                        stats.commits += 1;
+                        if t.shards().len() > 1 {
+                            stats.cross_latencies.push(now - commit_at);
+                        } else {
+                            stats.latencies.push(now - commit_at);
+                        }
+                    } else {
+                        stats.aborts += 1;
+                    }
+                    if t.shards().len() > 1 {
+                        for s in t.shards() {
+                            // The router tells participants; the
+                            // coordinator's record is written in parallel.
+                            let at = now + one_way(t.region, shard_region(s));
+                            push(
+                                &mut events,
+                                &mut payloads,
+                                at,
+                                Ev::Decide {
+                                    tx,
+                                    shard: s,
+                                    commit,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            Ev::Decide { tx, shard, commit } => {
+                let t = &txs[tx];
+                let st = &mut shards[shard];
+                if commit {
+                    for w in t.writes.iter().filter(|w| w.0 == shard) {
+                        *st.versions.entry(w.1).or_default() += 1;
+                    }
+                }
+                st.guards.retain(|_, holder| *holder != tx);
+                // Release mergeable writes that waited on this guard.
+                let waiting = std::mem::take(&mut st.waiting);
+                for (m, arrived) in waiting {
+                    stats.stalls.push(now - arrived);
+                    push(
+                        &mut events,
+                        &mut payloads,
+                        now,
+                        Ev::Mergeable { tx: m, shard },
+                    );
+                    let _ = arrived;
+                }
+            }
+            Ev::Mergeable { tx, shard } => {
+                let t = &txs[tx];
+                let st = &mut shards[shard];
+                let blocked = t
+                    .writes
+                    .iter()
+                    .filter(|w| w.0 == shard)
+                    .any(|w| st.guards.contains_key(&w.1));
+                if blocked {
+                    st.waiting.push((tx, now));
+                    continue;
+                }
+                for w in t.writes.iter().filter(|w| w.0 == shard) {
+                    *st.versions.entry(w.1).or_default() += 1;
+                }
+                let back = now + APPLY_US + one_way(shard_region(shard), t.region);
+                push(&mut events, &mut payloads, back, Ev::Vote { tx, yes: true });
+            }
+        }
+    }
+    stats
+}
+
+#[test]
+#[ignore = "benchmark; run explicitly"]
+fn b3_b4_cross_shard_commits() {
+    println!(
+        "| shards | cross-shard share | hot share | mergeable p50/p99 ms | serializable 1-shard p50/p99 ms | serializable cross-shard p50/p99 ms | abort % | writer stalls (count, p50 ms, p99 ms) |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for &shards in &[3usize, 9] {
+        for &cross in &[0.0, 0.1, 0.5] {
+            for &hot in &[0.0, 0.5, 0.9] {
+                let w = Workload2 {
+                    shards,
+                    keys_per_shard: 10_000,
+                    hot_keys: 10,
+                    hot_share: hot,
+                    cross_share: cross,
+                    serializable_share: 0.3,
+                    txs: 20_000,
+                    gap_us: 1_000,
+                    think_us: 50_000,
+                };
+                let mut s = run_commits(&w, 0xbeef + shards as u64);
+                let total = (s.commits + s.aborts).max(1);
+                let stalls = s.stalls.len();
+                println!(
+                    "| {shards} | {cross} | {hot} | {:.0}/{:.0} | {:.0}/{:.0} | {:.0}/{:.0} | {:.1} | {stalls}, {:.0}, {:.0} |",
+                    pct(&mut s.mergeable_latencies, 0.5),
+                    pct(&mut s.mergeable_latencies, 0.99),
+                    pct(&mut s.latencies, 0.5),
+                    pct(&mut s.latencies, 0.99),
+                    pct(&mut s.cross_latencies, 0.5),
+                    pct(&mut s.cross_latencies, 0.99),
+                    100.0 * s.aborts as f64 / total as f64,
+                    pct(&mut s.stalls, 0.5),
+                    pct(&mut s.stalls, 0.99),
+                );
+            }
+        }
+    }
+}
