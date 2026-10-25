@@ -415,6 +415,7 @@ impl Inner {
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_settled_only(read.settled_only)
             .with_history_origin(self.history_origin())
             .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)?;
@@ -1246,7 +1247,8 @@ impl Group {
 
 /// Whether a group may apply root-only commits by re-checking ids: a
 /// single-table query (not a union), unbounded or a first page, (no joins, arrays, required includes,
-/// aggregates, windows), outside branch views and cuts, whose compiled SQL
+/// aggregates, windows), outside branch views and cuts (a settled-only
+/// read is one), whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another). A
 /// synced read (`members_only`) qualifies: whether the server lists a row
@@ -1265,6 +1267,7 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()
+        && !read.settled_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
 }
