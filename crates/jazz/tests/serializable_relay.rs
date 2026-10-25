@@ -190,6 +190,20 @@ impl Net {
         self.drive(db.wait_for_transaction(tx, DurabilityTier::Global))
     }
 
+    /// `tx` was accepted where it was ordered, and is never `Global`:
+    /// there is no authority to make it so.
+    fn never_global(&self, db: &Db, tx: u64) {
+        let mut wait = pin!(db.wait_for_transaction(tx, DurabilityTier::Global));
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..MAX_TURNS {
+            assert!(
+                wait.as_mut().poll(&mut context).is_pending(),
+                "a commit no authority accepted reached Global"
+            );
+            self.pump();
+        }
+    }
+
     fn write_invite(&self, c: &str) -> RowUuid {
         let write = block_on(self.direct.insert("invites", code(c), Default::default())).unwrap();
         self.settle(&self.direct, write.mergeable_tx_id())
@@ -261,6 +275,17 @@ impl Net {
     /// join only if it holds. `between` runs after the read and before the
     /// commit.
     fn redeem(&self, db: &Db, c: &str, between: impl FnOnce()) -> Result<(), jazz::db::Error> {
+        let receipt = self.stage_redeem(db, c, between)?;
+        self.settle(db, receipt).map(drop)
+    }
+
+    /// [`Net::redeem`] up to its commit: its receipt, not yet settled.
+    fn stage_redeem(
+        &self,
+        db: &Db,
+        c: &str,
+        between: impl FnOnce(),
+    ) -> Result<u64, jazz::db::Error> {
         let open = OpenTransactionId::new();
         block_on(db.begin_serializable(open)).unwrap();
         let invite = db.prepare_query(&invite_query(c)).unwrap();
@@ -275,7 +300,8 @@ impl Net {
                 .insert("members", code(c), Default::default()),
         )
         .unwrap();
-        self.finish(db, open)
+        self.drive(db.commit_serializable_handle(open))
+            .map(|receipt| receipt.0)
     }
 
     /// Begin a serializable transaction on `db` whose snapshot is pinned
@@ -482,8 +508,9 @@ fn a_tabs_commit_over_its_own_unsettled_write_is_accepted() {
     assert_eq!(net.count(&invite_query("own")), 1);
 }
 
-/// A worker with no server is its tabs' authority: it validates their
-/// serializable commits itself.
+/// A worker with no server is its tabs' last word: it validates their
+/// serializable commits itself, ordering them so its tabs converge, but
+/// none of them becomes `Global`, since there is no authority.
 #[test]
 fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
     let net = Net::with_worker_hint(2, RemoteLinkHint::NoServer);
@@ -492,13 +519,15 @@ fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
             .insert("invites", code("abc"), Default::default()),
     )
     .unwrap();
-    net.settle(net.tab(0), write.mergeable_tx_id()).unwrap();
-    net.redeem(net.tab(1), "abc", || {})
+    net.never_global(net.tab(0), write.mergeable_tx_id());
+    let joined = net
+        .stage_redeem(net.tab(1), "abc", || {})
         .expect("an unchanged read holds");
+    net.never_global(net.tab(1), joined);
     let invite = write.row_uuid();
     let revoked = net.redeem(net.tab(1), "abc", || {
         let write = block_on(net.tab(0).delete("invites", invite, Default::default())).unwrap();
-        net.settle(net.tab(0), write.mergeable_tx_id()).unwrap();
+        net.never_global(net.tab(0), write.mergeable_tx_id());
     });
     assert_conflict(revoked);
     let members = net.worker.prepare_query(&members_query("abc")).unwrap();

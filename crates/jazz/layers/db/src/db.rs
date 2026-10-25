@@ -262,15 +262,15 @@ pub struct SubscriptionStream {
         Query,
         BTreeMap<String, Value>,
         bool,
-        ReadTier,
+        sync::RemoteReach,
     )>,
 }
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted, tier)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, tier);
+        if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
         }
     }
 }
@@ -488,6 +488,15 @@ pub(crate) enum Who {
     /// Unchecked like `Local` (the database identity stays the policy
     /// subject), with this author as the write's provenance.
     Attributed(AuthorSubject),
+}
+
+/// How long a LocalFirst read's first load waits for a relay's upstream
+/// (`firstLoadRemoteWaitMs`), as a non-durable foreground tells its relay.
+pub(crate) fn first_load_wait(tier: ReadTier, first_load: &FirstLoad) -> Option<u64> {
+    match (tier, first_load) {
+        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) => Some(*timeout_ms),
+        _ => None,
+    }
 }
 
 fn who(identity: WriteIdentity) -> Who {
@@ -1229,14 +1238,18 @@ impl Db {
             Self::remote_shape(&prepared.query)?;
         }
         // A non-durable foreground tells its relay how far the read
-        // reaches, as its fetches do; to an authority it is always remote.
-        let tier = if non_durable {
-            opts.tier
+        // reaches, and how long its first load waits for the relay's
+        // upstream, as its fetches do; to an authority it is always remote.
+        let reach = if non_durable {
+            sync::RemoteReach {
+                tier: opts.tier,
+                wait: first_load_wait(opts.tier, &opts.first_load),
+            }
         } else {
-            ReadTier::Remote
+            sync::RemoteReach::REMOTE
         };
         let remote = if remote_read {
-            self.attach_remote(prepared, read.include_deleted, tier)
+            self.attach_remote(prepared, read.include_deleted, reach)
         } else {
             None
         };
@@ -1289,7 +1302,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
-                    tier,
+                    reach,
                 )
             }),
         })
@@ -4719,7 +4732,15 @@ impl TxRef<'_> {
             Db::remote_shape(&prepared.query)?;
             let through = self
                 .db
-                .fetch(prepared, at, include_deleted, ReadTier::Remote, None, None)
+                .fetch(
+                    prepared,
+                    at,
+                    include_deleted,
+                    sync::RemoteReach::BEST_EFFORT,
+                    None,
+                    None,
+                    false,
+                )
                 .await?;
             if let Some(Batch {
                 kind:
