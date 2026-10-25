@@ -3813,6 +3813,28 @@ impl Db {
         scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         accepted: bool,
     ) -> Result<Option<FetchAnswer>, Error> {
+        let _deadline = self.read_deadline(deadline);
+        let _attempt_deadline = self.read_attempt_deadline();
+        // An in-flight host handshake is not an admitted transport. Wait before
+        // assigning this request to a connection: connect_upstream retires old
+        // requests, including any incorrectly queued before the first connect.
+        let available = poll_fn(|_| {
+            let inner = self.inner.borrow();
+            let Some(client) = &inner.client else {
+                return Poll::Ready(false);
+            };
+            if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
+                Poll::Ready(false)
+            } else if client.transport.is_some() {
+                Poll::Ready(true)
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        if !available {
+            return Ok(None);
+        }
         let (id, connection) = {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
@@ -3873,8 +3895,6 @@ impl Db {
         if accepted {
             self.schedule_pending_tick();
         }
-        let _deadline = self.read_deadline(deadline);
-        let _attempt_deadline = self.read_attempt_deadline();
         let _request = FetchRequest {
             inner: self.inner.clone(),
             id,
@@ -3905,13 +3925,30 @@ impl Db {
     /// commits held behind streamed chunks. Capture only this opening's writes;
     /// later writes cannot extend its wait. Either terminal fate releases the
     /// barrier: rejected writes are absent from the authority's ensuing answer.
-    async fn wait_for_preceding_read_writes(&self) {
+    async fn wait_for_preceding_read_writes(&self, reader: AuthorSubject) {
         let mut pending: Vec<UploadId> = {
             let inner = self.inner.borrow();
             let Some(client) = &inner.client else {
                 return;
             };
-            client.pending.iter().map(|p| (p.node, p.tx)).collect()
+            client
+                .pending
+                .iter()
+                .filter(|pending| {
+                    // A trusted backend can serve independent sessions. Only
+                    // writes in this read's identity belong to its ordering
+                    // barrier; provenance-only attribution remains a backend
+                    // write, just as in the ordinary transaction read path.
+                    pending.ops.iter().any(|op| {
+                        let writer = match op.identity() {
+                            Some(WriteIdentity::Session(author)) => author,
+                            _ => inner.identity.author,
+                        };
+                        writer == reader
+                    })
+                })
+                .map(|p| (p.node, p.tx))
+                .collect()
         };
         if pending.is_empty() {
             return;
@@ -3924,7 +3961,7 @@ impl Db {
                 return Poll::Ready(());
             };
             pending.retain(|id| !client.fates.contains_key(id));
-            if pending.is_empty() || client.transport.is_none() || !may_wait(client.hint.get()) {
+            if pending.is_empty() || !may_wait(client.hint.get()) {
                 Poll::Ready(())
             } else {
                 Poll::Pending
@@ -7605,7 +7642,12 @@ impl Db {
         {
             // This is upload ordering, not query coverage. In particular, a
             // large upload cannot consume the binding's coverage deadline.
-            self.wait_for_preceding_read_writes().await;
+            let reader = request_scope
+                .as_ref()
+                .map(|(identity, _)| *identity)
+                .or(author)
+                .unwrap_or_else(|| self.inner().identity.author);
+            self.wait_for_preceding_read_writes(reader).await;
         }
         let read = self.read_serialized_query(query, opts, open_tx, request_scope, author);
         let mut read = std::pin::pin!(read);
