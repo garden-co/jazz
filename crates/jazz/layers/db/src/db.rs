@@ -4726,7 +4726,7 @@ impl Db {
                 .execute_batch("RELEASE commit_batch")
                 .map_err(storage)?;
             let prior = inner.seq;
-            if !ops.is_empty() {
+            if !ops.is_empty() || kind.validates_reads() {
                 inner.seq = seq;
             }
             (seq, prior, mark)

@@ -605,6 +605,13 @@ pub(crate) enum Kind {
     },
 }
 
+impl Kind {
+    /// Whether the authority must see the commit even with no writes.
+    pub(crate) fn validates_reads(&self) -> bool {
+        matches!(self, Kind::Serializable { reads, .. } if !reads.is_empty())
+    }
+}
+
 struct Pending {
     tx: u64,
     ops: Vec<StagedOp>,
@@ -2900,7 +2907,9 @@ impl Db {
             inner.capture.extend(ops);
             return Ok(());
         }
-        if ops.is_empty() || seq != inner.seq {
+        // A read-only serializable commit still goes up: the authority
+        // validates its reads.
+        if (ops.is_empty() && !kind.validates_reads()) || seq != inner.seq {
             return Ok(());
         }
         // The writer the authority stamps: an explicit identity, or the

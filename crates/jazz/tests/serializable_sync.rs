@@ -394,6 +394,39 @@ fn an_offline_prepared_redemption_of_a_revoked_invite_conflicts() {
     );
 }
 
+/// A serializable transaction that only reads still commits at the
+/// authority, which re-runs its reads: a read that went stale conflicts.
+#[test]
+fn a_read_only_serializable_commit_validates_its_reads() {
+    let mut net = Net::new(3);
+    let invite = net.write_invite(OWNER, "abc");
+    assert_eq!(net.redeem(BACKEND, "abc", false, || {}), Redeem::Joined);
+    let read_only = |net: &Net| {
+        let db = net.db(BACKEND);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&invite_query("abc")).unwrap();
+        assert_eq!(
+            net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
+                .unwrap()
+                .len(),
+            1
+        );
+        block_on(db.commit_serializable_handle(open)).unwrap()
+    };
+    let holds = read_only(&net);
+    assert!(
+        net.settle(BACKEND, holds.0).is_ok(),
+        "an unchanged read commits"
+    );
+    net.go_offline(BACKEND);
+    let stale = read_only(&net);
+    net.revoke(OWNER, invite);
+    net.go_online(BACKEND);
+    let error = net.settle(BACKEND, stale.0).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+}
+
 /// Offline, a backend that never received another backend's redemption
 /// reads "nobody redeemed it"; that absence is a phantom at the authority.
 #[test]
