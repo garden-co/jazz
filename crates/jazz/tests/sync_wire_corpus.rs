@@ -15,7 +15,7 @@
 //! producer (`JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1`). After it, a change
 //! needs a new wire version and corpus beside this one.
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

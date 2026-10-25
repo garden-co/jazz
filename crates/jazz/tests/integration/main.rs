@@ -119,6 +119,8 @@ mod sync_sessions;
 mod sync_support;
 #[path = "../sync_support_access.rs"]
 mod sync_support_access;
+#[path = "../sync_wire_corpus.rs"]
+mod sync_wire_corpus;
 #[path = "../union_queries.rs"]
 mod union_queries;
 #[path = "../uuid_page_probe.rs"]
