@@ -2088,6 +2088,7 @@ version = "0.1.0"
 dependencies = [
  "jazz",
  "jazz-server",
+ "jazz-testkit",
  "jsonwebtoken",
  "opentelemetry",
  "opentelemetry-appender-tracing",
