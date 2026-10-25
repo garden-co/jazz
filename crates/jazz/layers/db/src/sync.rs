@@ -156,6 +156,64 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     }
 }
 
+/// Which end of a connection reads a frame batch, at which point, for
+/// [`validate_frame_batch_for_corpus`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CorpusReader {
+    /// The server's first batch: exactly one `Hello`.
+    ServerOpening,
+    /// The server after the `Hello`: every frame is a sync message.
+    Server,
+    /// A client: each frame is a `Hello` (tag 0), an `Error` (tag 1) or a
+    /// sync message, as its websocket reads them. No server-sent message
+    /// has tag 0 or 1.
+    Client,
+}
+
+/// Test-only: decode one websocket frame batch the way `reader` does, with
+/// the production decoders, negotiating a `Hello` against
+/// `negotiated_features`. NAPI and WASM expose it so the pinned wire corpus
+/// (`crates/jazz/fixtures/sqlite_sync_wire_v1.json`) runs through each
+/// shipped artifact. Not a host API.
+#[doc(hidden)]
+pub fn validate_frame_batch_for_corpus(
+    batch: &[u8],
+    reader: CorpusReader,
+    negotiated_features: crate::wire::WireFeatures,
+) -> Result<(), String> {
+    use crate::wire::{
+        WireFrame, decode_frame, decode_hello_frame, decode_websocket_frame_batch, negotiate_wire,
+    };
+    let hello = |frame: &[u8]| {
+        decode_hello_frame(frame)
+            .and_then(|hello| negotiate_wire(&hello, negotiated_features))
+            .map(drop)
+            .map_err(|error| format!("hello rejected: {}", error.message))
+    };
+    let message = |frame: &[u8]| {
+        postcard::from_bytes::<SyncMessage>(frame)
+            .map(drop)
+            .map_err(|error| format!("malformed sync message: {error}"))
+    };
+    let frames = decode_websocket_frame_batch(batch)
+        .map_err(|error| format!("malformed websocket frame batch: {error}"))?;
+    match reader {
+        CorpusReader::ServerOpening => match frames.as_slice() {
+            [frame] => hello(frame),
+            _ => Err("the opening batch must be exactly one Hello".to_owned()),
+        },
+        CorpusReader::Server => frames.iter().try_for_each(|frame| message(frame)),
+        CorpusReader::Client => frames.iter().try_for_each(|frame| match frame.first() {
+            Some(0) => hello(frame),
+            Some(1) => match decode_frame(frame) {
+                Ok(WireFrame::Error(_)) => Ok(()),
+                _ => Err("malformed WireFrame::Error".to_owned()),
+            },
+            _ => message(frame),
+        }),
+    }
+}
+
 /// One stored SQL cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Cell {

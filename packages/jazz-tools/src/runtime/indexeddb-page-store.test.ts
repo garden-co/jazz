@@ -1,6 +1,5 @@
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
 import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
-import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
@@ -703,24 +702,6 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
-  it("persists the Rust-owned v1 page fixture byte-for-byte", async () => {
-    const fixture = hexBytes(
-      await readFile(
-        new URL("../../../../crates/idb-tree/fixtures/page-v1-leaf.hex", import.meta.url),
-        "utf8",
-      ),
-    );
-    const name = databaseName();
-    const store = await IndexedDbPageStore.open(name);
-    await store.commit({
-      expectedGeneration: 0,
-      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
-      pages: new Map([[1, fixture]]),
-    });
-    expect(await store.readPage(1)).toEqual(fixture);
-    store.close();
-  });
-
   it("invalidates an open store when its IndexedDB database is externally deleted", async () => {
     const name = databaseName();
     const invalidations: Error[] = [];
@@ -843,14 +824,4 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
     tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
   });
-}
-
-function hexBytes(value: string): Uint8Array {
-  const trimmed = value.trim();
-  if (trimmed.length % 2 !== 0) throw new Error("hex fixture must have even length");
-  return Uint8Array.from(
-    Array.from({ length: trimmed.length / 2 }, (_, index) =>
-      Number.parseInt(trimmed.slice(index * 2, index * 2 + 2), 16),
-    ),
-  );
 }

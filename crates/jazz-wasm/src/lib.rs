@@ -196,24 +196,31 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only execution of a frozen v5 frame batch through the
-/// generated WASM artifact. This reaches the production Rust frame, feature,
-/// compression, and semantic-payload decoders; it is not a browser transport
-/// API.
+/// Test-only: read one pinned wire corpus batch through the generated WASM
+/// artifact, as `reader` (`"server-opening"`, `"server"` or `"client"`)
+/// would, with the production frame and sync message decoders. Not a
+/// browser transport API.
 #[wasm_bindgen(js_name = __testValidateWireFrameBatchCorpus)]
 pub fn test_validate_wire_frame_batch_corpus(
-    frame: Vec<u8>,
+    batch: Vec<u8>,
+    reader: String,
     negotiated_features: String,
 ) -> Result<(), JsValue> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| JsValue::from_str("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::decode_websocket_frame_batch(&frame)
-        .map_err(|error| error.to_string())
-        .and_then(|frames| {
-            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
-        })
-        .map_err(|error| error.into())
+    let reader = match reader.as_str() {
+        "server-opening" => jazz::db::CorpusReader::ServerOpening,
+        "server" => jazz::db::CorpusReader::Server,
+        "client" => jazz::db::CorpusReader::Client,
+        other => {
+            return Err(JsValue::from_str(&format!(
+                "unknown wire corpus reader {other:?}"
+            )));
+        }
+    };
+    jazz::db::validate_frame_batch_for_corpus(&batch, reader, negotiated_features)
+        .map_err(|error| JsValue::from_str(&error))
 }
 
 /// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
