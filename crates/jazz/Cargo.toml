@@ -101,9 +101,17 @@ harness = false
 name = "fanout_wire"
 harness = false
 
+[[bench]]
+name = "shard_capacity"
+harness = false
+
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
+
+[[test]]
+name = "geo_shard_spike"
+path = "tests/geo_shard_spike.rs"
 
 [[test]]
 name = "durable_file"

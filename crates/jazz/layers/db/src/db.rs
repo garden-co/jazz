@@ -372,11 +372,15 @@ struct Inner {
     schema: Rc<Schema>,
     /// The owner's current schema.
     owner: Rc<Schema>,
+    /// `owner.jazz.version_id()`, which hashes the whole schema.
+    pub(crate) owner_version: crate::ids::SchemaVersionId,
     /// The stored tables: the union of every admitted schema, keyed and
     /// named by stored names.
     physical: Schema,
     /// Admitted structural schemas, by version, and registered views.
     admitted: Vec<JazzSchema>,
+    /// `version_id()` of each of `admitted`, in order.
+    pub(crate) admitted_versions: Vec<crate::ids::SchemaVersionId>,
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
@@ -1035,8 +1039,10 @@ impl Db {
                 staging: LargeValueStagingPolicy::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
+                owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
+                admitted_versions: vec![config.schema.version_id()],
                 admitted: vec![config.schema.clone()],
                 names,
                 views: BTreeMap::new(),
@@ -1872,13 +1878,11 @@ impl Db {
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &target)?;
             if make_current {
+                inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
             }
-            if !inner
-                .admitted
-                .iter()
-                .any(|admitted| admitted.version_id() == version)
-            {
+            if !inner.admitted_versions.contains(&version) {
+                inner.admitted_versions.push(schema.version_id());
                 inner.admitted.push(schema);
             }
         }
@@ -4166,6 +4170,7 @@ impl Db {
                 if inner.names.get(&version).is_none() {
                     check_direct_lens(&inner.owner.jazz, &schema)?;
                 }
+                inner.admitted_versions.push(schema.version_id());
                 inner.admitted.push(schema.clone());
             }
             let base = inner.owner.names();

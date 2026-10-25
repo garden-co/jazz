@@ -1074,3 +1074,179 @@ fn b3_b4_cross_shard_commits() {
         }
     }
 }
+
+// ---- E5: what geo-sharding buys under local-first ---------------------------
+//
+// Own writes are visible at once everywhere (local-first), so the latencies
+// that placement changes are: a collaborator seeing a write, a serializable
+// commit, and loading a room the device has not cached. Compared: one core
+// region, one core plus regional relays (read caches), and geo shards that
+// home each room in its members' majority region.
+
+#[derive(Clone, Copy, Debug)]
+enum Placement {
+    Core,
+    CoreRelays,
+    GeoMajority,
+    GeoCreator,
+}
+
+/// Hop processing at a server or relay, ms.
+const HOP_MS: f64 = 1.0;
+/// Share of cold room loads a regional relay answers from cache.
+const RELAY_HIT: f64 = 0.9;
+
+fn region_weighted(rng: &mut Rng, weights: [f64; 3]) -> Region {
+    let x = rng.unit();
+    if x < weights[0] {
+        REGIONS[0]
+    } else if x < weights[0] + weights[1] {
+        REGIONS[1]
+    } else {
+        REGIONS[2]
+    }
+}
+
+struct GeoOutcome {
+    visible: Vec<f64>,
+    serializable: Vec<f64>,
+    cold: Vec<f64>,
+    cross_pairs: f64,
+}
+
+fn mean(v: &[f64]) -> f64 {
+    v.iter().sum::<f64>() / v.len() as f64
+}
+
+/// Share of events that feel local (under 20 ms), in percent.
+fn local(v: &[f64]) -> f64 {
+    v.iter().filter(|x| **x < 20.0).count() as f64 * 100.0 / v.len() as f64
+}
+
+fn run_geo(
+    placement: Placement,
+    weights: [f64; 3],
+    locality: f64,
+    room_size: usize,
+    seed: u64,
+) -> GeoOutcome {
+    let mut rng = Rng(seed);
+    let rooms = 4_000;
+    let mut out = GeoOutcome {
+        visible: Vec::new(),
+        serializable: Vec::new(),
+        cold: Vec::new(),
+        cross_pairs: 0.0,
+    };
+    let mut homes = Vec::new();
+    for _ in 0..rooms {
+        let community = region_weighted(&mut rng, weights);
+        let members: Vec<Region> = (0..room_size)
+            .map(|_| {
+                if rng.unit() < locality {
+                    community
+                } else {
+                    region_weighted(&mut rng, weights)
+                }
+            })
+            .collect();
+        let home = match placement {
+            Placement::Core | Placement::CoreRelays => Region::UsEast,
+            Placement::GeoCreator => members[0],
+            Placement::GeoMajority => *REGIONS
+                .iter()
+                .max_by_key(|r| {
+                    members.iter().filter(|m| m == r).count() * 4 + usize::from(**r == members[0])
+                })
+                .unwrap(),
+        };
+        homes.push(home);
+        for (w, &writer) in members.iter().enumerate() {
+            for (r, &reader) in members.iter().enumerate() {
+                if w == r {
+                    continue;
+                }
+                let relay = matches!(placement, Placement::CoreRelays);
+                let extra = if relay {
+                    2.0 * (rtt(writer, writer) / 2.0 + HOP_MS)
+                } else {
+                    0.0
+                };
+                out.visible
+                    .push(rtt(writer, home) / 2.0 + rtt(home, reader) / 2.0 + HOP_MS + extra);
+            }
+            out.serializable.push(rtt(writer, home) + HOP_MS);
+            let cold = if matches!(placement, Placement::CoreRelays) && rng.unit() < RELAY_HIT {
+                rtt(writer, writer) + HOP_MS
+            } else {
+                rtt(writer, home) + HOP_MS
+            };
+            out.cold.push(cold);
+        }
+    }
+    // A user's transaction spanning two random rooms of theirs: how often
+    // their homes differ (rooms of a user share its community region with
+    // probability `locality`).
+    let mut cross = 0;
+    let pairs = 20_000;
+    for _ in 0..pairs {
+        let a = rng.below(rooms);
+        let b = rng.below(rooms);
+        // Rooms of one user: same community with probability `locality`.
+        let same_community = rng.unit() < locality;
+        let differ = if same_community {
+            false
+        } else {
+            homes[a] != homes[b]
+        };
+        cross += usize::from(differ);
+    }
+    out.cross_pairs = cross as f64 / pairs as f64;
+    out
+}
+
+#[test]
+#[ignore = "benchmark; run explicitly"]
+fn e5_geo_value() {
+    let scenarios: [(&str, [f64; 3], f64); 5] = [
+        ("single-region app (all US)", [1.0, 0.0, 0.0], 1.0),
+        ("regional communities (90% local)", [0.5, 0.3, 0.2], 0.9),
+        ("mostly regional (70% local)", [0.5, 0.3, 0.2], 0.7),
+        ("mixed (40% local)", [0.5, 0.3, 0.2], 0.4),
+        ("fully global rooms", [0.5, 0.3, 0.2], 0.0),
+    ];
+    for room_size in [2, 8] {
+        println!("\nroom size {room_size}");
+        println!(
+            "{:<34} {:<12} {:>20} {:>20} {:>20} {:>8}",
+            "scenario",
+            "placement",
+            "visible mean/<20ms",
+            "serial. mean/<20ms",
+            "cold mean/<20ms",
+            "x-shard"
+        );
+        for (name, weights, locality) in scenarios {
+            for placement in [
+                Placement::Core,
+                Placement::CoreRelays,
+                Placement::GeoCreator,
+                Placement::GeoMajority,
+            ] {
+                let o = run_geo(placement, weights, locality, room_size, 7);
+                println!(
+                    "{:<34} {:<12} {:>8.0} ms /{:>5.0}% {:>8.0} ms /{:>5.0}% {:>8.0} ms /{:>5.0}% {:>7.0}%",
+                    name,
+                    format!("{placement:?}"),
+                    mean(&o.visible),
+                    local(&o.visible),
+                    mean(&o.serializable),
+                    local(&o.serializable),
+                    mean(&o.cold),
+                    local(&o.cold),
+                    o.cross_pairs * 100.0
+                );
+            }
+        }
+    }
+}
