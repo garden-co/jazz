@@ -82,6 +82,16 @@ impl Session {
             ["user", "identity", "subject"] => Value::String(self.subject.clone()?),
             ["user", "identity", "issuer"] => Value::String(self.issuer.clone()?),
             ["user", "account"] => Value::Uuid(self.account?),
+            // How the identity signed in, from its issuer (as Jazz derives
+            // `session.authMode`).
+            ["authMode"] => Value::String(
+                match self.issuer.as_deref()? {
+                    AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
+                    AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
+                    _ => "external",
+                }
+                .to_owned(),
+            ),
             ["claims", _, ..] => {
                 jazz_model::model::policy_claims::policy_claim_at_path(&self.claims, path)?
             }
@@ -1950,10 +1960,11 @@ impl<'a> Ctx<'a> {
                         self.policy_expr(policy, target, &p, None, session, depth - 1)?
                     }
                 };
+                // An array reference inherits from any row it names.
+                let on = self.join_key((target, &p, "id"), (table, alias, via_column))?;
                 format!(
-                    "EXISTS (SELECT 1 FROM {} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
+                    "EXISTS (SELECT 1 FROM {} AS {p} WHERE {on} AND {p}._del = 0 AND {inner})",
                     self.source(target)?,
-                    quote(table.stored_name(via_column))
                 )
             }
             PolicyExpr::InheritsReferencing {
