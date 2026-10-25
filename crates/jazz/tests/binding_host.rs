@@ -1293,3 +1293,75 @@ fn a_tabs_first_load_wait_reaches_its_worker() {
     }
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 1);
 }
+
+/// Whether a subscription event is ready now, without moving any frames.
+fn event_ready(binding: &Binding, stream: &mut jazz::db::SubscriptionStream) -> bool {
+    let mut context = Context::from_waker(Waker::noop());
+    pin!(binding.next_event(stream))
+        .poll(&mut context)
+        .is_ready()
+}
+
+/// A strict remote subscription lists what the server lists, without
+/// pending local versions (INV-API-32): a row written while the server
+/// has not accepted it appears only once it has, and a settled row changed
+/// meanwhile stays listed as it was settled. A local-first one shows both
+/// at once.
+#[test]
+fn a_remote_subscription_never_lists_pending_local_versions() {
+    let server = authority();
+    let row = *server
+        .insert("notes", &title("settled"), &none())
+        .unwrap()
+        .row_id
+        .0
+        .as_bytes();
+    let client = open(0xb7);
+    let up = client.connect_upstream();
+    let down = server.accept_subscriber(client.author(), Default::default());
+    let links = [(&up, &down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut remote = client
+        .subscribe(&query, &json!({ "tier": "remote" }), None, None)
+        .unwrap();
+    let opening = binding_host::event_chunk(drive(&links, client.next_event(&mut remote))).unwrap();
+    assert_eq!(delta_rows(opening), 1);
+    let mut local = client
+        .subscribe(&query, &json!({ "tier": "local-first" }), None, None)
+        .unwrap();
+    drive(&links, client.next_event(&mut local));
+
+    // Written while the server has not seen them: no frames move.
+    client.insert("notes", &title("pending"), &none()).unwrap();
+    client
+        .update("notes", &row, &title("changed"), &none())
+        .unwrap();
+    block_on(client.db.tick()).unwrap();
+    assert!(
+        event_ready(&client, &mut local),
+        "local-first shows pending writes"
+    );
+    assert!(
+        !event_ready(&client, &mut remote),
+        "a remote subscription listed a pending local version"
+    );
+    let read = client
+        .all(
+            query.clone(),
+            &json!({ "tier": "local-only" }),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
+
+    // The server accepts them: now they are listed.
+    let change = binding_host::event_chunk(drive(&links, client.next_event(&mut remote))).unwrap();
+    assert!(delta_rows(change) >= 1);
+    let read = client
+        .all(query, &json!({ "tier": "remote" }), None, None, None)
+        .unwrap();
+    assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
+    assert_eq!(titles(&server), ["changed", "pending"]);
+}

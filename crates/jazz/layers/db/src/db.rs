@@ -207,6 +207,11 @@ struct ReadSpec {
     include_deleted: bool,
     /// A replica's read of the server's view (`ReadTier::Remote`).
     members_only: bool,
+    /// A replica's `ReadTier::Remote` read: its pending local versions
+    /// (seqs from `LOCAL_BASE` up) are left out, and a row they changed
+    /// reads as its settled version, as the server lists it. Unlike a
+    /// [`ReadSpec::cut`] it stays live.
+    settled_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
 }
@@ -239,6 +244,7 @@ impl ReadSpec {
         Ok(Self {
             include_deleted: opts.read_view.include_deleted,
             members_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
+            settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
         })
@@ -2096,6 +2102,7 @@ impl Inner {
         Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_settled_only(read.settled_only)
             .with_history_origin(self.history_origin())
             .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)

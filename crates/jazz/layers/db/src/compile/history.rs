@@ -136,7 +136,7 @@ impl Ctx<'_> {
         bound: HistoryBound<'_>,
         include_deleted: bool,
     ) -> Result<(String, Table), Error> {
-        if self.cut.is_some() {
+        if self.cut.is_some() && !self.settled_only {
             return Err(history_unsupported("history at a snapshot"));
         }
         if self.view.as_ref().is_some_and(|view| view.base.is_some()) {

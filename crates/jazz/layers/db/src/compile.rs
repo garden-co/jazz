@@ -245,6 +245,9 @@ pub struct Ctx<'a> {
     pub view: Option<View>,
     /// An as-of cut every table is read through.
     pub cut: Option<Cut>,
+    /// The cut is a replica's last server seq: the read leaves out its
+    /// pending local versions (which history reads do anyway).
+    pub settled_only: bool,
     /// Questions the statement needs answered first.
     pub preps: Vec<Prep>,
     /// The authority's node, whose own commits history reads name by their
@@ -336,6 +339,7 @@ impl<'a> Ctx<'a> {
             tables: BTreeSet::new(),
             view: None,
             cut: None,
+            settled_only: false,
             preps: Vec::new(),
             history_origin: None,
             members_only: false,
@@ -369,6 +373,16 @@ impl<'a> Ctx<'a> {
 
     pub fn with_cut(mut self, cut: Option<Cut>) -> Self {
         self.cut = cut;
+        self
+    }
+
+    /// Leave out a replica's pending local versions, as of its last server
+    /// seq, unless the read already has a cut.
+    pub fn with_settled_only(mut self, settled_only: bool) -> Self {
+        if settled_only && self.cut.is_none() {
+            self.cut = Some(Cut::at(crate::db::LOCAL_BASE - 1));
+            self.settled_only = true;
+        }
         self
     }
 

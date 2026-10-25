@@ -5183,6 +5183,9 @@ impl Db {
                     ReadSpec {
                         include_deleted,
                         members_only: relayed.is_some(),
+                        // A Remote one leaves out this replica's pending
+                        // versions: only the authority confirms them.
+                        settled_only: relayed.is_some() && tier == ReadTier::Remote,
                         ..ReadSpec::default()
                     },
                     match relayed {
@@ -5451,9 +5454,15 @@ impl Db {
                     .schema
                     .stored_table(history.unwrap_or(&query.table))?
                     .to_owned();
+                // A strict Remote read leaves out this replica's pending
+                // versions: only the authority confirms them. One with a
+                // wait (a serializable snapshot) takes this replica's view.
                 let read = ReadSpec {
                     cut: at.map(Cut::at),
                     include_deleted,
+                    settled_only: tier == ReadTier::Remote
+                        && wait.is_none()
+                        && inner.client.is_some(),
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
