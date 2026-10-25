@@ -1562,7 +1562,7 @@ fn foreground_command(
                     binding_host::advice::delete(table, &row)
                 }
             }?;
-            let (id, future) = binding.request_permission_advice(action);
+            let (id, future) = binding.request_permission_advice(action, None, None)?;
             client.pending_or_ready(
                 Box::pin(async move {
                     Ok(Response::PermissionAdvice {
