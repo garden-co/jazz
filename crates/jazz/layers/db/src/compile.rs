@@ -51,13 +51,28 @@ impl Session {
         }
     }
 
-    pub fn for_author(author: AuthorSubject, claims: BTreeMap<String, Value>) -> Self {
+    pub fn for_author(author: AuthorSubject, mut claims: BTreeMap<String, Value>) -> Self {
         if author == AuthorSubject::SYSTEM {
             return Self {
                 claims,
                 ..Self::system()
             };
         }
+        // Structured author operands share the admitted identity used by policies.
+        // Accountless authors must also erase forged ownership claims, rather
+        // than retain provider values for fields absent from the real author.
+        for key in [
+            "user",
+            "user.account",
+            "user.identity",
+            "user.identity.issuer",
+            "user.identity.subject",
+        ] {
+            claims.remove(key);
+        }
+        claims.extend(jazz_model::model::policy_claims::author_policy_claims(
+            author,
+        ));
         let (issuer, subject) = author.principal_parts();
         Self {
             system: false,
@@ -1731,6 +1746,9 @@ impl<'a> Ctx<'a> {
                 let seeds = self.table(&seed.table)?;
                 let s = self.alias("s");
                 let mut conds = vec![format!("{s}._del = 0")];
+                if self.members_only {
+                    conds.push(self.listed(seeds, &s));
+                }
                 if let Some(session) = self.policy {
                     conds.push(self.read_policy(seeds, &s, session)?);
                 }
@@ -1766,6 +1784,9 @@ impl<'a> Ctx<'a> {
         };
         let e = self.alias("e");
         let mut step = vec![format!("{e}._del = 0")];
+        if self.members_only {
+            step.push(self.listed(edges, &e));
+        }
         if let Some(session) = self.policy {
             step.push(self.read_policy(edges, &e, session)?);
         }
@@ -1803,6 +1824,9 @@ impl<'a> Ctx<'a> {
                 column_sql(access, &a, &via.access_team_column)?
             ),
         ];
+        if self.members_only {
+            conds.push(self.listed(access, &a));
+        }
         if let Some(session) = self.policy {
             conds.push(self.read_policy(access, &a, session)?);
         }
@@ -1916,6 +1940,22 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
+        // Structured author operands use the same field-wise comparison as
+        // policies; binding their record bytes as a scalar is not supported.
+        let author = match (left, right) {
+            (Operand::Column(column), Operand::Claim(key))
+            | (Operand::Claim(key), Operand::Column(column))
+                if crate::values::author_record(column).is_some()
+                    && matches!(key.as_str(), "user" | "user.identity") =>
+            {
+                Some((column, key))
+            }
+            _ => None,
+        };
+        if let Some((column, key)) = author {
+            let path = crate::query::operand_claim_path(key);
+            return self.author_cmp(table, alias, column, &op, &path, self.claims);
+        }
         let left = self.operand(left, table, alias)?;
         let right = self.operand(right, table, alias)?;
         self.cmp(op, left, right)

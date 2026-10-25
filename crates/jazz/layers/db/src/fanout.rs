@@ -49,7 +49,7 @@ struct Member {
     settled: sync::SettledBy,
     told: std::cell::Cell<Option<DurabilityTier>>,
     accepted_evidence: bool,
-    readable_policy_inputs: bool,
+    support_inputs: bool,
 }
 
 /// One shared live result.
@@ -89,28 +89,24 @@ pub(super) struct Group {
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
-    /// The authority's readable-input stream also needs changed permission
+    /// Remote query and permission support streams also need changed input
     /// witnesses when the visible row result is unchanged.
-    pub(super) fn observe_readable_policy_inputs(&mut self, queue: &Queue) {
+    pub(super) fn observe_support_inputs(&mut self, queue: &Queue) {
         let queue = Rc::downgrade(queue);
         if let Some(member) = self
             .members
             .iter_mut()
             .find(|member| member.queue.ptr_eq(&queue))
         {
-            member.readable_policy_inputs = true;
+            member.support_inputs = true;
         }
     }
 
-    fn notify_readable_policy_inputs(&self) {
+    fn notify_support_inputs(&self) {
         if self.awaiting || !self.opened || self.read.frozen() {
             return;
         }
-        for member in self
-            .members
-            .iter()
-            .filter(|member| member.readable_policy_inputs)
-        {
+        for member in self.members.iter().filter(|member| member.support_inputs) {
             if let Some(queue) = member.queue.upgrade() {
                 let mut event = delta(false, Vec::new(), Vec::new(), Vec::new());
                 if let SubscriptionEvent::Delta { settled, tier, .. } = &mut event {
@@ -374,7 +370,7 @@ impl Inner {
             settled: settled.clone(),
             told: std::cell::Cell::new(now.then(|| settled.tier())),
             accepted_evidence: false,
-            readable_policy_inputs: false,
+            support_inputs: false,
         };
         let tier = settled.tier();
         let open = |rows: &[CurrentRow]| {
@@ -738,7 +734,7 @@ impl Inner {
             if let Some(changed) = targets.remove(&gid) {
                 refresh_includes(&mut group, &changed);
             }
-            group.notify_readable_policy_inputs();
+            group.notify_support_inputs();
         }
     }
 

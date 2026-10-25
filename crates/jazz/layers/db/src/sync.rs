@@ -34,6 +34,8 @@
 
 #[path = "sync/accepted_overlay.rs"]
 mod accepted_overlay;
+#[path = "sync/reachability.rs"]
+mod reachability;
 #[path = "sync/readable_policy.rs"]
 mod readable_policy;
 #[path = "sync/scoped_queries.rs"]
@@ -1051,6 +1053,7 @@ pub(crate) struct Session {
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     readable_policy: BTreeMap<u64, PreparedQuery>,
+    reachability: BTreeMap<u64, PreparedQuery>,
     /// The replica's coherence watches: `(table, column, value)` for every
     /// row shipped (`id`), include target and array correlation. A commit
     /// that writes a matching row ships its image (or an eviction).
@@ -1111,6 +1114,7 @@ impl Session {
             committed: Vec::new(),
             support: BTreeMap::new(),
             readable_policy: BTreeMap::new(),
+            reachability: BTreeMap::new(),
             watch: HashSet::new(),
             resume: BTreeMap::new(),
             held: BTreeMap::new(),
@@ -1223,14 +1227,16 @@ fn snapshot_unavailable(why: &str) -> Error {
 /// from the result and its edges ([`Support::Reach`]): seeded by rows of
 /// the root table that are themselves in the result (no filter after the
 /// gather), reaching root rows by id.
-fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
+fn gather_from_root(query: &Query, via: &crate::query::ReachableVia) -> bool {
     via.seed.as_ref().is_some_and(|seed| {
         seed.table == query.table && seed.user_column.is_none() && seed.team_column == "id"
     }) && via.access_table == query.table
         && via.access_row_column == "id"
         && via.access_team_column == "id"
-        && via.access_filters.is_empty()
-        && query.filters.is_empty()
+}
+
+fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
+    gather_from_root(query, via) && via.access_filters.is_empty() && query.filters.is_empty()
 }
 
 /// What a remote read of `query` subscribes to: the query itself, or for
@@ -1541,7 +1547,11 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
-        for via in &query.reachable {
+        for via in query
+            .reachable
+            .iter()
+            .filter(|via| gather_shaped(query, via))
+        {
             let edges = self.schema.table(&via.edge_table)?;
             support.push(Support::Reach {
                 frontier: table.stored_name(&via.access_team_column).to_owned(),
@@ -3672,7 +3682,10 @@ impl Db {
         }
         let query = &*remote_query(query);
         let other_tables = !query.joins.iter().all(join_followable)
-            || !query.reachable.iter().all(|via| gather_shaped(query, via))
+            || query
+                .reachable
+                .iter()
+                .any(|via| gather_from_root(query, via) && !gather_shaped(query, via))
             || !query.inherits.is_empty()
             || query
                 .includes
@@ -3680,7 +3693,7 @@ impl Db {
                 .any(|include| include.path.contains('.'));
         if other_tables {
             return Err(crate::values::unsupported(format!(
-                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers or multi-hop includes)",
+                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers, inheritance or multi-hop includes)",
                 query.table
             )));
         }
@@ -5683,6 +5696,45 @@ impl Db {
                         }
                         images.extend(extra);
                     }
+                    if let Some(prepared) = inner.sessions[index].reachability.get(&id).cloned() {
+                        let roots = group
+                            .upgrade()
+                            .map(|group| {
+                                group
+                                    .borrow()
+                                    .rows
+                                    .iter()
+                                    .map(|row| row.id)
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        match inner.reachability_inputs(
+                            &prepared,
+                            policy,
+                            &roots,
+                            &ReadSpec::default(),
+                        ) {
+                            Ok(inputs) => {
+                                for image in inputs {
+                                    watch.insert(wk((
+                                        image.table.clone(),
+                                        "id".to_owned(),
+                                        watch_key(&Sql::Blob(image.id.to_vec())),
+                                    )));
+                                    held_rows.entry(image.table.clone()).or_default().insert(
+                                        (RowUuid::from_bytes(image.id), image.key.clone()),
+                                        true,
+                                    );
+                                    images.push(image);
+                                }
+                            }
+                            Err(error) => {
+                                images.truncate(first);
+                                inner.refuse_subscription(index, id, error);
+                                continue;
+                            }
+                        }
+                    }
                     if let Some(prepared) = inner.sessions[index].readable_policy.get(&id).cloned()
                     {
                         let inputs = inner.subscription_policy_inputs(&prepared, policy, &group);
@@ -5922,6 +5974,7 @@ impl Db {
             include_deleted,
             ..ReadSpec::default()
         };
+        inner.check_reachability_shape(prepared)?;
         let publish_evidence = inner.sessions[index].identity == AuthorSubject::SYSTEM;
         if matches!(&evidence, Some(ScopedEvidence::Collect)) && !publish_evidence {
             return Err(rejected(
@@ -6019,6 +6072,8 @@ impl Db {
             }
             None | Some(ScopedEvidence::Supplied(_)) => None,
         };
+        let roots = rows.iter().map(|row| row.id).collect::<Vec<_>>();
+        let reachability_inputs = inner.reachability_inputs(prepared, policy, &roots, &read)?;
         // Scoped evidence already contains the exact query and policy inputs.
         // Re-following them against the current cache would mix cuts and claims.
         let support = if scoped_evidence.is_some() {
@@ -6042,6 +6097,14 @@ impl Db {
             inner.follow_support(&support, image, policy, &mut extra, &mut watch, &mut held)?;
         }
         images.extend(extra);
+        for image in &reachability_inputs {
+            if at.is_none() {
+                held.entry(image.table.clone())
+                    .or_default()
+                    .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
+            }
+        }
+        images.extend(reachability_inputs);
         for image in &images {
             watch.insert(wk((
                 image.table.clone(),
@@ -6690,6 +6753,7 @@ impl Db {
                     }
                 }
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
+                db.inner().check_reachability_shape(&prepared)?;
                 if readable_policy {
                     db.inner().check_readable_policy_shape(&prepared, policy)?;
                 }
@@ -6733,9 +6797,17 @@ impl Db {
                     }
                 }
                 let (queue, group) = subscribed?;
+                if reachability::needed(&query) {
+                    if let Some(group) = group.upgrade() {
+                        group.borrow_mut().observe_support_inputs(&queue);
+                    }
+                    inner.sessions[index]
+                        .reachability
+                        .insert(id, prepared.clone());
+                }
                 if readable_policy {
                     if let Some(group) = group.upgrade() {
-                        group.borrow_mut().observe_readable_policy_inputs(&queue);
+                        group.borrow_mut().observe_support_inputs(&queue);
                     }
                     inner.sessions[index]
                         .readable_policy
@@ -6815,6 +6887,7 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
                 inner.sessions[index].readable_policy.remove(&id);
+                inner.sessions[index].reachability.remove(&id);
                 if let Some((query, binding, include_deleted)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
