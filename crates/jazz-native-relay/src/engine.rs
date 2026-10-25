@@ -40,6 +40,74 @@ fn unsupported() -> RelayError {
         "native relay requires jazz.sqlite.native-relay-file.v1; legacy or foreign layouts cannot be opened",
     ))
 }
+/// A closed generic root may move between already linked host identities only
+/// after all original uploads have settled. This is deliberately not a private
+/// owner admission: matching account IDs never grants that capability.
+fn generic_handoff_is_admissible(
+    tx: &rusqlite::Transaction<'_>,
+    stored_scope: &str,
+    stored_author: &str,
+    config: &RelayOpenConfig,
+) -> Result<bool, RelayError> {
+    let previous =
+        jazz::ids::AuthorSubject::from_canonical(stored_author).map_err(|_| unsupported())?;
+    if !matches!(previous, jazz::ids::AuthorSubject::Authenticated(_))
+        || !matches!(
+            config.identity.author,
+            jazz::ids::AuthorSubject::Authenticated(_)
+        )
+        || previous == config.identity.author
+        || previous.account_id().is_none()
+        || previous.account_id() != config.identity.author.account_id()
+    {
+        return Ok(false);
+    }
+    let Some(mut fields) = stored_scope.strip_prefix("jazz-native-relay-owner-v1:") else {
+        return Ok(false);
+    };
+    let mut decoded = Vec::with_capacity(3);
+    for _ in 0..3 {
+        let Some((length, remaining)) = fields.split_once(':') else {
+            return Ok(false);
+        };
+        let Ok(length) = length.parse::<usize>() else {
+            return Ok(false);
+        };
+        let Some((field, remaining)) = remaining.split_at_checked(length) else {
+            return Ok(false);
+        };
+        decoded.push(field);
+        fields = remaining;
+    }
+    let previous_scope = RelayScope {
+        app_namespace: decoded[0].to_owned(),
+        storage_namespace: decoded[1].to_owned(),
+        auth_scope: Some(decoded[2].to_owned()),
+    };
+    if !fields.is_empty()
+        || previous_scope.validate().is_err()
+        || previous_scope.ledger_owner_encoding() != stored_scope
+        || previous_scope.app_namespace != config.scope.app_namespace
+        || previous_scope.storage_namespace != config.scope.storage_namespace
+    {
+        return Ok(false);
+    }
+    // Existence checks use the singleton/transaction keys and the existing
+    // partial pending-upload index; settled history is never scanned.
+    let initialized: i64 = tx.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('_jazz_pending','_jazz_relay_upload_v1','_jazz_owner_scope_v1')",
+        [], |row| row.get(0),
+    ).map_err(storage)?;
+    if initialized != 3 {
+        return Ok(false);
+    }
+    let held: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _jazz_owner_scope_v1 WHERE singleton=1) OR EXISTS(SELECT 1 FROM _jazz_pending LIMIT 1) OR EXISTS(SELECT 1 FROM _jazz_relay_upload_v1 WHERE pending=1 LIMIT 1)",
+        [], |row| row.get(0),
+    ).map_err(storage)?;
+    Ok(!held)
+}
+
 impl RelayDb {
     pub(super) fn identity(&self) -> DbIdentity {
         self.identity
@@ -100,6 +168,7 @@ impl RelayDb {
         let tx = conn.transaction().map_err(storage)?;
         let marker:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_jazz_native_relay_v1')",[],|r|r.get(0)).map_err(storage)?;
         let mut promote = false;
+        let mut generic_handoff = None;
         if marker {
             let stored:(i64,String,Option<String>,Vec<u8>,String)=tx.query_row(
                 "SELECT version,scope,owner,node,author FROM _jazz_native_relay_v1 WHERE slot=1",[],
@@ -107,15 +176,25 @@ impl RelayDb {
             if stored.0 != 1 {
                 return Err(unsupported());
             }
-            // A trusted admission can promote a closed generic root, but it
-            // cannot change its scope or identity, or downgrade a private one.
+            // Trusted promotion keeps the exact scope and identity. A generic
+            // linked-identity handoff is separate and never promotes a root.
             promote = stored.2.is_none() && owner.is_some();
-            if stored.1 != config.scope.ledger_owner_encoding()
+            if stored.3.as_slice() != config.identity.node.as_bytes()
                 || (stored.2.as_deref() != owner && !promote)
-                || stored.3.as_slice() != config.identity.node.as_bytes()
-                || stored.4 != config.identity.author.canonical()
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
+            }
+            if stored.1 != config.scope.ledger_owner_encoding()
+                || stored.4 != config.identity.author.canonical()
+            {
+                if stored.2.is_none()
+                    && owner.is_none()
+                    && generic_handoff_is_admissible(&tx, &stored.1, &stored.4, config)?
+                {
+                    generic_handoff = Some((stored.1, stored.4));
+                } else {
+                    return Err(RelayError::ScopeConfigurationMismatch);
+                }
             }
             // Core admission precedes the native marker update. A crash in
             // between must not reopen a private projection as a generic relay.
@@ -172,6 +251,21 @@ impl RelayDb {
         if let Some(bytes) = cached {
             // SAFETY: the cache is read in this exact admitted host scope.
             unsafe { core.install_cached_catalogue(bytes) }.map_err(RelayError::Db)?;
+        }
+        if let Some((previous_scope, previous_author)) = generic_handoff {
+            // jazz.sqlite.native-generic-handoff.v1: retain the v1 file layout,
+            // replacing only scope/author after core open succeeds. The owner
+            // lock spans both operations, including stale-handle invalidation.
+            let conn = Connection::open(path).map_err(storage)?;
+            conn.execute_batch("PRAGMA synchronous=FULL")
+                .map_err(storage)?;
+            let changed = conn.execute(
+                "UPDATE _jazz_native_relay_v1 SET scope=?1,author=?2 WHERE slot=1 AND version=1 AND owner IS NULL AND node=?3 AND scope=?4 AND author=?5",
+                rusqlite::params![config.scope.ledger_owner_encoding(), config.identity.author.canonical(), config.identity.node.as_bytes().as_slice(), previous_scope, previous_author],
+            ).map_err(storage)?;
+            if changed != 1 {
+                return Err(RelayError::ScopeConfigurationMismatch);
+            }
         }
         if let Some(owner) = owner {
             core.set_scope_isolated_storage_owner()

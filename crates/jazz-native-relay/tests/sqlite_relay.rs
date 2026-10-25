@@ -2701,3 +2701,278 @@ async fn native_pending_transaction_reads_preserve_their_staged_prefixes() {
         [Value::String("last".into())]
     );
 }
+
+fn linked_generic_config(path: &Path, subject: &str) -> RelayOpenConfig {
+    let mut config = generic_config(path);
+    config.scope.auth_scope = Some(subject.to_owned());
+    config.identity.author = AuthorSubject::authenticated("https://issuer.example", subject)
+        .unwrap()
+        .with_account(jazz::account_registry::AccountId(
+            "07070707-0707-0707-0707-070707070707".parse().unwrap(),
+        ));
+    config
+}
+
+// The public API cannot expose the admission marker. Inspect only the pinned
+// TEXT/BLOB values to verify the durable transition and private-owner absence.
+fn generic_marker_bytes(path: &Path) -> serde_json::Value {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    conn.query_row(
+        "SELECT version,scope,owner,node,author FROM _jazz_native_relay_v1 WHERE slot=1",
+        [],
+        |row| {
+            let scope: String = row.get(1)?;
+            let owner: Option<String> = row.get(2)?;
+            let node: Vec<u8> = row.get(3)?;
+            let author: String = row.get(4)?;
+            Ok(serde_json::json!({
+                "version": row.get::<_, i64>(0)?,
+                "scope_utf8": hex(scope.as_bytes()),
+                "owner_utf8": owner.map(|value| hex(value.as_bytes())),
+                "node": hex(&node),
+                "author_utf8": hex(author.as_bytes()),
+            }))
+        },
+    )
+    .unwrap()
+}
+
+/// Alice closes her settled generic relay before linked Bob reopens it. Old
+/// aliases stay closed, the v1 transition bytes are pinned, and no private
+/// owner capability is created by their shared account ID.
+#[test]
+fn linked_generic_handoff_preserves_exclusivity_and_pinned_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("linked.sqlite");
+    let registry = NativeRelayRegistry::default();
+    let alice = linked_generic_config(&path, "alice");
+    let bob = linked_generic_config(&path, "bob");
+    let old = registry.open(alice.clone()).unwrap();
+    assert!(matches!(
+        registry.open(bob.clone()),
+        Err(RelayError::StorageAlreadyOwned)
+    ));
+    registry.close(&alice.scope).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite_native_generic_handoff_v1.json"
+    ))
+    .unwrap();
+    assert_eq!(generic_marker_bytes(&path), fixture["alice"]);
+    let next = registry.open(bob.clone()).unwrap();
+    assert!(next.pump().is_ok());
+    assert!(old.pump().is_err());
+    registry.close(&bob.scope).unwrap();
+    assert_eq!(generic_marker_bytes(&path), fixture["bob"]);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    assert!(
+        !conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _jazz_owner_scope_v1 WHERE singleton=1)",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    drop(conn);
+    let again = registry.open(alice.clone()).unwrap();
+    assert!(again.pump().is_ok());
+    registry.close(&alice.scope).unwrap();
+    assert_eq!(generic_marker_bytes(&path), fixture["alice"]);
+}
+
+/// Alice's pending local upload remains byte-for-byte hers. Bob cannot hand off
+/// the root before settlement, and Alice can still reopen after that refusal.
+#[test]
+fn linked_generic_handoff_refuses_pending_local_uploads_without_relabeling() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.sqlite");
+    let registry = NativeRelayRegistry::default();
+    let alice = linked_generic_config(&path, "alice");
+    let bob = linked_generic_config(&path, "bob");
+    drop(registry.open(alice.clone()).unwrap());
+    registry.close(&alice.scope).unwrap();
+    seed_generic_pending(&path, alice.identity.author);
+    let pending = pending_commit_bytes(&path);
+    assert!(!pending.is_empty());
+    let marker = generic_marker_bytes(&path);
+    assert!(matches!(
+        registry.open(bob),
+        Err(RelayError::ScopeConfigurationMismatch)
+    ));
+    assert_eq!(generic_marker_bytes(&path), marker);
+    assert_eq!(pending_commit_bytes(&path), pending);
+    let restored = registry.open(alice.clone()).unwrap();
+    assert!(restored.pump().is_ok());
+    registry.close(&alice.scope).unwrap();
+    assert_eq!(pending_commit_bytes(&path), pending);
+}
+
+/// Mallory cannot cross account, application, storage or node boundaries.
+/// Neither a generic handoff nor trusted promotion lets Bob adopt Alice's
+/// private owner merely because their projected account IDs match.
+#[test]
+fn linked_generic_handoff_does_not_widen_scope_or_private_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("generic.sqlite");
+    let registry = NativeRelayRegistry::default();
+    let alice = linked_generic_config(&path, "alice");
+    let bob = linked_generic_config(&path, "bob");
+    drop(registry.open(alice.clone()).unwrap());
+    registry.close(&alice.scope).unwrap();
+    let marker = generic_marker_bytes(&path);
+    for kind in 0..5 {
+        let mut changed = bob.clone();
+        match kind {
+            0 => {
+                changed.identity.author =
+                    AuthorSubject::authenticated("https://issuer.example", "mallory")
+                        .unwrap()
+                        .with_account(jazz::account_registry::AccountId(
+                            "08080808-0808-0808-0808-080808080808".parse().unwrap(),
+                        ))
+            }
+            1 => changed.scope.app_namespace.push_str("-other"),
+            2 => changed.scope.storage_namespace.push_str("-other"),
+            3 => changed.identity.node = NodeUuid::from_bytes([99; 16]),
+            _ => {
+                changed.identity.author =
+                    AuthorSubject::authenticated("https://issuer.example", "bob").unwrap()
+            }
+        }
+        assert!(matches!(
+            registry.open(changed),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
+        assert_eq!(generic_marker_bytes(&path), marker);
+    }
+    assert!(Host::try_open(&path, "bob", bob.identity, schema()).is_err());
+    assert_eq!(generic_marker_bytes(&path), marker);
+    drop(Host::try_open(&path, "alice", alice.identity, schema()).unwrap());
+    let private_marker = generic_marker_bytes(&path);
+    assert!(matches!(
+        registry.open(bob.clone()),
+        Err(RelayError::ScopeConfigurationMismatch)
+    ));
+    assert!(Host::try_open(&path, "bob", bob.identity, schema()).is_err());
+    assert_eq!(generic_marker_bytes(&path), private_marker);
+    // Recreate an interrupted promotion: the private core scope exists, but
+    // the final native owner marker has not committed. This physical boundary
+    // cannot be staged through the public opener.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE _jazz_native_relay_v1 SET owner=NULL WHERE slot=1",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let interrupted = generic_marker_bytes(&path);
+    assert!(matches!(
+        registry.open(bob),
+        Err(RelayError::ScopeConfigurationMismatch)
+    ));
+    assert_eq!(generic_marker_bytes(&path), interrupted);
+    drop(Host::try_open(&path, "alice", alice.identity, schema()).unwrap());
+    assert_eq!(generic_marker_bytes(&path), private_marker);
+}
+
+/// Alice's replica upload is durable at a generic relay but not accepted.
+/// Linked Bob cannot acquire that relay's journal; refusing him retains the
+/// original source, message bytes and pending fate for Alice's later resume.
+#[test]
+fn linked_generic_handoff_refuses_pending_forwarded_uploads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("forwarded.sqlite");
+    let registry = NativeRelayRegistry::default();
+    let alice = linked_generic_config(&path, "alice");
+    drop(registry.open(alice.clone()).unwrap());
+    registry.close(&alice.scope).unwrap();
+    // A generic relay accepts durable replicas. Non-durable foregrounds need
+    // a private-owner admission and deliberately cannot populate this fixture.
+    let relay = block_on(Db::open_at(
+        DbConfig::new(schema(), alice.identity),
+        &path,
+        Default::default(),
+    ))
+    .unwrap();
+    relay.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
+    let sender = block_on(Db::open(DbConfig::new(
+        schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([3; 16]),
+            author: alice.identity.author,
+        },
+    )))
+    .unwrap();
+    let to_relay = Rc::new(RefCell::new(VecDeque::new()));
+    let to_sender = Rc::new(RefCell::new(VecDeque::new()));
+    block_on(sender.connect_upstream(Box::new(Queues {
+        inbound: to_sender.clone(),
+        outbound: to_relay.clone(),
+    })));
+    relay.accept_subscriber(
+        Box::new(Queues {
+            inbound: to_relay,
+            outbound: to_sender,
+        }),
+        alice.identity.author,
+    );
+    block_on(sender.insert(
+        "notes",
+        std::collections::BTreeMap::from([(
+            "text".to_owned(),
+            Value::String("pending foreground".into()),
+        )]),
+        Default::default(),
+    ))
+    .unwrap();
+    for _ in 0..12 {
+        block_on(sender.tick()).unwrap();
+        block_on(relay.tick()).unwrap();
+    }
+    block_on(sender.close()).unwrap();
+    block_on(relay.close()).unwrap();
+    drop(relay);
+    // The public receipt does not expose journal source/bytes; inspecting the
+    // durable row proves a failed handoff neither relabels nor settles it.
+    let uploads = || {
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        conn.prepare("SELECT source,commit_msg,pending FROM _jazz_relay_upload_v1 ORDER BY ordinal")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, bool>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let before = uploads();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].0, alice.identity.author.canonical());
+    assert!(before[0].2);
+    let marker = generic_marker_bytes(&path);
+    assert!(matches!(
+        registry.open(linked_generic_config(&path, "bob")),
+        Err(RelayError::ScopeConfigurationMismatch)
+    ));
+    assert_eq!(uploads(), before);
+    assert_eq!(generic_marker_bytes(&path), marker);
+    drop(registry.open(alice.clone()).unwrap());
+    registry.close(&alice.scope).unwrap();
+    assert_eq!(uploads(), before);
+}

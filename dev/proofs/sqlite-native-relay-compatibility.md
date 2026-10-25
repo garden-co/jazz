@@ -101,6 +101,32 @@ file creation. The core database owns its WAL and durability receipts. The lock
 inode is retained after close so another process cannot split ownership by
 replacing it.
 
+### Closed generic linked-identity handoff
+
+`jazz.sqlite.native-generic-handoff.v1` is a transition over the existing v1
+marker, pinned by `sqlite_native_generic_handoff_v1.json`. It changes only the
+scope and author TEXT values; version, node and the NULL owner are unchanged.
+Two authenticated host identities must name the same non-system account, the
+application and storage namespaces must match, and the node must be unchanged.
+The old owner must have closed and invalidated its aliases before the new open
+can acquire the exclusive file lock.
+
+Both pending journals must be empty. The check uses the existing transaction
+keys and pending-upload index; it does not scan settled history. An existing
+private core scope refuses the transition, including an interrupted promotion
+whose native marker still says generic. Neither shared account IDs nor the
+handoff grants private pending previews, delegated claims or Global acceptance.
+Refusal preserves the old marker and upload bytes, and the original identity
+can reopen normally.
+
+The lock spans validation, core opening and the FULL synchronous marker update.
+The update happens only after core open and cached catalogue validation succeed;
+a crash before it leaves the old admission marker. Once committed, an existing
+v1 reader can open using the new exact identity. Earlier builds cannot perform
+the transition themselves. There is no new file layout or wire encoding.
+Private account switching and retaining a previous login's pending uploads are
+not implemented by this generic transition.
+
 ### Generic owner promotion
 
 `jazz.sqlite.native-owner-promotion.v1` is an ordered transition over the existing
