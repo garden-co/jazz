@@ -41,7 +41,7 @@
 mod e2ee_crypto;
 
 #[cfg(feature = "rn-test-bridge")]
-compile_error!("the RN test bridge needs jazz-native-relay, which is not ported to SQLite yet");
+mod rn_test_bridge;
 
 #[global_allocator]
 static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;

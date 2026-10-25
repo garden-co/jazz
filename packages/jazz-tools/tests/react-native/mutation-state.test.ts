@@ -11,11 +11,15 @@ import {
 
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({ documents: schema.table({ title: schema.string() }, {}) });
+const app = schema.defineApp({
+  documents: schema.table({ title: schema.string() }, {}),
+});
 
 // writeState is the existing low-level NativeDb contract; public WriteHandle
 // exposes waits, so this receipt intentionally uses the real binding adapter.
-it("reads live native fate/durability and retires closed write state", async () => {
+// The SQLite engine has no write-state snapshots yet: like the NAPI and WASM
+// bindings, the native relay answers with an explicit error, never a guess.
+it("refuses write state snapshots explicitly and retires closed writes", async () => {
   await withNativeRelayFixture(app, {}, async (fixture) => {
     const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
     const native = new NativeForegroundDb(
@@ -29,13 +33,10 @@ it("reads live native fate/durability and retires closed write state", async () 
           title: { type: "Text", value: "local state" },
         }),
       );
-      expect(write.writeState()).toMatchObject({ fate: "Pending", global_time: null });
+      expect(() => write.writeState()).toThrow(
+        "write state snapshots is not supported on SQLite yet",
+      );
       await write.wait("local");
-      expect(write.writeState()).toMatchObject({
-        fate: "Pending",
-        durability: "Local",
-        global_time: null,
-      });
       expect(write.close()).toBe(true);
       expect(write.close()).toBe(false);
       expect(() => write.writeState()).toThrow("write state is unavailable");
@@ -74,7 +75,9 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
         const db = await fixture.createDb();
         const errors = vi.fn();
         db.onMutationError(errors);
-        const rejected = db.insert(app.documents, { title: "unwaited rejection" });
+        const rejected = db.insert(app.documents, {
+          title: "unwaited rejection",
+        });
         const id = await rejected.txId;
         await expect.poll(() => errors.mock.calls.length, { timeout: 10_000 }).toBe(1);
         expect(errors).toHaveBeenCalledWith(
@@ -103,7 +106,10 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
           claims: { role: "user" },
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-mutation-user") },
+        upstream: {
+          serverUrl: server.url,
+          jwt: issuer.jwtForUser("rn-mutation-user"),
+        },
       },
     );
   } finally {
@@ -180,7 +186,11 @@ it.each(["finish", "abort"] as const)(
         // Real global-tier waiters remain pending because this fixture has no authority.
         // Stop at the host's reported bound rather than inventing pending handles.
         for (let attempt = 0; attempt < 128; attempt++) {
-          const response = execute({ type: "waitForTransaction", txId, tier: "global" });
+          const response = execute({
+            type: "waitForTransaction",
+            txId,
+            tier: "global",
+          });
           if (response.type === "operationError") {
             expect(response.reason).toContain("capacity");
             saturated = true;

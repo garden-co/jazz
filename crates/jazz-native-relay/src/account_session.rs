@@ -393,10 +393,7 @@ impl NativeRelayHost {
         };
         if let Some(relay) = &live_relay {
             let next = claims.clone();
-            if let Err(error) = relay.run(move |worker| {
-                worker.refresh_account_claims(author, next);
-                Ok(())
-            }) {
+            if let Err(error) = relay.refresh_account_claims(author, next) {
                 return Err(relay_status(error));
             }
         }

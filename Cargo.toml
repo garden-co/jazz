@@ -11,8 +11,7 @@ members = [
   "crates/wasm-tracing",
   "crates/jazz-wasm",
   "crates/jazz-native-transport",
-  # Not yet ported to the SQLite engine (stage 2 of the Groove removal):
-  # "crates/jazz-native-relay",
+  "crates/jazz-native-relay",
   "crates/jazz-cli",
   "crates/jazz-server",
   "crates/jazz-testkit",
@@ -43,7 +42,6 @@ exclude = [
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
   "vendor/ruzstd",
-  "crates/jazz-native-relay",
   "crates/jazz-sim",
 ]
 

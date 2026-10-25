@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Linux RN API harness only; never enabled by published binding defaults. It
-# needs jazz-native-relay, which is not ported to SQLite yet, so enabling it
-# fails the build with that explanation.
-rn-test-bridge = []
+# Linux RN API harness only; never enabled by published binding defaults.
+rn-test-bridge = ["dep:jazz-native-relay", "dep:postcard"]
 # The published Node binding is a WebSocket peer. Its TypeScript carrier
 # advertises the binding's actual wire capabilities, so the default package
 # includes the same native zstd codec used by the shipped jazz-tools server.
@@ -18,6 +16,7 @@ transport-compression-zstd = ["jazz/transport-compression-zstd"]
 crate-type = ["cdylib"]
 
 [dependencies]
+jazz-native-relay = { path = "../jazz-native-relay", optional = true }
 jazz = { path = "../jazz", default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-otel.workspace = true
@@ -27,6 +26,7 @@ base64 = "0.22"
 napi = { version = "3", features = ["napi6", "serde-json", "async"] }
 napi-derive = "3"
 libsodium-sys-stable = "=1.24.0"
+postcard = { version = "1.1", features = ["alloc"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # local_dynamic_tls: a dlopen'd cdylib with mimalloc's default initial-exec
