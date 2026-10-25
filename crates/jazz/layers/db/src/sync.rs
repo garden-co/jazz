@@ -36,6 +36,8 @@
 mod accepted_overlay;
 #[path = "sync/readable_policy.rs"]
 mod readable_policy;
+#[path = "sync/scoped_queries.rs"]
+mod scoped_queries;
 #[path = "sync/scoped_reads.rs"]
 mod scoped_reads;
 use scoped_reads::ScopedEvidence;
@@ -5953,11 +5955,21 @@ impl Db {
                         "collecting scoped permission evidence away from the current authority",
                     ));
                 }
-                let evidence = inner.scoped_permission_evidence(
+                let through = at.unwrap_or(inner.seq);
+                let mut budget = scoped_reads::MAX_EVIDENCE;
+                images.extend(inner.scoped_query_images(
                     prepared,
                     policy,
                     &images,
-                    at.unwrap_or(inner.seq),
+                    through,
+                    &mut budget,
+                )?);
+                let evidence = inner.permission_evidence_with_budget(
+                    prepared,
+                    policy,
+                    &images,
+                    through,
+                    &mut budget,
                 )?;
                 for row in &evidence {
                     images.extend(inner.scoped_evidence_image(row)?);
@@ -5972,7 +5984,13 @@ impl Db {
             }
             None | Some(ScopedEvidence::Supplied(_)) => None,
         };
-        let support = inner.support_of(query)?;
+        // Scoped evidence already contains the exact query and policy inputs.
+        // Re-following them against the current cache would mix cuts and claims.
+        let support = if scoped_evidence.is_some() {
+            Vec::new()
+        } else {
+            inner.support_of(query)?
+        };
         let mut extra = Vec::new();
         let mut watch = std::mem::take(&mut inner.sessions[index].watch);
         let mut held = std::mem::take(&mut inner.sessions[index].held);
@@ -7588,7 +7606,6 @@ impl Db {
     fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<bool, Error> {
         let query = &prepared.query;
         if history_source_table(&query.table).is_some()
-            || !query.joins.is_empty()
             || query.flat_join.is_some()
             || !query.policy_branches.is_empty()
             || !query.reachable.is_empty()
@@ -7608,12 +7625,18 @@ impl Db {
         if !table.branch_by.is_empty() {
             return Err(unsupported("scoped remote reads of branched tables"));
         }
-        let policy = schema
-            .policy_schema()
-            .by_stored(&table.stored)
-            .and_then(|table| table.policy(crate::tools::Operation::Select));
-        let needs_evidence = policy.is_some_and(|policy| !row_local_policy(policy));
-        if needs_evidence {
+        let tables = scoped_queries::tables(&schema, table, &query.joins)?;
+        let mut needs_evidence = !query.joins.is_empty();
+        for table in tables {
+            let policy = schema
+                .policy_schema()
+                .by_stored(&table.stored)
+                .and_then(|table| table.policy(crate::tools::Operation::Select));
+            let nonlocal_policy = policy.is_some_and(|policy| !row_local_policy(policy));
+            needs_evidence |= nonlocal_policy;
+            if !nonlocal_policy {
+                continue;
+            }
             // Reject unbounded dependency shapes even for an empty result,
             // before the authority executes its ordinary permission query.
             let identity = prepared

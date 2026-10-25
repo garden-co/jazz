@@ -102,17 +102,6 @@ impl Inner {
         ))
     }
 
-    pub(super) fn scoped_permission_evidence(
-        &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-        roots: &[Image],
-        through: u64,
-    ) -> Result<Vec<ScopedReadRowV1>, Error> {
-        let mut budget = MAX_EVIDENCE;
-        self.permission_evidence_with_budget(prepared, identity, roots, through, &mut budget)
-    }
-
     pub(super) fn permission_evidence_with_budget(
         &self,
         prepared: &PreparedQuery,
