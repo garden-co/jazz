@@ -112,13 +112,10 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
 const rnNativeArtifactPushPaths = [
   "Cargo.lock",
   "Cargo.toml",
-  "crates/groove/**",
-  "crates/idb-tree/**",
   "crates/jazz/**",
   "crates/jazz-compression/**",
   "crates/jazz-native-relay/**",
   "crates/jazz-native-transport/**",
-  "crates/jazz-storage-sqlite/**",
   "crates/jazz-rn/**",
 ];
 const assertRnNativeArtifactPushPaths = (paths) =>
