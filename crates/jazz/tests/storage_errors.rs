@@ -261,6 +261,10 @@ impl Transport for Recording {
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inner.try_recv()
     }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.inner.take_failure()
+    }
 }
 
 #[test]

@@ -50,8 +50,8 @@ use crate::values::{
 pub use sync::{
     Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, QueryAttachment,
     RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, Upstream, WireError, WireTransport, WireTransportAdapter, duplex,
-    encode_frames, validate_frame_batch_for_corpus,
+    TransportError, Upstream, WireError, WireTransport, WireTransportAdapter, decode_message,
+    duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
