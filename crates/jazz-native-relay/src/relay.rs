@@ -615,6 +615,10 @@ struct MutationErrorReport {
 /// One attached UI peer: its in-memory database and both ends of its link.
 struct Foreground {
     binding: Binding,
+    /// The relay's persistent database. Permission advice is asked of it:
+    /// it is the replica linked to the authority, for the same author, and
+    /// a relay answers its own subscribers' advice requests `Unknown`.
+    authority: Binding,
     dirty: Rc<Cell<bool>>,
     /// The foreground's upstream link to the relay.
     link: Link,
@@ -688,10 +692,10 @@ impl Foreground {
             Poll::Pending => {
                 if self.pending.len() >= NATIVE_RELAY_FOREGROUND_PENDING_MAX {
                     if let Some(id) = operation.advice {
-                        self.binding.cancel_permission_advice(id);
+                        self.authority.cancel_permission_advice(id);
                     }
                     return Err(HostError::Argument(
-                        "too many pending foreground operations; poll or cancel one first"
+                        "foreground operation capacity reached; poll or cancel one first"
                             .to_owned(),
                     ));
                 }
@@ -772,7 +776,7 @@ impl Foreground {
     fn close(mut self) {
         for (_, operation) in std::mem::take(&mut self.pending) {
             if let Some(id) = operation.advice {
-                self.binding.cancel_permission_advice(id);
+                self.authority.cancel_permission_advice(id);
             }
         }
         for (_, (id, _)) in std::mem::take(&mut self.transactions) {
@@ -972,6 +976,7 @@ impl RelayWorker {
             id,
             Foreground {
                 binding,
+                authority: self.persistent.clone(),
                 dirty,
                 link,
                 served,
@@ -1383,7 +1388,7 @@ fn foreground_command(
             let cancelled = match client.pending.remove(&operation) {
                 Some(pending) => {
                     if let Some(id) = pending.advice {
-                        binding.cancel_permission_advice(id);
+                        client.authority.cancel_permission_advice(id);
                     }
                     true
                 }
@@ -1562,7 +1567,9 @@ fn foreground_command(
                     binding_host::advice::delete(table, &row)
                 }
             }?;
-            let (id, future) = binding.request_permission_advice(action, None, None)?;
+            let (id, future) = client
+                .authority
+                .request_permission_advice(action, None, None)?;
             client.pending_or_ready(
                 Box::pin(async move {
                     Ok(Response::PermissionAdvice {

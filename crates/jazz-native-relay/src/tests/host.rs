@@ -784,3 +784,39 @@ async fn private_session_write_reaches_core_and_survives_a_relay_restart() {
     fixture.wait_for_row(reopened_foreground, (row, "reaches Core"));
     fixture.revoke(&reopened);
 }
+
+/// On a replica a serializable snapshot is pinned by the transaction's
+/// first read; later writes outside it stay invisible to it.
+#[test]
+fn a_serializable_transaction_keeps_its_pinned_snapshot() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("snapshot.sqlite"), "alice", 0x31);
+    let foreground = fixture.open(&capability);
+    fixture.insert_todo(foreground, [0x01; 16], "before");
+    assert_eq!(fixture.rows(foreground).len(), 1);
+    let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
+        foreground,
+        ForegroundDbCommandRequest::BeginTransaction {
+            kind: ForegroundTransactionKind::Serializable,
+        },
+    ) else {
+        panic!("transaction opens");
+    };
+    let read = || match fixture.settle(
+        foreground,
+        ForegroundDbCommandRequest::All {
+            query: todos_query(),
+            options_json: "{}".into(),
+            transaction: Some(transaction),
+        },
+    ) {
+        ForegroundDbCommandResponse::Rows { rows } => titles(&rows),
+        response => panic!("transaction read: {response:?}"),
+    };
+    let before = vec![(RowUuid::from_bytes([0x01; 16]), "before".to_owned())];
+    assert_eq!(read(), before);
+    fixture.insert_todo(foreground, [0x02; 16], "after");
+    assert_eq!(fixture.rows(foreground).len(), 2);
+    assert_eq!(read(), before, "the pinned snapshot does not advance");
+}
