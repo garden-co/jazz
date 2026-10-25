@@ -1457,11 +1457,7 @@ impl<'a> Ctx<'a> {
         for nested in &join.nested_joins {
             conds.push(self.join_exists(nested, target, &j)?);
         }
-        Ok(format!(
-            "EXISTS (SELECT 1 FROM {} AS {j} WHERE {})",
-            self.source(target)?,
-            conds.join(" AND ")
-        ))
+        Ok(semi_join(format!("{} AS {j}", self.source(target)?), conds))
     }
 
     /// Root rows an access edge grants to a team reachable from the seed.
@@ -1927,9 +1923,9 @@ impl<'a> Ctx<'a> {
                 let e = self.alias("e");
                 let inner =
                     self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
-                format!(
-                    "EXISTS (SELECT 1 FROM {} AS {e} WHERE {e}._del = 0 AND {inner})",
-                    self.source(target)?
+                semi_join(
+                    format!("{} AS {e}", self.source(target)?),
+                    vec![format!("{e}._del = 0"), inner],
                 )
             }
             // The relation's outer row is the row under check, also inside
@@ -1962,9 +1958,9 @@ impl<'a> Ctx<'a> {
                 };
                 // An array reference inherits from any row it names.
                 let on = self.join_key((target, &p, "id"), (table, alias, via_column))?;
-                format!(
-                    "EXISTS (SELECT 1 FROM {} AS {p} WHERE {on} AND {p}._del = 0 AND {inner})",
-                    self.source(target)?,
+                semi_join(
+                    format!("{} AS {p}", self.source(target)?),
+                    vec![on, format!("{p}._del = 0"), inner],
                 )
             }
             PolicyExpr::InheritsReferencing {
@@ -1986,10 +1982,13 @@ impl<'a> Ctx<'a> {
                     }
                 };
                 // An array reference grants when it lists the row's id.
-                format!(
-                    "EXISTS (SELECT 1 FROM {} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
-                    self.source(source)?,
-                    correlate(source, &s, via_column, &format!("{alias}.id"))?
+                semi_join(
+                    format!("{} AS {s}", self.source(source)?),
+                    vec![
+                        correlate(source, &s, via_column, &format!("{alias}.id"))?,
+                        format!("{s}._del = 0"),
+                        inner,
+                    ],
                 )
             }
         })
@@ -2668,6 +2667,102 @@ fn or(parts: &[String]) -> String {
 /// terms n deep, and Durable Object SQLite caps expression depth at 100.
 const CHAIN_MAX: usize = 32;
 
+/// `EXISTS (SELECT 1 FROM {from} WHERE {conds})`, with any condition that
+/// is itself such an `EXISTS` joined in: `EXISTS (A WHERE c AND EXISTS (B
+/// WHERE d))` is `EXISTS (A, B WHERE c AND d)`. SQLite counts a nested
+/// subquery's depth on top of its enclosing expressions', so an inheritance
+/// chain nested level by level outgrows Durable Object SQLite's expression
+/// depth cap of 100 within a few levels; joined, it stays one level deep.
+fn semi_join(from: String, conds: Vec<String>) -> String {
+    let mut sources = vec![from];
+    let mut terms = Vec::with_capacity(conds.len());
+    for cond in conds {
+        match plain_exists(&cond) {
+            Some((source, term)) => {
+                sources.push(source.to_owned());
+                terms.push(term.to_owned());
+            }
+            None => terms.push(cond),
+        }
+    }
+    format!(
+        "EXISTS (SELECT 1 FROM {} WHERE {})",
+        sources.join(", "),
+        and(&terms)
+    )
+}
+
+/// The source list and condition of `sql` when it is exactly one
+/// `EXISTS (SELECT 1 FROM {from} WHERE {cond})`, as [`semi_join`] writes.
+fn plain_exists(sql: &str) -> Option<(&str, &str)> {
+    const HEAD: &str = "EXISTS (SELECT 1 FROM ";
+    let body = sql.strip_prefix(HEAD)?.strip_suffix(')')?;
+    // Scan the body at nesting depth zero, outside quotes: it must not
+    // close the EXISTS early, and its first top-level WHERE splits it.
+    let bytes = body.as_bytes();
+    let (mut depth, mut quote, mut split) = (0usize, None, None);
+    for (i, &b) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'\'' | b'"' => quote = Some(b),
+                b'(' => depth += 1,
+                b')' if depth == 0 => return None,
+                b')' => depth -= 1,
+                b' ' if depth == 0 && split.is_none() && body[i..].starts_with(" WHERE ") => {
+                    split = Some(i)
+                }
+                _ => {}
+            },
+        }
+    }
+    let split = split?;
+    let (from, cond) = (&body[..split], &body[split + " WHERE ".len()..]);
+    // Only a bare condition: no top-level clause after it.
+    let top = top_level(cond);
+    if [" GROUP BY ", " ORDER BY ", " LIMIT ", " HAVING "]
+        .iter()
+        .any(|clause| top.contains(clause))
+    {
+        return None;
+    }
+    Some((from, cond))
+}
+
+/// `sql` with every parenthesised or quoted span blanked out.
+fn top_level(sql: &str) -> String {
+    let (mut depth, mut quote) = (0usize, None);
+    sql.bytes()
+        .map(|b| {
+            let keep = match quote {
+                Some(q) => {
+                    if b == q {
+                        quote = None;
+                    }
+                    false
+                }
+                None => match b {
+                    b'\'' | b'"' => {
+                        quote = Some(b);
+                        false
+                    }
+                    b'(' => {
+                        depth += 1;
+                        false
+                    }
+                    b')' => {
+                        depth = depth.saturating_sub(1);
+                        false
+                    }
+                    _ => depth == 0,
+                },
+            };
+            if keep { b as char } else { ' ' }
+        })
+        .collect()
+}
+
 /// `parts` joined by `op`, nested in halves past [`CHAIN_MAX`] so the depth
 /// grows with the log of the count. SQLite splits nested AND and OR terms
 /// the same as a flat chain.
@@ -3249,4 +3344,44 @@ fn json_value(json: &serde_json::Value) -> Result<Value, Error> {
         },
         other => return Err(unsupported(format!("relation literal {other}"))),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{plain_exists, semi_join};
+
+    #[test]
+    fn nested_exists_conditions_join_into_one_level() {
+        let inner = semi_join(
+            r#""b" AS b"#.to_owned(),
+            vec!["b.x = a.id".to_owned(), "b.s IS 'W) WHERE ('".to_owned()],
+        );
+        let outer = semi_join(
+            r#""a" AS a"#.to_owned(),
+            vec!["a._del = 0".to_owned(), inner],
+        );
+        assert_eq!(
+            outer,
+            r#"EXISTS (SELECT 1 FROM "a" AS a, "b" AS b WHERE (a._del = 0 AND (b.x = a.id AND b.s IS 'W) WHERE (')))"#
+        );
+        // A subquery source keeps its own WHERE.
+        let sourced =
+            r#"EXISTS (SELECT 1 FROM (SELECT * FROM "c" WHERE k = 1) AS c WHERE c.v = 2)"#;
+        assert_eq!(
+            plain_exists(sourced),
+            Some((r#"(SELECT * FROM "c" WHERE k = 1) AS c"#, "c.v = 2"))
+        );
+    }
+
+    #[test]
+    fn only_a_single_bare_exists_is_joined_in() {
+        for sql in [
+            "EXISTS (SELECT 1 FROM a WHERE x) OR EXISTS (SELECT 1 FROM b WHERE y)",
+            "NOT EXISTS (SELECT 1 FROM a WHERE x)",
+            "EXISTS (SELECT 1 FROM a WHERE x LIMIT 1)",
+            "EXISTS (SELECT 1 FROM json_each(?1) WHERE value = 3) AND 1",
+        ] {
+            assert_eq!(plain_exists(sql), None, "{sql}");
+        }
+    }
 }
