@@ -1,0 +1,129 @@
+## auth-simple-chat: wide 1; directories 0
+   messages                     wide      root=messages             messages.chat_id = literal
+## band-book: inherit 3, colocated 3, direct 2; directories 2
+   attachments                  inherit   root=workspaces           via pageId -> pages: colocated
+   blocks                       inherit   root=workspaces           via pageId -> pages: colocated
+   invites                      colocated root=workspaces           EXISTS members.account = session | EXISTS members.account = session
+   issues                       inherit   root=workspaces           via pageId -> pages: colocated
+   members                      direct    root=workspaces           members.account = session | EXISTS members.account = session
+   pageGrants                   direct    root=workspaces           pageGrants.account = session | EXISTS members.account = session
+   pages                        colocated root=workspaces           EXISTS members.account = session | EXISTS pageGrants.account = session
+   workspaces                   colocated root=workspaces           EXISTS members.account = session
+## band-chat: colocated 3, direct 3, inherit 2, two-hop 1; directories 5
+   canvases                     colocated root=rooms                EXISTS roomMembers.memberAuthor = session
+   joinRequests                 direct    root=rooms                joinRequests.requester = session | EXISTS rooms.$createdBy.account = session
+   messages                     colocated root=rooms                EXISTS roomMembers.memberAuthor = session
+   profiles                     two-hop   root=profiles             referenced by messages
+   reactions                    inherit   root=rooms                via messageId -> messages: colocated
+   readMarkers                  direct    root=readMarkers          readMarkers.reader = session
+   roomMembers                  inherit   root=rooms                via roomId -> rooms: direct
+   rooms                        direct    root=rooms                rooms.$createdBy.account = session | EXISTS roomMembers.memberAuthor = session
+   strokes                      colocated root=rooms                EXISTS roomMembers.memberAuthor = session
+## big-label: none 1, colocated 7, inherit 2, two-hop 1; directories 2
+   artists                      colocated root=organizations        EXISTS memberships.userId = session
+   catalogues                   colocated root=organizations        EXISTS memberships.userId = session
+   memberships                  colocated root=organizations        EXISTS memberships.userId = session
+   organizations                colocated root=organizations        EXISTS memberships.userId = session
+   people                       two-hop   root=people               referenced by memberships
+   personEmails                 none      root=personEmails         
+   releaseAssignments           inherit   root=organizations        via releaseId -> releases: colocated
+   releaseTeams                 colocated root=organizations        EXISTS memberships.userId = session
+   releases                     colocated root=organizations        EXISTS memberships.userId = session
+   teamAssignments              inherit   root=organizations        via teamId -> teams: colocated
+   teams                        colocated root=organizations        EXISTS memberships.userId = session
+## branching-planner: scatter 2; directories 0
+   scenarios                    scatter   root=scenarios            public (True)
+   tasks                        scatter   root=tasks                public (True)
+## chat-react: direct 1, wide 5, scatter 1; directories 2
+   canvases                     wide      root=chats                via chats: chats.isPublic = literal
+   chatMembers                  direct    root=chats                chatMembers.userId = session | EXISTS chatMembers.userId = session
+   chats                        wide      root=chats                chats.isPublic = literal
+   messages                     wide      root=chats                EXISTS chats: chats.isPublic = literal
+   profiles                     scatter   root=profiles             public (True)
+   reactions                    wide      root=chats                via messages: EXISTS chats: chats.isPublic = literal
+   strokes                      wide      root=chats                via canvases: via chats: chats.isPublic = literal
+## epic-drop: inherit 1, colocated 1, direct 2, two-hop 1; directories 3
+   files                        inherit   root=folders              via folder_id -> folders: direct
+   folderInvites                colocated root=folders              EXISTS folders.owner_id = session
+   folderMembers                direct    root=folders              folderMembers.user_id = session | EXISTS folders.owner_id = session
+   folders                      direct    root=folders              folders.owner_id = session | EXISTS folderMembers.user_id = session
+   profiles                     two-hop   root=profiles             referenced by folderMembers
+## jamazon-warehouse: scatter 10; directories 0
+   customers                    scatter   root=customers            public (True)
+   deliveries                   scatter   root=deliveries           public (True)
+   districts                    scatter   root=districts            public (True)
+   items                        scatter   root=items                public (True)
+   order_lines                  scatter   root=order_lines          public (True)
+   orders                       scatter   root=orders               public (True)
+   payments                     scatter   root=payments             public (True)
+   stock                        scatter   root=stock                public (True)
+   warehouse_operators          scatter   root=warehouse_operators  public (True)
+   warehouses                   scatter   root=warehouses           public (True)
+## jamazon: inherit 4, direct 2, scatter 3; directories 2
+   cartLines                    inherit   root=carts                via cartId -> carts: direct
+   carts                        direct    root=carts                carts.shopper = session
+   categories                   scatter   root=categories           public (True)
+   orderEvents                  inherit   root=orders               via orderId -> orders: direct
+   orderLines                   inherit   root=orders               via orderId -> orders: direct
+   orders                       direct    root=orders               orders.shopper = session
+   payments                     inherit   root=orders               via orderId -> orders: direct
+   products                     scatter   root=products             public (True)
+   stock                        scatter   root=stock                public (True)
+## music-agent: direct 6, inherit 3; directories 6
+   artists                      direct    root=artists              artists.ownerAccount = session
+   attachments                  inherit   root=conversations        via conversationId -> conversations: direct
+   calendarEvents               direct    root=calendarEvents       calendarEvents.ownerAccount = session
+   conversations                direct    root=conversations        conversations.ownerAccount = session
+   profiles                     direct    root=profiles             profiles.accountId = session
+   songs                        direct    root=songs                songs.ownerAccount = session
+   toolCalls                    inherit   root=conversations        via conversationId -> conversations: direct
+   turns                        inherit   root=conversations        via conversationId -> conversations: direct
+   venues                       direct    root=venues               venues.ownerAccount = session
+## poster-shop: inherit 6, colocated 2; directories 1
+   assets                       inherit   root=canvases             via canvasId -> canvases: colocated
+   canvasInvites                colocated root=canvases             EXISTS canvasMembers.memberAuthor = session
+   canvasMembers                inherit   root=canvases             via canvasId -> canvases: colocated
+   canvases                     colocated root=canvases             EXISTS canvasMembers.memberAuthor = session
+   checkpoints                  inherit   root=canvases             via canvasId -> canvases: colocated
+   cursors                      inherit   root=canvases             via canvasId -> canvases: colocated
+   layers                       inherit   root=canvases             via canvasId -> canvases: colocated
+   shapes                       inherit   root=canvases             via canvasId -> canvases: colocated
+## record-player: direct 3, inherit 1, scatter 2; directories 3
+   albums                       scatter   root=albums               public (True)
+   invitations                  direct    root=playlists            invitations.subject = session | EXISTS playlists.$createdBy.account = session
+   playback_positions           direct    root=playback_positions   playback_positions.$createdBy.account = session
+   playlist_entries             inherit   root=playlists            via playlist_id -> playlists: direct
+   playlists                    direct    root=playlists            playlists.$createdBy.account = session | EXISTS invitations.subject = session
+   tracks                       scatter   root=tracks               public (True)
+## stage-plan: colocated 5, direct 1, inherit 1, scatter 1; directories 3
+   activity                     colocated root=shows                EXISTS showCrew.account = session | EXISTS shows.chiefAccount = session
+   checklistItems               direct    root=checklistItems       checklistItems.ownerAccount = session
+   comments                     inherit   root=shows                via taskId -> tasks: colocated
+   crew                         scatter   root=crew                 public (True)
+   showCrew                     colocated root=shows                EXISTS showCrew.account = session | EXISTS shows.chiefAccount = session
+   showInvites                  colocated root=shows                EXISTS shows.chiefAccount = session
+   shows                        colocated root=shows                EXISTS showCrew.account = session | EXISTS shows.chiefAccount = session
+   tasks                        colocated root=shows                EXISTS showCrew.account = session | EXISTS shows.chiefAccount = session
+## text-editor: scatter 2; directories 0
+   documentLogs                 scatter   root=documentLogs         public (True)
+   documents                    scatter   root=documents            public (True)
+## todo: scatter 2; directories 0
+   projects                     scatter   root=projects             public (True)
+   todos                        scatter   root=todos                public (True)
+## wequencer: colocated 5, inherit 1, direct 1, two-hop 1; directories 3
+   patterns                     colocated root=sessions             EXISTS session_members.member_author = session
+   presence                     colocated root=sessions             EXISTS session_members.member_author = session
+   profiles                     two-hop   root=profiles             referenced by presence
+   session_members              inherit   root=sessions             via session_id -> sessions: direct
+   sessions                     direct    root=sessions             sessions.$createdBy.account = session | EXISTS session_members.member_author = session
+   steps                        colocated root=sessions             EXISTS session_members.member_author = session
+   tracks                       colocated root=sessions             EXISTS session_members.member_author = session
+   transport_observations       colocated root=sessions             EXISTS session_members.member_author = session
+## world-tour: colocated 2, direct 1, wide 1, scatter 2; directories 2
+   bandInvites                  colocated root=bands                EXISTS bands.ownerId = session
+   bands                        scatter   root=bands                public (True)
+   members                      direct    root=bands                members.userId = session | EXISTS members.userId = session
+   stopNotes                    colocated root=bands                EXISTS members.userId = session
+   stops                        wide      root=bands                stops.status = literal
+   venues                       scatter   root=venues               public (True)
+TOTAL {'wide': 7, 'inherit': 24, 'colocated': 28, 'direct': 22, 'two-hop': 4, 'none': 1, 'scatter': 25}
