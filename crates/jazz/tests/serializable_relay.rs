@@ -339,6 +339,10 @@ fn assert_conflict(result: Result<(), jazz::db::Error>) {
     assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
 }
 
+fn assert_rejected(result: Result<(), jazz::db::Error>) {
+    common::assert_serialization_conflict(&result.expect_err("the authority rejects the commit"));
+}
+
 #[test]
 fn a_tabs_serializable_redemption_through_its_worker_joins() {
     let net = Net::new(1);
@@ -352,7 +356,7 @@ fn a_tabs_serializable_redemption_through_its_worker_joins() {
 fn a_revocation_after_a_tabs_read_rejects_its_redemption() {
     let net = Net::new(1);
     let invite = net.write_invite("abc");
-    assert_conflict(net.redeem(net.tab(0), "abc", || net.revoke(invite)));
+    assert_rejected(net.redeem(net.tab(0), "abc", || net.revoke(invite)));
     assert_eq!(net.count(&members_query("abc")), 0);
 }
 
@@ -407,7 +411,7 @@ fn a_tabs_blind_write_over_a_newer_version_conflicts() {
             Default::default(),
         ))
         .unwrap();
-        assert_conflict(net.finish(tab, open));
+        assert_rejected(net.finish(tab, open));
         assert_eq!(
             net.holders(),
             ["direct"],

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, FileOptions, ReadOpts, ReadTier, SubscriptionEvent,
+    Db, DbConfig, DbIdentity, FileOptions, ReadOpts, ReadTier, SubscriptionEvent,
     SubscriptionStream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -384,7 +384,7 @@ fn validation_correctness_smoke() {
             };
             let committed = match outcome {
                 Ok(()) => true,
-                Err(error) if error.code == ErrorCode::TransactionConflict => false,
+                Err(error) if error.is_conflict() => false,
                 Err(error) => panic!("unexpected commit failure: {error}"),
             };
             assert_eq!(

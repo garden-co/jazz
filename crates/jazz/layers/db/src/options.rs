@@ -353,6 +353,26 @@ impl Error {
             message: message.into(),
         }
     }
+
+    /// The authority rejected a serializable commit because a read it made
+    /// no longer holds. The message is the public contract bindings match.
+    pub(crate) fn serialization_conflict() -> Self {
+        Self::new(
+            ErrorCode::WriteRejected,
+            "SerializationConflict (reason: Serializable transaction conflicted with another write)",
+        )
+    }
+
+    /// Whether the authority rejected this serializable commit as a conflict.
+    pub fn is_serialization_conflict(&self) -> bool {
+        self.code == ErrorCode::WriteRejected && self.message.starts_with("SerializationConflict")
+    }
+
+    /// Whether this serializable transaction conflicted, at the replica or
+    /// at the authority: running it again may succeed.
+    pub fn is_conflict(&self) -> bool {
+        self.code == ErrorCode::TransactionConflict || self.is_serialization_conflict()
+    }
 }
 
 impl From<crate::query::QueryError> for Error {

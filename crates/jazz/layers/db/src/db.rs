@@ -3437,11 +3437,10 @@ impl Inner {
         }
     }
 
-    /// Read-for-write (SPEC 7, INV-RLS-20): a session may update only a
-    /// row it may read, and omitted cells must not be merged blind. A
-    /// replica acting for a session (a backend's request) refuses an update
-    /// of a row hidden from it at once; an upsert there leaves the existing
-    /// target to the authority, which rejects it on upload.
+    /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
+    /// only a row it may read, and omitted cells must not be merged blind.
+    /// A replica acting for a session (a backend's request) refuses either
+    /// at once when it holds the row hidden from that session.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -3450,11 +3449,7 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        let reader = match *who {
-            Who::Session(author) if verb == "UPDATE" => Some(author),
-            who => self.checked(who),
-        };
-        if let Some(author) = reader
+        if let Who::Session(author) = *who
             && !self.check(table, row, key, author, Operation::Select)?
         {
             let detail = format!(

@@ -5724,10 +5724,7 @@ impl Db {
                         .is_some_and(|seq| !in_snapshot(seq))
                 {
                     let rows = mentioned(&inner);
-                    return Err((
-                        conflict("row visible parent changed since transaction write was staged"),
-                        rows,
-                    ));
+                    return Err((Error::serialization_conflict(), rows));
                 }
             }
             for read in reads {
@@ -5758,10 +5755,7 @@ impl Db {
                     .collect();
                 if now != then {
                     let rows = mentioned(&inner);
-                    return Err((
-                        conflict("a row read by the transaction changed since its snapshot"),
-                        rows,
-                    ));
+                    return Err((Error::serialization_conflict(), rows));
                 }
             }
         }

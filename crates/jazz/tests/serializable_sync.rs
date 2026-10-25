@@ -242,7 +242,7 @@ impl Net {
         match self.settle(i, receipt.0) {
             Ok(_) => Redeem::Joined,
             Err(error) => {
-                assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+                common::assert_serialization_conflict(&error);
                 Redeem::Conflict
             }
         }
@@ -379,7 +379,7 @@ fn an_offline_prepared_redemption_of_a_revoked_invite_conflicts() {
     let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
     net.go_online(BACKEND);
     let error = net.settle(BACKEND, receipt.0).unwrap_err();
-    assert_eq!(error.code, ErrorCode::TransactionConflict);
+    common::assert_serialization_conflict(&error);
     assert_eq!(net.members("abc"), 1);
     // The rejected optimistic member is gone from the backend's replica.
     let members = net
@@ -424,7 +424,7 @@ fn a_read_only_serializable_commit_validates_its_reads() {
     net.revoke(OWNER, invite);
     net.go_online(BACKEND);
     let error = net.settle(BACKEND, stale.0).unwrap_err();
-    assert_eq!(error.code, ErrorCode::TransactionConflict);
+    common::assert_serialization_conflict(&error);
 }
 
 /// Offline, a backend that never received another backend's redemption
@@ -469,13 +469,14 @@ fn an_offline_absence_guard_conflicts_when_the_invite_was_taken() {
                 .wait_for_pending_writes(DurabilityTier::Global),
         )
         .unwrap_err();
-    assert_eq!(all.code, ErrorCode::TransactionConflict);
+    common::assert_serialization_conflict(&all);
     let error = net.settle(OTHER, receipt.0).unwrap_err();
     assert_eq!(
         error.code,
-        ErrorCode::TransactionConflict,
+        ErrorCode::WriteRejected,
         "read {seen} members; the authority has 1"
     );
+    common::assert_serialization_conflict(&error);
     assert_eq!(net.members("abc"), 1);
 }
 
