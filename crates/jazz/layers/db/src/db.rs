@@ -3144,11 +3144,12 @@ impl Inner {
 
     /// Read-for-write: a hidden row is indistinguishable from an absent one,
     /// and omitted cells must not be merged blind.
-    /// The session a write's operation policies (USING, WITH CHECK,
-    /// INSERT, DELETE) are checked as here: a trusted session's, at the
-    /// authority. A replica checks only that the session may read its
-    /// target ([`Who::Session`]) and leaves the rest to the authority on
-    /// upload: it may lack rows those policies read (hidden from it).
+    /// The session a write's policies (read access to its target, USING,
+    /// WITH CHECK, INSERT, DELETE) are checked as here: a trusted
+    /// session's, at the authority. A replica leaves them to the authority
+    /// on upload, which rejects the write: it may lack rows those policies
+    /// read (hidden from it), and a backend acting for a session holds
+    /// rows that session cannot read.
     fn checked(&self, who: Who) -> Option<AuthorSubject> {
         match who {
             Who::Session(author) if self.client.is_none() => Some(author),
@@ -3164,7 +3165,7 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        if let Who::Session(author) = *who
+        if let Some(author) = self.checked(*who)
             && !self.check(table, row, key, author, Operation::Select)?
         {
             return Err(denied(format_args!(
@@ -3338,7 +3339,7 @@ impl Inner {
         let check = |inner: &Self, key: &[u8], fresh: bool| -> Result<(), Error> {
             // Deleting a row this same commit inserted needs no read
             // permission: nothing persisted is revealed.
-            if let Who::Session(author) = who
+            if let Some(author) = inner.checked(who)
                 && !fresh
                 && !inner.check(table, row, key, author, Operation::Select)?
             {

@@ -1337,11 +1337,11 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   const scenarioMode = benchmarkSmokeMode("ci");
   const compileMode = benchmarkSmokeMode("compile-ci");
   const requiredSmokeTests = [
-    "jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=sync_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=validation_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=relation_include_delivery_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=cold_subscription_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=sync_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=validation_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=relation_include_delivery_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=route_subscription_curve_correctness_smoke",
     "jazz-sim::scenario_smoke=s1_saas_smoke",
     "jazz-sim::scenario_smoke=micro_correctness_smoke",
     "jazz-sim::scenario_smoke=s1_saas_db_surface_smoke",
@@ -1355,9 +1355,9 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   ];
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.deepEqual(
-    [
-      ...localCi.matchAll(/"(?:jazz|jazz-sim)::(?:legacy_benchmark_smoke|scenario_smoke)=[^"]+"/g),
-    ].map((match) => match[0].slice(1, -1)),
+    [...localCi.matchAll(/"jazz-sim::(?:core_benchmark_smoke|scenario_smoke)=[^"]+"/g)].map(
+      (match) => match[0].slice(1, -1),
+    ),
     requiredSmokeTests,
   );
   assert.doesNotMatch(
@@ -1385,7 +1385,7 @@ test("benchmark correctness stays on ordinary CI while API compilation runs nigh
   assert.doesNotMatch(compileMode, /cargo test -p (?:jazz|jazz-sim)/);
   assert.match(benchmarkSmokeGate, /cargo metadata --no-deps --format-version 1/);
   assert.match(benchmarkSmokeGate, /required-features/);
-  assert.match(scenarioMode, /cargo test -p jazz --features testing --test legacy_benchmark_smoke/);
+  assert.match(scenarioMode, /cargo test -p jazz-sim --test core_benchmark_smoke/);
   assert.match(scenarioMode, /cargo test -p jazz-sim --test scenario_smoke/);
   assert.match(benchmarkSmokeGate, /benchmark-smoke phase=%s duration_seconds=%s status=%s/);
   assert.throws(

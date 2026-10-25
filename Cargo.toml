@@ -17,7 +17,7 @@ members = [
   "crates/jazz-server",
   "crates/jazz-testkit",
   "crates/jazz-otel",
-  # "crates/jazz-sim",
+  "crates/jazz-sim",
   "crates/jazz-napi",
   # The old Axum todo server examples expect a Send + Sync JazzClient in shared
   # router state. Core Db ownership is currently local-thread by design;
@@ -44,7 +44,6 @@ exclude = [
   "examples/docs/todo-server-rs",
   "vendor/ruzstd",
   "crates/jazz-native-relay",
-  "crates/jazz-sim",
 ]
 
 [workspace.dependencies]

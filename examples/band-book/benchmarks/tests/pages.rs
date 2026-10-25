@@ -59,9 +59,11 @@ fn timed_organization_page_cannot_be_satisfied_by_direct_ownership() {
 fn ordered_page_preserves_id_ties_and_refills_after_deletions() {
     let tied = Fixture::with_order_values(1_000, Policy::OwnerOrOrg, |index| (index / 5) as u64);
     let rows = tied.session(Page::Org(0), 3, user(2)).read();
+    // Ties break by row id in the last order key's direction (newest first
+    // here), as SPEC/6_queries.md specifies.
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
-        (35..38).map(document_row).collect::<Vec<_>>()
+        (37..40).rev().map(document_row).collect::<Vec<_>>()
     );
 
     let deleted = Fixture::new(1_000, Policy::Unrestricted);

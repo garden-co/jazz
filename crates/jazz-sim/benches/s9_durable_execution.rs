@@ -1,1369 +1,617 @@
-use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, File};
-use std::future::Future;
-use std::io::{BufWriter, Write};
-use std::pin::pin;
-use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+//! S9 durable execution: workflow instances advanced step by step by
+//! workers that coordinate only through serializable transactions.
+//!
+//! Each transition reads an instance's `currentStep`, advances it, and
+//! records the step and an event in the same transaction. Every few
+//! transitions two workers race on the same instance from the same read;
+//! the authority must reject the second. A dashboard follows running
+//! instances, tailers follow the event log, a worker crashes and resumes
+//! mid-run, and a late tailer rehydrates the whole log.
+//!
+//! Gates: injected races equal double-advance rejects with zero double
+//! advances; the dashboard and tailers match the oracle after every
+//! transition and every tailer's log is gap-free (`INV-BENCH-8`); the
+//! accepted schedule replayed on plain SQLite ends in the same state
+//! (`INV-BENCH-7`).
+
+use std::collections::BTreeMap;
+use std::io::Write;
 use std::time::Instant;
 
-use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, SerializableTxOps, Transport};
-use jazz::groove::records::Value;
-use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::{MergeableCommit, NodeState};
-use jazz::peer::PeerState;
-use jazz::protocol::{SubscriptionKey, SyncMessage};
-use jazz::query::Query;
-use jazz::schema::{JazzSchema, TableSchema};
-use jazz::time::GlobalTime;
-use jazz::tools::public_schema::{
-    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+use jazz::db::{Db, ErrorCode, ReadOpts};
+use jazz::ids::{AuthorSubject, RowUuid};
+use jazz::query::{Query, col, eq, lit};
+use jazz::records::Value;
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
+use jazz_sim::oracle::{Live, cell};
+use jazz_sim::support::{allow_all, cells, compile, insert, int, open, row, text, user, uuid};
+use jazz_sim::{
+    Latencies, PauseMode, PeerProfile, Sim, SimulatorTransportCodec, bench_profile, emit_summary,
+    env_u64, env_usize,
 };
-use jazz::tools::test_support::AllowAll;
-use jazz::tx::{DurabilityTier, Fate, RejectionReason};
-use jazz::wire::TransportError;
-use jazz_sim::fixture::{
-    DirectDbQueryServer, apply_sync_message_settled, commit_mergeable_unit_settled,
-    register_query_receiver, settle_outcome,
-};
-use jazz_sim::public_schema_fixture::compile_public_schema;
-use jazz_sim::view_accounting::version_bundle_refs;
-use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
-use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
-use tempfile::TempDir;
 
 const WORKFLOWS: &str = "workflows";
 const INSTANCES: &str = "instances";
 const STEPS: &str = "steps";
 const EVENTS: &str = "events";
 
-struct WorkerHarness {
-    _dir: TempDir,
-    db: Db,
-    author: AuthorSubject,
-    _relay_dir: TempDir,
-    relay: NodeState,
-    relay_peer: PeerState,
-    client_peer: PeerState,
-    query_server: DirectDbQueryServer,
-    attachments: Vec<jazz::db::QueryAttachment>,
-    hydrated_tables: BTreeSet<String>,
-    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
-}
-
-struct QueueTransport {
-    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-}
-
-impl Transport for QueueTransport {
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.outbound.borrow_mut().push_back(message);
-        Ok(())
-    }
-
-    fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.inbound.borrow_mut().pop_front()
-    }
-}
-
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
-    if std::env::var("JAZZ_SMOKE").is_ok() {
-        smoke();
-        return;
-    }
-    let config = Config::from_env();
-    let profile = PeerProfile::new(
-        config.profile.clone(),
-        env_u64("JAZZ_LINK_ONE_WAY_MS", 1),
-        env_u64("JAZZ_LINK_JITTER_MS", 0),
-        env_u64("JAZZ_LINK_OVERHEAD_MS", 0),
-    );
-    let mut max_instances_within_slo = 0_usize;
-    for instances in config.ladder_instances.clone() {
-        let mut run_config = config.clone();
-        run_config.instances = instances;
-        let jazz = run_jazz(&run_config);
-        let sqlite = run_sqlite_reference(&run_config, &jazz.accepted_schedule);
-        assert_sqlite_replay_matches(&run_config, &jazz.accepted_schedule, &jazz.final_state);
-        let log = run_log_floor(&run_config, &jazz.accepted_schedule);
-        let within_slo =
-            jazz.transition_latency.value_at_quantile(0.95) <= profile.one_way_latency_ms * 20_000;
-        if within_slo {
-            max_instances_within_slo = instances;
-        }
-        emit_summary(SummaryInputs {
-            config: &run_config,
-            profile: &profile,
-            jazz: &jazz,
-            sqlite: &sqlite,
-            log: &log,
-            max_instances_within_slo,
-            within_slo,
-            phase: "scale_ladder",
-        });
-    }
-}
-
-pub fn smoke() {
+    let profile = bench_profile();
     let config = Config {
-        seed: 0x5900_0001,
-        profile: "s9-smoke".to_owned(),
-        instances: 8,
-        ladder_instances: vec![8],
-        steps_per_instance: 3,
-        transitions: 12,
-        workers: 2,
-        tailers: 2,
-        race_every: 3,
-        per_instance_rate: 2,
+        seed: env_u64("JAZZ_SEED", 0x5900_0001),
+        profile: format!("{profile:?}").to_lowercase(),
+        instances: env_usize("JAZZ_S9_INSTANCES", profile.select(10, 50, 200)).max(1),
+        steps_per_instance: env_usize("JAZZ_S9_STEPS_PER_INSTANCE", profile.select(3, 4, 5)).max(1),
+        transitions: env_usize("JAZZ_S9_TRANSITIONS", profile.select(30, 100, 400)).max(1),
+        workers: env_usize("JAZZ_S9_WORKERS", profile.select(2, 3, 4)).max(2),
+        tailers: env_usize("JAZZ_S9_TAILERS", profile.select(1, 2, 4)),
+        race_every: env_usize("JAZZ_S9_RACE_EVERY", profile.select(5, 8, 10)).max(2),
+        link: PeerProfile::new(
+            "regional",
+            env_u64("JAZZ_LINK_ONE_WAY_MS", 20),
+            env_u64("JAZZ_LINK_JITTER_MS", 5),
+            0,
+        ),
     };
-    let start = Instant::now();
-    let jazz = run_jazz(&config);
-    assert_eq!(jazz.injected_races, jazz.double_advance_rejects);
-    assert_eq!(jazz.double_advances, 0);
-    assert_sqlite_replay_matches(&config, &jazz.accepted_schedule, &jazz.final_state);
-    let sqlite = run_sqlite_reference(&config, &jazz.accepted_schedule);
-    let log = run_log_floor(&config, &jazz.accepted_schedule);
-    let profile = PeerProfile::new(config.profile.clone(), 1, 0, 0);
-    emit_summary(SummaryInputs {
-        config: &config,
-        profile: &profile,
-        jazz: &jazz,
-        sqlite: &sqlite,
-        log: &log,
-        max_instances_within_slo: config.instances,
-        within_slo: true,
-        phase: "smoke",
-    });
-    let mut fields = metadata_fields(
-        "s9_durable_execution",
-        "deterministic",
-        config.seed,
-        &config.profile,
-    );
-    fields.insert("phase".to_owned(), json!("smoke_timing"));
-    fields.insert(
-        "smoke_elapsed_us".to_owned(),
-        json!(start.elapsed().as_micros()),
-    );
-    fields.insert("correctness".to_owned(), json!("matched"));
-    emit_json_line(
-        "s9_durable_execution",
-        &JsonValue::Object(fields).to_string(),
-    );
-    emit_relay_phase_summaries(&config, &profile, &jazz);
+    run(&config, true);
 }
 
-fn emit_relay_phase_summaries(config: &Config, profile: &PeerProfile, jazz: &JazzSummary) {
-    let mut acceptance = metadata_fields(
-        "s9_durable_execution",
-        "synchronous",
-        config.seed,
-        &profile.name,
-    );
-    acceptance.insert("phase".to_owned(), json!("core_mergeable_acceptance"));
-    acceptance.insert(
-        "acceptance_p50_us".to_owned(),
-        json!(jazz.transition_latency.value_at_quantile(0.50)),
-    );
-    acceptance.insert(
-        "acceptance_p95_us".to_owned(),
-        json!(jazz.transition_latency.value_at_quantile(0.95)),
-    );
-    acceptance.insert("durability_tier".to_owned(), json!("Global"));
-    acceptance.insert("api_surface".to_owned(), json!("db"));
-    emit_json_line(
-        "s9_durable_execution",
-        &JsonValue::Object(acceptance).to_string(),
-    );
-
-    let mut hydration = metadata_fields(
-        "s9_durable_execution",
-        "synchronous",
-        config.seed,
-        &profile.name,
-    );
-    hydration.insert("phase".to_owned(), json!("core_permission_scope_hydration"));
-    hydration.insert("scope".to_owned(), json!("workflow_table_surface"));
-    hydration.insert("hydration_bytes".to_owned(), json!(jazz.sync_bytes));
-    hydration.insert("hydration_floor_bytes".to_owned(), json!(jazz.sync_bytes));
-    hydration.insert("hydration_rows".to_owned(), json!(config.instances));
-    emit_json_line(
-        "s9_durable_execution",
-        &JsonValue::Object(hydration).to_string(),
+#[allow(dead_code)]
+pub fn smoke() {
+    run(
+        &Config {
+            seed: 0x5900_0001,
+            profile: "s9-smoke".to_owned(),
+            instances: 8,
+            steps_per_instance: 3,
+            transitions: 12,
+            workers: 2,
+            tailers: 2,
+            race_every: 3,
+            link: PeerProfile::new("s9-smoke", 2, 1, 0),
+        },
+        false,
     );
 }
 
-#[derive(Clone, Debug)]
 struct Config {
     seed: u64,
     profile: String,
     instances: usize,
-    ladder_instances: Vec<usize>,
     steps_per_instance: usize,
     transitions: usize,
     workers: usize,
     tailers: usize,
     race_every: usize,
-    per_instance_rate: u64,
+    link: PeerProfile,
 }
 
-impl Config {
-    fn from_env() -> Self {
-        let bench_profile = bench_profile();
-        let default_ladder_instances: &[usize] =
-            bench_profile.select(&[10, 50, 100][..], &[50, 250, 1_000], &[100, 1_000, 10_000]);
-        let ladder_instances = env_usize_list("JAZZ_S9_LADDER_INSTANCES", default_ladder_instances);
-        Self {
-            seed: env_u64("JAZZ_SEED", 0x5900_0001),
-            profile: std::env::var("JAZZ_PROFILE").unwrap_or_else(|_| "s9-local".to_owned()),
-            instances: ladder_instances[0],
-            ladder_instances,
-            steps_per_instance: env_usize(
-                "JAZZ_S9_STEPS_PER_INSTANCE",
-                bench_profile.select(3, 4, 5),
+fn schema() -> JazzSchema {
+    let table = TableSchemaBuilder::new;
+    compile(
+        &SchemaBuilder::new()
+            .table(
+                table(WORKFLOWS)
+                    .column("name", ColumnType::Text)
+                    .column("definition", ColumnType::Text)
+                    .policies(allow_all()),
             )
-            .max(1),
-            transitions: env_usize("JAZZ_S9_TRANSITIONS", bench_profile.select(30, 100, 200))
-                .max(1),
-            workers: env_usize("JAZZ_S9_WORKERS", bench_profile.select(2, 3, 4)).max(2),
-            tailers: env_usize("JAZZ_S9_TAILERS", bench_profile.select(1, 2, 4)),
-            race_every: env_usize("JAZZ_S9_RACE_EVERY", bench_profile.select(5, 8, 10)).max(1),
-            per_instance_rate: env_u64("JAZZ_S9_PER_INSTANCE_RATE", bench_profile.select(1, 2, 2))
-                .max(1),
-        }
+            .table(
+                table(INSTANCES)
+                    .fk_column("workflow", WORKFLOWS)
+                    .column("state", ColumnType::Text)
+                    .column("currentStep", ColumnType::BigInt)
+                    .policies(allow_all()),
+            )
+            .table(
+                table(STEPS)
+                    .fk_column("instance", INSTANCES)
+                    .column("seq", ColumnType::BigInt)
+                    .column("output", ColumnType::Text)
+                    .policies(allow_all()),
+            )
+            .table(
+                table(EVENTS)
+                    .fk_column("instance", INSTANCES)
+                    .column("seq", ColumnType::BigInt)
+                    .column("payload", ColumnType::Text)
+                    .policies(allow_all()),
+            )
+            .build(),
+    )
+}
+
+fn workflow() -> RowUuid {
+    row(0x90, 0)
+}
+
+fn instance(n: usize) -> RowUuid {
+    row(0x91, n as u64)
+}
+
+/// Steps and events are keyed by (instance, seq), so a double advance
+/// would show as two transactions writing one row, never as a silent gap.
+fn step_row(n: usize, seq: u64) -> RowUuid {
+    row(0x92, ((n as u64) << 16) | seq)
+}
+
+fn event_row(n: usize, seq: u64) -> RowUuid {
+    row(0x93, ((n as u64) << 16) | seq)
+}
+
+fn state_for(step: u64, steps_per_instance: usize) -> &'static str {
+    if step >= steps_per_instance as u64 {
+        "completed"
+    } else {
+        "running"
+    }
+}
+
+fn get_int(row: &jazz::db::CurrentRow, column: &str) -> i64 {
+    match cell(row, column) {
+        Some(Value::I64(v)) => v,
+        other => panic!("{column}: {other:?}"),
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Transition {
     instance: usize,
-    from_step: u64,
-    to_step: u64,
+    from: u64,
 }
 
-#[derive(Debug)]
-struct JazzSummary {
-    accepted_schedule: Vec<Transition>,
-    attempts: usize,
-    rejects: usize,
-    injected_races: usize,
-    double_advance_rejects: usize,
-    double_advances: usize,
-    transition_latency: Histogram<u64>,
-    dashboard_latency: Histogram<u64>,
-    tail_latency: Histogram<u64>,
-    resume_latency: Histogram<u64>,
-    aggregate_elapsed_us: u128,
-    aggregate_with_assertions_elapsed_us: u128,
-    settle_elapsed_us: u128,
-    assertion_elapsed_us: u128,
-    cold_resume_elapsed_us: u128,
-    final_state: BTreeMap<usize, u64>,
-    fixture_current_state_bytes: u64,
-    transition_history_bytes: u64,
-    total_storage_bytes: u64,
-    sync_bytes: u64,
-    resume_bytes: u64,
+/// One worker's attempt to advance `instance`: read its current step in a
+/// serializable transaction, then stage the advance, the step and the event.
+struct Attempt<'a> {
+    sim: &'a Sim,
+    db: &'a Db,
+    tx: jazz::db::SerializableTx<'a>,
+    transition: Transition,
 }
 
-#[derive(Debug)]
-struct BaselineSummary {
-    elapsed_us: u128,
-    bytes: u64,
-    tx_per_sec: f64,
+impl<'a> Attempt<'a> {
+    fn stage(sim: &'a Sim, db: &'a Db, n: usize, steps_per_instance: usize) -> Self {
+        let tx = sim.drive(db.serializable_tx()).expect("begin serializable");
+        let prepared = db
+            .prepare_query(&Query::from(INSTANCES).filter(eq(col("id"), lit(uuid(instance(n))))))
+            .expect("prepare");
+        let rows = sim
+            .drive(tx.all_prepared(&prepared))
+            .expect("serializable read");
+        assert_eq!(rows.len(), 1, "instance {n}");
+        let from = get_int(&rows[0], "currentStep") as u64;
+        let to = from + 1;
+        sim.drive(tx.update(
+            INSTANCES,
+            instance(n),
+            cells([
+                ("currentStep", int(to as i64)),
+                ("state", text(state_for(to, steps_per_instance))),
+            ]),
+            Default::default(),
+        ))
+        .unwrap_or_else(|error| panic!("stage advance: {error}"));
+        for (table, id, payload_column, payload) in [
+            (STEPS, step_row(n, to), "output", format!("output-{n}-{to}")),
+            (
+                EVENTS,
+                event_row(n, to),
+                "payload",
+                format!("event-{n}-{to}"),
+            ),
+        ] {
+            sim.drive(tx.insert(
+                table,
+                cells([
+                    ("instance", uuid(instance(n))),
+                    ("seq", int(to as i64)),
+                    (payload_column, text(payload)),
+                ]),
+                jazz::db::InsertOptions {
+                    row_id: Some(id),
+                    ..Default::default()
+                },
+            ))
+            .unwrap_or_else(|error| panic!("stage {table}: {error}"));
+        }
+        Self {
+            sim,
+            db,
+            tx,
+            transition: Transition { instance: n, from },
+        }
+    }
+
+    /// Commit and wait for the authority. True if accepted.
+    fn commit(self) -> bool {
+        let outcome = match self.sim.drive(self.tx.commit()) {
+            Ok(receipt) => self
+                .sim
+                .drive(
+                    self.db
+                        .wait_for_transaction(receipt.0, DurabilityTier::Global),
+                )
+                .map(|_| ()),
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(()) => true,
+            Err(error) if error.code == ErrorCode::TransactionConflict => false,
+            Err(error) => panic!("unexpected commit failure: {error}"),
+        }
+    }
 }
 
-fn run_jazz(config: &Config) -> JazzSummary {
-    let schema = schema();
-    let (core_dir, mut core) = open_node(node(250), schema.clone());
-    let mut global_time = 1_u64;
-    seed_fixture(config, &mut core, &mut global_time);
-    let fixture_current_state_bytes = storage_bytes(core_dir.path());
-
-    let mut dashboard_peer = PeerState::new();
-    let (_dashboard_dir, mut dashboard) = open_node(node(40), schema.clone());
-    sync_tables(&mut core, &mut dashboard, &mut dashboard_peer, &[INSTANCES]);
-
-    let mut tailers = (0..config.tailers)
-        .map(|idx| {
-            let (dir, mut node) = open_node(node(60 + idx as u8), schema.clone());
-            let mut peer = PeerState::new();
-            sync_tables(&mut core, &mut node, &mut peer, &[EVENTS]);
-            (dir, node, peer)
+/// The dashboard: running instances and their current step.
+fn assert_dashboard(dashboard: &Live, oracle: &[u64], steps_per_instance: usize) {
+    let expected: BTreeMap<RowUuid, i64> = oracle
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| **step < steps_per_instance as u64)
+        .map(|(n, step)| (instance(n), *step as i64))
+        .collect();
+    let actual: BTreeMap<RowUuid, i64> = dashboard
+        .rows
+        .iter()
+        .map(|(id, cells)| match cells.get("currentStep") {
+            Some(Value::I64(step)) => (*id, *step),
+            other => panic!("currentStep: {other:?}"),
         })
-        .collect::<Vec<_>>();
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "the dashboard shows exactly the running instances"
+    );
+}
 
-    let mut workers = (0..config.workers)
-        .map(|idx| {
-            let mut worker =
-                open_worker(node(20 + idx as u8), node(120 + idx as u8), schema.clone());
-            sync_worker_tables(
-                &mut core,
-                &mut worker,
-                &[WORKFLOWS, INSTANCES, STEPS, EVENTS],
+/// A tailer holds every event the oracle has accepted, with no gaps, and
+/// never lost one it had seen.
+fn assert_tailer(tailer: &Live, oracle: &[u64]) {
+    let expected: Vec<RowUuid> = oracle
+        .iter()
+        .enumerate()
+        .flat_map(|(n, step)| (1..=*step).map(move |seq| event_row(n, seq)))
+        .collect();
+    let mut actual: Vec<RowUuid> = tailer.ids().into_iter().collect();
+    actual.sort();
+    let mut expected_sorted = expected.clone();
+    expected_sorted.sort();
+    assert_eq!(
+        actual, expected_sorted,
+        "a tailer's event log is complete and gap-free"
+    );
+    assert_eq!(tailer.removed, 0, "an event log is prefix-monotone");
+}
+
+fn next_runnable(oracle: &[u64], offset: usize, steps_per_instance: usize) -> usize {
+    (0..oracle.len())
+        .map(|i| (offset + i) % oracle.len())
+        .find(|n| oracle[*n] < steps_per_instance as u64)
+        .expect("transitions exceed the instances' step capacity")
+}
+
+fn run(config: &Config, emit: bool) {
+    assert!(
+        config.transitions <= config.instances * config.steps_per_instance,
+        "the run needs enough steps to advance"
+    );
+    let mut sim = Sim::new(config.seed, SimulatorTransportCodec::WireFrames);
+    let core = sim.add("core", open(schema(), 0, AuthorSubject::SYSTEM));
+    insert(
+        core,
+        WORKFLOWS,
+        workflow(),
+        cells([
+            ("name", text("order-fulfilment")),
+            ("definition", text("charge;pack;ship;notify;close")),
+        ]),
+    );
+    for n in 0..config.instances {
+        insert(
+            core,
+            INSTANCES,
+            instance(n),
+            cells([
+                ("workflow", uuid(workflow())),
+                ("state", text("running")),
+                ("currentStep", int(0)),
+            ]),
+        );
+    }
+
+    let workers: Vec<String> = (0..config.workers).map(|w| format!("worker-{w}")).collect();
+    for (w, name) in workers.iter().enumerate() {
+        sim.add(
+            name.clone(),
+            open(schema(), 1 + w as u32, user(1 + w as u32)),
+        );
+        sim.connect(name, "core", user(1 + w as u32), config.link.clone());
+    }
+    sim.add("dashboard", open(schema(), 100, user(100)));
+    sim.connect("dashboard", "core", user(100), config.link.clone());
+    let running = Query::from(INSTANCES).filter(eq(col("state"), lit(text("running"))));
+    let mut dashboard = Live::subscribe(sim.db("dashboard"), &running, ReadOpts::default());
+    let mut tailers: Vec<Live> = (0..config.tailers)
+        .map(|t| {
+            let name = format!("tailer-{t}");
+            sim.add(
+                name.clone(),
+                open(schema(), 200 + t as u32, user(200 + t as u32)),
             );
-            worker
+            sim.connect(&name, "core", user(200 + t as u32), config.link.clone());
+            Live::subscribe(sim.db(&name), &Query::from(EVENTS), ReadOpts::default())
         })
-        .collect::<Vec<_>>();
+        .collect();
+    sim.settle();
+    sim.reset_stats();
 
     let mut oracle = vec![0_u64; config.instances];
-    let mut seen_advances = BTreeSet::<(usize, u64)>::new();
-    let mut accepted_schedule = Vec::new();
-    let mut attempts = 0_usize;
-    let mut rejects = 0_usize;
-    let mut injected_races = 0_usize;
-    let mut double_advance_rejects = 0_usize;
-    let mut double_advances = 0_usize;
-    let mut transition_latency = Histogram::new(3).unwrap();
-    let mut dashboard_latency = Histogram::new(3).unwrap();
-    let mut tail_latency = Histogram::new(3).unwrap();
-    let mut resume_latency = Histogram::new(3).unwrap();
-    let mut settle_elapsed_us = 0_u128;
-    let mut aggregate_elapsed_us = 0_u128;
-    let mut assertion_elapsed_us = 0_u128;
-    let mut sync_bytes = 0_u64;
-    let mut now_ms = 10_000_u64;
-
-    let target_transitions = config
-        .transitions
-        .min(config.instances.saturating_mul(config.steps_per_instance));
-    let aggregate_with_assertions_start = Instant::now();
-    while accepted_schedule.len() < target_transitions {
-        let aggregate_start = Instant::now();
-        let instance = next_runnable_instance(&oracle, accepted_schedule.len(), config)
-            .expect("configured transitions exceeded runnable instance capacity");
-        let expected_step = oracle[instance];
+    let mut schedule: Vec<Transition> = Vec::new();
+    let (
+        mut attempts,
+        mut rejects,
+        mut injected_races,
+        mut double_advance_rejects,
+        mut double_advances,
+    ) = (0, 0, 0, 0, 0);
+    let mut transition_us = Latencies::default();
+    let mut dashboard_ms = Latencies::default();
+    let mut tail_ms = Latencies::default();
+    let crash_at = config.transitions / 2;
+    let started = Instant::now();
+    while schedule.len() < config.transitions {
+        let n = next_runnable(&oracle, schedule.len(), config.steps_per_instance);
+        if schedule.len() == crash_at {
+            // A worker crashes between transitions; its peers keep going
+            // and it resumes from whatever the authority holds.
+            sim.pause(&workers[0], PauseMode::Disconnect);
+        }
+        if schedule.len() == crash_at + config.workers {
+            sim.resume(&workers[0]);
+            sim.settle();
+        }
+        let crashed =
+            |w: usize| w == 0 && (crash_at..crash_at + config.workers).contains(&schedule.len());
         let race =
-            !accepted_schedule.is_empty() && accepted_schedule.len() % config.race_every == 0;
+            !schedule.is_empty() && schedule.len().is_multiple_of(config.race_every) && !crashed(0);
+        let attempt_started = Instant::now();
+        let before_ms = sim.now_ms();
         if race {
-            let (first_worker, second_worker) = first_two_workers(&mut workers);
-            sync_worker_tables(
-                &mut core,
-                first_worker,
-                &[WORKFLOWS, INSTANCES, STEPS, EVENTS],
+            // Both workers read the same step before either commits.
+            let first = Attempt::stage(&sim, sim.db(&workers[0]), n, config.steps_per_instance);
+            let second = Attempt::stage(&sim, sim.db(&workers[1]), n, config.steps_per_instance);
+            assert_eq!(
+                first.transition, second.transition,
+                "the racers read the same step"
             );
-            sync_worker_tables(
-                &mut core,
-                second_worker,
-                &[WORKFLOWS, INSTANCES, STEPS, EVENTS],
-            );
-            let before = Instant::now();
-            let first = apply_transition(
-                first_worker,
-                &mut core,
-                instance,
-                expected_step,
-                config.steps_per_instance,
-                now_ms,
-            )
-            .unwrap();
-            attempts += 1;
-            now_ms += 1;
-            assert!(first);
-            record_accept(
-                config,
-                AcceptState {
-                    core: &mut core,
-                    global_time: &mut global_time,
-                    accepted_schedule: &mut accepted_schedule,
-                    oracle: &mut oracle,
-                    seen_advances: &mut seen_advances,
-                    double_advances: &mut double_advances,
-                },
-                instance,
-                expected_step,
-                now_ms,
-            );
-            let settle_us = before.elapsed().as_micros() as u64;
-            transition_latency.record(settle_us).unwrap();
-            settle_elapsed_us += u128::from(settle_us);
-            let second = apply_transition(
-                second_worker,
-                &mut core,
-                instance,
-                expected_step,
-                config.steps_per_instance,
-                now_ms,
-            )
-            .unwrap();
-            attempts += 1;
-            now_ms += 1;
+            let transition = first.transition;
+            attempts += 2;
             injected_races += 1;
-            if second {
+            assert!(first.commit(), "the first racer commits");
+            if second.commit() {
                 double_advances += 1;
             } else {
                 rejects += 1;
                 double_advance_rejects += 1;
             }
+            schedule.push(transition);
         } else {
-            let worker_idx = accepted_schedule.len() % workers.len();
-            let worker = &mut workers[worker_idx];
-            sync_worker_tables(&mut core, worker, &[INSTANCES]);
-            let before = Instant::now();
-            let accepted = apply_transition(
-                worker,
-                &mut core,
-                instance,
-                expected_step,
-                config.steps_per_instance,
-                now_ms,
-            )
-            .unwrap();
+            let w = (1..=config.workers)
+                .map(|i| (schedule.len() + i) % config.workers)
+                .find(|w| !crashed(*w))
+                .expect("a live worker");
+            let attempt = Attempt::stage(&sim, sim.db(&workers[w]), n, config.steps_per_instance);
+            let transition = attempt.transition;
             attempts += 1;
-            now_ms += 1_000_u64
-                .checked_div(config.per_instance_rate * config.instances.max(1) as u64)
-                .unwrap_or(1)
-                .max(1);
-            if accepted {
-                record_accept(
-                    config,
-                    AcceptState {
-                        core: &mut core,
-                        global_time: &mut global_time,
-                        accepted_schedule: &mut accepted_schedule,
-                        oracle: &mut oracle,
-                        seen_advances: &mut seen_advances,
-                        double_advances: &mut double_advances,
-                    },
-                    instance,
-                    expected_step,
-                    now_ms,
-                );
-                let settle_us = before.elapsed().as_micros() as u64;
-                transition_latency.record(settle_us).unwrap();
-                settle_elapsed_us += u128::from(settle_us);
+            if attempt.commit() {
+                schedule.push(transition);
             } else {
                 rejects += 1;
+                continue;
             }
         }
-        aggregate_elapsed_us += aggregate_start.elapsed().as_micros();
-
-        let dashboard_start = Instant::now();
-        let update = table_query_update(&mut core, &mut dashboard_peer, INSTANCES, false);
-        sync_bytes += view_update_bytes(&update);
-        apply_sync_message_settled(&mut dashboard, update).unwrap();
-        assert_dashboard_matches(&mut dashboard, &oracle, config.steps_per_instance);
-        dashboard_latency
-            .record(dashboard_start.elapsed().as_micros() as u64)
-            .unwrap();
-
-        let tail_start = Instant::now();
-        for (_, tailer, peer) in &mut tailers {
-            let update = table_query_update(&mut core, peer, EVENTS, false);
-            sync_bytes += view_update_bytes(&update);
-            apply_sync_message_settled(tailer, update).unwrap();
-            assert_tailers_gap_free(tailer, &oracle);
-        }
-        tail_latency
-            .record(tail_start.elapsed().as_micros() as u64)
-            .unwrap();
-        assertion_elapsed_us += dashboard_start.elapsed().as_micros();
-    }
-    let aggregate_with_assertions_elapsed_us =
-        aggregate_with_assertions_start.elapsed().as_micros();
-
-    let resume_start = Instant::now();
-    let (_resume_dir, mut resume) = open_node(node(90), schema.clone());
-    let mut resume_peer = PeerState::new();
-    let mut resume_bytes = 0_u64;
-    for table in [INSTANCES, STEPS, EVENTS] {
-        register_table_receiver(&mut resume, table, AuthorSubject::SYSTEM);
-        let update = table_query_update(&mut core, &mut resume_peer, table, true);
-        resume_bytes += view_update_bytes(&update);
-        apply_sync_message_settled(&mut resume, update).unwrap();
-    }
-    resume_latency
-        .record(resume_start.elapsed().as_micros() as u64)
-        .unwrap();
-    let cold_resume_elapsed_us = resume_start.elapsed().as_micros();
-    assert_resume_matches(&mut resume, &oracle);
-    assert_tailers_gap_free(&mut resume, &oracle);
-    let total_storage_bytes = storage_bytes(core_dir.path());
-
-    JazzSummary {
-        accepted_schedule,
-        attempts,
-        rejects,
-        injected_races,
-        double_advance_rejects,
-        double_advances,
-        transition_latency,
-        dashboard_latency,
-        tail_latency,
-        resume_latency,
-        aggregate_elapsed_us,
-        aggregate_with_assertions_elapsed_us,
-        settle_elapsed_us,
-        assertion_elapsed_us,
-        cold_resume_elapsed_us,
-        final_state: oracle.into_iter().enumerate().collect(),
-        fixture_current_state_bytes,
-        transition_history_bytes: total_storage_bytes.saturating_sub(fixture_current_state_bytes),
-        total_storage_bytes,
-        sync_bytes,
-        resume_bytes,
-    }
-}
-
-fn first_two_workers(workers: &mut [WorkerHarness]) -> (&mut WorkerHarness, &mut WorkerHarness) {
-    let (first, rest) = workers.split_at_mut(1);
-    (&mut first[0], &mut rest[0])
-}
-
-fn next_runnable_instance(oracle: &[u64], offset: usize, config: &Config) -> Option<usize> {
-    (0..config.instances)
-        .map(|delta| (offset + delta) % config.instances)
-        .find(|candidate| oracle[*candidate] < config.steps_per_instance as u64)
-}
-
-struct AcceptState<'a> {
-    core: &'a mut NodeState,
-    global_time: &'a mut u64,
-    accepted_schedule: &'a mut Vec<Transition>,
-    oracle: &'a mut [u64],
-    seen_advances: &'a mut BTreeSet<(usize, u64)>,
-    double_advances: &'a mut usize,
-}
-
-fn record_accept(
-    config: &Config,
-    state: AcceptState<'_>,
-    instance: usize,
-    from_step: u64,
-    now_ms: u64,
-) {
-    let to_step = from_step + 1;
-    let transition = Transition {
-        instance,
-        from_step,
-        to_step,
-    };
-    if !state.seen_advances.insert((instance, to_step)) {
-        *state.double_advances += 1;
-    }
-    state.oracle[instance] = to_step.min(config.steps_per_instance as u64);
-    append_step_and_event(state.core, state.global_time, transition, now_ms);
-    state.accepted_schedule.push(transition);
-}
-
-fn apply_transition(
-    client: &mut WorkerHarness,
-    core: &mut NodeState,
-    instance: usize,
-    expected_step: u64,
-    steps_per_instance: usize,
-    now_ms: u64,
-) -> Result<bool, jazz::db::Error> {
-    let tx = jazz::db::block_on(client.db.serializable_tx())?;
-    let row = instance_row(instance);
-    let cells = jazz::db::block_on(tx.read(INSTANCES, row))?.expect("instance");
-    let workflow = uuid_cell(&cells, "workflow");
-    let current_step = u64_cell(&cells, "currentStep");
-    let next_step = current_step + 1;
-    let state = if next_step >= steps_per_instance as u64 {
-        "completed"
-    } else {
-        "running"
-    };
-    // The instance row already exists (read above); advancing it is an
-    // update, since an explicit-id insert in a serializable tx only creates.
-    jazz::db::block_on(tx.update(
-        INSTANCES,
-        row,
-        cells_map([
-            ("workflow", Value::Uuid(workflow.0)),
-            ("state", Value::String(state.to_owned())),
-            ("currentStep", Value::U64(next_step)),
-            ("wakeAt", Value::U64(0)),
-        ]),
-        Default::default(),
-    ))?;
-    let _tx_id = jazz::db::block_on(tx.commit())?;
-    jazz::db::block_on(client.db.tick())?;
-    let unit = client
-        .outbound
-        .borrow_mut()
-        .pop_front()
-        .expect("db serializable transition should upload a commit unit");
-    let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
-        unreachable!();
-    };
-    jazz::db::block_on(client.relay.ingest_relay_commit_unit(tx, versions)).unwrap();
-    let _ = now_ms;
-    let outcome = jazz::db::block_on(core.apply_sync_message(unit)).unwrap();
-    let updates = settle_outcome(core, outcome).unwrap();
-    let mut accepted = false;
-    let mut rejection = None;
-    for update in updates {
-        if let SyncMessage::FateUpdate { fate, .. } = &update {
-            match fate {
-                Fate::Accepted => accepted = true,
-                Fate::Rejected(reason) => rejection = Some(reason.clone()),
-                Fate::Pending => {}
-            }
-        }
-        apply_sync_message_settled(&mut client.relay, update.clone()).unwrap();
-        client.inbound.borrow_mut().push_back(update);
-        jazz::db::block_on(client.db.tick())?;
-    }
-    if matches!(
-        rejection,
-        Some(RejectionReason::ClientClockTooFarAhead | RejectionReason::CausalityViolation)
-    ) {
-        panic!("unexpected transition rejection: {rejection:?}");
-    }
-    if accepted {
-        assert_eq!(current_step, expected_step);
-    }
-    Ok(accepted)
-}
-
-fn append_step_and_event(
-    core: &mut NodeState,
-    global_time: &mut u64,
-    transition: Transition,
-    now_ms: u64,
-) {
-    let instance = instance_row(transition.instance);
-    let step_tx = commit_mergeable_unit_settled(
-        core,
-        MergeableCommit::new(
-            STEPS,
-            step_row(transition.instance, transition.to_step),
-            now_ms,
-        )
-        .cells(cells_map([
-            ("instance", Value::Uuid(instance.0)),
-            ("seq", Value::U64(transition.to_step)),
-            ("kind", Value::String("activity".to_owned())),
-            (
-                "input",
-                Value::String(format!("{{\"from\":{}}}", transition.from_step)),
-            ),
-            (
-                "output",
-                Value::String(format!("{{\"to\":{}}}", transition.to_step)),
-            ),
-            ("status", Value::String("completed".to_owned())),
-        ])),
-    )
-    .unwrap();
-    accept_global(core, step_tx.0, global_time);
-    let event_tx = commit_mergeable_unit_settled(
-        core,
-        MergeableCommit::new(
-            EVENTS,
-            event_row(transition.instance, transition.to_step),
-            now_ms,
-        )
-        .cells(cells_map([
-            ("instance", Value::Uuid(instance.0)),
-            ("seq", Value::U64(transition.to_step)),
-            (
-                "payload",
-                Value::Bytes(
-                    format!("{}:{}", transition.instance, transition.to_step).into_bytes(),
-                ),
-            ),
-        ])),
-    )
-    .unwrap();
-    accept_global(core, event_tx.0, global_time);
-}
-
-fn seed_fixture(config: &Config, core: &mut NodeState, global_time: &mut u64) {
-    let tx = commit_mergeable_unit_settled(
-        core,
-        MergeableCommit::new(WORKFLOWS, workflow_row(), 1).cells(cells_map([
-            ("name", Value::String("workflow-main".to_owned())),
-            (
-                "definition",
-                Value::String(format!("{{\"steps\":{}}}", config.steps_per_instance)),
-            ),
-        ])),
-    )
-    .unwrap();
-    accept_global(core, tx.0, global_time);
-    for instance in 0..config.instances {
-        let tx = commit_mergeable_unit_settled(
-            core,
-            MergeableCommit::new(INSTANCES, instance_row(instance), 2).cells(cells_map([
-                ("workflow", Value::Uuid(workflow_row().0)),
-                ("state", Value::String("running".to_owned())),
-                ("currentStep", Value::U64(0)),
-                ("wakeAt", Value::U64(0)),
-            ])),
-        )
-        .unwrap();
-        accept_global(core, tx.0, global_time);
-    }
-}
-
-fn run_sqlite_reference(config: &Config, schedule: &[Transition]) -> BaselineSummary {
-    let conn = sqlite_fixture(config);
-    let start = Instant::now();
-    for transition in schedule {
-        let changed = conn
-            .execute(
-                "UPDATE instances SET current_step = ?1, state = ?2 WHERE id = ?3 AND current_step = ?4",
-                params![
-                    transition.to_step as i64,
-                    if transition.to_step >= config.steps_per_instance as u64 { "completed" } else { "running" },
-                    transition.instance as i64,
-                    transition.from_step as i64,
-                ],
-            )
-            .unwrap();
-        assert_eq!(changed, 1);
-    }
-    let elapsed_us = start.elapsed().as_micros();
-    BaselineSummary {
-        elapsed_us,
-        bytes: 0,
-        tx_per_sec: schedule.len() as f64 / (elapsed_us as f64 / 1_000_000.0).max(0.000_001),
-    }
-}
-
-fn assert_sqlite_replay_matches(
-    config: &Config,
-    schedule: &[Transition],
-    jazz: &BTreeMap<usize, u64>,
-) {
-    let conn = sqlite_fixture(config);
-    for transition in schedule {
-        conn.execute(
-            "UPDATE instances SET current_step = ?1, state = ?2 WHERE id = ?3 AND current_step = ?4",
-            params![
-                transition.to_step as i64,
-                if transition.to_step >= config.steps_per_instance as u64 { "completed" } else { "running" },
-                transition.instance as i64,
-                transition.from_step as i64,
-            ],
-        )
-        .unwrap();
-    }
-    for instance in 0..config.instances {
-        let step: i64 = conn
-            .query_row(
-                "SELECT current_step FROM instances WHERE id = ?1",
-                [instance as i64],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(Some(&(step as u64)), jazz.get(&instance));
-    }
-}
-
-fn sqlite_fixture(config: &Config) -> Connection {
-    let dir = tempfile::tempdir().unwrap();
-    let conn = Connection::open(dir.path().join("s9.sqlite")).unwrap();
-    conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-    conn.pragma_update(None, "synchronous", "NORMAL").unwrap();
-    conn.execute_batch(
-        "
-        CREATE TABLE instances(id INTEGER PRIMARY KEY, current_step INTEGER NOT NULL, state TEXT NOT NULL);
-        ",
-    )
-    .unwrap();
-    for instance in 0..config.instances {
-        conn.execute(
-            "INSERT INTO instances VALUES (?1, 0, 'running')",
-            [instance as i64],
-        )
-        .unwrap();
-    }
-    conn
-}
-
-fn run_log_floor(_config: &Config, schedule: &[Transition]) -> BaselineSummary {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("events.log");
-    let mut writer = BufWriter::new(File::create(&path).unwrap());
-    let start = Instant::now();
-    for transition in schedule {
-        let payload = format!("{}:{}", transition.instance, transition.to_step);
-        writer
-            .write_all(&(payload.len() as u32).to_le_bytes())
-            .unwrap();
-        writer.write_all(payload.as_bytes()).unwrap();
-    }
-    writer.flush().unwrap();
-    writer.get_ref().sync_all().unwrap();
-    let elapsed_us = start.elapsed().as_micros();
-    BaselineSummary {
-        elapsed_us,
-        bytes: fs::metadata(path).unwrap().len(),
-        tx_per_sec: schedule.len() as f64 / (elapsed_us as f64 / 1_000_000.0).max(0.000_001),
-    }
-}
-
-struct SummaryInputs<'a> {
-    config: &'a Config,
-    profile: &'a PeerProfile,
-    jazz: &'a JazzSummary,
-    sqlite: &'a BaselineSummary,
-    log: &'a BaselineSummary,
-    max_instances_within_slo: usize,
-    within_slo: bool,
-    phase: &'a str,
-}
-
-fn emit_summary(input: SummaryInputs<'_>) {
-    let SummaryInputs {
-        config,
-        profile,
-        jazz,
-        sqlite,
-        log,
-        max_instances_within_slo,
-        within_slo,
-        phase,
-    } = input;
-    let steps = jazz.accepted_schedule.len().max(1) as f64;
-    let mut fields = metadata_fields(
-        "s9_durable_execution",
-        "synchronous",
-        config.seed,
-        &profile.name,
-    );
-    fields.insert("phase".to_owned(), json!(phase));
-    fields.insert("instances".to_owned(), json!(config.instances));
-    fields.insert(
-        "steps_per_instance".to_owned(),
-        json!(config.steps_per_instance),
-    );
-    fields.insert(
-        "committed_transitions".to_owned(),
-        json!(jazz.accepted_schedule.len()),
-    );
-    fields.insert("attempts".to_owned(), json!(jazz.attempts));
-    fields.insert("rejects".to_owned(), json!(jazz.rejects));
-    fields.insert("injected_races".to_owned(), json!(jazz.injected_races));
-    fields.insert(
-        "double_advance_rejects".to_owned(),
-        json!(jazz.double_advance_rejects),
-    );
-    fields.insert("double_advances".to_owned(), json!(jazz.double_advances));
-    fields.insert(
-        "transition_settle_p50_us".to_owned(),
-        json!(jazz.transition_latency.value_at_quantile(0.5)),
-    );
-    fields.insert(
-        "transition_settle_p95_us".to_owned(),
-        json!(jazz.transition_latency.value_at_quantile(0.95)),
-    );
-    fields.insert(
-        "dashboard_p95_us".to_owned(),
-        json!(jazz.dashboard_latency.value_at_quantile(0.95)),
-    );
-    fields.insert(
-        "tail_p95_us".to_owned(),
-        json!(jazz.tail_latency.value_at_quantile(0.95)),
-    );
-    fields.insert(
-        "resume_p95_us".to_owned(),
-        json!(jazz.resume_latency.value_at_quantile(0.95)),
-    );
-    fields.insert(
-        "link_rtt_floor_us".to_owned(),
-        json!(profile.one_way_latency_ms * 2_000),
-    );
-    fields.insert(
-        "max_concurrent_instances_within_slo".to_owned(),
-        json!(max_instances_within_slo),
-    );
-    fields.insert("within_slo".to_owned(), json!(within_slo));
-    fields.insert(
-        "aggregate_transitions_per_sec".to_owned(),
-        json!(steps / (jazz.aggregate_elapsed_us as f64 / 1_000_000.0).max(0.000_001)),
-    );
-    fields.insert(
-        "aggregate_elapsed_us".to_owned(),
-        json!(jazz.aggregate_elapsed_us),
-    );
-    fields.insert(
-        "aggregate_with_assertions_transitions_per_sec".to_owned(),
-        json!(
-            steps / (jazz.aggregate_with_assertions_elapsed_us as f64 / 1_000_000.0).max(0.000_001)
-        ),
-    );
-    fields.insert(
-        "aggregate_with_assertions_elapsed_us".to_owned(),
-        json!(jazz.aggregate_with_assertions_elapsed_us),
-    );
-    fields.insert(
-        "settle_transitions_per_sec".to_owned(),
-        json!(steps / (jazz.settle_elapsed_us as f64 / 1_000_000.0).max(0.000_001)),
-    );
-    fields.insert(
-        "assertion_elapsed_us".to_owned(),
-        json!(jazz.assertion_elapsed_us),
-    );
-    fields.insert(
-        "cold_resume_elapsed_us".to_owned(),
-        json!(jazz.cold_resume_elapsed_us),
-    );
-    fields.insert(
-        "cold_resume_transitions_per_sec".to_owned(),
-        json!(steps / (jazz.cold_resume_elapsed_us as f64 / 1_000_000.0).max(0.000_001)),
-    );
-    fields.insert("sqlite_tx_per_sec".to_owned(), json!(sqlite.tx_per_sec));
-    fields.insert("sqlite_elapsed_us".to_owned(), json!(sqlite.elapsed_us));
-    fields.insert("log_floor_elapsed_us".to_owned(), json!(log.elapsed_us));
-    fields.insert(
-        "log_floor_bytes_per_step".to_owned(),
-        json!(log.bytes as f64 / steps),
-    );
-    fields.insert(
-        "fixture_current_state_bytes".to_owned(),
-        json!(jazz.fixture_current_state_bytes),
-    );
-    fields.insert(
-        "transition_history_bytes".to_owned(),
-        json!(jazz.transition_history_bytes),
-    );
-    fields.insert(
-        "transition_history_bytes_per_step".to_owned(),
-        json!(jazz.transition_history_bytes as f64 / steps),
-    );
-    fields.insert(
-        "total_storage_bytes".to_owned(),
-        json!(jazz.total_storage_bytes),
-    );
-    fields.insert(
-        "total_storage_bytes_per_step_including_fixture".to_owned(),
-        json!(jazz.total_storage_bytes as f64 / steps),
-    );
-    fields.insert("sync_bytes".to_owned(), json!(jazz.sync_bytes));
-    fields.insert("resume_bytes".to_owned(), json!(jazz.resume_bytes));
-    fields.insert("same_schedule_replay".to_owned(), json!("matched"));
-    fields.insert(
-        "correctness".to_owned(),
-        json!("gap_free_monotone_no_double_advance_resume_exact"),
-    );
-    emit_json_line(
-        "s9_durable_execution",
-        &JsonValue::Object(fields).to_string(),
-    );
-}
-
-fn assert_dashboard_matches(node: &mut NodeState, oracle: &[u64], steps_per_instance: usize) {
-    let schema = schema();
-    let table = table_schema(&schema, INSTANCES);
-    let running = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local))
-        .unwrap()
-        .into_iter()
-        .filter(|row| row.cell(table, "state") == Some(Value::String("running".to_owned())))
-        .count();
-    let expected = oracle
-        .iter()
-        .filter(|step| **step < steps_per_instance as u64)
-        .count();
-    assert_eq!(running, expected);
-}
-
-fn assert_tailers_gap_free(node: &mut NodeState, oracle: &[u64]) {
-    let schema = schema();
-    let table = table_schema(&schema, EVENTS);
-    let mut seen = BTreeMap::<usize, BTreeSet<u64>>::new();
-    for row in jazz::db::block_on(node.current_rows(EVENTS, DurabilityTier::Local)).unwrap() {
-        let instance = instance_idx(RowUuid(match row.cell(table, "instance").unwrap() {
-            Value::Uuid(uuid) => uuid,
-            other => panic!("expected uuid, got {other:?}"),
-        }));
-        let seq = value_u64(row.cell(table, "seq").unwrap());
-        seen.entry(instance).or_default().insert(seq);
-    }
-    for (instance, expected_step) in oracle.iter().copied().enumerate() {
-        let actual = seen.get(&instance).cloned().unwrap_or_default();
-        assert_eq!(actual.len() as u64, expected_step);
-        for seq in 1..=expected_step {
-            assert!(actual.contains(&seq), "missing event {instance}:{seq}");
-        }
-    }
-}
-
-fn assert_resume_matches(node: &mut NodeState, oracle: &[u64]) {
-    let schema = schema();
-    let table = table_schema(&schema, INSTANCES);
-    let rows = jazz::db::block_on(node.current_rows(INSTANCES, DurabilityTier::Local)).unwrap();
-    for row in rows {
-        let instance = instance_idx(row.row_uuid());
+        transition_us.record_duration_us(attempt_started.elapsed());
+        let transition = *schedule.last().expect("accepted");
         assert_eq!(
-            value_u64(row.cell(table, "currentStep").unwrap()),
-            oracle[instance]
+            transition.from, oracle[n],
+            "a transition advances from the accepted step"
+        );
+        oracle[n] += 1;
+
+        // Dashboard and tailers follow; time is virtual.
+        let committed_ms = sim.now_ms();
+        sim.settle();
+        dashboard.poll();
+        assert_dashboard(&dashboard, &oracle, config.steps_per_instance);
+        dashboard_ms.record(sim.now_ms().saturating_sub(committed_ms));
+        for tailer in &mut tailers {
+            tailer.poll();
+            assert_tailer(tailer, &oracle);
+        }
+        tail_ms.record(sim.now_ms().saturating_sub(before_ms));
+    }
+    let run_us = started.elapsed().as_micros() as u64;
+    let (run_up, run_down) = sim.total_stats();
+
+    assert_eq!(
+        injected_races, double_advance_rejects,
+        "every injected race is rejected"
+    );
+    assert_eq!(
+        double_advances, 0,
+        "no instance advances twice from one step"
+    );
+    assert!(injected_races > 0, "the run injects races");
+
+    // A late tailer rehydrates the whole log.
+    sim.add("late-tailer", open(schema(), 300, user(300)));
+    sim.connect("late-tailer", "core", user(300), config.link.clone());
+    let resume_started = sim.now_ms();
+    let mut late = Live::subscribe(
+        sim.db("late-tailer"),
+        &Query::from(EVENTS),
+        ReadOpts::default(),
+    );
+    sim.settle();
+    late.poll();
+    assert_tailer(&late, &oracle);
+    let resume_ms = sim.now_ms() - resume_started;
+
+    // The authority's end state equals plain SQLite replaying the schedule.
+    let jazz_steps: Vec<u64> = (0..config.instances)
+        .map(|n| {
+            let rows = jazz_sim::oracle::read(
+                sim.db("core"),
+                &Query::from(INSTANCES).filter(eq(col("id"), lit(uuid(instance(n))))),
+                ReadOpts::default(),
+            );
+            match rows
+                .values()
+                .next()
+                .and_then(|cells| cells.get("currentStep"))
+            {
+                Some(Value::I64(step)) => *step as u64,
+                other => panic!("currentStep: {other:?}"),
+            }
+        })
+        .collect();
+    assert_eq!(jazz_steps, oracle, "the authority holds the oracle's steps");
+    let (sqlite_steps, sqlite_us) = sqlite_replay(config, &schedule);
+    assert_eq!(
+        sqlite_steps, jazz_steps,
+        "SQLite replay of the accepted schedule matches"
+    );
+    for (n, steps) in oracle.iter().enumerate() {
+        let events = jazz_sim::oracle::read(
+            sim.db("core"),
+            &Query::from(EVENTS).filter(eq(col("instance"), lit(uuid(instance(n))))),
+            ReadOpts::default(),
+        );
+        assert_eq!(
+            events.len() as u64,
+            *steps,
+            "one event per accepted step of instance {n}"
+        );
+    }
+
+    if emit {
+        let (log_bytes, log_us) = log_floor(&schedule);
+        let mut fields = sim.json_fields();
+        fields.insert("phase".to_owned(), json!("summary"));
+        fields.insert("instances".to_owned(), json!(config.instances));
+        fields.insert("transitions".to_owned(), json!(schedule.len()));
+        fields.insert("workers".to_owned(), json!(config.workers));
+        fields.insert("tailers".to_owned(), json!(config.tailers));
+        fields.insert("attempts".to_owned(), json!(attempts));
+        fields.insert("rejects".to_owned(), json!(rejects));
+        fields.insert("injected_races".to_owned(), json!(injected_races));
+        fields.insert(
+            "double_advance_rejects".to_owned(),
+            json!(double_advance_rejects),
+        );
+        fields.insert("double_advances".to_owned(), json!(double_advances));
+        fields.insert("run_us".to_owned(), json!(run_us));
+        fields.insert(
+            "transitions_per_sec".to_owned(),
+            json!(schedule.len() as f64 / (run_us as f64 / 1e6).max(1e-6)),
+        );
+        fields.insert("run_bytes".to_owned(), json!(run_up.bytes + run_down.bytes));
+        fields.insert("resume_ms".to_owned(), json!(resume_ms));
+        fields.insert("sqlite_replay_us".to_owned(), json!(sqlite_us));
+        fields.insert("log_floor_bytes".to_owned(), json!(log_bytes));
+        fields.insert("log_floor_us".to_owned(), json!(log_us));
+        fields.extend(transition_us.json_fields("transition_us"));
+        fields.extend(dashboard_ms.json_fields("dashboard_ms"));
+        fields.extend(tail_ms.json_fields("tail_ms"));
+        emit_summary(
+            "s9_durable_execution",
+            "deterministic",
+            config.seed,
+            &config.profile,
+            JsonValue::Object(fields),
         );
     }
 }
 
-fn sync_tables(core: &mut NodeState, node: &mut NodeState, peer: &mut PeerState, tables: &[&str]) {
-    for table in tables {
-        register_table_receiver(node, table, peer.identity());
-        let update = table_query_update(core, peer, table, true);
-        apply_sync_message_settled(node, update).unwrap();
-    }
-}
-
-fn register_table_receiver(node: &mut NodeState, table: &str, identity: AuthorSubject) {
-    let shape = Query::from(table).validate(&schema()).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    register_query_receiver(
-        node,
-        &shape,
-        &binding,
-        Default::default(),
-        jazz::protocol::DelegatedSessionBinding {
-            identity,
-            claims: BTreeMap::new(),
-        },
+/// Plain SQLite: a compare-and-set on the instance per transition.
+fn sqlite_replay(config: &Config, schedule: &[Transition]) -> (Vec<u64>, u64) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = rusqlite::Connection::open(dir.path().join("s9.sqlite")).expect("sqlite");
+    db.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;
+         CREATE TABLE instances (id INTEGER PRIMARY KEY, current_step INTEGER NOT NULL, state TEXT NOT NULL);
+         CREATE TABLE events (instance INTEGER, seq INTEGER, payload TEXT, PRIMARY KEY (instance, seq));",
     )
-    .unwrap();
-}
-
-fn table_query_update(
-    core: &mut NodeState,
-    peer: &mut PeerState,
-    table: &str,
-    reset: bool,
-) -> SyncMessage {
-    let shape = Query::from(table).validate(&schema()).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    if reset {
-        jazz::db::block_on(peer.rehydrate_query(core, &shape, &binding)).unwrap()
-    } else {
-        jazz::db::block_on(peer.query_update(core, &shape, &binding)).unwrap()
+    .expect("schema");
+    for n in 0..config.instances {
+        db.execute(
+            "INSERT INTO instances VALUES (?1, 0, 'running')",
+            [n as i64],
+        )
+        .expect("seed");
     }
-}
-
-fn sync_worker_tables(core: &mut NodeState, worker: &mut WorkerHarness, tables: &[&str]) {
-    for table in tables {
-        let reset = worker.hydrated_tables.insert((*table).to_owned());
-        if reset {
-            register_table_receiver(&mut worker.relay, table, worker.author);
-        }
-        let update = table_query_update(core, &mut worker.relay_peer, table, reset);
-        apply_sync_message_settled(&mut worker.relay, update).unwrap();
+    let started = Instant::now();
+    for transition in schedule {
+        let to = transition.from + 1;
+        let tx = db.unchecked_transaction().expect("transaction");
+        let changed = tx
+            .execute(
+                "UPDATE instances SET current_step = ?1, state = ?2 WHERE id = ?3 AND current_step = ?4",
+                rusqlite::params![
+                    to as i64,
+                    state_for(to, config.steps_per_instance),
+                    transition.instance as i64,
+                    transition.from as i64
+                ],
+            )
+            .expect("advance");
+        assert_eq!(
+            changed, 1,
+            "the SQLite compare-and-set accepts the jazz schedule"
+        );
+        tx.execute(
+            "INSERT INTO events VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                transition.instance as i64,
+                to as i64,
+                format!("event-{}-{to}", transition.instance)
+            ],
+        )
+        .expect("event");
+        tx.commit().expect("commit");
     }
-    jazz::db::block_on(worker.db.tick()).unwrap();
-    let queued = worker.outbound.borrow_mut().drain(..).collect::<Vec<_>>();
-    for message in queued {
-        if !worker
-            .query_server
-            .handle(
-                &mut worker.relay,
-                &mut worker.client_peer,
-                &schema(),
-                &message,
-            )
-            .unwrap()
-        {
-            worker.outbound.borrow_mut().push_back(message);
-        }
+    let elapsed = started.elapsed().as_micros() as u64;
+    let mut statement = db
+        .prepare("SELECT current_step FROM instances ORDER BY id")
+        .expect("prepare");
+    let steps = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .expect("query")
+        .map(|step| step.expect("step") as u64)
+        .collect();
+    (steps, elapsed)
+}
+
+/// The floor: an append-only event log file.
+fn log_floor(schedule: &[Transition]) -> (u64, u64) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("events.log");
+    let started = Instant::now();
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&path).expect("log file"));
+    for transition in schedule {
+        let payload = format!("event-{}-{}", transition.instance, transition.from + 1);
+        file.write_all(&(payload.len() as u32).to_le_bytes())
+            .expect("length");
+        file.write_all(payload.as_bytes()).expect("payload");
     }
-    for update in worker
-        .query_server
-        .updates(&mut worker.relay, &mut worker.client_peer)
-        .unwrap()
-    {
-        worker.inbound.borrow_mut().push_back(update);
-    }
-    jazz::db::block_on(worker.db.tick()).unwrap();
-}
-
-fn bind_worker_table_query(
-    peer: &mut PeerState,
-    schema: &JazzSchema,
-    table: &str,
-    author: &AuthorSubject,
-) {
-    let shape = Query::from(table)
-        .validate(schema)
-        .expect("valid whole-table shape");
-    let binding = shape.bind(BTreeMap::new()).expect("empty binding");
-    peer.set_subscription_policy_binding(
-        SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
-        },
-        (author.clone(), BTreeMap::new()),
-    );
-}
-
-fn open_worker(node_uuid: NodeUuid, relay_uuid: NodeUuid, schema: JazzSchema) -> WorkerHarness {
-    let author = AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]);
-    let (dir, db) = open_db(node_uuid, schema.clone(), author.clone());
-    let outbound = Rc::new(RefCell::new(VecDeque::new()));
-    let inbound = Rc::new(RefCell::new(VecDeque::new()));
-    let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
-        outbound: Rc::clone(&outbound),
-        inbound: Rc::clone(&inbound),
-    })));
-    let (relay_dir, relay) = open_node(relay_uuid, schema.clone());
-    let mut worker = WorkerHarness {
-        _dir: dir,
-        db,
-        author: author.clone(),
-        _relay_dir: relay_dir,
-        relay,
-        relay_peer: PeerState::relay(),
-        client_peer: PeerState::client_link(author.clone()),
-        query_server: DirectDbQueryServer::new(jazz::protocol::DelegatedSessionBinding {
-            identity: author,
-            claims: BTreeMap::new(),
-        }),
-        attachments: Vec::new(),
-        hydrated_tables: BTreeSet::new(),
-        outbound,
-        inbound,
-        _upstream: upstream,
-    };
-    worker
-        .relay_peer
-        .set_ship_complete_serializable_payloads(true);
-    for table in [WORKFLOWS, INSTANCES, STEPS, EVENTS] {
-        bind_worker_table_query(&mut worker.relay_peer, &schema, table, &worker.author);
-        let prepared = worker.db.prepare_query(&Query::from(table)).unwrap();
-        worker
-            .attachments
-            .push(worker.db.attach_query(&prepared).unwrap());
-    }
-    worker
-}
-
-fn accept_global(core: &mut NodeState, tx: jazz::tx::TxId, global_time: &mut u64) {
-    jazz::db::block_on(core.apply_fate_update(
-        tx,
-        Fate::Accepted,
-        Some(GlobalTime(*global_time)),
-        Some(DurabilityTier::Global),
-    ))
-    .unwrap();
-    *global_time += 1;
-}
-
-fn schema() -> JazzSchema {
-    compile_public_schema(
-        SchemaBuilder::new()
-            .table(
-                PublicTableSchema::builder(WORKFLOWS)
-                    .column("name", PublicColumnType::Text)
-                    .column("definition", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchema::builder(INSTANCES)
-                    .fk_column("workflow", WORKFLOWS)
-                    .column("state", PublicColumnType::Text)
-                    .column("currentStep", PublicColumnType::Timestamp)
-                    .column("wakeAt", PublicColumnType::Timestamp),
-            )
-            .table(
-                PublicTableSchema::builder(STEPS)
-                    .fk_column("instance", INSTANCES)
-                    .column("seq", PublicColumnType::Timestamp)
-                    .column("kind", PublicColumnType::Text)
-                    .column("input", PublicColumnType::Text)
-                    .column("output", PublicColumnType::Text)
-                    .column("status", PublicColumnType::Text),
-            )
-            .table(
-                PublicTableSchema::builder(EVENTS)
-                    .fk_column("instance", INSTANCES)
-                    .column("seq", PublicColumnType::Timestamp)
-                    .column("payload", PublicColumnType::Bytea),
-            )
-            .build()
-            .allow_all(),
+    file.flush().expect("flush");
+    file.get_ref().sync_all().expect("sync");
+    (
+        std::fs::metadata(&path).expect("size").len(),
+        started.elapsed().as_micros() as u64,
     )
-}
-
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState) {
-    let dir = tempfile::tempdir().unwrap();
-    let refs = schema.column_families();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
-        node_uuid, schema, storage,
-    ))
-    .unwrap();
-    (dir, node)
-}
-
-fn open_db(node_uuid: NodeUuid, schema: JazzSchema, author: AuthorSubject) -> (TempDir, Db) {
-    let dir = tempfile::tempdir().unwrap();
-    let refs = schema.column_families();
-    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    // These direct-message simulations bypass the transport catalogue handshake.
-    // Seed the same physical catalogue before reopening through the public Db API.
-    drop(
-        block_on(NodeState::new_with_shared_test_catalogue(
-            node_uuid,
-            schema.clone(),
-            storage,
-        ))
-        .unwrap(),
-    );
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let db = block_on(Db::open(DbConfig {
-        schema,
-        storage,
-        identity: DbIdentity {
-            node: node_uuid,
-            author,
-        },
-        id_source: Some(Box::new(SeededRowIdSource::new(u64::from_le_bytes(
-            node_uuid.as_bytes()[..8]
-                .try_into()
-                .expect("node seed bytes"),
-        )))),
-    }))
-    .unwrap();
-    (dir, db)
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    let mut future = pin!(future);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
-        }
-    }
-}
-
-fn storage_bytes(path: &std::path::Path) -> u64 {
-    fs::read_dir(path)
-        .into_iter()
-        .flat_map(|entries| entries.flatten())
-        .map(|entry| {
-            let meta = entry.metadata().unwrap();
-            if meta.is_dir() {
-                storage_bytes(&entry.path())
-            } else {
-                meta.len()
-            }
-        })
-        .sum()
-}
-
-fn view_update_bytes(update: &SyncMessage) -> u64 {
-    match update {
-        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
-            version_carriers,
-            peer_payload_inventory,
-            ..
-        }) => {
-            version_bundle_refs(version_carriers)
-                .flat_map(|bundle| bundle.versions)
-                .map(|version| version.record().raw().len() as u64 + 64)
-                .sum::<u64>()
-                + (peer_payload_inventory.complete_tx_payloads.len() as u64 * 24)
-        }
-        _ => 0,
-    }
-}
-
-fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
-    schema
-        .tables
-        .iter()
-        .find(|candidate| candidate.name == table)
-        .unwrap()
-}
-
-fn cells_map<const N: usize>(items: [(&str, Value); N]) -> BTreeMap<String, Value> {
-    items.into_iter().map(|(k, v)| (k.to_owned(), v)).collect()
-}
-
-fn u64_cell(cells: &BTreeMap<String, Value>, key: &str) -> u64 {
-    value_u64(cells.get(key).unwrap().clone())
-}
-
-fn uuid_cell(cells: &BTreeMap<String, Value>, key: &str) -> RowUuid {
-    match cells.get(key).unwrap() {
-        Value::Uuid(uuid) => RowUuid(*uuid),
-        other => panic!("expected uuid cell {key}, got {other:?}"),
-    }
-}
-
-fn value_u64(value: Value) -> u64 {
-    match value {
-        Value::U64(value) => value,
-        other => panic!("expected u64, got {other:?}"),
-    }
-}
-
-fn workflow_row() -> RowUuid {
-    row(1, 0)
-}
-
-fn instance_row(instance: usize) -> RowUuid {
-    row(2, instance as u64)
-}
-
-fn step_row(instance: usize, seq: u64) -> RowUuid {
-    row(3, (instance as u64) << 32 | seq)
-}
-
-fn event_row(instance: usize, seq: u64) -> RowUuid {
-    row(4, (instance as u64) << 32 | seq)
-}
-
-fn instance_idx(row: RowUuid) -> usize {
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&row.as_bytes()[8..]);
-    u64::from_be_bytes(bytes) as usize
-}
-
-fn row(tag: u8, value: u64) -> RowUuid {
-    let mut bytes = [tag; 16];
-    bytes[8..].copy_from_slice(&value.to_be_bytes());
-    RowUuid::from_bytes(bytes)
-}
-
-fn node(byte: u8) -> NodeUuid {
-    NodeUuid::from_bytes([byte; 16])
-}
-
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_usize_list(name: &str, default: &[usize]) -> Vec<usize> {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .filter_map(|part| part.trim().parse::<usize>().ok())
-                .filter(|value| *value > 0)
-                .collect::<Vec<_>>()
-        })
-        .filter(|values| !values.is_empty())
-        .unwrap_or_else(|| default.to_vec())
 }
