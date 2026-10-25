@@ -487,6 +487,12 @@ impl Chunks {
     }
 
     /// The chunks statements needed since the last call.
+    /// Whether a read recorded chunks to request that the next send has
+    /// not taken yet.
+    pub(crate) fn has_demand(&self) -> bool {
+        !self.state.lock().expect("chunk cache").demand.is_empty()
+    }
+
     pub(crate) fn take_demand(&self) -> BTreeSet<ChunkRequest> {
         std::mem::take(&mut self.state.lock().expect("chunk cache").demand)
     }

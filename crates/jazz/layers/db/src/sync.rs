@@ -3302,13 +3302,16 @@ impl Db {
     }
 
     /// Whether chunks this replica requested may still arrive: it is
-    /// connected to an upstream that may answer, with requests outstanding.
+    /// connected to an upstream that may answer, with requests outstanding
+    /// (sent, or recorded by a read for the next send).
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
         inner.client.as_ref().is_some_and(|client| {
             client.transport.is_some()
                 && may_wait(client.hint.get())
-                && !(client.requested.is_empty() && client.wanted.is_empty())
+                && !(client.requested.is_empty()
+                    && client.wanted.is_empty()
+                    && !inner.chunks.has_demand())
         })
     }
 
@@ -5689,9 +5692,24 @@ impl Db {
             first_load: FirstLoad::Deliver,
             ..opts
         };
-        let inner = self.inner();
-        let roots = inner.run(&prepared, identity, &ReadSpec::of(&opts, &inner)?)?;
-        Ok(result(inner.nest_relations(&prepared, identity, roots)?))
+        // A row whose large values are still being fetched answers once
+        // their chunks arrive, while the upstream that will send them is
+        // connected (a reloaded tab's rows come from its relay first).
+        poll_fn(|_| {
+            let read = {
+                let inner = self.inner();
+                ReadSpec::of(&opts, &inner)
+                    .and_then(|spec| inner.run(&prepared, identity, &spec))
+                    .and_then(|roots| inner.nest_relations(&prepared, identity, roots))
+            };
+            match read {
+                Err(error) if crate::large::is_missing(&error) && self.awaiting_chunks() => {
+                    Poll::Pending
+                }
+                read => Poll::Ready(read.map(result)),
+            }
+        })
+        .await
     }
 }
 
