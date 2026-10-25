@@ -75,13 +75,20 @@ large-value hydration, one-shot cancellation and host timer re-arming. Chromium
 WASM tests exercise the public foreground marker, ordinary wire frames, cached
 one-shot reads and the real `after:<milliseconds>` timeout callback.
 
-Foreground mutations fail with an explicit unsupported-operation `Query` error
-before publishing a row or write receipt, including staged writes. The guard is shared by standalone, staged and
-streamed publication; replicated owner rows still hydrate normally. Worker
-upload forwarding and durable acknowledgements must be ported before these
-foregrounds can write. Storage owners and direct replicas keep their write path.
+Foreground writes require the current private owner to acknowledge the same
+subject and schema. Before that acknowledgement, after detachment or while a
+replacement connection is awaiting admission, standalone, staged and streamed
+publication fail with an explicit `Query` error. The later
+[private-owner port](sqlite-owner-projection-compatibility.md) supplies pending
+write recovery and admission; [owner storage receipts](sqlite-owner-stored-compatibility.md)
+provide Local durability after the real flush. Global still requires the
+authority's receipt. Storage owners and direct replicas retain their write path.
 
-This is the core and WASM foreground read path. It does not port the SDK's Groove
-page-store/epoch admission bridge, relay write uploads, native bindings, accepted
-catalogue identities or E2EE accepted-history observations. Those unsupported
-entry points remain explicit; this is not end-to-end browser E2EE qualification.
+This note covers foreground reads. The
+[browser storage bridge](sqlite-browser-storage-compatibility.md),
+[durable relay uploads](sqlite-relay-upload-compatibility.md),
+[accepted catalogue identities](sqlite-catalogue-compatibility.md) and
+[paired accepted reads](sqlite-paired-reads-compatibility.md) have their own ports
+and limits. The [browser quickstart qualification](sqlite-browser-reload-qualification.md)
+covers the React chat flow and reloads. The native binding port remains
+unpublished, and focused browser checks do not qualify the whole E2EE stack.

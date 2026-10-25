@@ -4,7 +4,9 @@ E14 implements `hasAuthenticatedCatalogue`, `takeAuthenticatedCatalogueState`,
 `validateCatalogueCaptureReplacement` and cached-catalogue WASM opens. Previously
 these calls rejected on SQLite. A host can now persist a capture outside an
 account's row store and restore accepted physical UUIDs into a fresh offline
-runtime. This does not implement initialization transaction seals or journals.
+runtime. [Initialization seals](sqlite-initialization-compatibility.md) and
+[foreground journal recovery](sqlite-foreground-initialization-compatibility.md)
+are separate contracts.
 
 ## Trust and admission
 
@@ -99,5 +101,8 @@ upgrade-all-peers requirement for catalogue sync tags still applies.
 
 Tests exercise the public core lifecycle, rollback, malformed and incompatible
 replacement, stale-cache restart, exact bytes, WASM memory/self-signed opens and
-real Chromium IndexedDB flush/close/reopen. They do not qualify the remaining
-full encrypted SDK application path or the unported browser-worker bridge.
+real Chromium IndexedDB flush/close/reopen. The
+[browser-worker storage bridge](sqlite-browser-storage-compatibility.md) and
+[React quickstart qualification](sqlite-browser-reload-qualification.md) now have
+separate coverage. Catalogue capture tests alone do not qualify the full encrypted
+SDK application, migrations or the unpublished native runtime port.

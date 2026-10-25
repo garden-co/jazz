@@ -68,9 +68,11 @@ fixed wire bytes. Browser tests exercise the database and transport tick APIs,
 real IndexedDB flush/reopen, large uploads and later authority acceptance or
 rejection. The reopen test is orderly closure, not a browser-crash simulation.
 
-Foreground mutation admission remains guarded. Recovering a private pending
-read overlay after foreground reload is a separate requirement before enabling
-those writes. These tests deliberately queue ordinary replica writes before
-entering foreground mode to isolate the receipt boundary. This change does not
-claim a working E2EE foreground app or make pending relay rows shared permission
-evidence.
+A storage receipt alone does not admit foreground mutations. The later
+[private-owner port](sqlite-owner-projection-compatibility.md) adds pending-read
+recovery and requires a matching owner acknowledgement before new writes. These
+receipt tests deliberately queue ordinary replica writes before entering
+foreground mode to isolate the durability boundary; `sqlite_owner_writes` covers
+new writes after admission. Pending relay rows never become shared permission
+evidence. The [browser quickstart checks](sqlite-browser-reload-qualification.md)
+provide separate application coverage, with explicit limits.

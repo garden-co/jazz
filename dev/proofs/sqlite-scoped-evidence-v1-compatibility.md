@@ -84,12 +84,18 @@ row-ID tie-breaking and authority pagination remain unchanged. An unselected
 sort column still participates in ordering. The authority's initial query still follows the normal
 query and permission execution path.
 
-This ordinary receipt covers flat, unbranched scoped Remote reads. The
-[accepted scoped extension](sqlite-accepted-scoped-evidence-v1-compatibility.md)
-adds a distinct receipt for paired reads at pinned authority cuts. Relation
-results, joins, aggregates and history queries remain unsupported. Negative cross-row
-policies remain outside the public schema converter's supported shapes. Missing chunks hydrate through normal sync; missing versions or policy
-metadata fail closed. Relay schema translation remains unsupported.
+This ordinary receipt covers flat, unbranched scoped Remote reads. The later
+[request-scoped relation port](sqlite-scoped-relations-compatibility.md) also
+supports bounded existential traversals, including nested traversals and root
+windows, with the same receipt. Joined or included relationship output, arrays,
+aggregates and history queries remain unsupported.
+
+The [accepted scoped extension](sqlite-accepted-scoped-evidence-v1-compatibility.md)
+adds a distinct receipt for paired reads at pinned authority cuts; paired
+accepted relation reads retain their explicit refusal. Negative cross-row
+policies remain outside the public schema converter's supported shapes. Missing
+chunks hydrate through normal sync; missing versions or policy metadata fail
+closed. Relay schema translation remains unsupported.
 
 Public API regressions cover direct and relayed recursive permissions,
 revocation, concurrent claims, private dependency policies, chunked claim

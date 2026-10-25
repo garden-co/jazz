@@ -54,9 +54,12 @@ uploads continue waiting for their authority fate.
 Durable relay upload forwarding is now covered by
 [SQLite durable relay uploads](sqlite-relay-upload-compatibility.md). It journals
 original transaction identities and waits for the authority's qualified receipt.
-Non-durable foreground writes remain unsupported pending owner flush
-acknowledgements and private pending overlays. Optimistic upstream sequences are
-never reported as globally accepted.
+Non-durable foreground writes use the later
+[private-owner admission and recovery port](sqlite-owner-projection-compatibility.md).
+They become Local only after a matching
+[owner storage receipt](sqlite-owner-stored-compatibility.md), and Global only
+after the authority's acceptance. Optimistic upstream sequences are never
+reported as globally accepted.
 
 ## Validation boundary
 
@@ -67,7 +70,11 @@ corruption test is deliberate because undecodable durable bytes must fail closed
 Browser tests cover the public WASM snapshot, rejection and closed-handle paths,
 plus IndexedDB flush qualification and reopening.
 
-These receipts do not implement E2EE's paired accepted-content/transaction
-observations, accepted catalogue coverage or table/column identities. The SDK
-browser-worker admission/storage bridge and native runtime still require their
-own ports. This change does not qualify browser E2EE end to end.
+Write fate is distinct from E2EE's
+[paired accepted-content/transaction observations](sqlite-paired-reads-compatibility.md)
+and [accepted catalogue coverage and identities](sqlite-catalogue-compatibility.md).
+The [browser storage bridge](sqlite-browser-storage-compatibility.md) is also
+ported separately. These receipt tests do not qualify those full paths; the
+[browser quickstart checks](sqlite-browser-reload-qualification.md) cover the
+React chat flow and reloads. Native runtime publication and full-stack
+qualification remain outstanding.
