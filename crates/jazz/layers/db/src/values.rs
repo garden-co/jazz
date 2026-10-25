@@ -724,6 +724,7 @@ impl Schema {
                     self.tables.insert(name.clone(), table.physical());
                 }
                 Some(physical) => {
+                    let mut large = Vec::new();
                     for column in &table.columns {
                         if physical.column(&column.stored).is_some() {
                             continue;
@@ -742,9 +743,17 @@ impl Schema {
                         let mut stored = column.clone();
                         stored.name = column.stored.clone();
                         if crate::large::large_capable(column) {
-                            ddl.push_str(&crate::large::triggers(physical, &[&stored]));
+                            large.push(stored.clone());
                         }
                         physical.columns.push(stored);
+                    }
+                    if let Some(first) = large.first() {
+                        let columns: Vec<&Column> = large.iter().collect();
+                        ddl.push_str(&crate::large::triggers(
+                            physical,
+                            &columns,
+                            Some(&first.stored),
+                        ));
                     }
                     for index in &table.indexes {
                         let index = table.stored_index(index);
@@ -903,7 +912,7 @@ impl Table {
             .stored()
             .filter(|c| crate::large::large_capable(c))
             .collect();
-        sql.push_str(&crate::large::triggers(table, &large));
+        sql.push_str(&crate::large::triggers(table, &large, None));
         sql
     }
 }
