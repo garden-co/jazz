@@ -296,7 +296,8 @@ pub enum WireTarget {
     },
 }
 
-/// A replicated write.
+/// A replicated write. `at`: its explicit provenance timestamp (Unix ms),
+/// if the writer gave one; each write in a commit carries its own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireOp {
     Insert {
@@ -304,29 +305,34 @@ pub enum WireOp {
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Update {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Upsert {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Delete {
         table: String,
         row: [u8; 16],
         target: WireTarget,
+        at: Option<u64>,
     },
     Restore {
         table: String,
         row: [u8; 16],
         cells: Option<BTreeMap<String, Value>>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Move {
         table: String,
@@ -474,8 +480,6 @@ pub enum SyncMessage {
         /// trusted link acting for it): the authority checks their
         /// policies as that session. Otherwise `author` is provenance only.
         session: Option<BTreeMap<String, Value>>,
-        /// The writes' explicit provenance timestamp (Unix ms), if any.
-        updated_at: Option<u64>,
         /// The rows as the writer's replica holds them after these writes
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
@@ -550,10 +554,13 @@ pub enum SyncMessage {
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
-    /// `action` right now? Never writes.
+    /// `action` right now? Never writes. `author` and `session` name the
+    /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
     Advise {
         id: u64,
         action: PermissionAdviceAction,
+        author: Option<String>,
+        session: Option<BTreeMap<String, Value>>,
     },
     // server → client
     Advice {
@@ -1167,29 +1174,34 @@ fn to_wire(op: &StagedOp) -> Result<WireOp, Error> {
             row: bytes(&opts.row_id.expect("inserts carry their row id")),
             cells: cells.clone(),
             target: exact_target(&opts.target),
+            at: opts.updated_at_ms,
         },
         StagedOp::Update(table, row, cells, opts) => WireOp::Update {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Upsert(table, row, cells, opts) => WireOp::Upsert {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Delete(table, row, opts) => WireOp::Delete {
             table: table.clone(),
             row: bytes(row),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Restore(table, row, cells, opts) => WireOp::Restore {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: exact_target(&opts.target),
+            at: opts.updated_at_ms,
         },
         StagedOp::Move(table, from, to, row) => WireOp::Move {
             table: table.clone(),
@@ -1236,12 +1248,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Insert(
             table,
             cells,
             InsertOptions {
                 row_id: Some(id(row)),
                 target: exact(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1250,12 +1264,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Update(
             table,
             id(row),
             cells,
             UpdateOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1264,20 +1280,28 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Upsert(
             table,
             id(row),
             cells,
             UpsertOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
-        WireOp::Delete { table, row, target } => StagedOp::Delete(
+        WireOp::Delete {
+            table,
+            row,
+            target,
+            at,
+        } => StagedOp::Delete(
             table,
             id(row),
             DeleteOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1286,12 +1310,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Restore(
             table,
             id(row),
             cells,
             RestoreOptions {
                 target: exact(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -2560,7 +2586,6 @@ impl Inner {
                 ops,
                 author,
                 session,
-                updated_at,
                 ..
             } = &commit
             else {
@@ -2575,9 +2600,6 @@ impl Inner {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
                 ops.iter_mut()
                     .for_each(|op| op.attribute(author, session.is_some()));
-            }
-            if let Some(at) = *updated_at {
-                ops.iter_mut().for_each(|op| op.stamp_at(at));
             }
             client.pending.push(Pending {
                 tx,
@@ -2881,7 +2903,6 @@ impl Db {
                     ops: wire,
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
-                    updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
                     expect,
                 };
                 client.unsent.push(commit.clone());
@@ -3234,10 +3255,16 @@ impl Db {
     }
 
     /// Ask the upstream authority whether `action` would be allowed for
-    /// this replica's session; wait with [`Db::permission_advice`]. Without
-    /// a connected upstream the answer is `Unknown`: a replica's own policy
-    /// evidence may be incomplete, so it never decides locally.
-    pub fn request_permission_advice(&self, action: PermissionAdviceAction) -> u64 {
+    /// this replica's session, or for `session` (an identity a trusted
+    /// backend acts for, with its claims); wait with
+    /// [`Db::permission_advice`]. Without a connected upstream the answer
+    /// is `Unknown`: a replica's own policy evidence may be incomplete, so
+    /// it never decides locally.
+    pub fn request_permission_advice(
+        &self,
+        action: PermissionAdviceAction,
+        session: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> u64 {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return 0;
@@ -3246,7 +3273,16 @@ impl Db {
         client.next_id += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
-            client.outbox.push(SyncMessage::Advise { id, action });
+            let (author, session) = match session {
+                Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
+                None => (None, None),
+            };
+            client.outbox.push(SyncMessage::Advise {
+                id,
+                action,
+                author,
+                session,
+            });
         } else {
             client.advice.insert(id, Some(PermissionAdvice::Unknown));
         }
@@ -3317,30 +3353,17 @@ impl Db {
                     Err(_) => PermissionAdvice::Unknown,
                 };
             }
-            PermissionAdviceAction::Insert { table, cells } => {
-                let owner = self.inner.borrow().owner.clone();
-                // The candidate has no id yet: a policy that looks at it
-                // cannot be decided.
-                match owner.table(&table) {
-                    Ok(schema) => {
-                        if schema
-                            .policy(crate::tools::Operation::Insert)
-                            .is_some_and(depends_on_row_id)
-                        {
-                            return PermissionAdvice::Unknown;
-                        }
-                    }
-                    Err(_) => return PermissionAdvice::Unknown,
-                }
-                StagedOp::Insert(
-                    table,
-                    cells,
-                    InsertOptions {
-                        row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
-                        ..Default::default()
-                    },
-                )
-            }
+            // The candidate gets a fresh id, as the insert it previews will:
+            // no other row can reference it yet, so the dry run decides what
+            // the authority would.
+            PermissionAdviceAction::Insert { table, cells } => StagedOp::Insert(
+                table,
+                cells,
+                InsertOptions {
+                    row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                    ..Default::default()
+                },
+            ),
             PermissionAdviceAction::Update { table, row, patch } => {
                 StagedOp::Update(table, row, patch, Default::default())
             }
@@ -4569,6 +4592,25 @@ impl Db {
         result
     }
 
+    /// Run `f` with a vouched session's claims standing for its identity's.
+    fn with_claims<R>(
+        &self,
+        vouched: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let Some((author, claims)) = vouched else {
+            return f();
+        };
+        let previous = self.inner.borrow_mut().claims.insert(author, claims);
+        let result = f();
+        let mut inner = self.inner.borrow_mut();
+        match previous {
+            Some(previous) => inner.claims.insert(author, previous),
+            None => inner.claims.remove(&author),
+        };
+        result
+    }
+
     fn serve_as(
         &self,
         index: usize,
@@ -4784,8 +4826,25 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::Advise { id, action } => {
-                let advice = self.advise(policy, action);
+            SyncMessage::Advise {
+                id,
+                action,
+                author,
+                session,
+            } => {
+                // As for a commit: a trusted link may ask for a session it
+                // vouches for; a session link only for its own.
+                let advice = match commit_who(policy, author.as_deref(), session.is_some()) {
+                    Ok(who) => {
+                        let identity = match who {
+                            Who::Session(author) => Some(author),
+                            _ => policy,
+                        };
+                        let vouched = vouched(policy, who, session);
+                        self.with_claims(vouched, || self.advise(identity, action))
+                    }
+                    Err(_) => PermissionAdvice::Denied,
+                };
                 self.inner.borrow_mut().sessions[index]
                     .outbox
                     .push(SyncMessage::Advice { id, advice });
@@ -4960,7 +5019,6 @@ impl Db {
                 ops,
                 author,
                 session,
-                updated_at,
                 expect,
             } => {
                 // A resend after a reconnect gets the recorded fate.
@@ -4970,33 +5028,10 @@ impl Db {
                     None => match commit_who(policy, author.as_deref(), session.is_some())
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
-                            // A trusted link's session write is checked
-                            // with the claims the link vouches for.
-                            let vouched = match (who, session) {
-                                (Who::Session(author), Some(claims)) if policy.is_none() => {
-                                    Some((author, claims))
-                                }
-                                _ => None,
-                            };
-                            let previous = vouched.as_ref().map(|(author, claims)| {
-                                (
-                                    *author,
-                                    self.inner
-                                        .borrow_mut()
-                                        .claims
-                                        .insert(*author, claims.clone()),
-                                )
-                            });
-                            let result =
-                                db.authorize_commit(who, policy, kind, ops, updated_at, (node, tx));
-                            if let Some((author, previous)) = previous {
-                                let mut inner = self.inner.borrow_mut();
-                                match previous {
-                                    Some(previous) => inner.claims.insert(author, previous),
-                                    None => inner.claims.remove(&author),
-                                };
-                            }
-                            result
+                            let vouched = vouched(policy, who, session);
+                            self.with_claims(vouched, || {
+                                db.authorize_commit(who, policy, kind, ops, (node, tx))
+                            })
                         }) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
@@ -5144,11 +5179,9 @@ impl Db {
         identity: Option<AuthorSubject>,
         kind: WireKind,
         ops: Vec<WireOp>,
-        updated_at: Option<u64>,
         origin: ([u8; 16], u64),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
-        let mut ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>()
-        {
+        let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
@@ -5164,9 +5197,6 @@ impl Db {
                 ),
                 Vec::new(),
             ));
-        }
-        if let Some(at) = updated_at {
-            ops.iter_mut().for_each(|op| op.stamp_at(at));
         }
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
@@ -5346,6 +5376,19 @@ impl Db {
 /// attribute to another author; a trusted link (no policy identity) writes
 /// as the session it names (impersonation: checked as it), or unchecked,
 /// attributed to the author it names or as itself.
+/// The session and claims a trusted link (no `policy` of its own) vouches
+/// for: its session writes and preflights are checked with them.
+fn vouched(
+    policy: Option<AuthorSubject>,
+    who: Who,
+    session: Option<BTreeMap<String, Value>>,
+) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+    match (who, session) {
+        (Who::Session(author), Some(claims)) if policy.is_none() => Some((author, claims)),
+        _ => None,
+    }
+}
+
 fn commit_who(
     policy: Option<AuthorSubject>,
     author: Option<&str>,
@@ -5372,32 +5415,6 @@ fn commit_who(
         }
         (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
         (None, _) => Ok(Who::Local),
-    }
-}
-
-/// Whether a policy can look at the row's own id (subqueries count: they
-/// may correlate on it).
-fn depends_on_row_id(policy: &PolicyExpr) -> bool {
-    match policy {
-        PolicyExpr::Cmp { column, .. }
-        | PolicyExpr::IsNull { column }
-        | PolicyExpr::IsNotNull { column }
-        | PolicyExpr::Contains { column, .. }
-        | PolicyExpr::In { column, .. }
-        | PolicyExpr::InList { column, .. } => column == "id",
-        PolicyExpr::Inherits { via_column, .. } => via_column == "id",
-        PolicyExpr::InheritsReferencing { .. }
-        | PolicyExpr::Exists { .. }
-        | PolicyExpr::ExistsRel { .. } => true,
-        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().any(depends_on_row_id),
-        PolicyExpr::Not(item) => depends_on_row_id(item),
-        PolicyExpr::SessionCmp { .. }
-        | PolicyExpr::SessionIsNull { .. }
-        | PolicyExpr::SessionIsNotNull { .. }
-        | PolicyExpr::SessionContains { .. }
-        | PolicyExpr::SessionInList { .. }
-        | PolicyExpr::True
-        | PolicyExpr::False => false,
     }
 }
 

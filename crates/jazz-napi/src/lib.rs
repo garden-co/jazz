@@ -1074,13 +1074,13 @@ impl NapiDb {
         &self,
         action: HostResult<jazz::protocol::PermissionAdviceAction>,
         author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
     ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
         let binding = self.binding()?;
-        if author.is_some() {
-            return Err(not_supported("permission advice for another identity").into());
-        }
         let action = action.map_err(host_error)?;
-        let (id, future) = binding.request_permission_advice(action);
+        let (id, future) = binding
+            .request_permission_advice(action, author.as_deref(), claims)
+            .map_err(host_error)?;
         let pending = PendingNativePermissionAdvice {
             future: RefCell::new(Some(future)),
             binding,
@@ -1128,9 +1128,9 @@ impl NapiDb {
         table: String,
         cells: Uint8Array,
         author: Option<Uint8Array>,
-        _claims: Option<JsonValue>,
+        claims: Option<JsonValue>,
     ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(binding_host::advice::insert(table, &cells), author)
+        self.request_permission_advice(binding_host::advice::insert(table, &cells), author, claims)
     }
 
     #[napi(js_name = "requestReadPermissionAdvice")]
@@ -1139,9 +1139,9 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         author: Option<Uint8Array>,
-        _claims: Option<JsonValue>,
+        claims: Option<JsonValue>,
     ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(binding_host::advice::read(table, &row_id), author)
+        self.request_permission_advice(binding_host::advice::read(table, &row_id), author, claims)
     }
 
     #[napi(js_name = "requestUpdatePermissionAdvice")]
@@ -1151,9 +1151,13 @@ impl NapiDb {
         row_id: Uint8Array,
         patch: Uint8Array,
         author: Option<Uint8Array>,
-        _claims: Option<JsonValue>,
+        claims: Option<JsonValue>,
     ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(binding_host::advice::update(table, &row_id, &patch), author)
+        self.request_permission_advice(
+            binding_host::advice::update(table, &row_id, &patch),
+            author,
+            claims,
+        )
     }
 
     #[napi(js_name = "requestDeletePermissionAdvice")]
@@ -1162,9 +1166,9 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
         author: Option<Uint8Array>,
-        _claims: Option<JsonValue>,
+        claims: Option<JsonValue>,
     ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.request_permission_advice(binding_host::advice::delete(table, &row_id), author)
+        self.request_permission_advice(binding_host::advice::delete(table, &row_id), author, claims)
     }
 
     /// Admit a verified local-first account for this backend runtime only.
