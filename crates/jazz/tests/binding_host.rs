@@ -638,6 +638,66 @@ fn tab_over(worker: &Binding, tab: Binding) -> (Binding, Link, Link) {
     (tab, up, down)
 }
 
+#[test]
+fn a_frame_is_one_message_and_a_rows_message_ends_its_parts() {
+    use jazz::db::{FrameJoiner, SyncMessage, decode_message, encode_frames};
+    let [frame] =
+        <[Vec<u8>; 1]>::try_from(encode_frames(SyncMessage::Unsubscribe { id: 7 }).unwrap())
+            .unwrap();
+    assert!(matches!(
+        decode_message(&frame),
+        Ok(SyncMessage::Unsubscribe { id: 7 })
+    ));
+    // Postcard alone reads a valid prefix and ignores the rest.
+    let trailing = [frame.as_slice(), &[0]].concat();
+    assert!(postcard::from_bytes::<SyncMessage>(&trailing).is_ok());
+    assert!(decode_message(&trailing).is_err());
+    assert!(FrameJoiner::default().push(&trailing).is_err());
+    // Parts followed by anything but their `Rows` are the peer's error.
+    let part = postcard::to_allocvec(&SyncMessage::RowsPart { images: Vec::new() }).unwrap();
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&part).unwrap().is_none());
+    assert!(joiner.push(&frame).is_err());
+}
+
+/// A frame no sync message decodes from.
+const MALFORMED: [u8; 2] = [0xc8, 0x01];
+
+#[test]
+fn a_server_disconnects_a_client_whose_frame_does_not_decode() {
+    let worker = open(0xe0);
+    let (tab, up, down) = tab_over(&worker, open(0xe1));
+    pump(&[(&up, &down)]);
+    assert_eq!(worker.db.open_subscribers(), 1);
+    down.receive([MALFORMED.to_vec()]);
+    block_on(worker.tick()).unwrap();
+    assert_eq!(worker.db.open_subscribers(), 0);
+    // Nothing more reaches the tab over the closed session.
+    worker.insert("notes", &title("after"), &none()).unwrap();
+    block_on(worker.tick()).unwrap();
+    assert!(down.take_outbound().is_empty());
+    drop(tab);
+}
+
+#[test]
+fn a_client_detaches_from_an_upstream_whose_frame_does_not_decode() {
+    let worker = open(0xe2);
+    let (tab, up, down) = tab_over(&worker, open(0xe3));
+    pump(&[(&up, &down)]);
+    // A frame with bytes after its message is as malformed as any.
+    let [frame] = <[Vec<u8>; 1]>::try_from(
+        jazz::db::encode_frames(jazz::db::SyncMessage::Unsubscribe { id: 1 }).unwrap(),
+    )
+    .unwrap();
+    up.receive([[frame.as_slice(), &[0]].concat()]);
+    block_on(tab.tick()).unwrap();
+    // Detached, the tab's writes queue instead of going upstream.
+    tab.insert("notes", &title("offline"), &none()).unwrap();
+    block_on(tab.tick()).unwrap();
+    assert!(up.take_outbound().is_empty());
+    assert_eq!(titles(&tab), ["offline"]);
+}
+
 /// The opening's rows of a fresh subscription on `binding`.
 fn opening_rows(links: &[(&Link, &Link)], binding: &Binding) -> usize {
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();

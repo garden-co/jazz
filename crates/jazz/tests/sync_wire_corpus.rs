@@ -552,6 +552,11 @@ fn produce_sqlite_sync_wire_corpus_v1() {
             ),
             entry("truncated commit", "server", batch(&[commit])),
             entry(
+                "a sync message with bytes after it",
+                "server",
+                batch(&[[subscribe.as_slice(), &[0]].concat()]),
+            ),
+            entry(
                 "a client hello followed by a message in the opening batch",
                 "server-opening",
                 batch(&[hello(WirePeerRole::Client), subscribe.clone()]),

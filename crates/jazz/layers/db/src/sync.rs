@@ -72,6 +72,13 @@ pub const LOCAL_BASE: u64 = 1 << 52;
 pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     fn try_recv(&mut self) -> Option<SyncMessage>;
+    /// Why this transport stopped yielding messages, once: a peer's frame
+    /// it cannot decode ends the link rather than the process. The
+    /// database then drops the link (a client detaches, a server closes
+    /// the session).
+    fn take_failure(&mut self) -> Option<TransportError> {
+        None
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -115,6 +122,9 @@ pub use crate::wire::WireTransport;
 pub struct WireTransportAdapter<W> {
     wire: W,
     joiner: FrameJoiner,
+    /// A frame failed to decode: nothing more is read, and
+    /// [`Transport::take_failure`] reports it once.
+    failed: Option<Option<TransportError>>,
 }
 
 /// The largest encoded message one wire frame carries, leaving room for
@@ -163,35 +173,57 @@ fn split_rows(
     split_rows(rest, parts)
 }
 
+/// One frame's [`SyncMessage`]: exactly one postcard value, so a frame
+/// with bytes after its message is malformed rather than truncated.
+pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    match postcard::take_from_bytes(frame)? {
+        (message, []) => Ok(message),
+        _ => Err(postcard::Error::DeserializeBadEncoding),
+    }
+}
+
 /// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
 /// one message they encode.
 #[derive(Default)]
 pub struct FrameJoiner {
-    parts: Vec<Image>,
+    /// The images of the parts received since the last whole message.
+    parts: Option<Vec<Image>>,
 }
 
 impl FrameJoiner {
-    /// The message `frame` completes, if any.
-    pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, postcard::Error> {
-        match postcard::from_bytes(frame)? {
-            SyncMessage::RowsPart { images } => {
-                self.parts.extend(images);
+    /// The message `frame` completes, if any. A frame that does not decode,
+    /// or a message other than `Rows` after a `RowsPart`, is the peer's
+    /// error.
+    pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        let message = decode_message(frame)
+            .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))?;
+        match (self.parts.take(), message) {
+            (parts, SyncMessage::RowsPart { images }) => {
+                self.parts = Some(parts.unwrap_or_default());
+                self.parts.as_mut().expect("parts").extend(images);
                 Ok(None)
             }
-            SyncMessage::Rows { images } if !self.parts.is_empty() => {
-                let mut joined = std::mem::take(&mut self.parts);
+            (Some(mut joined), SyncMessage::Rows { images }) => {
                 joined.extend(images);
                 Ok(Some(SyncMessage::Rows { images: joined }))
             }
-            message => {
-                assert!(
-                    self.parts.is_empty(),
-                    "a Rows message's parts end with its Rows frame, not {message:?}"
-                );
-                Ok(Some(message))
-            }
+            (Some(_), message) => Err(TransportError::Failed(format!(
+                "a Rows message's parts end with its Rows frame, not {}",
+                message_kind(&message)
+            ))),
+            (None, message) => Ok(Some(message)),
         }
     }
+}
+
+/// A message's variant name, for errors that must not dump its contents.
+fn message_kind(message: &SyncMessage) -> String {
+    let debug = format!("{message:?}");
+    debug
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 impl<W> WireTransportAdapter<W> {
@@ -199,6 +231,7 @@ impl<W> WireTransportAdapter<W> {
         Self {
             wire,
             joiner: FrameJoiner::default(),
+            failed: None,
         }
     }
 }
@@ -214,12 +247,24 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     /// The next whole message: a `Rows` whose frames have not all arrived
     /// waits for the rest.
     fn try_recv(&mut self) -> Option<SyncMessage> {
+        if self.failed.is_some() {
+            return None;
+        }
         loop {
             let frame = self.wire.try_recv_frame()?;
-            if let Some(message) = self.joiner.push(&frame).expect("decode sync frame") {
-                return Some(message);
+            match self.joiner.push(&frame) {
+                Ok(Some(message)) => return Some(message),
+                Ok(None) => {}
+                Err(error) => {
+                    self.failed = Some(Some(error));
+                    return None;
+                }
             }
         }
+    }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.failed.as_mut().and_then(Option::take)
     }
 }
 
@@ -258,7 +303,7 @@ pub fn validate_frame_batch_for_corpus(
             .map_err(|error| format!("hello rejected: {}", error.message))
     };
     let message = |frame: &[u8]| {
-        postcard::from_bytes::<SyncMessage>(frame)
+        decode_message(frame)
             .map(drop)
             .map_err(|error| format!("malformed sync message: {error}"))
     };
@@ -3058,16 +3103,7 @@ impl Db {
         if client.connection != upstream.0 || client.transport.is_none() {
             return false;
         }
-        client.transport = None;
-        let mut link = client.hint.get();
-        link.detached = true;
-        client.hint.set(link);
-        // Nothing settles at the server's tier while detached: a
-        // subscription (or one opened meanwhile) is held until the next
-        // upstream answers it again.
-        for remote in client.remote.values() {
-            remote.answered.set(false);
-        }
+        inner.detach_upstream();
         true
     }
 
@@ -3794,10 +3830,17 @@ impl Db {
                 return Ok(());
             };
             let mut inbound = Vec::new();
+            let mut failed = false;
             if let Some(transport) = client.transport.as_mut() {
                 while let Some(message) = transport.try_recv() {
                     inbound.push(message);
                 }
+                failed = transport.take_failure().is_some();
+            }
+            // An upstream that sent what this client cannot decode is
+            // dropped like a lost link; what arrived before it applies.
+            if failed {
+                inner.detach_upstream();
             }
             // Chunks are not ordered with rows; everything else is applied
             // in arrival order.
@@ -4149,6 +4192,23 @@ impl Inner {
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
     /// schema (also for a version this store has not admitted).
+    /// Drop the upstream link: reads stop waiting, writes queue.
+    fn detach_upstream(&mut self) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        client.transport = None;
+        let mut link = client.hint.get();
+        link.detached = true;
+        client.hint.set(link);
+        // Nothing settles at the server's tier while detached: a
+        // subscription (or one opened meanwhile) is held until the next
+        // upstream answers it again.
+        for remote in client.remote.values() {
+            remote.answered.set(false);
+        }
+    }
+
     /// Session `index` closed: what this relay owed it is dropped, so a
     /// later session in its slot is not handed it.
     fn forget_relayed(&mut self, index: usize) {
@@ -4382,7 +4442,7 @@ impl Db {
         }
         crate::large::expire_receipts(&self.inner.borrow().conn, now_ms())?;
         for index in 0..sessions {
-            let inbound: Vec<SyncMessage> = {
+            let (inbound, failed): (Vec<SyncMessage>, bool) = {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 if !session.open {
@@ -4390,8 +4450,15 @@ impl Db {
                 }
                 let mut inbound = std::mem::take(&mut session.backlog);
                 inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
-                inbound.into()
+                let failed = session.transport.take_failure().is_some();
+                (inbound.into(), failed)
             };
+            // A client that sent what this server cannot decode is
+            // disconnected; nothing it sent is served.
+            if failed {
+                self.disconnect_subscriber(SubscriberId(index));
+                continue;
+            }
             let mut inbound: VecDeque<SyncMessage> = inbound.into();
             self.serve_due_first_loads(index)?;
             // Relayed reads the upstream answered (or can no longer answer)
