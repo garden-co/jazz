@@ -348,6 +348,7 @@ pub struct Ctx<'a> {
     /// Read the server's view on a replica: root rows the server stopped
     /// listing for it (`_jazz_revoked`) are left out.
     pub members_only: bool,
+    readable_inheritance: bool,
     /// Current private pending rows before this owner's first authority catalogue.
     /// This applies to result selection, never to permission dependencies.
     owner_previews: bool,
@@ -438,6 +439,7 @@ impl<'a> Ctx<'a> {
             preps: Vec::new(),
             history_origin: None,
             members_only: false,
+            readable_inheritance: false,
             owner_previews: false,
             next_alias: 0,
             permission_evidence: None,
@@ -513,6 +515,11 @@ impl<'a> Ctx<'a> {
 
     pub fn with_members_only(mut self, members_only: bool) -> Self {
         self.members_only = members_only;
+        self
+    }
+
+    pub(crate) fn with_readable_inheritance(mut self, required: bool) -> Self {
+        self.readable_inheritance = required;
         self
     }
 
@@ -2348,7 +2355,19 @@ impl<'a> Ctx<'a> {
             }
         });
         self.in_inherited_policy = previous;
-        result
+        let mut clauses = vec![result?];
+        if self.members_only {
+            clauses.push(self.listed(table, alias));
+        }
+        if self.readable_inheritance && operation != Operation::Select && !session.system {
+            // This additional check authorizes transport only. It never changes
+            // the requested capability or turns UPDATE WITH CHECK into USING.
+            let previous = std::mem::replace(&mut self.readable_inheritance, false);
+            let readable = self.read_policy(table, alias, session);
+            self.readable_inheritance = previous;
+            clauses.push(readable?);
+        }
+        Ok(and(&clauses))
     }
 
     // ---- relation IR ----------------------------------------------------

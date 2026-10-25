@@ -117,7 +117,7 @@ impl Inner {
     pub(super) fn refuse_subscription(&mut self, index: usize, id: u64, error: Error) {
         self.sessions[index].support.remove(&id);
         self.sessions[index].readable_policy.remove(&id);
-        self.sessions[index].reachability.remove(&id);
+        self.sessions[index].query_support.remove(&id);
         self.sessions[index].resume.remove(&id);
         if self.sessions[index].subs.remove(&id).is_some() {
             self.fan.dropped.set(self.fan.dropped.get() + 1);

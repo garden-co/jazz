@@ -34,6 +34,8 @@
 
 #[path = "sync/accepted_overlay.rs"]
 mod accepted_overlay;
+#[path = "sync/inheritance.rs"]
+mod inheritance;
 #[path = "sync/reachability.rs"]
 mod reachability;
 #[path = "sync/readable_policy.rs"]
@@ -1053,7 +1055,7 @@ pub(crate) struct Session {
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     readable_policy: BTreeMap<u64, PreparedQuery>,
-    reachability: BTreeMap<u64, PreparedQuery>,
+    query_support: BTreeMap<u64, PreparedQuery>,
     /// The replica's coherence watches: `(table, column, value)` for every
     /// row shipped (`id`), include target and array correlation. A commit
     /// that writes a matching row ships its image (or an eviction).
@@ -1114,7 +1116,7 @@ impl Session {
             committed: Vec::new(),
             support: BTreeMap::new(),
             readable_policy: BTreeMap::new(),
-            reachability: BTreeMap::new(),
+            query_support: BTreeMap::new(),
             watch: HashSet::new(),
             resume: BTreeMap::new(),
             held: BTreeMap::new(),
@@ -3686,14 +3688,13 @@ impl Db {
                 .reachable
                 .iter()
                 .any(|via| gather_from_root(query, via) && !gather_shaped(query, via))
-            || !query.inherits.is_empty()
             || query
                 .includes
                 .iter()
                 .any(|include| include.path.contains('.'));
         if other_tables {
             return Err(crate::values::unsupported(format!(
-                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers, inheritance or multi-hop includes)",
+                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers or multi-hop includes)",
                 query.table
             )));
         }
@@ -5696,24 +5697,23 @@ impl Db {
                         }
                         images.extend(extra);
                     }
-                    if let Some(prepared) = inner.sessions[index].reachability.get(&id).cloned() {
+                    if let Some(prepared) = inner.sessions[index].query_support.get(&id).cloned() {
                         let roots = group
                             .upgrade()
-                            .map(|group| {
-                                group
-                                    .borrow()
-                                    .rows
-                                    .iter()
-                                    .map(|row| row.id)
-                                    .collect::<Vec<_>>()
-                            })
+                            .map(|group| group.borrow().rows.clone())
                             .unwrap_or_default();
-                        match inner.reachability_inputs(
-                            &prepared,
-                            policy,
-                            &roots,
-                            &ReadSpec::default(),
-                        ) {
+                        let inputs = inner
+                            .inheritance_inputs(&prepared, policy, &roots, &ReadSpec::default())
+                            .and_then(|mut inputs| {
+                                inputs.extend(inner.reachability_inputs(
+                                    &prepared,
+                                    policy,
+                                    &roots.iter().map(|row| row.id).collect::<Vec<_>>(),
+                                    &ReadSpec::default(),
+                                )?);
+                                Ok(inputs)
+                            });
+                        match inputs {
                             Ok(inputs) => {
                                 for image in inputs {
                                     watch.insert(wk((
@@ -5975,6 +5975,7 @@ impl Db {
             ..ReadSpec::default()
         };
         inner.check_reachability_shape(prepared)?;
+        inner.check_inheritance_shape(prepared)?;
         let publish_evidence = inner.sessions[index].identity == AuthorSubject::SYSTEM;
         if matches!(&evidence, Some(ScopedEvidence::Collect)) && !publish_evidence {
             return Err(rejected(
@@ -6073,7 +6074,8 @@ impl Db {
             None | Some(ScopedEvidence::Supplied(_)) => None,
         };
         let roots = rows.iter().map(|row| row.id).collect::<Vec<_>>();
-        let reachability_inputs = inner.reachability_inputs(prepared, policy, &roots, &read)?;
+        let mut reachability_inputs = inner.reachability_inputs(prepared, policy, &roots, &read)?;
+        reachability_inputs.extend(inner.inheritance_inputs(prepared, policy, &rows, &read)?);
         // Scoped evidence already contains the exact query and policy inputs.
         // Re-following them against the current cache would mix cuts and claims.
         let support = if scoped_evidence.is_some() {
@@ -6754,6 +6756,7 @@ impl Db {
                 }
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 db.inner().check_reachability_shape(&prepared)?;
+                db.inner().check_inheritance_shape(&prepared)?;
                 if readable_policy {
                     db.inner().check_readable_policy_shape(&prepared, policy)?;
                 }
@@ -6797,12 +6800,12 @@ impl Db {
                     }
                 }
                 let (queue, group) = subscribed?;
-                if reachability::needed(&query) {
+                if reachability::needed(&query) || !query.inherits.is_empty() {
                     if let Some(group) = group.upgrade() {
                         group.borrow_mut().observe_support_inputs(&queue);
                     }
                     inner.sessions[index]
-                        .reachability
+                        .query_support
                         .insert(id, prepared.clone());
                 }
                 if readable_policy {
@@ -6887,7 +6890,7 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
                 inner.sessions[index].readable_policy.remove(&id);
-                inner.sessions[index].reachability.remove(&id);
+                inner.sessions[index].query_support.remove(&id);
                 if let Some((query, binding, include_deleted)) =
                     inner.sessions[index].relayed.remove(&id)
                 {

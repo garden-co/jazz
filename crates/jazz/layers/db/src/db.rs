@@ -257,6 +257,8 @@ pub enum SubscriptionEvent {
 /// What a read observes: deletions and the branch view.
 #[derive(Clone, Debug, Default)]
 struct ReadSpec {
+    /// Internal support check: every inherited capability needs readable witnesses.
+    readable_inheritance: bool,
     scoped_evidence: bool,
     permission_cut: Option<u64>,
     permission_own: u64,
@@ -293,6 +295,7 @@ impl ReadSpec {
             }
         };
         Ok(Self {
+            readable_inheritance: false,
             scoped_evidence: false,
             permission_cut: None,
             permission_own: 0,
@@ -2333,6 +2336,7 @@ impl Inner {
             .with_cut(read.cut.clone())
             .with_history_origin(self.history_origin())
             .with_members_only(read.members_only)
+            .with_readable_inheritance(read.readable_inheritance)
             .compile_query(&prepared.query, read.include_deleted)?;
         if self.candidate_read_evidence.is_some() && !compiled.preps.is_empty() {
             return Err(unsupported(
