@@ -922,6 +922,7 @@ impl Inner {
                 row_uuid: *id,
                 joined: Vec::new(),
                 version: None,
+                union_arm: None,
                 index: *index,
             })
             .collect();
@@ -938,6 +939,7 @@ impl Inner {
                     row_uuid: row.id,
                     joined: Vec::new(),
                     version: None,
+                    union_arm: None,
                     index,
                 })
             }));
@@ -1114,6 +1116,7 @@ impl Inner {
                             row_uuid: row.id,
                             joined: row.joined.to_vec(),
                             version: row.version,
+                            union_arm: row.union_arm.clone(),
                             index,
                         })
                         .collect();
@@ -1238,7 +1241,7 @@ impl Group {
 }
 
 /// Whether a group may apply root-only commits by re-checking ids: a
-/// single-table query, unbounded or a first page, (no joins, arrays, required includes,
+/// single-table query (not a union), unbounded or a first page, (no joins, arrays, required includes,
 /// aggregates, windows), outside branch views and cuts, whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another). A
@@ -1247,6 +1250,7 @@ impl Group {
 /// row as changed.
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
     !is_history_table(&query.table)
+        && query.relation.is_none()
         && query.offset == 0
         && query.aggregate.is_none()
         && query.joins.is_empty()
@@ -1320,9 +1324,14 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 }
 
 /// What identifies a result row across runs: its id, plus its seq for a
-/// history read, whose versions share their row's id, and a flat join's
-/// joined rows (the occurrence).
-type RowKey = (RowUuid, u64, Arc<[crate::values::JoinedRow]>);
+/// history read, whose versions share their row's id, a flat join's
+/// joined rows, and a union read's arm (the occurrence).
+type RowKey = (
+    RowUuid,
+    u64,
+    Arc<[crate::values::JoinedRow]>,
+    Option<Arc<str>>,
+);
 
 fn row_key(row: &CurrentRow) -> RowKey {
     let version = if is_history_table(&row.table) {
@@ -1330,7 +1339,7 @@ fn row_key(row: &CurrentRow) -> RowKey {
     } else {
         0
     };
-    (row.id, version, row.joined.clone())
+    (row.id, version, row.joined.clone(), row.union_arm.clone())
 }
 
 /// The keyed diff of two results, or `None` when nothing changed.
@@ -1382,6 +1391,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
             row_uuid: row.id,
             joined: row.joined.to_vec(),
             version: row.version,
+            union_arm: row.union_arm.clone(),
             index,
         })
         .collect();

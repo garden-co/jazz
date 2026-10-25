@@ -120,6 +120,7 @@ impl Ctx<'_> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            union: false,
             preps: self.preps,
         })
     }

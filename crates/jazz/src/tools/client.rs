@@ -298,10 +298,16 @@ impl Forwarder {
                 held.row_uuid() == row.row_uuid
                     && held.table() == row.table
                     && held.joined_rows() == row.joined.as_slice()
+                    && held.union_arm() == row.union_arm.as_deref()
             });
             let id = match held {
                 Some(at) => decoder.key(&self.rows.remove(at))?,
-                None => jazz_db::values::occurrence_key(row.row_uuid, row.version, &row.joined),
+                None => jazz_db::values::occurrence_key(
+                    row.row_uuid,
+                    row.version,
+                    &row.joined,
+                    row.union_arm.as_deref(),
+                ),
             };
             delta.removed.push(OrderedRemoved {
                 id,
@@ -313,6 +319,7 @@ impl Forwarder {
                 held.row_uuid() == row.row_uuid()
                     && held.table() == row.table()
                     && held.joined_rows() == row.joined_rows()
+                    && held.union_arm() == row.union_arm()
             });
             // A row that only moved, or got a new version with the same
             // shown cells, carries no payload: they are what it was
@@ -1927,11 +1934,7 @@ impl Decoder<'_> {
                 NodeUuid(*node),
             )));
         }
-        Ok(jazz_db::values::occurrence_key(
-            row.row_uuid(),
-            row.root_version(),
-            row.joined_rows(),
-        ))
+        Ok(row.occurrence_key())
     }
 
     fn values(&self, row: &CurrentRow) -> Result<Vec<QueryResultField>> {

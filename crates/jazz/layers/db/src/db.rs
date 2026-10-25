@@ -177,6 +177,8 @@ pub struct RemovedRow {
     pub joined: Vec<crate::values::JoinedRow>,
     /// A flat join's root version ([`CurrentRow::root_version`]).
     pub version: Option<crate::values::SourceVersion>,
+    /// A union read's arm ([`CurrentRow::union_arm`]).
+    pub union_arm: Option<Arc<str>>,
     pub index: usize,
 }
 
@@ -676,7 +678,8 @@ fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error
 
 /// A relation facade query (hopTo, gather, match), as clients send it: the
 /// ordinary query it stands for, the way Jazz's validation normalizes it.
-/// Unions and projections that rename or narrow the output are not
+/// A union stays a relation query ([`union_plan`] reads its arms when it
+/// compiles). Projections that rename or narrow the output are not
 /// supported yet. `None` when the query is not a relation query.
 fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, Error> {
     use crate::query::{RelationProjectExpr, RelationRowIdRef};
@@ -684,16 +687,6 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
         return Ok(None);
     };
     let not_yet = |what: &str| crate::values::unsupported(what.to_owned());
-    if crate::query::relation_union_parts(&relation.rel).is_some() {
-        return Err(not_yet("union relation queries"));
-    }
-    let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
-    let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
-    if resolved.table != query.table {
-        return Err(crate::values::query_error(
-            "relation query output table does not match its Query envelope",
-        ));
-    }
     let has_ordinary_clauses = !query.filters.is_empty()
         || !query.joins.is_empty()
         || query.flat_join.is_some()
@@ -708,6 +701,19 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
     if has_ordinary_clauses {
         return Err(crate::values::query_error(
             "relation query cannot be combined with ordinary query clauses",
+        ));
+    }
+    if union_plan(query, schema)?.is_some() {
+        if query.select.is_some() || !query.array_subqueries.is_empty() {
+            return Err(not_yet("selections or relations on union queries"));
+        }
+        return Ok(Some(query.clone()));
+    }
+    let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
+    let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
+    if resolved.table != query.table {
+        return Err(crate::values::query_error(
+            "relation query output table does not match its Query envelope",
         ));
     }
     if let Some(columns) =
@@ -747,6 +753,116 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
     resolved.select = query.select.clone();
     resolved.relation = None;
     Ok(Some(resolved))
+}
+
+/// A public `UNION ALL`: each arm, by label, as the ordinary query it
+/// stands for, and the order and window over the whole union. Every arm
+/// reads the output table under its own read policy, so an arm never
+/// widens access; a row matched by several arms is one result row per
+/// arm.
+pub(crate) struct UnionPlan {
+    pub arms: Vec<(String, Query)>,
+    pub order_by: Vec<crate::query::OrderBy>,
+    pub offset: usize,
+    pub limit: Option<usize>,
+}
+
+/// The union a relation query stands for, or `None` when it is not one.
+pub(crate) fn union_plan(query: &Query, schema: &Schema) -> Result<Option<UnionPlan>, Error> {
+    let Some(parts) = query
+        .relation
+        .as_ref()
+        .and_then(|relation| crate::query::relation_union_parts(&relation.rel))
+    else {
+        return Ok(None);
+    };
+    let invalid = |message: &str| crate::values::query_error(message.to_owned());
+    if parts.inputs.is_empty() {
+        return Err(invalid("union requires at least one input"));
+    }
+    let mut labels = BTreeSet::new();
+    let mut arms = Vec::with_capacity(parts.inputs.len());
+    for arm in parts.inputs {
+        if arm.label.is_empty()
+            || arm.label.len() > 4096
+            || arm.label.contains('\0')
+            || !labels.insert(arm.label.clone())
+        {
+            return Err(invalid(
+                "union arm labels must be 1..=4096 bytes, NUL-free, and unique",
+            ));
+        }
+        if crate::query::relation_union_parts(&arm.input).is_some() {
+            return Err(crate::values::unsupported("unions nested in union arms"));
+        }
+        let mut envelope = Query::from(query.table.as_str());
+        envelope.relation = Some(crate::query::RelationQuery { rel: arm.input });
+        let resolved = normalize_relation(&envelope, schema)?.expect("a relation query");
+        arms.push((arm.label, resolved));
+    }
+    let mut order_by = Vec::new();
+    for term in parts.order_by.unwrap_or_default() {
+        if term
+            .column
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope != query.table)
+        {
+            return Err(invalid(
+                "union order_by must be scoped to the union output table",
+            ));
+        }
+        order_by.push(crate::query::OrderBy {
+            column: term.column.column,
+            direction: term.direction,
+        });
+    }
+    Ok(Some(UnionPlan {
+        arms,
+        order_by,
+        offset: parts.offset.unwrap_or(0),
+        limit: parts.limit,
+    }))
+}
+
+/// A union read with its window widened to start at its first row (limit
+/// plus offset), as [`crate::db::sync::remote_query`] does for an ordinary
+/// window: a replica holds the whole prefix and applies the offset itself.
+/// `None` when `query` is not a union with an offset.
+pub(crate) fn union_prefix(query: &Query) -> Option<Query> {
+    use crate::query::RelationExpr;
+    let parts = crate::query::relation_union_parts(&query.relation.as_ref()?.rel)?;
+    let offset = parts.offset.filter(|offset| *offset > 0)?;
+    let mut rel = RelationExpr::Union {
+        inputs: parts.inputs,
+    };
+    if let Some(terms) = parts.order_by {
+        rel = RelationExpr::OrderBy {
+            input: Box::new(rel),
+            terms,
+        };
+    }
+    if let Some(limit) = parts.limit {
+        rel = RelationExpr::Limit {
+            input: Box::new(rel),
+            limit: limit.saturating_add(offset),
+        };
+    }
+    let mut prefix = query.clone();
+    prefix.relation = Some(crate::query::RelationQuery { rel });
+    Some(prefix)
+}
+
+/// Whether a read is a window: a limit or offset, of the query or of the
+/// union it stands for.
+pub(crate) fn is_windowed(query: &Query) -> bool {
+    query.limit.is_some()
+        || query.offset > 0
+        || query
+            .relation
+            .as_ref()
+            .and_then(|relation| crate::query::relation_union_parts(&relation.rel))
+            .is_some_and(|parts| parts.limit.is_some() || parts.offset.is_some_and(|o| o > 0))
 }
 
 /// The reason a policy rejects a write, leading its message (the code
@@ -1226,7 +1342,7 @@ impl Db {
         // server stopped listing leaves it, though the copy stays readable.
         read.members_only |= remote_read;
         if remote_read {
-            Self::remote_shape(&prepared.query)?;
+            self.remote_shape(&prepared.query)?;
         }
         // A non-durable foreground tells its relay how far the read
         // reaches, as its fetches do; to an authority it is always remote.
@@ -2057,6 +2173,8 @@ impl Inner {
         // A replica missing chunks reads on past the first blocked cell, so
         // one round trip asks for every row's missing nodes.
         let mut blocked = false;
+        // A union's arm labels, shared by their rows.
+        let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
                 let key = match row.get_ref(0).map_err(storage)? {
@@ -2095,7 +2213,26 @@ impl Inner {
                     })
                 })
                 .collect::<Result<Arc<[_]>, Error>>()?;
-            let first = if flat { 4 + 2 * compiled.joined } else { 3 };
+            let union_arm = if compiled.union {
+                let label: String = row.get(3).map_err(storage)?;
+                Some(match arms.iter().find(|arm| ***arm == *label) {
+                    Some(arm) => arm.clone(),
+                    None => {
+                        let arm: Arc<str> = Arc::from(label);
+                        arms.push(arm.clone());
+                        arm
+                    }
+                })
+            } else {
+                None
+            };
+            let first = if flat {
+                4 + 2 * compiled.joined
+            } else if compiled.union {
+                4
+            } else {
+                3
+            };
             let cells = compiled
                 .projection
                 .iter()
@@ -2123,6 +2260,7 @@ impl Inner {
                 types: types.clone(),
                 joined,
                 version: root_version,
+                union_arm,
             });
         }
         if blocked {
@@ -4716,7 +4854,7 @@ impl TxRef<'_> {
             && self.db.is_client()
         {
             let at = pinned.then_some(snapshot);
-            Db::remote_shape(&prepared.query)?;
+            self.db.remote_shape(&prepared.query)?;
             let through = self
                 .db
                 .fetch(prepared, at, include_deleted, ReadTier::Remote, None, None)
