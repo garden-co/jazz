@@ -45,6 +45,19 @@ impl StoreSpec {
     /// versioned filename hashes the complete storage owner. A ready SDK
     /// sidecar passes its replica-specific path and requires an existing file.
     pub(crate) fn from_js(storage: &JsValue, storage_owner: &str) -> Result<Self, JsValue> {
+        // A removed page-store callback object must not silently become the
+        // default SQLite VFS. Reject it before opening or deleting any file,
+        // without invoking its callbacks or property getters.
+        if !storage.is_undefined() && !storage.is_null() {
+            for callback in ["metadata", "readPage", "commitPages"] {
+                if js_sys::Reflect::has(storage, &JsValue::from_str(callback))? {
+                    return Err(crate::to_js_error(jazz::db::Error::new(
+                        jazz::db::ErrorCode::Query,
+                        "custom browser page store does not provide durable admission for SQLite; use { backend, path }",
+                    )));
+                }
+            }
+        }
         let field = |name: &str| -> Result<Option<String>, JsValue> {
             if storage.is_undefined() || storage.is_null() {
                 return Ok(None);
