@@ -2531,6 +2531,25 @@ impl Inner {
         })
     }
 
+    /// [`Inner::check`] for a write at `seq`, on the evidence SPEC 7 gives
+    /// a WITH CHECK: committed state overlaid with the unit's other live
+    /// rows, the protected row read as committed. A same-table EXISTS
+    /// compares the new row with the old one, never with itself.
+    fn check_write(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        operation: Operation,
+        seq: u64,
+    ) -> Result<bool, Error> {
+        let session = self.session(author);
+        self.holds_at(table, row, key, Some(write_cut(table, row, seq)), |ctx| {
+            ctx.operation_policy(table, operation, "a", &session)
+        })
+    }
+
     fn check_clause(
         &self,
         table: &Table,
@@ -3132,7 +3151,7 @@ impl Inner {
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
         if let Some(author) = self.checked(who)
-            && !self.check(table, row, &key, author, Operation::Insert)?
+            && !self.check_write(table, row, &key, author, Operation::Insert, seq)?
         {
             return Err(denied(format_args!(
                 "INSERT policy denied the new row in `{table_name}`"
@@ -3278,17 +3297,16 @@ impl Inner {
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
         };
-        // The new row is checked against the other rows as they were
-        // before this transaction, as a policy's subqueries see the
-        // statement's snapshot: a same-table EXISTS compares the new row
-        // with the old one, not with itself. Without a WITH CHECK, the new
-        // row must pass USING, as in Postgres.
+        // The new row is checked on the evidence SPEC 7 gives a WITH CHECK
+        // (see [`write_cut`]): a same-table EXISTS compares the new row with
+        // the old one, not with itself. Without a WITH CHECK, the new row
+        // must pass USING, as in Postgres.
         let update = &table.policies.update;
         let with_check = update.with_check.as_ref().or(update.using.as_ref());
         if let Some(author) = self.checked(who)
             && !{
                 let session = self.session(author);
-                let before = Some(Cut::at(seq.saturating_sub(1)));
+                let before = Some(write_cut(table, row, seq));
                 self.holds_at(table, row, &key, before, |ctx| {
                     ctx.policy_clause(with_check, table, "a", &session)
                 })?
@@ -3442,11 +3460,26 @@ impl Inner {
         )?;
         // A restore writes an existing row back: the UPDATE policy decides.
         if let Some(author) = self.checked(who)
-            && !self.check(table, row, &key, author, Operation::Update)?
+            && !self.check_write(table, row, &key, author, Operation::Update, seq)?
         {
             return Err(denied("RESTORE policy denied the restored row"));
         }
         Ok(WriteHandle { row, seq })
+    }
+}
+
+/// The rows a write's policy reads, for a write at `seq` (SPEC 7, WITH
+/// CHECK): committed state, overlaid with the unit's other inserted,
+/// restored and updated rows as they stand so far. The unit's deletes are
+/// not overlaid, so a committed row it deletes still reads as committed and
+/// a row it both inserts and deletes reads as absent; the protected row
+/// itself reads as committed (absent for an insert).
+fn write_cut(table: &Table, row: RowUuid, seq: u64) -> Cut {
+    Cut {
+        seq: seq.saturating_sub(1),
+        own: seq,
+        extra: Vec::new(),
+        protected: Some((table.stored.clone(), *row.0.as_bytes())),
     }
 }
 

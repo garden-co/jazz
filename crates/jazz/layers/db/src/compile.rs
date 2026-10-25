@@ -256,6 +256,10 @@ pub struct Cut {
     pub seq: u64,
     pub own: u64,
     pub extra: Vec<u64>,
+    /// A write check's evidence (SPEC 7, WITH CHECK): of the versions at
+    /// `own`, deletes are not overlaid, and neither is the protected row
+    /// (stored table, id), which reads as committed.
+    pub protected: Option<(String, [u8; 16])>,
 }
 
 impl Cut {
@@ -374,17 +378,32 @@ impl<'a> Ctx<'a> {
             .map(u64::to_string)
             .collect::<Vec<_>>()
             .join(", ");
+        // The versions at `own` that are overlaid: all of them, or for a
+        // write check the unit's live rows other than the protected one.
+        let overlaid = |alias: &str| match &cut.protected {
+            None => format!("{alias}_seq = {own}"),
+            Some(_) => format!("({alias}_seq = {own} AND {alias}_del = 0)"),
+        };
+        let mut overlaid_here = overlaid("");
+        let mut overlaid_c = overlaid("c.");
+        if let Some((stored, id)) = &cut.protected
+            && *stored == table.stored
+        {
+            let id = self.bind(Sql::Blob(id.to_vec()));
+            overlaid_here = format!("({overlaid_here} AND id <> {id})");
+            overlaid_c = format!("({overlaid_c} AND c.id <> {id})");
+        }
         let (visible, h_visible, newer) = if extra.is_empty() {
             (
-                format!("_seq <= {seq} OR _seq = {own}"),
+                format!("_seq <= {seq} OR {overlaid_here}"),
                 format!("h2._seq <= {seq}"),
-                format!("c._seq > {seq} AND c._seq <> {own}"),
+                format!("c._seq > {seq} AND NOT {overlaid_c}"),
             )
         } else {
             (
-                format!("_seq <= {seq} OR _seq = {own} OR _seq IN ({extra})"),
+                format!("_seq <= {seq} OR {overlaid_here} OR _seq IN ({extra})"),
                 format!("(h2._seq <= {seq} OR h2._seq IN ({extra}))"),
-                format!("c._seq > {seq} AND c._seq <> {own} AND c._seq NOT IN ({extra})"),
+                format!("c._seq > {seq} AND NOT {overlaid_c} AND c._seq NOT IN ({extra})"),
             )
         };
         let history = quote(&format!("{}__h", table.stored));
