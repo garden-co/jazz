@@ -3360,12 +3360,14 @@ impl Db {
 
     /// Whether chunks this replica requested may still arrive: it is
     /// connected to an upstream that may answer, with requests outstanding
-    /// (sent, or recorded by a read for the next send).
+    /// (sent, or recorded by a read for the next send). A non-durable
+    /// foreground's relay answers from its store whatever its own path to
+    /// the server.
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
         inner.client.as_ref().is_some_and(|client| {
             client.transport.is_some()
-                && may_wait(client.hint.get())
+                && (may_wait(client.hint.get()) || inner.non_durable)
                 && !(client.requested.is_empty()
                     && client.wanted.is_empty()
                     && !inner.chunks.has_demand())

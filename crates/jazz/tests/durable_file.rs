@@ -638,13 +638,15 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
     );
 
     // A reloaded tab: a fresh non-durable foreground over the relay, still
-    // offline. Its one-shot read gets the row from the relay and waits for
+    // offline (and disconnected from the server, as the app asked). Its one-shot read gets the row from the relay and waits for
     // the value's chunks instead of failing on them.
     let tab = block_on(Db::open(config(8))).unwrap();
     tab.set_non_durable_client();
     let (tab_side, relay_down) = duplex();
     let _tab_link = block_on(tab.connect_upstream(tab_side));
     relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM);
+    // The app disconnected from the server; the worker still answers.
+    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
     let read = postcard::to_allocvec(&Query::from("items")).unwrap();
     let result = drive(
         &[&tab, &relay, &tab],
