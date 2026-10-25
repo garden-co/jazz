@@ -578,7 +578,7 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
 
 #[test]
 fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
-    use jazz::db::{Image, SyncCell, SyncMessage, encode_frames};
+    use jazz::db::{FrameJoiner, Image, SyncCell, SyncMessage, encode_frames};
     let image = |n: u8| Image {
         table: "todos".into(),
         id: [n; 16],
@@ -595,15 +595,29 @@ fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
     .unwrap();
     assert!(frames.len() > 1);
     let limit = jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
-    let mut ids = Vec::new();
-    for frame in frames {
+    // Every frame but the last carries leading parts; the last is the
+    // `Rows` that completes them, and only it yields the whole message.
+    let last = frames.len() - 1;
+    let mut joiner = FrameJoiner::default();
+    for (i, frame) in frames.iter().enumerate() {
         assert!(frame.len() < limit);
-        match postcard::from_bytes::<SyncMessage>(&frame).unwrap() {
-            SyncMessage::Rows { images } => ids.extend(images.into_iter().map(|i| i.id)),
-            other => panic!("expected rows, got {other:?}"),
+        let decoded = postcard::from_bytes::<SyncMessage>(frame).unwrap();
+        match (i == last, decoded) {
+            (false, SyncMessage::RowsPart { .. }) | (true, SyncMessage::Rows { .. }) => {}
+            (_, other) => panic!("frame {i} of {}: {other:?}", frames.len()),
+        }
+        match joiner.push(frame).unwrap() {
+            None => assert!(i < last),
+            Some(SyncMessage::Rows { images: joined }) => {
+                assert_eq!(i, last);
+                assert_eq!(
+                    joined.iter().map(|i| i.id).collect::<Vec<_>>(),
+                    images.iter().map(|i| i.id).collect::<Vec<_>>()
+                );
+            }
+            Some(other) => panic!("expected rows, got {other:?}"),
         }
     }
-    assert_eq!(ids, images.iter().map(|i| i.id).collect::<Vec<_>>());
     // A message that fits stays one frame.
     let one = encode_frames(SyncMessage::Rows {
         images: vec![image(1)],

@@ -48,7 +48,7 @@ use crate::values::{
     AuthorKey, Schema, Sql, Table, author_key, from_sql, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, FirstLoad, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
+    Cell as SyncCell, FirstLoad, FrameJoiner, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
     Upstream, WireError, WireTransport, WireTransportAdapter, duplex, encode_frames,
 };

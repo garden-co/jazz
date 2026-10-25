@@ -15,8 +15,8 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    Db, RemoteLinkHint, SubscriberId, SyncMessage, Transport, TransportError, Upstream, block_on,
-    encode_frames,
+    Db, FrameJoiner, RemoteLinkHint, SubscriberId, SyncMessage, Transport, TransportError,
+    Upstream, block_on, encode_frames,
 };
 use jazz::ids::AuthorSubject;
 use serde_json::{Map, Value as JsonValue, json};
@@ -245,20 +245,15 @@ impl Transport for SimTransport {
     }
 }
 
-/// Decode the frames of one message. A message split across several
-/// frames is a `Rows` message whose images were halved; join them again.
+/// Decode the frames of one message, joining a `Rows` split across them.
 fn decode_frames(frames: Vec<Vec<u8>>) -> SyncMessage {
-    let mut decoded = frames
-        .iter()
-        .map(|frame| postcard::from_bytes::<SyncMessage>(frame).expect("decode sync frame"));
-    let first = decoded.next().expect("at least one frame");
-    decoded.fold(first, |joined, next| match (joined, next) {
-        (SyncMessage::Rows { mut images }, SyncMessage::Rows { images: more }) => {
-            images.extend(more);
-            SyncMessage::Rows { images }
-        }
-        (joined, next) => panic!("only Rows messages span frames: {joined:?} then {next:?}"),
-    })
+    let mut joiner = FrameJoiner::default();
+    let mut message = None;
+    for frame in &frames {
+        assert!(message.is_none(), "frames past the end of a message");
+        message = joiner.push(frame).expect("decode sync frame");
+    }
+    message.expect("the frames end a message")
 }
 
 fn kind(message: &SyncMessage) -> String {

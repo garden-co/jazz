@@ -23,6 +23,8 @@ mod branch_views;
 mod claims_change;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
+#[path = "../commit_atomicity_frames.rs"]
+mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
 mod composite_indexes;
 #[path = "../deleted_rows.rs"]

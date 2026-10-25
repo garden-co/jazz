@@ -112,47 +112,114 @@ pub fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
 pub use crate::wire::WireTransport;
 
 /// Frames messages with postcard over a byte transport.
-pub struct WireTransportAdapter<W>(W);
+pub struct WireTransportAdapter<W> {
+    wire: W,
+    joiner: FrameJoiner,
+}
 
 /// The largest encoded message one wire frame carries, leaving room for
 /// the carrier's count and length prefixes.
 const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
 
-/// `message` as wire frames. A first result can outgrow one frame: its row
-/// images travel in as many `Rows` messages as it takes (a row fits one,
-/// as a large value travels as chunks).
+/// `message` as wire frames. A `Rows` message can outgrow one frame (a
+/// first result, or one commit's fan-out): its images travel in as many
+/// frames as it takes (a row fits one, as a large value travels as
+/// chunks), each but the last a `RowsPart`, and [`FrameJoiner`] makes
+/// them one message again.
 pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    let frame = postcard::to_allocvec(&message)?;
-    match message {
-        SyncMessage::Rows { mut images }
-            if frame.len() > MAX_MESSAGE_FRAME_BYTES && images.len() > 1 =>
-        {
-            let rest = images.split_off(images.len() / 2);
-            let mut frames = encode_frames(SyncMessage::Rows { images })?;
-            frames.extend(encode_frames(SyncMessage::Rows { images: rest })?);
-            Ok(frames)
+    let SyncMessage::Rows { images } = message else {
+        return Ok(vec![postcard::to_allocvec(&message)?]);
+    };
+    let mut parts = Vec::new();
+    split_rows(images, &mut parts)?;
+    let last = parts.len() - 1;
+    for (i, (images, frame)) in parts.iter_mut().enumerate() {
+        if i < last {
+            *frame = postcard::to_allocvec(&SyncMessage::RowsPart {
+                images: std::mem::take(images),
+            })?;
         }
-        _ => Ok(vec![frame]),
+    }
+    Ok(parts.into_iter().map(|(_, frame)| frame).collect())
+}
+
+/// `images` halved until each half encodes as a `Rows` within one frame,
+/// in order, each with that encoding.
+fn split_rows(
+    images: Vec<Image>,
+    parts: &mut Vec<(Vec<Image>, Vec<u8>)>,
+) -> Result<(), postcard::Error> {
+    let message = SyncMessage::Rows { images };
+    let frame = postcard::to_allocvec(&message)?;
+    let SyncMessage::Rows { mut images } = message else {
+        unreachable!()
+    };
+    if frame.len() <= MAX_MESSAGE_FRAME_BYTES || images.len() <= 1 {
+        parts.push((images, frame));
+        return Ok(());
+    }
+    let rest = images.split_off(images.len() / 2);
+    split_rows(images, parts)?;
+    split_rows(rest, parts)
+}
+
+/// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
+/// one message they encode.
+#[derive(Default)]
+pub struct FrameJoiner {
+    parts: Vec<Image>,
+}
+
+impl FrameJoiner {
+    /// The message `frame` completes, if any.
+    pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, postcard::Error> {
+        match postcard::from_bytes(frame)? {
+            SyncMessage::RowsPart { images } => {
+                self.parts.extend(images);
+                Ok(None)
+            }
+            SyncMessage::Rows { images } if !self.parts.is_empty() => {
+                let mut joined = std::mem::take(&mut self.parts);
+                joined.extend(images);
+                Ok(Some(SyncMessage::Rows { images: joined }))
+            }
+            message => {
+                assert!(
+                    self.parts.is_empty(),
+                    "a Rows message's parts end with its Rows frame, not {message:?}"
+                );
+                Ok(Some(message))
+            }
+        }
     }
 }
 
 impl<W> WireTransportAdapter<W> {
     pub fn current(wire: W) -> Self {
-        Self(wire)
+        Self {
+            wire,
+            joiner: FrameJoiner::default(),
+        }
     }
 }
 
 impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message).map_err(|e| TransportError::Failed(e.to_string()))? {
-            self.0.send_frame(frame)?;
+            self.wire.send_frame(frame)?;
         }
         Ok(())
     }
 
+    /// The next whole message: a `Rows` whose frames have not all arrived
+    /// waits for the rest.
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        let frame = self.0.try_recv_frame()?;
-        Some(postcard::from_bytes(&frame).expect("decode sync frame"))
+        loop {
+            let frame = self.wire.try_recv_frame()?;
+            if let Some(message) = self.joiner.push(&frame).expect("decode sync frame") {
+                return Some(message);
+            }
+        }
     }
 }
 
@@ -591,6 +658,14 @@ pub enum SyncMessage {
     /// rather than waiting out its budget.
     SchemaAdmission {
         admitted: bool,
+    },
+    /// The leading images of a `Rows` message too large for one wire
+    /// frame; the message's final frame is the `Rows` itself. A receiver
+    /// joins the parts and applies them as that one message, so a
+    /// commit's rows reach readers whole (a wire framing only: never sent
+    /// as a message of its own).
+    RowsPart {
+        images: Vec<Image>,
     },
 }
 
