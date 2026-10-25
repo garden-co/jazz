@@ -398,6 +398,8 @@ struct Inner {
     fan: fanout::Fanout,
     /// Rows written since the last dispatch: (table, id, branch key).
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
+    /// The write checks of the unit being applied, run at its end.
+    deferred: RefCell<Option<Vec<DeferredCheck>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
@@ -1050,6 +1052,7 @@ impl Db {
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
+                deferred: RefCell::new(None),
                 tx: None,
                 publications: Vec::new(),
                 client: None,
@@ -2671,23 +2674,151 @@ impl Inner {
         })
     }
 
-    /// [`Inner::check`] for a write at `seq`, on the evidence SPEC 7 gives
-    /// a WITH CHECK: committed state overlaid with the unit's other live
-    /// rows, the protected row read as committed. A same-table EXISTS
-    /// compares the new row with the old one, never with itself.
-    fn check_write(
+    /// Check a write's own policy as SPEC 7 has it: on committed state
+    /// overlaid with the unit's grounded rows. Inside a unit
+    /// ([`Inner::defer_checks`]) the check waits for the unit's end;
+    /// alone, nothing else is grounded and it runs now.
+    fn write_check(
         &self,
         table: &Table,
         row: RowUuid,
         key: &[u8],
         author: AuthorSubject,
-        operation: Operation,
+        check: WriteCheck,
         seq: u64,
-    ) -> Result<bool, Error> {
-        let session = self.session(author);
-        self.holds_at(table, row, key, Some(write_cut(table, row, seq)), |ctx| {
-            ctx.operation_policy(table, operation, "a", &session)
-        })
+    ) -> Result<(), Error> {
+        let deferred = DeferredCheck {
+            table: table.name.clone(),
+            row,
+            key: key.to_vec(),
+            author,
+            check,
+        };
+        if let Some(pending) = self.deferred.borrow_mut().as_mut() {
+            // A row's first write decides which policy its unit's end state
+            // must pass.
+            if !pending
+                .iter()
+                .any(|p| p.table == deferred.table && p.row == row && p.key == deferred.key)
+            {
+                pending.push(deferred);
+            }
+            return Ok(());
+        }
+        self.ground(vec![deferred], seq)
+    }
+
+    /// Start a unit: write checks wait for [`Inner::finish_checks`].
+    pub(crate) fn defer_checks(&self) {
+        *self.deferred.borrow_mut() = Some(Vec::new());
+    }
+
+    /// Drop a unit's pending checks (it rolled back).
+    pub(crate) fn abandon_checks(&self) {
+        *self.deferred.borrow_mut() = None;
+    }
+
+    /// End a unit written at `seq`: ground its writes (SPEC 7). The first
+    /// round checks every write on committed state alone; a write that
+    /// passes is grounded, and from the next round on its row shows its
+    /// end state to the others. A write that never passes rejects the
+    /// unit. A row the unit leaves deleted has no end state to check.
+    pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
+        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        self.ground(pending, seq)
+    }
+
+    fn ground(&self, mut pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
+        let schema = self.schema.clone();
+        let mut live = Vec::with_capacity(pending.len());
+        for check in pending.drain(..) {
+            let table = schema.table(&check.table)?;
+            if !self.is_deleted_version(table, check.row, &check.key)? {
+                live.push(check);
+            }
+        }
+        let mut pending = live;
+        let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
+        loop {
+            let cut = Cut {
+                seq: seq.saturating_sub(1),
+                own: seq,
+                extra: Vec::new(),
+                grounded: Some(Arc::new(grounded.clone())),
+            };
+            let mut passed = Vec::new();
+            let mut failed = Vec::new();
+            for check in pending {
+                let table = schema.table(&check.table)?;
+                let session = self.session(check.author);
+                let holds =
+                    self.holds_at(table, check.row, &check.key, Some(cut.clone()), |ctx| {
+                        match check.check {
+                            WriteCheck::Insert => {
+                                ctx.operation_policy(table, Operation::Insert, "a", &session)
+                            }
+                            WriteCheck::Restore => {
+                                ctx.operation_policy(table, Operation::Update, "a", &session)
+                            }
+                            // Without a WITH CHECK, the new row must pass
+                            // USING, as in Postgres.
+                            WriteCheck::WithCheck { .. } => {
+                                let update = &table.policies.update;
+                                let clause = update.with_check.as_ref().or(update.using.as_ref());
+                                ctx.policy_clause(clause, table, "a", &session)
+                            }
+                        }
+                    })?;
+                if holds {
+                    passed.push(check);
+                } else {
+                    failed.push(check);
+                }
+            }
+            if failed.is_empty() {
+                return Ok(());
+            }
+            if passed.is_empty() {
+                let check = &failed[0];
+                return Err(match check.check {
+                    WriteCheck::Insert => denied(format_args!(
+                        "INSERT policy denied the new row in `{}`",
+                        check.table
+                    )),
+                    WriteCheck::WithCheck { upsert } => denied(format_args!(
+                        "{} policy (WITH CHECK) denied the new row",
+                        if upsert { "UPSERT" } else { "UPDATE" }
+                    )),
+                    WriteCheck::Restore => denied("RESTORE policy denied the restored row"),
+                });
+            }
+            for check in passed {
+                let stored = schema.table(&check.table)?.stored.clone();
+                grounded
+                    .entry(stored)
+                    .or_default()
+                    .insert(*check.row.0.as_bytes());
+            }
+            pending = failed;
+        }
+    }
+
+    /// Whether `row`'s current version on branch `key` is a tombstone.
+    fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
+        let sql = format!(
+            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2",
+            quote(&table.stored)
+        );
+        let deleted: Option<i64> = self
+            .conn
+            .cached_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(deleted.is_none_or(|d| d != 0))
     }
 
     fn check_clause(
@@ -3275,12 +3406,8 @@ impl Inner {
         self.changed
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
-        if let Some(author) = self.checked(who)
-            && !self.check_write(table, row, &key, author, Operation::Insert, seq)?
-        {
-            return Err(denied(format_args!(
-                "INSERT policy denied the new row in `{table_name}`"
-            )));
+        if let Some(author) = self.checked(who) {
+            self.write_check(table, row, &key, author, WriteCheck::Insert, seq)?;
         }
         Ok(WriteHandle { row, seq })
     }
@@ -3316,9 +3443,18 @@ impl Inner {
         if let Some(author) = reader
             && !self.check(table, row, key, author, Operation::Select)?
         {
-            return Err(denied(format_args!(
-                "read policy denied {verb}: the target requires read permission"
-            )));
+            let detail = format!(
+                "read policy denied {verb} on table {}: the operation requires read \
+                 permission on the target row",
+                table.name
+            );
+            // A replica refuses it locally, as main does; an authority
+            // reports it as its policy rejection.
+            return Err(if self.client.is_some() {
+                rejected(detail)
+            } else {
+                denied(detail)
+            });
         }
         if let Some(author) = self.checked(*who)
             && !self.check_clause(
@@ -3428,23 +3564,17 @@ impl Inner {
             Located::Absent { .. } => unreachable!("absent upserts insert"),
         };
         // The new row is checked on the evidence SPEC 7 gives a WITH CHECK
-        // (see [`write_cut`]): a same-table EXISTS compares the new row with
-        // the old one, not with itself. Without a WITH CHECK, the new row
-        // must pass USING, as in Postgres.
-        let update = &table.policies.update;
-        let with_check = update.with_check.as_ref().or(update.using.as_ref());
-        if let Some(author) = self.checked(who)
-            && !{
-                let session = self.session(author);
-                let before = Some(write_cut(table, row, seq));
-                self.holds_at(table, row, &key, before, |ctx| {
-                    ctx.policy_clause(with_check, table, "a", &session)
-                })?
-            }
-        {
-            return Err(denied(format_args!(
-                "{verb} policy (WITH CHECK) denied the new row"
-            )));
+        // ([`Inner::write_check`]): a same-table EXISTS compares the new row
+        // with the old one, not with itself.
+        if let Some(author) = self.checked(who) {
+            self.write_check(
+                table,
+                row,
+                &key,
+                author,
+                WriteCheck::WithCheck { upsert },
+                seq,
+            )?;
         }
         Ok(WriteHandle { row, seq })
     }
@@ -3580,28 +3710,30 @@ impl Inner {
             content.is_some(),
         )?;
         // A restore writes an existing row back: the UPDATE policy decides.
-        if let Some(author) = self.checked(who)
-            && !self.check_write(table, row, &key, author, Operation::Update, seq)?
-        {
-            return Err(denied("RESTORE policy denied the restored row"));
+        if let Some(author) = self.checked(who) {
+            self.write_check(table, row, &key, author, WriteCheck::Restore, seq)?;
         }
         Ok(WriteHandle { row, seq })
     }
 }
 
-/// The rows a write's policy reads, for a write at `seq` (SPEC 7, WITH
-/// CHECK): committed state, overlaid with the unit's other inserted,
-/// restored and updated rows as they stand so far. The unit's deletes are
-/// not overlaid, so a committed row it deletes still reads as committed and
-/// a row it both inserts and deletes reads as absent; the protected row
-/// itself reads as committed (absent for an insert).
-fn write_cut(table: &Table, row: RowUuid, seq: u64) -> Cut {
-    Cut {
-        seq: seq.saturating_sub(1),
-        own: seq,
-        extra: Vec::new(),
-        protected: Some((table.stored.clone(), *row.0.as_bytes())),
-    }
+/// A write's own policy check, deferred to the end of its unit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteCheck {
+    /// The INSERT policy on the new row.
+    Insert,
+    /// The UPDATE (or UPSERT) WITH CHECK on the new row.
+    WithCheck { upsert: bool },
+    /// The UPDATE policy on a restored row.
+    Restore,
+}
+
+struct DeferredCheck {
+    table: String,
+    row: RowUuid,
+    key: Vec<u8>,
+    author: AuthorSubject,
+    check: WriteCheck,
 }
 
 /// Which branch a write addresses.
@@ -4576,8 +4708,12 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            let applied = inner.apply_with_edits(ops, &batch.edits, ops.len(), seq);
+            inner.defer_checks();
+            let applied = inner
+                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
+                .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
+                inner.abandon_checks();
                 inner
                     .conn
                     .execute_batch("ROLLBACK TO commit_batch; RELEASE commit_batch")

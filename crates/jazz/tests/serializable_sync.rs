@@ -672,3 +672,48 @@ fn a_read_of_deleted_rows_validates_as_it_was_read() {
     net.settle(OWNER, receipt.0)
         .expect("the authority re-reads deleted rows too");
 }
+
+/// Two transactions on one replica (a backend serving concurrent
+/// requests) both find a seeded id absent and insert it. The second commit
+/// is a conflict, so a retry finds the first one's row, never a storage
+/// error about an object that already exists.
+#[test]
+fn racing_inserts_of_one_id_on_one_replica_conflict() {
+    let net = Net::new(1);
+    let db = net.db(0);
+    let id = RowUuid::from_bytes([0x77; 16]);
+    let one = || Query::from("invites").filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let mut opens = Vec::new();
+    for _ in 0..2 {
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&one()).unwrap();
+        assert!(
+            net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
+                .unwrap()
+                .is_empty()
+        );
+        net.drive(db.serializable_tx_ref(open).insert(
+            "invites",
+            code("seeded"),
+            jazz::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        opens.push(open);
+    }
+    let first = net.drive(db.commit_serializable_handle(opens[0])).unwrap();
+    let second = net.drive(db.commit_serializable_handle(opens[1]));
+    let error = second.expect_err("the second insert of the id conflicts");
+    assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+    net.settle(0, first.0).expect("the first commit settles");
+    let all = net.core.prepare_query(&one()).unwrap();
+    assert_eq!(
+        block_on(net.core.all(&all, ReadOpts::default()))
+            .unwrap()
+            .len(),
+        1
+    );
+}

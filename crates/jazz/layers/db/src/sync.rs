@@ -5379,10 +5379,14 @@ impl Db {
                 .execute_batch("SAVEPOINT upload")
                 .map_err(|e| (storage(e), Vec::new()))?;
             let mark = inner.changed.borrow().len();
+            // The unit's write checks run at its end, grounded (SPEC 7).
+            inner.defer_checks();
             let applied = ops
                 .iter()
-                .try_for_each(|op| inner.apply_as(op, who, seq).map(drop));
+                .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
+                .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
+                inner.abandon_checks();
                 inner
                     .conn
                     .execute_batch("ROLLBACK TO upload; RELEASE upload")

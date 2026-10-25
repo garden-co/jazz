@@ -257,9 +257,9 @@ pub struct Cut {
     pub own: u64,
     pub extra: Vec<u64>,
     /// A write check's evidence (SPEC 7, WITH CHECK): of the versions at
-    /// `own`, deletes are not overlaid, and neither is the protected row
-    /// (stored table, id), which reads as committed.
-    pub protected: Option<(String, [u8; 16])>,
+    /// `own`, only the live rows grounded so far (by stored table) are
+    /// overlaid; every other row the unit wrote reads as committed.
+    pub grounded: Option<std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>>,
 }
 
 impl Cut {
@@ -385,20 +385,24 @@ impl<'a> Ctx<'a> {
             .collect::<Vec<_>>()
             .join(", ");
         // The versions at `own` that are overlaid: all of them, or for a
-        // write check the unit's live rows other than the protected one.
-        let overlaid = |alias: &str| match &cut.protected {
-            None => format!("{alias}_seq = {own}"),
-            Some(_) => format!("({alias}_seq = {own} AND {alias}_del = 0)"),
+        // write check the unit's grounded live rows.
+        let (overlaid_here, overlaid_c) = match &cut.grounded {
+            None => (format!("_seq = {own}"), format!("c._seq = {own}")),
+            Some(grounded) => match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
+                None => ("0".to_owned(), "0".to_owned()),
+                Some(ids) => {
+                    let ids = ids
+                        .iter()
+                        .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (
+                        format!("(_seq = {own} AND _del = 0 AND id IN ({ids}))"),
+                        format!("(c._seq = {own} AND c._del = 0 AND c.id IN ({ids}))"),
+                    )
+                }
+            },
         };
-        let mut overlaid_here = overlaid("");
-        let mut overlaid_c = overlaid("c.");
-        if let Some((stored, id)) = &cut.protected
-            && *stored == table.stored
-        {
-            let id = self.bind(Sql::Blob(id.to_vec()));
-            overlaid_here = format!("({overlaid_here} AND id <> {id})");
-            overlaid_c = format!("({overlaid_c} AND c.id <> {id})");
-        }
         let (visible, h_visible, newer) = if extra.is_empty() {
             (
                 format!("_seq <= {seq} OR {overlaid_here}"),
