@@ -1379,11 +1379,25 @@ impl Binding {
 
     /// Ask the authority whether `action` would be allowed; the request goes
     /// out on the next tick. Resolves to `"allowed" | "denied" | "unknown"`.
+    /// Ask the authority about `action` for this database's own session,
+    /// or, on a trusted backend, for `author` with its `claims`.
     pub fn request_permission_advice(
         &self,
         action: PermissionAdviceAction,
-    ) -> (u64, HostFuture<&'static str>) {
-        let id = self.db.request_permission_advice(action);
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<(u64, HostFuture<&'static str>)> {
+        let session = match author {
+            Some(author) => {
+                let author = self.author_of(author)?;
+                Some((
+                    author,
+                    self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
+                ))
+            }
+            None => None,
+        };
+        let id = self.db.request_permission_advice(action, session);
         self.hooks.after_write();
         let db = self.db.clone();
         let progress = self.hooks.progress.clone();
@@ -1391,7 +1405,7 @@ impl Binding {
             Box::pin(
                 async move { Ok(advice_str(progress.parked(db.permission_advice(id)).await)) },
             );
-        (id, future)
+        Ok((id, future))
     }
 
     /// Drop a pending advice request; it resolves `"unknown"`.
