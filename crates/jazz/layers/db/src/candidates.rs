@@ -393,7 +393,7 @@ impl Inner {
                     )
                 })?;
                 let target = schema.table(name)?;
-                let Some(condition) = target.policy(*operation) else {
+                let Some(condition) = target.inherited_policy(*operation) else {
                     return Ok(());
                 };
                 (
@@ -416,7 +416,7 @@ impl Inner {
                     return Ok(());
                 }
                 let target = schema.table(source_table)?;
-                let Some(condition) = target.policy(*operation) else {
+                let Some(condition) = target.inherited_policy(*operation) else {
                     return Ok(());
                 };
                 (

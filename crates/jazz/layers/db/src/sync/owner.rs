@@ -110,8 +110,8 @@ impl Inner {
                 || previous.jazz.without_permissions(),
                 |descriptor| descriptor.schema.schema,
             );
-            let source = self.named_policy_schema(&schema);
-            if source.jazz != previous.jazz {
+            let source = self.named_policy_schema(&schema)?;
+            if source.jazz != previous.jazz || source.names().tables != previous.names().tables {
                 self.view_policy_source = Some(Rc::new(source));
                 self.reset_everything();
             }
@@ -133,7 +133,7 @@ impl Inner {
         {
             let denied = previous.jazz.without_permissions();
             if denied != previous.jazz {
-                self.view_policy_source = Some(Rc::new(self.named_policy_schema(&denied)));
+                self.view_policy_source = Some(Rc::new(self.named_policy_schema(&denied)?));
                 self.reset_everything();
             }
         }

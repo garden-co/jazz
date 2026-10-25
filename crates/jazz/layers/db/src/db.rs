@@ -2224,11 +2224,13 @@ impl Inner {
 
     /// Keep the owner's compatible physical defaults and indexes when adopting
     /// the authority's policy semantics for the same structural schema.
-    fn named_policy_schema(&self, policies: &JazzSchema) -> Schema {
+    fn named_policy_schema(&self, policies: &JazzSchema) -> Result<Schema, Error> {
         if policies.version_id() == self.owner.jazz.version_id() {
-            self.named(&self.owner.jazz.with_permissions_from(policies))
+            Ok(self.named(&self.owner.jazz.with_permissions_from(policies)))
+        } else if self.names.get(&policies.version_id()).is_some() {
+            Ok(self.named(policies))
         } else {
-            self.named(policies)
+            self.named_catalogue_policy_schema(policies)
         }
     }
 
@@ -2307,11 +2309,9 @@ impl Inner {
                     "scoped permission policy descriptor is not resident",
                 )
             })?;
-            Rc::new(
-                (*schema)
-                    .clone()
-                    .with_policies_of(Rc::new(self.named_policy_schema(&descriptor.schema.schema))),
-            )
+            Rc::new((*schema).clone().with_policies_of(Rc::new(
+                self.named_policy_schema(&descriptor.schema.schema)?,
+            )))
         } else {
             schema
         };
@@ -4361,11 +4361,12 @@ impl Db {
                 // This view's permissions come from authenticated metadata,
                 // never from the caller. A split head/descriptor denies access.
                 if inner.view_policy_source.is_none() {
-                    inner.view_policy_source =
-                        Some(Rc::new(inner.named_policy_schema(&descriptor.map_or_else(
+                    inner.view_policy_source = Some(Rc::new(inner.named_policy_schema(
+                        &descriptor.map_or_else(
                             || inner.owner.jazz.without_permissions(),
                             |descriptor| descriptor.schema.schema,
-                        ))));
+                        ),
+                    )?));
                 }
             }
             if let Some(admitted) = inner.admitted.iter().find(|a| a.version_id() == version) {

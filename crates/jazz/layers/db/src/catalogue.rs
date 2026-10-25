@@ -59,6 +59,107 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
 }
 
 impl Inner {
+    /// An authenticated policy descriptor can be newer than this replica's
+    /// opened schema. Resolve its names through accepted UUIDs to the local
+    /// tables/column epochs, without installing a new schema or copying rows.
+    /// Missing identities are deliberately absent from the compiled schema:
+    /// an old table or column with the same spelling is never a substitute.
+    pub(super) fn named_catalogue_policy_schema(
+        &self,
+        policies: &JazzSchema,
+    ) -> Result<Schema, Error> {
+        let target = self
+            .catalogue_schema(policies.version_id())?
+            .ok_or_else(|| absent("current policy schema has no accepted catalogue descriptor"))?;
+        type LocalTable = (String, BTreeMap<GlobalPhysicalColumnId, String>);
+        let mut local: BTreeMap<GlobalPhysicalTableId, LocalTable> = BTreeMap::new();
+        for admitted in &self.admitted {
+            let Some(names) = self.names.get(&admitted.version_id()) else {
+                continue;
+            };
+            let Some(descriptor) = self.catalogue_schema(admitted.version_id())? else {
+                continue;
+            };
+            for (name, identity) in &descriptor.identities.tables {
+                let Some((stored, columns)) = names.tables.get(name) else {
+                    continue;
+                };
+                let entry = local
+                    .entry(identity.id)
+                    .or_insert_with(|| (stored.clone(), BTreeMap::new()));
+                if entry.0 != *stored {
+                    return Err(invalid(
+                        "accepted policy table identity maps to conflicting local storage",
+                    ));
+                }
+                for (column, identity) in &identity.columns {
+                    let Some(stored) = columns.get(column) else {
+                        continue;
+                    };
+                    if entry
+                        .1
+                        .insert(identity.id, stored.clone())
+                        .is_some_and(|previous| previous != *stored)
+                    {
+                        return Err(invalid(
+                            "accepted policy column identity maps to conflicting local storage",
+                        ));
+                    }
+                }
+            }
+        }
+        let mut schema = Schema::new(policies);
+        schema.tables.retain(|name, table| {
+            let Some(identity) = target.identities.tables.get(name) else {
+                return false;
+            };
+            let Some((stored, columns)) = local.get(&identity.id) else {
+                return false;
+            };
+            table.stored = stored.clone();
+            table.columns.retain_mut(|column| {
+                let Some(identity) = identity.columns.get(&column.name) else {
+                    return false;
+                };
+                let Some(stored) = columns.get(&identity.id) else {
+                    return false;
+                };
+                column.stored = stored.clone();
+                true
+            });
+            // A newer descriptor may declare indexes this old replica has
+            // never installed. Proof bounds can use only its physical indexes,
+            // translated back into the policy schema's current column names.
+            table.indexes = self
+                .physical
+                .tables
+                .get(stored)
+                .map_or_else(Vec::new, |physical| {
+                    physical
+                        .indexes
+                        .iter()
+                        .filter_map(|index| {
+                            index
+                                .iter()
+                                .map(|stored| {
+                                    if stored == "id" {
+                                        return Some(stored.clone());
+                                    }
+                                    table
+                                        .columns
+                                        .iter()
+                                        .find(|column| column.stored == *stored)
+                                        .map(|column| column.name.clone())
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .collect()
+                });
+            true
+        });
+        Ok(schema)
+    }
+
     pub(super) fn catalogue_head(&self) -> Result<Option<CatalogueHeadV1>, Error> {
         let bytes: Option<Vec<u8>> = self
             .conn

@@ -1079,12 +1079,9 @@ impl<'a> Ctx<'a> {
         if query.flat_join.is_some() {
             return self.compile_flat_join(query);
         }
-        if !query.policy_branches.is_empty()
-            || !query.inherits.is_empty()
-            || query.relation.is_some()
-        {
+        if !query.policy_branches.is_empty() || query.relation.is_some() {
             return Err(unsupported(
-                "this query form (policy branches, inherits, relation) on SQLite",
+                "this query form (policy branches, relation) on SQLite",
             ));
         }
         let table = self.table(&query.table)?;
@@ -1102,6 +1099,33 @@ impl<'a> Ctx<'a> {
         }
         for reachable in &query.reachable {
             wheres.push(self.reachable(reachable, table, alias)?);
+        }
+        for inherited in &query.inherits {
+            // This is an explicit query predicate, including for SYSTEM reads:
+            // the referenced live row must prove the requested capability.
+            // Ordinary read policies still apply independently below.
+            let operation = match inherited.operation {
+                crate::query::InheritsOperation::Select => Operation::Select,
+                crate::query::InheritsOperation::Insert => Operation::Insert,
+                crate::query::InheritsOperation::Update => Operation::Update,
+                crate::query::InheritsOperation::Delete => Operation::Delete,
+            };
+            let predicate = PolicyExpr::Inherits {
+                operation,
+                via_column: inherited.parent_column.clone(),
+                max_depth: inherited.max_depth,
+            };
+            let previous = std::mem::replace(&mut self.in_policy, true);
+            let predicate = self.policy_expr(
+                &predicate,
+                table,
+                alias,
+                None,
+                self.claims,
+                DEFAULT_INHERITS_DEPTH,
+            );
+            self.in_policy = previous;
+            wheres.push(predicate?);
         }
         for join in &query.joins {
             wheres.push(self.join_exists(join, table, alias)?);
@@ -2277,10 +2301,12 @@ impl<'a> Ctx<'a> {
         depth: usize,
     ) -> Result<String, Error> {
         let previous = std::mem::replace(&mut self.in_inherited_policy, true);
-        let result = match table.policy(operation) {
-            None => Ok("0".to_owned()),
-            Some(policy) => self.policy_expr(policy, table, alias, None, session, depth),
-        };
+        let result = self.under_policy_schema(table, |ctx, table| {
+            match table.inherited_policy(operation) {
+                None => Ok("0".to_owned()),
+                Some(policy) => ctx.policy_expr(policy, table, alias, None, session, depth),
+            }
+        });
         self.in_inherited_policy = previous;
         result
     }

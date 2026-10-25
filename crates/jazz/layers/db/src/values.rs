@@ -545,6 +545,20 @@ impl Table {
         name == "id" || self.column(name).is_some()
     }
 
+    /// An inherited capability concerns the accepted old row. UPDATE's CHECK
+    /// validates a replacement, so a CHECK-only policy declares an unrestricted
+    /// old-row capability; absence of the entire operation still denies.
+    pub fn inherited_policy(&self, operation: crate::tools::Operation) -> Option<&PolicyExpr> {
+        if operation == crate::tools::Operation::Update {
+            return match &self.policies.update.using {
+                Some(policy) => Some(policy),
+                None if self.policies.update.with_check.is_some() => Some(&PolicyExpr::True),
+                None => None,
+            };
+        }
+        self.policy(operation)
+    }
+
     /// The policy that gates `operation`, or `None` (deny).
     pub fn policy(&self, operation: crate::tools::Operation) -> Option<&PolicyExpr> {
         use crate::tools::Operation::*;
