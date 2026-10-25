@@ -17,7 +17,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-mod common;
+use crate::common;
 
 use duplex_transport::duplex;
 use jazz::block_on;

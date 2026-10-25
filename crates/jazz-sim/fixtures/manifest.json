@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "release": "https://github.com/garden-co/jazz/releases/tag/jazz-sim-fixtures-v1",
+  "fixtures": [
+    {
+      "name": "automerge-paper",
+      "path": "automerge-paper/editing-trace.js",
+      "asset": "https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/automerge-paper-editing-trace.js",
+      "sha256": "aeccdcd46542fede7f893c09f8e9008aa1909167d96acdfd32102ec7fc04f4f4",
+      "bytes": 4579726,
+      "source": "automerge/automerge-perf edit-by-index editing trace"
+    },
+    {
+      "name": "seph-blog1",
+      "path": "seph-blog1/seph-blog1.json.gz",
+      "asset": "https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/seph-blog1.json.gz",
+      "sha256": "43b5d326ca8c9094cd94e28ab66cd2f3073ce2893db959a0388c53f0aed8156d",
+      "bytes": 733701,
+      "source": "josephg/editing-traces sequential trace"
+    },
+    {
+      "name": "egwalker",
+      "path": "egwalker/S3.json",
+      "asset": "https://github.com/garden-co/jazz/releases/download/jazz-sim-fixtures-v1/egwalker-S3.json",
+      "sha256": "a2ac2036f851d434b278d231f5a8199f0097ff87cf171b5d12c9d81203a2ad91",
+      "bytes": 3466010,
+      "source": "josephg/egwalker-paper S3 dataset"
+    }
+  ]
+}

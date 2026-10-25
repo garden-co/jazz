@@ -3,7 +3,7 @@
 //! differ in shape share one record type, and a synced forward array
 //! relation ships the rows its arrays list. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

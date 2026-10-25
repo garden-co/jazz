@@ -107,8 +107,10 @@ impl Ctx<'_> {
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
-                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                "SELECT {alias}.id, {alias}._seq, {alias}._del, {alias}.{} \
+                 {columns} FROM {source} AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} \
+                 OFFSET {offset}",
+                quote(TRANSACTION_ID_COLUMN),
                 and(&wheres),
             )
         };
@@ -120,6 +122,8 @@ impl Ctx<'_> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            versioned: true,
+            union: false,
             preps: self.preps,
         })
     }

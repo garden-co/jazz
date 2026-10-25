@@ -7665,19 +7665,22 @@ mod tests {
     }
 
     #[test]
-    fn legacy_row_member_postcard_golden_decodes() {
-        const LEGACY: &[u8] = &[
-            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    fn row_member_postcard_golden_decodes() {
+        // The occurrence crosses as its ResultKey (main's encoding since the
+        // unified occurrence serialization).
+        const GOLDEN: &[u8] = &[
+            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 26, 2, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
         ];
         let member = ResultMemberEntry::Row(RealRowMemberEntry::current_content((
             jazz_types::Intern::new("t".to_owned()),
             RowUuid::from_bytes([1; 16]),
             TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
         )));
-        assert_eq!(postcard::to_allocvec(&member).unwrap(), LEGACY);
-        let decoded: ResultMemberEntry = postcard::from_bytes(LEGACY).unwrap();
+        assert_eq!(postcard::to_allocvec(&member).unwrap(), GOLDEN);
+        let decoded: ResultMemberEntry = postcard::from_bytes(GOLDEN).unwrap();
         assert_eq!(decoded, member);
     }
 

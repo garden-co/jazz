@@ -4,7 +4,7 @@
 //! history and indexes, a reopened file finds them again, and a client on the
 //! old schema syncs with a server on the new one. No data is copied.
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

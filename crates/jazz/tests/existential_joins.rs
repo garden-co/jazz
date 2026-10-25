@@ -3,7 +3,7 @@
 //! when the reader may read it. Synced, the server ships each level's
 //! correlated rows with the result. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

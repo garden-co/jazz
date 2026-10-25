@@ -4,7 +4,7 @@
 //! rows that left and fetches result rows it lacks, which covers rows that
 //! became readable without changing. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

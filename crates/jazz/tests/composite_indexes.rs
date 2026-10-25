@@ -17,7 +17,7 @@ use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuil
 #[cfg(any())] // jazz-sqlite: not ported, RocksDB storage
 use jazz_storage_rocksdb::RocksDbStorage;
 
-mod common;
+use crate::common;
 
 use common::allow_all_policies;
 

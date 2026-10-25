@@ -3,7 +3,7 @@
 //! chunk tree, and still reads, filters, orders and indexes as its logical
 //! value (Groove SPEC ch. 9, `INV-LARGE-1`).
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

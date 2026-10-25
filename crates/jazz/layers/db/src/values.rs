@@ -1045,6 +1045,8 @@ pub struct CurrentRow {
     pub(crate) joined: Arc<[JoinedRow]>,
     /// A flat join's root version when the root is a history source.
     pub(crate) version: Option<SourceVersion>,
+    /// A union read's arm label: with the row, its occurrence.
+    pub(crate) union_arm: Option<Arc<str>>,
 }
 
 /// A history version's transaction identity, `(tx, node)` as its
@@ -1052,12 +1054,14 @@ pub struct CurrentRow {
 pub type SourceVersion = (u64, crate::ids::NodeUuid);
 
 /// A row's result key: the row itself, or a flat join's root followed by
-/// its joined source rows, each with its history version if it has one.
+/// its joined source rows, each with its history version if it has one,
+/// and for a union read the arm that matched it (at the root's position).
 /// Relations arrive as nested rows, not joined outputs.
 pub fn occurrence_key(
     root: RowUuid,
     version: Option<SourceVersion>,
     joined: &[JoinedRow],
+    union_arm: Option<&str>,
 ) -> jazz_types::object::ResultKey {
     use jazz_types::object::{ObjectId, OutputOccurrenceId, ResultKey, SourceOccurrenceId};
     let source = |row: RowUuid, version: Option<SourceVersion>| {
@@ -1067,7 +1071,7 @@ pub fn occurrence_key(
             None => SourceOccurrenceId::current(id),
         }
     };
-    if joined.is_empty() && version.is_none() {
+    if joined.is_empty() && version.is_none() && union_arm.is_none() {
         return ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
             root.0,
         )));
@@ -1078,9 +1082,9 @@ pub fn occurrence_key(
             joined
                 .iter()
                 .map(|joined| source(joined.row, joined.version)),
-            [],
+            union_arm.map(|label| (0, label.to_owned())),
         )
-        .expect("an occurrence without union arms is valid"),
+        .expect("a union arm label is 1..=4096 bytes, as union_plan checks"),
     )
 }
 
@@ -1110,6 +1114,17 @@ impl CurrentRow {
     /// A flat join's root version, when its root is a history source.
     pub fn root_version(&self) -> Option<SourceVersion> {
         self.version
+    }
+
+    /// A union read's arm label (the arm that matched this occurrence of
+    /// the row); `None` for other reads.
+    pub fn union_arm(&self) -> Option<&str> {
+        self.union_arm.as_deref()
+    }
+
+    /// The row's result key ([`occurrence_key`]).
+    pub fn occurrence_key(&self) -> jazz_types::object::ResultKey {
+        occurrence_key(self.id, self.version, &self.joined, self.union_arm())
     }
 
     pub fn is_deleted(&self) -> bool {

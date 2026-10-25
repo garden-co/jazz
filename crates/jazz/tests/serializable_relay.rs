@@ -6,7 +6,7 @@
 //! last word on its tabs' commits and validates them itself. Not ported
 //! from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

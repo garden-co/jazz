@@ -3,7 +3,7 @@
 //! operation under the session's policies and rolls it back; without an
 //! authority the answer is `Unknown`, never a local guess.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

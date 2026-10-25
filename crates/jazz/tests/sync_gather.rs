@@ -4,7 +4,7 @@
 //! frontier value so an edge that extends the closure reaches the replica.
 //! Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

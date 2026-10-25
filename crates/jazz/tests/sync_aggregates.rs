@@ -3,7 +3,7 @@
 //! aggregates them as it would local rows. AVG stays finite for large
 //! finite inputs. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

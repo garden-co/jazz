@@ -5,7 +5,7 @@
 //! concurrent writes do not). Not ported from Jazz: these pin the prototype's
 //! design from sqlite-experiment/serializable.md.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

@@ -29,7 +29,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-mod common;
+use crate::common;
 
 use duplex_transport::duplex;
 use jazz::block_on;

@@ -3,7 +3,7 @@
 //! session write is staged on the replica and checked as that session, with
 //! the claims the link vouches for, at the authority. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

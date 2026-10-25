@@ -2550,7 +2550,7 @@ fn branch_history_checks_inherited_policy_evidence_in_the_branch() {
     );
 }
 
-mod common;
+use crate::common;
 
 /// One write in a scripted branch-view sequence.
 type BranchEdit<'a> = Box<dyn Fn(&Db) + 'a>;

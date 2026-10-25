@@ -4,7 +4,7 @@
 //! writer installs its own image at `through`, with the authority's stamps.
 //! Anything else ships the image as before. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

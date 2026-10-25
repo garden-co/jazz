@@ -1,5 +1,5 @@
 // Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
-mod common;
+use crate::common;
 
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};

@@ -4,7 +4,7 @@
 //! commit each maintained result must equal a fresh read. Not ported from
 //! Jazz: this pins the prototype's fan-out (src/fanout.rs).
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

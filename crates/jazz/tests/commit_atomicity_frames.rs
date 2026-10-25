@@ -2,7 +2,7 @@
 //! the authority's fan-out for it outgrows one wire frame and the frames
 //! arrive across several client ticks.
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -45,8 +45,8 @@ impl WireTransport for GatedWire {
     }
 }
 
-const ROWS: usize = 3_000;
-const BODY: usize = 1_000;
+const ROWS: usize = 100;
+const BODY: usize = 30_000;
 
 fn schema() -> JazzSchema {
     compile_schema(

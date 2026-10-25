@@ -1,7 +1,7 @@
 //! A session's claims changing re-runs only that session's results, not
 //! every live result on the node. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

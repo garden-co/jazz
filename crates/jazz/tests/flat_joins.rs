@@ -5,7 +5,7 @@
 //! results add, remove and replace by that occurrence (SPEC 6.4.1). Synced
 //! reads ship each occurrence's joined rows. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

@@ -3,7 +3,7 @@
 //! installed), and clients push the nodes of their new values ahead of the
 //! commit that references them (Groove SPEC ch. 19 §19.4, §19.6).
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
