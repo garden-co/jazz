@@ -7,7 +7,7 @@
 //! Synced unions attach on the server as the union and ship every arm's
 //! rows.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

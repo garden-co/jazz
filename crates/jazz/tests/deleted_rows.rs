@@ -7,7 +7,7 @@
 //! row's current version, and a resumed client keeps the deleted versions
 //! it holds). Ported from #4173 and #4182's Groove behaviour.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

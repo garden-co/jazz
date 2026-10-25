@@ -1,7 +1,7 @@
 //! Policy values a session supplies beyond its identity and claims, and
 //! inheritance through an array reference.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

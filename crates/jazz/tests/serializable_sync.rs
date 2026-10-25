@@ -6,7 +6,7 @@
 //! non-serializable commit. Not ported verbatim (Jazz's suite drives its
 //! server shell and snapshot-capture internals).
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

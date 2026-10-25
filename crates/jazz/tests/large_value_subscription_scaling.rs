@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema};
 use jazz::block_on;

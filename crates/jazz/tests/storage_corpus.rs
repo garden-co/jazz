@@ -19,7 +19,7 @@
 //! `dev/gates/storage-compat.sh` runs these by exact name. Not ported from
 //! Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

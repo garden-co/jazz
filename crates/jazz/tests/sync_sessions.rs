@@ -2,7 +2,7 @@
 //! session, never stalls the others, and its slot is reused, so churn does
 //! not grow the server. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};

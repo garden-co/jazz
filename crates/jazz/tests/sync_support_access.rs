@@ -3,7 +3,7 @@
 //! membership is deleted. The replica must lose it (and get it back when
 //! access returns). Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

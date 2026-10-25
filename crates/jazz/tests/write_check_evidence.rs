@@ -4,7 +4,7 @@
 //! row it is deciding; the unit's deletes are not overlaid, so a row the
 //! unit both inserts and deletes is never evidence.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

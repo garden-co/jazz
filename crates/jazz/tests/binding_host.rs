@@ -2,7 +2,7 @@
 //! options objects (JSON here), binding-codec cells, postcard queries, and
 //! sync frames the host carries between two bindings.
 
-mod common;
+use crate::common;
 
 use std::future::Future;
 use std::pin::pin;

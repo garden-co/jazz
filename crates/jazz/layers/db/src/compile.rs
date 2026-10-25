@@ -2719,6 +2719,14 @@ fn plain_exists(sql: &str) -> Option<(&str, &str)> {
     }
     let split = split?;
     let (from, cond) = (&body[..split], &body[split + " WHERE ".len()..]);
+    // Every source must be aliased: an unaliased one (`json_each(..)`)
+    // names its columns bare, which another joined source could shadow.
+    if !top_level(from)
+        .split(',')
+        .all(|source| source.contains(" AS "))
+    {
+        return None;
+    }
     // Only a bare condition: no top-level clause after it.
     let top = top_level(cond);
     if [" GROUP BY ", " ORDER BY ", " LIMIT ", " HAVING "]
@@ -3380,6 +3388,7 @@ mod tests {
             "NOT EXISTS (SELECT 1 FROM a WHERE x)",
             "EXISTS (SELECT 1 FROM a WHERE x LIMIT 1)",
             "EXISTS (SELECT 1 FROM json_each(?1) WHERE value = 3) AND 1",
+            "EXISTS (SELECT 1 FROM json_each(t.a) WHERE value = 3)",
         ] {
             assert_eq!(plain_exists(sql), None, "{sql}");
         }

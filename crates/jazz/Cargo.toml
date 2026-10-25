@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 autobins = false
 autobenches = false
+autotests = false
 
 [features]
 # Jazz is the common semantic library. Process and target shells select
@@ -99,3 +100,15 @@ harness = false
 [[bench]]
 name = "fanout_wire"
 harness = false
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
+[[test]]
+name = "durable_file"
+path = "tests/durable_file.rs"
+
+[[test]]
+name = "maintained_differential"
+path = "tests/maintained_differential.rs"

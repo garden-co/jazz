@@ -2,7 +2,7 @@
 //! grow (new tables, columns, indexes) and nothing already stored changes.
 //! Changes SQLite cannot make in place fail with "not supported yet".
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

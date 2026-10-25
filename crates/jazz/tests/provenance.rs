@@ -2,7 +2,7 @@
 //! engine-maintained per row version, readable, orderable and filterable by
 //! name, kept by history, and never writable by the app. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

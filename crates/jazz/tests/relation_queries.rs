@@ -3,7 +3,7 @@
 //! the ordinary query it stands for. Projections that rename or narrow the
 //! output are refused as not supported yet. Unions: `union_queries.rs`.
 
-mod common;
+use crate::common;
 use common::compile_schema;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
