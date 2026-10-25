@@ -1940,17 +1940,26 @@ impl WasmTransport {
     pub fn set_auxiliary_trace_enabled(&self, _enabled: bool) {}
 
     #[wasm_bindgen(js_name = sendWireFrame)]
-    pub fn send_wire_frame(&self, frame: Vec<u8>) {
+    pub fn send_wire_frame(&self, frame: Vec<u8>) -> Result<(), JsValue> {
+        jazz::sync_codec::decode_sync_message(&frame).map_err(|error| core_error_to_js(&error))?;
         self.link.receive([frame]);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = sendWireFrames)]
-    pub fn send_wire_frames(&self, frames: js_sys::Array) {
-        self.link.receive(
-            frames
-                .iter()
-                .map(|frame| js_sys::Uint8Array::new(&frame).to_vec()),
-        );
+    pub fn send_wire_frames(&self, frames: js_sys::Array) -> Result<(), JsValue> {
+        let frames: Vec<Vec<u8>> = frames
+            .iter()
+            .map(|frame| js_sys::Uint8Array::new(&frame).to_vec())
+            .collect();
+        // Validate the complete batch before exposing even its valid prefix to
+        // the database or scheduling a tick, matching the native host boundary.
+        for frame in &frames {
+            jazz::sync_codec::decode_sync_message(frame)
+                .map_err(|error| core_error_to_js(&error))?;
+        }
+        self.link.receive(frames);
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = recvWireFrames)]

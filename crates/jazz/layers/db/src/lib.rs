@@ -42,6 +42,7 @@ pub mod names;
 pub mod options;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+pub mod sync_codec;
 pub mod values;
 
 #[cfg(feature = "testing")]
