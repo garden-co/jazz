@@ -301,6 +301,8 @@ pub struct Compiled {
     /// `$transactionId`) after its id, seq and deletion flag, as a flat
     /// join does: a history row's occurrence is its version.
     pub versioned: bool,
+    /// Rows are union rows: column 3 is the arm's label.
+    pub union: bool,
     /// Run before the statement.
     pub preps: Vec<Prep>,
     /// The statement with prefix-tie ranks in its order, used instead when
@@ -661,6 +663,7 @@ impl<'a> Ctx<'a> {
             aggregate: true,
             joined: 0,
             versioned: false,
+            union: false,
             preps: self.preps,
         })
     }
@@ -696,6 +699,9 @@ impl<'a> Ctx<'a> {
         if query.flat_join.is_some() {
             return self.compile_flat_join(query);
         }
+        if let Some(plan) = crate::db::union_plan(query, self.schema)? {
+            return self.compile_union(plan, include_deleted);
+        }
         if !query.policy_branches.is_empty()
             || !query.inherits.is_empty()
             || query.relation.is_some()
@@ -704,6 +710,54 @@ impl<'a> Ctx<'a> {
                 "this query form (policy branches, inherits, relation) on SQLite",
             ));
         }
+        let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
+        let alias = "t";
+        if let Some(aggregate) = &query.aggregate {
+            if !query.array_subqueries.is_empty() || query.select.is_some() {
+                return Err(unsupported(
+                    "aggregates with selections or array subqueries on SQLite",
+                ));
+            }
+            let from = self.source(table)?;
+            return self.compile_aggregate(query, aggregate, table, &from, alias, &wheres);
+        }
+        let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
+        let columns = projection
+            .iter()
+            .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
+        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(query.offset as i64));
+        let source = self.source(table)?;
+        let statement = |order: &str| {
+            format!(
+                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                and(&wheres),
+            )
+        };
+        Ok(Compiled {
+            sql: statement(&order),
+            ranked_sql: ranked_order.as_deref().map(statement),
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: 0,
+            versioned: false,
+            union: false,
+            preps: self.preps,
+        })
+    }
+
+    /// A plain query's root table (read as `t`), its projection, and the
+    /// conditions its rows meet: filters, traversals, required includes and
+    /// array requirements, the read policy, and liveness.
+    fn root_rows(
+        &mut self,
+        query: &Query,
+        include_deleted: bool,
+    ) -> Result<(&'a Table, Vec<(String, ValueType)>, Vec<String>), Error> {
         let table = self.table(&query.table)?;
         let projection = projection(table, query.select.as_deref())?;
         let alias = "t";
@@ -749,39 +803,134 @@ impl<'a> Ctx<'a> {
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(table, alias, session)?);
         }
-        if let Some(aggregate) = &query.aggregate {
-            if !query.array_subqueries.is_empty() || query.select.is_some() {
-                return Err(unsupported(
-                    "aggregates with selections or array subqueries on SQLite",
-                ));
+        Ok((table, projection, wheres))
+    }
+
+    /// A union: each arm's rows under its own conditions and read policy,
+    /// labelled with the arm (column 3), `UNION ALL`, then ordered and
+    /// windowed as a whole. Ties break by row id, then by arm label, in
+    /// the last key's direction, so a row matched by several arms has a
+    /// stable place for each.
+    fn compile_union(
+        mut self,
+        plan: crate::db::UnionPlan,
+        include_deleted: bool,
+    ) -> Result<Compiled, Error> {
+        let alias = "t";
+        let mut projection = Vec::new();
+        // Each arm as (plain, ranked) statement text.
+        let mut arms = Vec::with_capacity(plan.arms.len());
+        let mut keys = Vec::new();
+        for (label, arm) in &plan.arms {
+            let unsupported_arm = [
+                (arm.flat_join.is_some(), "flat joins"),
+                (
+                    crate::schema::history::history_source_table(&arm.table).is_some(),
+                    "history reads",
+                ),
+                (!arm.policy_branches.is_empty(), "policy branches"),
+                (!arm.inherits.is_empty(), "inherited-policy traversals"),
+                (arm.aggregate.is_some(), "aggregates"),
+                (!arm.includes.is_empty(), "includes"),
+                (!arm.array_subqueries.is_empty(), "array subqueries"),
+                (arm.select.is_some(), "select projections"),
+            ];
+            if let Some((_, feature)) = unsupported_arm.iter().find(|(present, _)| *present) {
+                return Err(unsupported(format!("union arms with {feature}")));
             }
-            let from = self.source(table)?;
-            return self.compile_aggregate(query, aggregate, table, &from, alias, &wheres);
+            if let Some(column) = deletion_column(arm) {
+                if !include_deleted {
+                    return Err(query_error(format!(
+                        "Reading {column} requires includeDeleted"
+                    )));
+                }
+                if !arm.joins.is_empty() {
+                    return Err(unsupported(format!("reading {column} in joins")));
+                }
+            }
+            let (table, arm_projection, wheres) = self.root_rows(arm, include_deleted)?;
+            let columns = arm_projection
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _))| Ok(format!(", {} AS c{i}", column_sql(table, alias, name)?)))
+                .collect::<Result<String, Error>>()?;
+            let label = self.bind(Sql::Text(label.as_bytes().to_vec()));
+            keys = self.order_terms(table, alias, &plan.order_by)?;
+            let mut plain_keys = String::new();
+            let mut ranked_keys = String::new();
+            for (i, key) in keys.iter().enumerate() {
+                plain_keys.push_str(&format!(", {} AS k{i}", key.sql));
+                ranked_keys.push_str(&format!(", {} AS k{i}", key.sql));
+                if let Some(rank) = &key.rank {
+                    ranked_keys.push_str(&format!(", {rank} AS r{i}"));
+                }
+            }
+            let source = self.source(table)?;
+            let body = |keys: &str| {
+                format!(
+                    "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._del AS _del, \
+                     {label} AS _arm{columns}{keys} FROM {source} AS {alias} WHERE {}",
+                    and(&wheres)
+                )
+            };
+            let (mut plain, mut ranked) = (body(&plain_keys), body(&ranked_keys));
+            // An arm's own window applies before the union.
+            if arm.limit.is_some() || arm.offset != 0 {
+                let (order, ranked_order) = self.order_sql(table, alias, &arm.order_by)?;
+                let ranked_order = ranked_order.unwrap_or_else(|| order.clone());
+                let limit = self.bind(Sql::Integer(arm.limit.map_or(-1, |l| l as i64)));
+                let offset = self.bind(Sql::Integer(arm.offset as i64));
+                let window = |body: &str, order: &str| {
+                    format!("SELECT * FROM ({body} ORDER BY {order} LIMIT {limit} OFFSET {offset})")
+                };
+                plain = window(&plain, &order);
+                ranked = window(&ranked, &ranked_order);
+            }
+            projection = arm_projection;
+            arms.push((plain, ranked));
         }
-        let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
-        let columns = projection
-            .iter()
-            .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
-            .collect::<Result<String, Error>>()?;
-        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
-        let offset = self.bind(Sql::Integer(query.offset as i64));
-        let source = self.source(table)?;
-        let statement = |order: &str| {
+        let tie = match plan.order_by.last().map(|key| key.direction) {
+            Some(OrderDirection::Desc) => "DESC",
+            _ => "ASC",
+        };
+        let order = |ranked: bool| {
+            let mut order = Vec::new();
+            for (i, key) in keys.iter().enumerate() {
+                order.push(format!("k{i} {}", key.direction));
+                if ranked && key.rank.is_some() {
+                    order.push(format!("r{i} {}", key.direction));
+                }
+            }
+            order.push(format!("id {tie}"));
+            order.push(format!("_arm {tie}"));
+            order.join(", ")
+        };
+        let limit = self.bind(Sql::Integer(plan.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(plan.offset as i64));
+        let columns: String = (0..projection.len()).map(|i| format!(", c{i}")).collect();
+        let statement = |ranked: bool| {
+            let arms: Vec<&str> = arms
+                .iter()
+                .map(|(plain, with_ranks)| if ranked { with_ranks } else { plain }.as_str())
+                .collect();
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
-                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
-                and(&wheres),
+                "SELECT id, _seq, _del, _arm{columns} FROM ({}) ORDER BY {} \
+                 LIMIT {limit} OFFSET {offset}",
+                arms.join(" UNION ALL "),
+                order(ranked)
             )
         };
+        let ranked = keys.iter().any(|key| key.rank.is_some());
         Ok(Compiled {
-            sql: statement(&order),
-            ranked_sql: ranked_order.as_deref().map(statement),
+            sql: statement(false),
+            ranked_sql: ranked.then(|| statement(true)),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
             joined: 0,
             versioned: false,
+            union: true,
             preps: self.preps,
         })
     }
@@ -1041,6 +1190,7 @@ impl<'a> Ctx<'a> {
             aggregate: false,
             joined: sources.len() - 1,
             versioned: true,
+            union: false,
             preps: self.preps,
         })
     }
@@ -1218,6 +1368,7 @@ impl<'a> Ctx<'a> {
             aggregate: false,
             joined: 0,
             versioned: false,
+            union: false,
             preps: self.preps,
         })
     }
@@ -2955,39 +3106,13 @@ impl Ctx<'_> {
         let mut keys = Vec::new();
         let mut ranked = Vec::new();
         let mut any_large = false;
-        for key in order {
-            let direction = match key.direction {
-                OrderDirection::Asc => "ASC",
-                OrderDirection::Desc => "DESC",
-            };
-            if crate::values::author_record(&key.column).is_some() {
-                return Err(unsupported(format!(
-                    "ordering by the author record `{}` (order by its parts)",
-                    key.column
-                )));
-            }
-            match self.column_term(table, alias, &key.column)? {
-                Term::Large(column) => {
-                    any_large = true;
-                    let sql = crate::large::key_sql(&column.cell);
-                    keys.push(format!("{sql} {direction}"));
-                    ranked.push(format!("{sql} {direction}"));
-                    let question = format!("rank {} {}", column.table, column.column);
-                    let slot = self.prep(
-                        |slot| Prep::Rank {
-                            slot,
-                            table: column.table.clone(),
-                            column: column.column.clone(),
-                        },
-                        question,
-                    );
-                    ranked.push(format!("{} {direction}", scratch_value(slot, &column.cell)));
-                }
-                term => {
-                    let sql = format!("{} {direction}", term.sql().expect("column"));
-                    keys.push(sql.clone());
-                    ranked.push(sql);
-                }
+        for key in self.order_terms(table, alias, order)? {
+            let direction = key.direction;
+            keys.push(format!("{} {direction}", key.sql));
+            ranked.push(format!("{} {direction}", key.sql));
+            if let Some(rank) = key.rank {
+                any_large = true;
+                ranked.push(format!("{rank} {direction}"));
             }
         }
         // Ties break by row id in the direction of the last key, so a declared
@@ -3001,6 +3126,62 @@ impl Ctx<'_> {
         ranked.push(format!("{alias}.id {tie}"));
         Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
     }
+
+    /// Each order key's SQL and direction; a large-capable column's key is
+    /// its sort prefix, with the rank of prefix ties (answered by a prep)
+    /// as its second part.
+    fn order_terms(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        order: &[crate::query::OrderBy],
+    ) -> Result<Vec<OrderTerm>, Error> {
+        let mut terms = Vec::with_capacity(order.len());
+        for key in order {
+            let direction = match key.direction {
+                OrderDirection::Asc => "ASC",
+                OrderDirection::Desc => "DESC",
+            };
+            if crate::values::author_record(&key.column).is_some() {
+                return Err(unsupported(format!(
+                    "ordering by the author record `{}` (order by its parts)",
+                    key.column
+                )));
+            }
+            terms.push(match self.column_term(table, alias, &key.column)? {
+                Term::Large(column) => {
+                    let question = format!("rank {} {}", column.table, column.column);
+                    let slot = self.prep(
+                        |slot| Prep::Rank {
+                            slot,
+                            table: column.table.clone(),
+                            column: column.column.clone(),
+                        },
+                        question,
+                    );
+                    OrderTerm {
+                        sql: crate::large::key_sql(&column.cell),
+                        rank: Some(scratch_value(slot, &column.cell)),
+                        direction,
+                    }
+                }
+                term => OrderTerm {
+                    sql: term.sql().expect("column").to_owned(),
+                    rank: None,
+                    direction,
+                },
+            });
+        }
+        Ok(terms)
+    }
+}
+
+/// One order key: its SQL, the rank breaking its prefix ties (a
+/// large-capable column), and its direction.
+struct OrderTerm {
+    sql: String,
+    rank: Option<String>,
+    direction: &'static str,
 }
 
 fn is_id(operand: &Operand) -> bool {

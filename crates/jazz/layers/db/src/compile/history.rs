@@ -123,6 +123,7 @@ impl Ctx<'_> {
             aggregate: false,
             joined: 0,
             versioned: true,
+            union: false,
             preps: self.preps,
         })
     }
