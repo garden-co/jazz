@@ -297,6 +297,10 @@ pub struct Compiled {
     /// Joined source row ids each row carries after its root's id, seq and
     /// deletion flag (a flat join's occurrence; 0 otherwise).
     pub joined: usize,
+    /// Each row carries its root's version (a history read's
+    /// `$transactionId`) after its id, seq and deletion flag, as a flat
+    /// join does: a history row's occurrence is its version.
+    pub versioned: bool,
     /// Run before the statement.
     pub preps: Vec<Prep>,
     /// The statement with prefix-tie ranks in its order, used instead when
@@ -656,6 +660,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: true,
             joined: 0,
+            versioned: false,
             preps: self.preps,
         })
     }
@@ -776,6 +781,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            versioned: false,
             preps: self.preps,
         })
     }
@@ -1034,6 +1040,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: false,
             joined: sources.len() - 1,
+            versioned: true,
             preps: self.preps,
         })
     }
@@ -1210,6 +1217,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            versioned: false,
             preps: self.preps,
         })
     }

@@ -2099,7 +2099,11 @@ impl Inner {
                     crate::ids::NodeUuid(uuid::Uuid::from_slice(node).map_err(|_| corrupt())?),
                 )))
             };
-            let root_version = if flat { version(3)? } else { None };
+            let root_version = if compiled.versioned {
+                version(3)?
+            } else {
+                None
+            };
             let joined = (0..compiled.joined)
                 .map(|i| {
                     let id: Vec<u8> = row.get(4 + 2 * i).map_err(storage)?;
@@ -2111,7 +2115,11 @@ impl Inner {
                     })
                 })
                 .collect::<Result<Arc<[_]>, Error>>()?;
-            let first = if flat { 4 + 2 * compiled.joined } else { 3 };
+            let first = if flat {
+                4 + 2 * compiled.joined
+            } else {
+                3 + usize::from(compiled.versioned)
+            };
             let cells = compiled
                 .projection
                 .iter()
@@ -2940,21 +2948,6 @@ impl Inner {
         Ok(cells)
     }
 
-    /// Whether `row` on branch `key` has a superseded committed image.
-    fn has_history(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
-        let sql = format!(
-            "SELECT EXISTS (SELECT 1 FROM {} WHERE id = ?1 AND _b = ?2)",
-            quote(&format!("{}__h", table.stored))
-        );
-        self.conn
-            .cached_row(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
-                |r| r.get(0),
-            )
-            .map_err(storage)
-    }
-
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
@@ -3160,14 +3153,10 @@ impl Inner {
         Ok(WriteHandle { row, seq })
     }
 
-    /// Read-for-write: a hidden row is indistinguishable from an absent one,
-    /// and omitted cells must not be merged blind.
-    /// The session a write's policies (read access to its target, USING,
-    /// WITH CHECK, INSERT, DELETE) are checked as here: a trusted
-    /// session's, at the authority. A replica leaves them to the authority
-    /// on upload, which rejects the write: it may lack rows those policies
-    /// read (hidden from it), and a backend acting for a session holds
-    /// rows that session cannot read.
+    /// The session a write's operation policies (USING, WITH CHECK,
+    /// INSERT, DELETE) are checked as here: a trusted session's, at the
+    /// authority. A replica leaves them to the authority on upload: it may
+    /// lack rows those policies read (hidden from it).
     fn checked(&self, who: Who) -> Option<AuthorSubject> {
         match who {
             Who::Session(author) if self.client.is_none() => Some(author),
@@ -3175,6 +3164,11 @@ impl Inner {
         }
     }
 
+    /// Read-for-write (SPEC 7, INV-RLS-20): a session may update only a
+    /// row it may read, and omitted cells must not be merged blind. A
+    /// replica acting for a session (a backend's request) refuses an update
+    /// of a row hidden from it at once; an upsert there leaves the existing
+    /// target to the authority, which rejects it on upload.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -3183,7 +3177,11 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        if let Some(author) = self.checked(*who)
+        let reader = match *who {
+            Who::Session(author) if verb == "UPDATE" => Some(author),
+            who => self.checked(who),
+        };
+        if let Some(author) = reader
             && !self.check(table, row, key, author, Operation::Select)?
         {
             return Err(denied(format_args!(
@@ -3353,17 +3351,9 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        let check = |inner: &Self, key: &[u8], fresh: bool| -> Result<(), Error> {
-            // Deleting a row this same commit inserted needs no read
-            // permission: nothing persisted is revealed.
-            if let Some(author) = inner.checked(who)
-                && !fresh
-                && !inner.check(table, row, key, author, Operation::Select)?
-            {
-                return Err(denied(
-                    "read policy denied DELETE: the target requires read permission",
-                ));
-            }
+        // A delete by row id reads no user data (SPEC 7): its DELETE policy
+        // alone decides, so a write-only principal may delete.
+        let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
             if let Some(author) = inner.checked(who)
                 && !inner.check(table, row, key, author, Operation::Delete)?
             {
@@ -3375,10 +3365,9 @@ impl Inner {
             Located::Row {
                 key,
                 deleted: false,
-                seq: current,
+                ..
             } => {
-                let fresh = current == seq && !self.has_history(table, row, &key)?;
-                check(self, &key, fresh)?;
+                check(self, &key)?;
                 self.snapshot(table, row, &key, seq)?;
                 self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true), false)?;
             }
@@ -3390,7 +3379,7 @@ impl Inner {
                 head_cells,
                 at,
             } => {
-                check(self, &from, false)?;
+                check(self, &from)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true), false)?;
             }
