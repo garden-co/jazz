@@ -560,6 +560,11 @@ pub enum SyncMessage {
     /// serves a LocalOnly one from its store alone, without its upstream
     /// (a non-durable foreground's LocalOnly read). An authority's store
     /// is the answer either way.
+    /// `wait`: how long (ms) a relay waits for its upstream's answer
+    /// before it serves its own store: a LocalFirst one's first load (the
+    /// reader's `firstLoadRemoteWaitMs`). `None`: a LocalFirst one waits
+    /// while the upstream may answer, a Remote one however long it takes
+    /// (only the authority confirms a remote result).
     Subscribe {
         id: u64,
         query: Query,
@@ -567,6 +572,7 @@ pub enum SyncMessage {
         since: Option<u64>,
         include_deleted: bool,
         tier: ReadTier,
+        wait: Option<u64>,
     },
     Unsubscribe {
         id: u64,
@@ -582,7 +588,12 @@ pub enum SyncMessage {
     /// `tier` is how far it reaches past a relay: `LocalOnly` is served
     /// from the relay's store, `LocalFirst` too while the relay asks its
     /// upstream to refresh it, `Remote` once its upstream answered. An
-    /// authority's store answers any tier.
+    /// authority's store answers any tier. `wait`: how long (ms) a relay
+    /// waits for its upstream's answer while it may give one, then serves
+    /// its store: a LocalFirst read's first load, or a Remote read that
+    /// takes the relay's view when the authority cannot answer (a
+    /// serializable transaction's snapshot). `None`: a LocalFirst read is
+    /// served now, a Remote one once the upstream answered.
     Fetch {
         id: u64,
         query: Query,
@@ -590,6 +601,7 @@ pub enum SyncMessage {
         at: Option<u64>,
         include_deleted: bool,
         tier: ReadTier,
+        wait: Option<u64>,
     },
     /// `author`: the provenance the writes carry when it is not the
     /// sender's own (a trusted session or an attribution), as a canonical
@@ -670,12 +682,15 @@ pub enum SyncMessage {
     /// `held`: the commit's `expect` entries whose row the server did not
     /// ship because its version at `through` is what the writer expected:
     /// the writer installs its own, with the authority's stamps, as that
-    /// version.
+    /// version. `global`: the fate is the global authority's (directly, or
+    /// relayed from it), not the last word of a replica with no server,
+    /// which orders its sessions' commits but cannot make them `Global`.
     Fate {
         tx: u64,
         through: u64,
         result: Result<(), WireError>,
         held: Vec<Held>,
+        global: bool,
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
@@ -773,7 +788,7 @@ pub(crate) struct Remote {
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
     /// How far it reaches (see `SyncMessage::Subscribe`).
-    tier: ReadTier,
+    reach: RemoteReach,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// Whether the last answer was the global authority's.
     pub(crate) global: Rc<StdCell<bool>>,
@@ -816,6 +831,9 @@ pub(crate) struct Client {
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
+    /// Accepted fates from a replica with no server: they order the
+    /// commit, but it never becomes `Global`.
+    local_fates: HashSet<u64>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
@@ -859,6 +877,14 @@ type RelayedFate = (usize, u64, Vec<(String, RowUuid, Vec<u8>)>);
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
     upstream: u64,
+    /// What it asked its upstream: asked again on a new connection, since
+    /// an answer the last one owed is lost with it.
+    ask: SyncMessage,
+    /// A Remote read with no wait: served only once the upstream answered.
+    strict: bool,
+    /// Otherwise it is served from this store once the upstream can no
+    /// longer answer, or its wait runs out (`None`: never).
+    until: Option<Instant>,
     session: usize,
     /// The session's `Fetch`, served locally once the upstream answered.
     message: SyncMessage,
@@ -868,9 +894,38 @@ fn remote_key(
     query: &Query,
     binding: &BTreeMap<String, Value>,
     include_deleted: bool,
-    tier: ReadTier,
+    reach: RemoteReach,
 ) -> String {
-    format!("{query:?}{binding:?}{include_deleted}{tier:?}")
+    format!("{query:?}{binding:?}{include_deleted}{reach:?}")
+}
+
+/// How far a read reaches past a relay: its tier, and how long the relay
+/// waits for its upstream (see `SyncMessage::Subscribe` and `Fetch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteReach {
+    pub(crate) tier: ReadTier,
+    pub(crate) wait: Option<u64>,
+}
+
+impl RemoteReach {
+    /// What the authority lists, once it answers.
+    pub(crate) const REMOTE: RemoteReach = RemoteReach {
+        tier: ReadTier::Remote,
+        wait: None,
+    };
+
+    /// What the authority lists while it can answer, else the relay's
+    /// view: a serializable transaction's snapshot read, which pins
+    /// offline at the cut the replica knows.
+    pub(crate) const BEST_EFFORT: RemoteReach = RemoteReach {
+        tier: ReadTier::Remote,
+        wait: Some(u64::MAX),
+    };
+}
+
+/// When a wait of `ms` from now runs out; `None` if never.
+fn wait_until(ms: u64) -> Option<Instant> {
+    Instant::now().checked_add(std::time::Duration::from_millis(ms))
 }
 
 /// Whether a read may wait for the server: a live link needs the own
@@ -1040,6 +1095,18 @@ pub(crate) struct Session {
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
+    /// On a relay, LocalFirst subscriptions waiting for the upstream's
+    /// first answer for at most their first-load wait.
+    first_load: BTreeMap<u64, FirstLoadWait>,
+}
+
+/// A relayed LocalFirst subscription's first-load wait: once `until`
+/// passes unanswered, its result is this store's (see
+/// [`Db::serve_due_first_loads`]).
+struct FirstLoadWait {
+    until: Instant,
+    prepared: PreparedQuery,
+    include_deleted: bool,
 }
 
 impl Session {
@@ -1074,6 +1141,7 @@ impl Session {
             told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
+            first_load: BTreeMap::new(),
         }
     }
 
@@ -2878,6 +2946,7 @@ impl Client {
             pending: Vec::new(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            local_fates: HashSet::new(),
             shadow: HashMap::new(),
             known: 0,
             persisted_known: 0,
@@ -2927,7 +2996,8 @@ impl Db {
                     binding: r.binding.clone(),
                     since: r.through,
                     include_deleted: r.include_deleted,
-                    tier: r.tier,
+                    tier: r.reach.tier,
+                    wait: r.reach.wait,
                 }
             })
             .collect();
@@ -2951,6 +3021,19 @@ impl Db {
         // that reads them reports the error, and the next one tries again.
         client.hold_owed = true;
         client.outbox.extend(resubscribe);
+        // Relayed reads still waiting are asked again: the old session's
+        // answers are lost with it.
+        let reask: Vec<SyncMessage> = client
+            .relayed_fetches
+            .iter()
+            .filter(|fetch| matches!(client.answers.get(&fetch.upstream), Some(None)))
+            .map(|fetch| fetch.ask.clone())
+            .collect();
+        let relayed: HashSet<u64> = client.relayed_fetches.iter().map(|f| f.upstream).collect();
+        client
+            .outbox
+            .retain(|m| !matches!(m, SyncMessage::Fetch { id, .. } if relayed.contains(id)));
+        client.outbox.extend(reask);
         // Sent-but-unsettled commits go first, in their original order.
         let mut resend = client.sent.clone();
         resend.append(&mut client.unsent);
@@ -3200,7 +3283,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
     ) -> Option<(
         Rc<StdCell<bool>>,
         Rc<RefCell<Option<Error>>>,
@@ -3209,7 +3292,7 @@ impl Db {
         let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
-        let key = remote_key(&query, &prepared.binding, include_deleted, tier);
+        let key = remote_key(&query, &prepared.binding, include_deleted, reach);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some((
@@ -3229,7 +3312,8 @@ impl Db {
             binding: prepared.binding.clone(),
             since: None,
             include_deleted,
-            tier,
+            tier: reach.tier,
+            wait: reach.wait,
         });
         client.remote.insert(
             key.clone(),
@@ -3239,7 +3323,7 @@ impl Db {
                 query: query.into_owned(),
                 binding: prepared.binding.clone(),
                 include_deleted,
-                tier,
+                reach,
                 answered: answered.clone(),
                 refused: refused.clone(),
                 global: global.clone(),
@@ -3256,11 +3340,11 @@ impl Db {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
     ) {
         self.inner
             .borrow_mut()
-            .release_remote(query, binding, include_deleted, tier);
+            .release_remote(query, binding, include_deleted, reach);
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -3276,12 +3360,12 @@ impl Inner {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
     ) {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = remote_key(&remote_query(query), binding, include_deleted, tier);
+        let key = remote_key(&remote_query(query), binding, include_deleted, reach);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -3299,19 +3383,25 @@ impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
     /// answer is complete through, if it answered, or why it refused.
+    /// `strict` (a Remote read): the read waits for an answer while the
+    /// link is down or there is no server, asking again on each new
+    /// connection, since an answer the last one owed is lost with it.
     /// `coverage`: the read must be covered by the server. It fails once
     /// the check says the caller's budget is spent (`NotObserved`), or as
     /// soon as the server says it has not admitted this client's schema
     /// version.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
         deadline: Option<Instant>,
         coverage: Option<&dyn Fn() -> bool>,
+        strict: bool,
     ) -> Result<Option<u64>, Error> {
+        let tier = reach.tier;
         // A non-durable foreground's relay answers a local read from its
         // store whatever its own path to the server: the read waits for it
         // while connected to it.
@@ -3320,40 +3410,61 @@ impl Db {
             may_wait(client.hint.get())
                 || (inner.non_durable && tier != ReadTier::Remote && client.transport.is_some())
         };
-        let id = {
-            let mut inner = self.inner.borrow_mut();
-            if inner.client.is_none() || !answerable(&inner) {
+        {
+            let inner = self.inner.borrow();
+            if inner.client.is_none() || !strict && !answerable(&inner) {
                 return Ok(None);
             }
-            let client = inner.client.as_mut().expect("client");
-            let id = client.next_id;
-            client.next_id += 1;
-            client.answers.insert(id, None);
-            client.outbox.push(SyncMessage::Fetch {
-                id,
-                query: remote_query(&prepared.query).into_owned(),
-                binding: prepared.binding.clone(),
-                at,
-                include_deleted,
-                tier,
-            });
-            id
+        }
+        let message = |id: u64| SyncMessage::Fetch {
+            id,
+            query: remote_query(&prepared.query).into_owned(),
+            binding: prepared.binding.clone(),
+            at,
+            include_deleted,
+            tier,
+            wait: reach.wait,
         };
+        // The request in flight, and the connection it went out on.
+        let mut asked: Option<(u64, u64)> = None;
         poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
-            if let Some(Some(_)) = client.answers.get(&id) {
+            if let Some((id, _)) = asked
+                && let Some(Some(_)) = client.answers.get(&id)
+            {
                 let answer = client.answers.remove(&id).flatten().expect("answered");
                 return Poll::Ready(answer.map(|(through, _)| Some(through)));
             }
-            if !answerable || deadline.is_some_and(|d| Instant::now() >= d) {
-                client.answers.remove(&id);
+            let ask = if strict {
+                client.transport.is_some()
+                    && asked.is_none_or(|(_, connection)| connection != client.connection)
+            } else {
+                asked.is_none()
+            };
+            if ask {
+                if let Some((id, _)) = asked {
+                    client.answers.remove(&id);
+                }
+                let id = client.next_id;
+                client.next_id += 1;
+                client.answers.insert(id, None);
+                client.outbox.push(message(id));
+                asked = Some((id, client.connection));
+            }
+            let forget = |client: &mut Client| {
+                if let Some((id, _)) = asked {
+                    client.answers.remove(&id);
+                }
+            };
+            if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
+                forget(client);
                 return Poll::Ready(Ok(None));
             }
             if let Some(expired) = coverage {
                 if client.unadmitted {
-                    client.answers.remove(&id);
+                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::Schema,
                         "schema version is awaiting published catalogue admission; \
@@ -3361,7 +3472,7 @@ impl Db {
                     )));
                 }
                 if expired() {
-                    client.answers.remove(&id);
+                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,
                         "Timed out waiting for query coverage",
@@ -3434,6 +3545,9 @@ impl Db {
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             match client.fates.get(&tx) {
+                // Ordered by a replica with no server: no authority makes
+                // it `Global`.
+                Some(Ok(())) if client.local_fates.contains(&tx) => Poll::Pending,
                 Some(Ok(())) => Poll::Ready(Ok(tx)),
                 Some(Err(error)) => Poll::Ready(Err(error.clone())),
                 None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
@@ -3802,6 +3916,7 @@ impl Db {
                         through,
                         result,
                         held,
+                        global,
                     } => {
                         let accepted = result.is_ok();
                         if accepted {
@@ -3841,6 +3956,9 @@ impl Db {
                             }
                         }
                         let client = inner.client.as_mut().expect("client");
+                        if accepted && !global {
+                            client.local_fates.insert(tx);
+                        }
                         client.fates.insert(tx, result);
                         let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
@@ -3871,6 +3989,7 @@ impl Db {
                                     through,
                                     result: fate.clone().map_err(|error| wire_error(&error)),
                                     held: Vec::new(),
+                                    global,
                                 });
                             }
                         }
@@ -4053,19 +4172,22 @@ impl Inner {
     }
 
     /// Session `index`'s relayed reads that are ready to serve from this
-    /// store: the upstream answered, or can no longer. A refusal goes to
-    /// the session as its own.
+    /// store: the upstream answered, or a first-load wait ran out or can no
+    /// longer be answered. A refusal goes to the session as its own.
     fn relayed_fetches_ready(&mut self, index: usize) -> Vec<SyncMessage> {
         let Some(client) = self.client.as_mut() else {
             return Vec::new();
         };
         let can_wait = may_wait(client.hint.get());
+        let now = Instant::now();
         let mut ready = Vec::new();
         let mut refused = Vec::new();
         let mut kept = Vec::new();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
-            if fetch.session != index || !answered && can_wait {
+            let given_up =
+                !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
+            if fetch.session != index || !answered && !given_up {
                 kept.push(fetch);
                 continue;
             }
@@ -4221,7 +4343,7 @@ impl Db {
         let dropped = inner.fan.dropped.clone();
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
             for (query, binding, include_deleted) in session.close(&dropped) {
-                inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
+                inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
             }
             inner.forget_relayed(subscriber.0);
         }
@@ -4277,6 +4399,7 @@ impl Db {
                 inbound.into()
             };
             let mut inbound: VecDeque<SyncMessage> = inbound.into();
+            self.serve_due_first_loads(index)?;
             // Relayed reads the upstream answered (or can no longer answer)
             // are served from this store first, in the order they came.
             let relayed = self.inner.borrow_mut().relayed_fetches_ready(index);
@@ -4801,7 +4924,12 @@ impl Db {
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
                     for (query, binding, include_deleted) in released {
-                        inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
+                        inner.release_remote(
+                            &query,
+                            &binding,
+                            include_deleted,
+                            RemoteReach::REMOTE,
+                        );
                     }
                     inner.forget_relayed(index);
                     break;
@@ -4812,6 +4940,57 @@ impl Db {
     }
 
     /// A handle that reads and writes through session `index`'s schema.
+    /// Session `index`'s relayed LocalFirst subscriptions whose first-load
+    /// wait ran out before the upstream answered: from now on each is this
+    /// store's result, settled at once, as when the upstream cannot answer.
+    /// The upstream subscription it keeps fills the store when it answers.
+    fn serve_due_first_loads(&self, index: usize) -> Result<(), Error> {
+        let now = Instant::now();
+        let due: Vec<(u64, FirstLoadWait)> = {
+            let mut inner = self.inner.borrow_mut();
+            let session = &mut inner.sessions[index];
+            let ids: Vec<u64> = session
+                .first_load
+                .iter()
+                .filter(|(_, wait)| wait.until <= now)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| session.first_load.remove(&id).map(|wait| (id, wait)))
+                .collect()
+        };
+        for (id, wait) in due {
+            let policy = {
+                let inner = self.inner.borrow();
+                // Answered and sent meanwhile: it already lists the
+                // upstream's result.
+                if !matches!(inner.sessions[index].subs.get(&id), Some((.., false))) {
+                    continue;
+                }
+                inner.session_policy(index)
+            };
+            let db = self.session_db(index);
+            let mut inner = db.inner();
+            let authority = inner.authority;
+            let (queue, group) = inner.subscribe_member(
+                &wait.prepared,
+                policy,
+                ReadSpec {
+                    include_deleted: wait.include_deleted,
+                    ..ReadSpec::default()
+                },
+                SettledBy::Always(authority),
+            )?;
+            let session = &mut inner.sessions[index];
+            if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
+                session.subs.insert(id, (queue, group, windowed, false));
+                let dropped = inner.fan.dropped.clone();
+                dropped.set(dropped.get() + 1);
+            }
+        }
+        Ok(())
+    }
+
     fn session_db(&self, index: usize) -> Db {
         let view = self.inner.borrow_mut().session_schema(index);
         Db {
@@ -4893,27 +5072,47 @@ impl Db {
                 since,
                 include_deleted,
                 tier,
+                wait,
             } => {
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = crate::db::is_windowed(&query);
                 // A relay serves what its upstream lists, settled once the
-                // upstream answers: its own store may be cold. A relay
-                // whose upstream cannot answer yet (its link is down, or
-                // still to come) serves its own store, settled at once,
-                // while the upstream subscription it keeps fills that store
-                // once the link is up.
+                // upstream answers: its own store may be cold. A Remote
+                // read waits for that answer however long it takes, its
+                // link down or no server at all: only the authority
+                // confirms a remote result. A LocalFirst one whose upstream
+                // cannot answer yet (its link is down, or still to come)
+                // serves this store, settled at once, while the upstream
+                // subscription it keeps fills the store once the link is
+                // up; one with a first-load wait is served so once the wait
+                // runs out.
                 let upstream = db
                     .inner()
                     .client
                     .as_ref()
                     .map(|client| may_wait(client.hint.get()));
                 let attached = if upstream.is_some() && !local {
-                    db.attach_remote(&prepared, include_deleted, ReadTier::Remote)
+                    db.attach_remote(&prepared, include_deleted, RemoteReach::REMOTE)
                 } else {
                     None
                 };
-                let relayed = attached.as_ref().filter(|_| upstream == Some(true));
+                let strict = tier == ReadTier::Remote && wait.is_none();
+                let relayed = attached
+                    .as_ref()
+                    .filter(|_| upstream == Some(true) || strict);
+                if relayed.is_some()
+                    && let Some(until) = wait.and_then(wait_until)
+                {
+                    self.inner.borrow_mut().sessions[index].first_load.insert(
+                        id,
+                        FirstLoadWait {
+                            until,
+                            prepared: prepared.clone(),
+                            include_deleted,
+                        },
+                    );
+                }
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
@@ -4946,7 +5145,7 @@ impl Db {
                             &prepared.query,
                             &prepared.binding,
                             include_deleted,
-                            ReadTier::Remote,
+                            RemoteReach::REMOTE,
                         ),
                     }
                 }
@@ -5024,10 +5223,11 @@ impl Db {
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
+                inner.sessions[index].first_load.remove(&id);
                 if let Some((query, binding, include_deleted)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
-                    inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
+                    inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
                 }
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
@@ -5108,21 +5308,27 @@ impl Db {
                 at,
                 include_deleted,
                 tier,
+                wait,
             } => {
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
-                // it. A LocalFirst read is served now, and its upstream's
-                // answer refreshes the store for the next.
+                // it; the read waits for that answer while the link is down
+                // or there is no server, since only the authority confirms
+                // a remote result. A read with a wait is asked the same way
+                // while the upstream may answer, and served once it does or
+                // the wait runs out. Any other LocalFirst read is served
+                // now, and its upstream's answer refreshes the store for
+                // the next.
                 let (relay, refresh) = {
                     let mut inner = self.inner.borrow_mut();
                     let answered = inner.sessions[index].fetched_upstream.remove(&id);
-                    let upstream = inner
-                        .client
-                        .as_ref()
-                        .is_some_and(|client| may_wait(client.hint.get()));
+                    let client = inner.client.as_ref();
+                    let upstream = client.is_some_and(|client| may_wait(client.hint.get()));
+                    let waits = upstream && tier != ReadTier::LocalOnly && wait.is_some();
+                    let strict = client.is_some() && tier == ReadTier::Remote && wait.is_none();
                     (
-                        upstream && !answered && tier == ReadTier::Remote,
-                        upstream && !answered && tier == ReadTier::LocalFirst,
+                        (!answered && (strict || waits)).then_some(strict),
+                        upstream && !answered && tier == ReadTier::LocalFirst && !waits,
                     )
                 };
                 if refresh {
@@ -5138,26 +5344,32 @@ impl Db {
                         at,
                         include_deleted,
                         tier: ReadTier::Remote,
+                        wait: None,
                     });
                 }
-                if relay {
+                if let Some(strict) = relay {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
                     let mut inner = self.inner.borrow_mut();
                     let client = inner.client.as_mut().expect("client");
                     let upstream = client.next_id;
                     client.next_id += 1;
                     client.answers.insert(upstream, None);
-                    client.outbox.push(SyncMessage::Fetch {
+                    let ask = SyncMessage::Fetch {
                         id: upstream,
                         query: remote_query(&prepared.query).into_owned(),
                         binding: prepared.binding.clone(),
                         at,
                         include_deleted,
-                        tier,
-                    });
+                        tier: ReadTier::Remote,
+                        wait: None,
+                    };
+                    client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
                         upstream,
                         session: index,
+                        ask,
+                        strict,
+                        until: wait.and_then(wait_until),
                         message: SyncMessage::Fetch {
                             id,
                             query,
@@ -5165,6 +5377,7 @@ impl Db {
                             at,
                             include_deleted,
                             tier,
+                            wait,
                         },
                     });
                     return Ok(());
@@ -5348,11 +5561,15 @@ impl Db {
                         });
                         inner.sessions[index].echoes.extend(echoes);
                     }
+                    // A replica's own last word (it has no server) orders
+                    // the commit at a local seq, but is not the authority's.
+                    let global = inner.client.is_none() || through < LOCAL_BASE;
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
                         through,
                         result,
                         held: Vec::new(),
+                        global,
                     });
                 }
             }
@@ -5879,19 +6096,25 @@ impl Db {
                 let coverage: Option<&dyn Fn() -> bool> =
                     require_coverage.then_some(&coverage_expired);
                 // A non-durable foreground reads its relay's view at the
-                // tier it was asked for.
-                let tier = if non_durable {
-                    opts.tier
+                // tier it was asked for, with its first load's wait.
+                let reach = if non_durable {
+                    RemoteReach {
+                        tier: opts.tier,
+                        wait: crate::db::first_load_wait(opts.tier, &opts.first_load),
+                    }
                 } else {
-                    ReadTier::Remote
+                    RemoteReach::REMOTE
                 };
+                // A Remote read waits for the server while offline.
+                let strict = opts.tier == ReadTier::Remote;
                 self.fetch(
                     &prepared,
                     None,
                     opts.read_view.include_deleted,
-                    tier,
+                    reach,
                     deadline,
                     coverage,
+                    strict,
                 )
                 .await?;
             }

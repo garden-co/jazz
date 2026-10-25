@@ -46,7 +46,9 @@ use common::{compile_schema, read_and_allow_all_writes, session_eq};
 const CORPUS: &str = "sqlite_sync_wire_v1.json";
 const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 
-/// Every `SyncMessage` variant, in declaration order.
+/// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
+/// framing of a `Rows` too large for one frame, whose real frames are
+/// megabytes (binding_host's frame-split test covers it).
 const VARIANTS: [&str; 20] = [
     "Subscribe",
     "Unsubscribe",
@@ -427,6 +429,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             since: None,
             include_deleted: false,
             tier: ReadTier::LocalFirst,
+            wait: None,
         },
     ])));
     server.accept_subscriber(

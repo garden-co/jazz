@@ -1005,6 +1005,7 @@ impl Owner {
                                     .to_owned(),
                             )),
                             held: Vec::new(),
+                            global: true,
                         });
                 }
                 Ok(

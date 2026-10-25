@@ -2168,6 +2168,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "jazz",
+ "jazz-native-relay",
  "jazz-otel",
  "jazz-server",
  "libsodium-sys-stable",
@@ -2175,9 +2176,35 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "postcard",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "jazz-native-relay"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "futures",
+ "getrandom 0.3.4",
+ "jazz",
+ "jazz-native-transport",
+ "jazz-server",
+ "jazz-testkit",
+ "libc",
+ "postcard",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "stacker",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
 ]
 
 [[package]]
