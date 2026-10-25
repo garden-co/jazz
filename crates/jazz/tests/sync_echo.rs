@@ -360,3 +360,38 @@ fn a_lost_fate_resumes_correctly() {
     assert_eq!(shipped(&down), (0, vec![1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
+
+/// Each write's explicit timestamp reaches the authority as its own: a
+/// transaction that backfills rows a millisecond apart keeps them apart
+/// there, rather than every row taking the first write's time.
+#[test]
+fn explicit_timestamps_reach_the_authority_per_write() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (_upstream, _down) = connect(&server, &client, user(1));
+    let _live = subscribe(&client);
+    pump(&server, &[&client]);
+    let batch = jazz::tools::OpenTransactionId::new();
+    block_on(client.begin_mergeable(batch)).unwrap();
+    for (n, at) in [(1u8, 1_704_067_200_001u64), (2, 1_704_067_200_002)] {
+        block_on(client.mergeable_tx_ref(batch).insert(
+            "docs",
+            cells(&[("title", "Doc"), ("body", "")]),
+            InsertOptions {
+                row_id: Some(row(n)),
+                updated_at_ms: Some(at),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    block_on(client.commit_mergeable_handle(batch)).unwrap();
+    pump(&server, &[&client]);
+    let created: Vec<bool> = snapshot(&server)
+        .iter()
+        .zip(["1704067200001", "1704067200002"])
+        .map(|(row, at)| row.contains(at))
+        .collect();
+    assert_eq!(created, [true, true], "{:?}", snapshot(&server));
+    assert_eq!(snapshot(&client), snapshot(&server));
+}

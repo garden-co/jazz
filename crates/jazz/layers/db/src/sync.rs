@@ -296,7 +296,8 @@ pub enum WireTarget {
     },
 }
 
-/// A replicated write.
+/// A replicated write. `at`: its explicit provenance timestamp (Unix ms),
+/// if the writer gave one; each write in a commit carries its own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireOp {
     Insert {
@@ -304,29 +305,34 @@ pub enum WireOp {
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Update {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Upsert {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Delete {
         table: String,
         row: [u8; 16],
         target: WireTarget,
+        at: Option<u64>,
     },
     Restore {
         table: String,
         row: [u8; 16],
         cells: Option<BTreeMap<String, Value>>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Move {
         table: String,
@@ -474,8 +480,6 @@ pub enum SyncMessage {
         /// trusted link acting for it): the authority checks their
         /// policies as that session. Otherwise `author` is provenance only.
         session: Option<BTreeMap<String, Value>>,
-        /// The writes' explicit provenance timestamp (Unix ms), if any.
-        updated_at: Option<u64>,
         /// The rows as the writer's replica holds them after these writes
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
@@ -1167,29 +1171,34 @@ fn to_wire(op: &StagedOp) -> Result<WireOp, Error> {
             row: bytes(&opts.row_id.expect("inserts carry their row id")),
             cells: cells.clone(),
             target: exact_target(&opts.target),
+            at: opts.updated_at_ms,
         },
         StagedOp::Update(table, row, cells, opts) => WireOp::Update {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Upsert(table, row, cells, opts) => WireOp::Upsert {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Delete(table, row, opts) => WireOp::Delete {
             table: table.clone(),
             row: bytes(row),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Restore(table, row, cells, opts) => WireOp::Restore {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: exact_target(&opts.target),
+            at: opts.updated_at_ms,
         },
         StagedOp::Move(table, from, to, row) => WireOp::Move {
             table: table.clone(),
@@ -1236,12 +1245,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Insert(
             table,
             cells,
             InsertOptions {
                 row_id: Some(id(row)),
                 target: exact(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1250,12 +1261,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Update(
             table,
             id(row),
             cells,
             UpdateOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1264,20 +1277,28 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Upsert(
             table,
             id(row),
             cells,
             UpsertOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
-        WireOp::Delete { table, row, target } => StagedOp::Delete(
+        WireOp::Delete {
+            table,
+            row,
+            target,
+            at,
+        } => StagedOp::Delete(
             table,
             id(row),
             DeleteOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1286,12 +1307,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Restore(
             table,
             id(row),
             cells,
             RestoreOptions {
                 target: exact(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -2560,7 +2583,6 @@ impl Inner {
                 ops,
                 author,
                 session,
-                updated_at,
                 ..
             } = &commit
             else {
@@ -2575,9 +2597,6 @@ impl Inner {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
                 ops.iter_mut()
                     .for_each(|op| op.attribute(author, session.is_some()));
-            }
-            if let Some(at) = *updated_at {
-                ops.iter_mut().for_each(|op| op.stamp_at(at));
             }
             client.pending.push(Pending {
                 tx,
@@ -2881,7 +2900,6 @@ impl Db {
                     ops: wire,
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
-                    updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
                     expect,
                 };
                 client.unsent.push(commit.clone());
@@ -4960,7 +4978,6 @@ impl Db {
                 ops,
                 author,
                 session,
-                updated_at,
                 expect,
             } => {
                 // A resend after a reconnect gets the recorded fate.
@@ -4987,8 +5004,7 @@ impl Db {
                                         .insert(*author, claims.clone()),
                                 )
                             });
-                            let result =
-                                db.authorize_commit(who, policy, kind, ops, updated_at, (node, tx));
+                            let result = db.authorize_commit(who, policy, kind, ops, (node, tx));
                             if let Some((author, previous)) = previous {
                                 let mut inner = self.inner.borrow_mut();
                                 match previous {
@@ -5144,11 +5160,9 @@ impl Db {
         identity: Option<AuthorSubject>,
         kind: WireKind,
         ops: Vec<WireOp>,
-        updated_at: Option<u64>,
         origin: ([u8; 16], u64),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
-        let mut ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>()
-        {
+        let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
@@ -5164,9 +5178,6 @@ impl Db {
                 ),
                 Vec::new(),
             ));
-        }
-        if let Some(at) = updated_at {
-            ops.iter_mut().for_each(|op| op.stamp_at(at));
         }
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();

@@ -4001,18 +4001,6 @@ impl StagedOp {
         }
     }
 
-    /// Stamp the write at `at` (Unix ms) instead of the applying clock.
-    pub(crate) fn stamp_at(&mut self, at: u64) {
-        match self {
-            StagedOp::Insert(.., o) => o.updated_at_ms = Some(at),
-            StagedOp::Update(.., o) => o.updated_at_ms = Some(at),
-            StagedOp::Upsert(.., o) => o.updated_at_ms = Some(at),
-            StagedOp::Delete(.., o) => o.updated_at_ms = Some(at),
-            StagedOp::Restore(.., o) => o.updated_at_ms = Some(at),
-            StagedOp::Move(..) => {}
-        }
-    }
-
     /// Attribute the write to `author` (unchecked, as an uploaded write is
     /// re-applied locally).
     /// Whether the write is a trusted session's: its policies are checked
