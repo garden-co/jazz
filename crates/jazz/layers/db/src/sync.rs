@@ -3804,6 +3804,25 @@ impl Db {
             .map(|answer| answer.map(|(through, _, _)| through))
     }
 
+    /// Strict transaction reads wait while offline before issuing a request.
+    /// The caller retains its read guard and coverage deadline during this wait.
+    pub(super) async fn wait_for_read_transport(&self) {
+        poll_fn(|_| {
+            if self
+                .inner
+                .borrow()
+                .client
+                .as_ref()
+                .is_some_and(|client| client.transport.is_some() && may_wait(client.hint.get()))
+            {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
     pub(super) async fn fetch_answer(
         &self,
         prepared: &PreparedQuery,
@@ -7753,7 +7772,7 @@ impl Db {
         if let Some(tx) = open_tx {
             let rows = self
                 .serializable_tx_ref(tx)
-                .all_prepared_with(&prepared, opts.read_view.include_deleted)
+                .all_prepared_at_tier(&prepared, opts.read_view.include_deleted, opts.tier)
                 .await?;
             return Ok(result(rows));
         }

@@ -318,7 +318,7 @@ impl ReadGuard {
     pub(super) fn require_success(&mut self) {
         self.poison = true;
     }
-    fn watch(&self, waker: &Waker) {
+    pub(super) fn watch(&self, waker: &Waker) {
         let mut state = self.state.borrow_mut();
         if !state.wakers.iter().any(|w| w.will_wake(waker)) {
             state.wakers.push(waker.clone());

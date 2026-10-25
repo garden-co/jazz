@@ -5289,10 +5289,12 @@ impl Db {
             prepared.clone()
         };
         if let Some(Batch {
-            kind: BatchKind::Serializable { reads, .. },
+            kind: BatchKind::Serializable { reads, pinned, .. },
             ..
         }) = inner.batches.get_mut(&id)
         {
+            // Once any read has observed this cut, later reads must not advance it.
+            *pinned = true;
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 scoped: None,
@@ -5388,6 +5390,16 @@ impl TxRef<'_> {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_at_tier(prepared, include_deleted, ReadTier::LocalFirst)
+            .await
+    }
+
+    pub(super) async fn all_prepared_at_tier(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        tier: ReadTier,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let mut guard = self.db.transaction_read_guard(self.id, false)?;
         // Capture before waiting for earlier reads. Their authority round trip
         // must not make later staging visible to this already-admitted read.
@@ -5423,7 +5435,7 @@ impl TxRef<'_> {
             None => prepared.clone(),
         };
         let result = self
-            .all_prepared_with_inner(&prepared, include_deleted, &guard, prefix)
+            .all_prepared_with_inner(&prepared, include_deleted, tier, &guard, prefix)
             .await;
         guard.finish(&result);
         result
@@ -5433,12 +5445,13 @@ impl TxRef<'_> {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
+        tier: ReadTier,
         guard: &accepted::ReadGuard,
         prefix: BatchPrefix,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // A client hydrates a serializable read from the authority at the
-        // snapshot first, unless the link cannot answer (then the replica
-        // answers and the authority's validation decides).
+        // A client hydrates a serializable read at the transaction snapshot.
+        // LocalFirst can use the replica's known cut when offline; Remote must
+        // obtain authority coverage, and LocalOnly never requests it.
         let snapshot = match self.db.inner.borrow().batches.get(&self.id) {
             Some(Batch {
                 kind:
@@ -5486,10 +5499,32 @@ impl TxRef<'_> {
         }
         if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
+            && tier != ReadTier::LocalOnly
         {
             let at = pinned.then_some(snapshot);
             Db::remote_shape(&prepared.query)?;
-            let through = self.db.fetch(prepared, at, include_deleted, None).await?;
+            let fetch = async {
+                if tier == ReadTier::Remote {
+                    self.db.wait_for_read_transport().await;
+                }
+                let through = self.db.fetch(prepared, at, include_deleted, None).await?;
+                if tier == ReadTier::Remote && through.is_none() {
+                    return Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "authority coverage unavailable for transaction read",
+                    ));
+                }
+                Ok(through)
+            };
+            let mut fetch = std::pin::pin!(fetch);
+            let through = std::future::poll_fn(|cx| {
+                guard.watch(cx.waker());
+                if let Err(error) = self.db.check_read_guard(self.id, guard) {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                fetch.as_mut().poll(cx)
+            })
+            .await?;
             self.db.check_read_guard(self.id, guard)?;
             if let Some(Batch {
                 kind:
