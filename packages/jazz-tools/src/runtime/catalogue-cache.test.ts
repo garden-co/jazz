@@ -101,3 +101,35 @@ describe("account-independent authenticated catalogue cache", () => {
     expect(await new EphemeralCatalogueCache().load(scope)).toBeNull();
   });
 });
+
+// The merge callback stands in for core's independently tested opaque capture
+// merge. Host storage must invoke it against the latest bytes while publishing.
+it.each(["node", "browser", "ephemeral"] as const)(
+  "%s catalogue publishers retain both concurrent descriptor additions",
+  async (kind) => {
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    const directory = await mkdtemp(join(tmpdir(), "jazz-catalogue-merge-"));
+    directories.push(directory);
+    const ephemeral = new EphemeralCatalogueCache();
+    const adapter = () =>
+      kind === "node"
+        ? new NodeCatalogueCache(directory)
+        : kind === "browser"
+          ? new BrowserCatalogueCache()
+          : ephemeral;
+    const merge = (previous: Uint8Array, next: Uint8Array) =>
+      Uint8Array.from(new Set([...previous, ...next])).sort();
+    await adapter().publish(scope, Uint8Array.of(1), merge);
+    await Promise.all([
+      adapter().publish(scope, Uint8Array.of(1, 2), merge),
+      adapter().publish(scope, Uint8Array.of(1, 3), merge),
+    ]);
+    expect(await adapter().load(scope)).toEqual(Uint8Array.of(1, 2, 3));
+    await expect(
+      adapter().publish(scope, Uint8Array.of(9), () => {
+        throw new Error("conflicting identity");
+      }),
+    ).rejects.toThrow("conflicting identity");
+    expect(await adapter().load(scope)).toEqual(Uint8Array.of(1, 2, 3));
+  },
+);

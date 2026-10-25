@@ -199,8 +199,9 @@ fn occurrence(
     row: RowUuid,
     version: Option<crate::values::SourceVersion>,
     joined: &[crate::values::JoinedRow],
+    union_arm: Option<&str>,
 ) -> ResultKey {
-    crate::values::occurrence_key(row, version, joined)
+    crate::values::occurrence_key_with_union_arm(row, version, joined, union_arm)
 }
 
 /// Encode an incremental subscription delta with aligned occurrence sidecars.
@@ -226,15 +227,36 @@ pub fn encode_subscription_delta(
             .collect(),
         added_occurrence_keys: added
             .iter()
-            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
+            .map(|row| {
+                occurrence(
+                    row.row_uuid(),
+                    row.root_version(),
+                    row.joined_rows(),
+                    row.union_arm(),
+                )
+            })
             .collect(),
         updated_occurrence_keys: updated
             .iter()
-            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
+            .map(|row| {
+                occurrence(
+                    row.row_uuid(),
+                    row.root_version(),
+                    row.joined_rows(),
+                    row.union_arm(),
+                )
+            })
             .collect(),
         removed_occurrence_keys: removed
             .iter()
-            .map(|row| occurrence(row.row_uuid, row.version, &row.joined))
+            .map(|row| {
+                occurrence(
+                    row.row_uuid,
+                    row.version,
+                    &row.joined,
+                    row.union_arm.as_deref(),
+                )
+            })
             .collect(),
         added_indices: added.iter().map(|row| row.index as u64).collect(),
         updated_previous_indices: updated
@@ -496,6 +518,7 @@ mod tests {
             types: Arc::from([ValueType::String, ValueType::Bool]),
             joined: Arc::from([]),
             version: None,
+            union_arm: None,
         }
     }
 
@@ -577,6 +600,7 @@ mod tests {
                 row_uuid: RowUuid::from_bytes([8; 16]),
                 joined: Vec::new(),
                 version: None,
+                union_arm: None,
                 index: 1,
             }],
         )

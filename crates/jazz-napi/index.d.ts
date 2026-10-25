@@ -28,6 +28,7 @@ export declare class JazzServer {
 
 export declare class NapiDb {
   validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void
+  mergeCatalogueCaptures(previous: Uint8Array, next: Uint8Array): Uint8Array
   hasAuthenticatedCatalogue(): boolean | PendingNativeCatalogueState
   takeAuthenticatedCatalogueState(): NativeCatalogueState | PendingNativeCatalogueState
   sealInitializationTransaction(openId: string): NativeInitializationSeal | PendingNativeInitializationSeal

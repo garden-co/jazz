@@ -78,6 +78,23 @@ accepted descriptors and rebound UUIDs. Source process/node rotation is allowed
 when the persisted catalogue namespace and manifests remain the same. Rotating
 the namespace within an existing host-cache scope is deliberately rejected.
 
+Shared host caches merge separately authenticated captures under their existing
+publication lock or transaction. `mergeCatalogueCaptures` retains the union of
+accepted descriptors and the newer comparable head. An older publisher cannot
+roll back the cache or erase descriptors learned by another owner. Overlapping
+descriptors must keep their physical identities and lineage structure; namespace
+changes, conflicting active revisions and incomparable head positions still fail.
+The strict replacement validator retains its existing rejection rules.
+
+For example, Alice may have received schema A and current schema C while Bob
+received schema B and C. Either publication order produces the same A/B/C cache.
+A later stale A-only capture keeps C as the current head. This merge does not
+admit a live owner's unopened views, install policies or create fresh coverage;
+normal core admission and authority receipts still govern those operations.
+The result uses the same canonical v1 encoding and unchanged host envelopes.
+The native relay, Node, browser and ephemeral cache all resolve against the
+current stored bytes inside their atomic publication operation.
+
 `jazz.sqlite.catalogue-cache-mode.v1` is the SQLite table
 `_jazz_catalogue_cache_mode_v1(slot INTEGER PRIMARY KEY CHECK(slot=1))`.
 The presence of its sole row `(1)` requires accepted-schema admission after

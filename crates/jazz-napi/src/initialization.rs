@@ -1,5 +1,4 @@
 use super::*;
-use jazz::db::{InitializationSeal, ReservedTxId};
 
 #[napi(object)]
 pub struct NativeInitializationSeal {
@@ -99,8 +98,7 @@ impl PendingNativeInitializationSeal {
 
     #[napi]
     pub fn cancel(&self) {
-        // The receiver owns the core seal until it is delivered to the caller.
-        // Dropping it also drops an undelivered seal, retiring its reservation.
+        // Dropping the pending owner operation retires any undelivered reservation.
         self.future.borrow_mut().take();
         if let Some(cleanup) = self.cleanup.borrow_mut().take() {
             cleanup();
@@ -115,16 +113,14 @@ impl Drop for PendingNativeInitializationSeal {
 }
 
 impl NapiDb {
-    fn take_initialization_seal(&self, token: &str) -> napi::Result<InitializationSeal> {
+    fn take_initialization_token(&self, token: &str) -> napi::Result<()> {
         self.streaming.ensure_admitted(self.view_id)?;
-        self.initialization_seals
-            .borrow_mut()
-            .remove(token)
-            .ok_or_else(|| {
-                napi::Error::from_reason(
-                    "initialization seal is unknown, consumed, or belongs to another runtime",
-                )
-            })
+        if !self.initialization_seals.borrow_mut().remove(token) {
+            return Err(napi::Error::from_reason(
+                "initialization seal is unknown, consumed, or belongs to another runtime",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -142,6 +138,19 @@ impl NapiDb {
             .map_err(BindingError::from)
     }
 
+    #[napi(js_name = "mergeCatalogueCaptures")]
+    pub fn merge_catalogue_captures(
+        &self,
+        previous: Uint8Array,
+        next: Uint8Array,
+    ) -> js::Result<Uint8Array> {
+        self.streaming.ensure_admitted(self.view_id)?;
+        jazz::db::merge_catalogue_captures(&previous, &next)
+            .map(Uint8Array::new)
+            .map_err(napi_error)
+            .map_err(BindingError::from)
+    }
+
     #[napi(js_name = "hasAuthenticatedCatalogue")]
     pub fn has_authenticated_catalogue(
         &self,
@@ -155,7 +164,7 @@ impl NapiDb {
             ($db:expr) => {{
                 let db = Rc::clone($db);
                 Box::pin(async move {
-                    let ready = db.has_authenticated_catalogue().await.map_err(napi_error)?;
+                    let ready = db.has_authenticated_catalogue().map_err(napi_error)?;
                     Ok(NativeCatalogueState {
                         capture: None,
                         ready,
@@ -196,7 +205,6 @@ impl NapiDb {
                 Box::pin(async move {
                     let state = db
                         .take_authenticated_catalogue_state()
-                        .await
                         .map_err(napi_error)?;
                     Ok(NativeCatalogueState {
                         capture: state.capture.map(Uint8Array::new),
@@ -230,56 +238,47 @@ impl NapiDb {
         let inner = inner
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let now_ms = commit_timestamp_ms()?;
-        macro_rules! seal {
-            ($db:expr, $drive:expr) => {{
-                let db = Rc::clone($db);
-                let owner = Rc::clone(&db);
-                let receiver = db.enqueue_transaction_read(open_id, async move {
-                    owner
-                        .seal_initialization_transaction_at_ms(open_id, now_ms)
-                        .await
-                });
-                if $drive {
-                    db.drive_queued_mutation_once();
-                }
-                let lifecycle = Rc::clone(&self.streaming);
-                let view_id = self.view_id;
-                let cleanup: Box<dyn FnOnce()> = Box::new(move || {
-                    // Cancellation before execution has no core seal to drop.
-                    // Queue abandonment after the already-admitted begin/staging.
-                    if lifecycle.ensure_admitted(view_id).is_ok() {
-                        db.enqueue_abandon_transaction_handle(open_id);
-                    }
-                });
-                (receiver, cleanup)
-            }};
-        }
-        let (receiver, cleanup) = seal!(&inner.core, inner.drives_mutations_inline);
+        let db = Rc::clone(&inner.core);
+        let owner = Rc::clone(&db);
+        let non_durable = self.non_durable_client.get();
+        let cleanup: Box<dyn FnOnce()> = Box::new(move || {
+            // The foreground reservation future retires its request on drop.
+            // Abandon any batch which had not yet frozen when cancellation won.
+            let _ = owner.binding.rollback_transaction(&open_id.to_string());
+        });
         let seals = Rc::clone(&self.initialization_seals);
         let streaming = Rc::clone(&self.streaming);
         let view_id = self.view_id;
         let pending = PendingNativeInitializationSeal {
             future: RefCell::new(Some(Box::pin(async move {
-                let seal = receiver
-                    .await
-                    .map_err(|_| {
-                        napi::Error::from_reason(
-                            "initialization seal owner operation was cancelled",
-                        )
-                    })?
-                    .map_err(napi_error)?;
-                streaming.ensure_admitted(view_id)?;
-                let reserved_tx_id = seal.reservation().encode();
-                let token = CoreOpenTransactionId::new().to_string();
-                seals.borrow_mut().insert(token.clone(), seal);
+                let id = open_id.to_string();
+                let seal = if non_durable {
+                    db.binding
+                        .seal_initialization_transaction_with_owner(&id)
+                        .await
+                } else {
+                    db.binding.seal_initialization_transaction(&id)
+                }
+                .map_err(napi_error)?;
+                if let Err(error) = streaming.ensure_admitted(view_id) {
+                    let _ = db.binding.cancel_initialization_transaction(&seal.token);
+                    return Err(error);
+                }
+                seals.borrow_mut().insert(seal.token.clone());
                 Ok(NativeInitializationSeal {
-                    token,
-                    reserved_tx_id,
+                    token: seal.token,
+                    reserved_tx_id: seal.reserved_tx_id,
                 })
             }))),
             cleanup: RefCell::new(Some(cleanup)),
         };
+        // Keep the persistent owner's cancellation boundary even though SQLite
+        // commits synchronously. Returning the pending operation lets its
+        // caller cancel or close before the first storage turn; dropping it
+        // rolls back the unpublished transaction through the cleanup guard.
+        if inner.core.is_persistent() {
+            return Ok(Either::B(pending));
+        }
         match pending.poll_once()? {
             Some(seal) => Ok(Either::A(seal)),
             None => Ok(Either::B(pending)),
@@ -288,25 +287,34 @@ impl NapiDb {
 
     #[napi(js_name = "publishInitializationTransaction")]
     pub fn publish_initialization_transaction(&self, token: String) -> js::Result<Write> {
-        let seal = self.take_initialization_seal(&token)?;
+        self.take_initialization_token(&token)?;
         let inner = self.inner.borrow();
         let inner = inner
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let write = core_block_on(inner.core.publish_initialization_transaction(seal))
+        let write = inner
+            .core
+            .binding
+            .publish_initialization_transaction(&token)
             .map_err(napi_error)?;
-        inner.after_enqueue();
-        core_write(Rc::clone(&inner.core), write).map_err(BindingError::from)
+        Ok(host_write_with_kind(
+            Rc::clone(&inner.core),
+            write,
+            "serializable",
+        ))
     }
 
     #[napi(js_name = "cancelInitializationTransaction")]
     pub fn cancel_initialization_transaction(&self, token: String) -> js::Result<()> {
-        let seal = self.take_initialization_seal(&token)?;
+        self.take_initialization_token(&token)?;
         let inner = self.inner.borrow();
         let inner = inner
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        core_block_on(inner.core.cancel_initialization_transaction(seal))
+        inner
+            .core
+            .binding
+            .cancel_initialization_transaction(&token)
             .map_err(napi_error)
             .map_err(BindingError::from)
     }
@@ -327,32 +335,12 @@ impl NapiDb {
         let inner = inner
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        macro_rules! prepare {
-            ($db:expr, $drive:expr) => {{
-                let db = Rc::clone($db);
-                let owner = Rc::clone(&db);
-                let receiver = db.enqueue_transaction_read(open_id, async move {
-                    owner
-                        .prepare_initialization_insert(open_id, &table, row_id)
-                        .await
-                });
-                if $drive {
-                    db.drive_queued_mutation_once();
-                }
-                native_read_or_pending(Box::pin(async move {
-                    receiver
-                        .await
-                        .map_err(|_| {
-                            napi::Error::from_reason(
-                                "initialization absence owner operation was cancelled",
-                            )
-                        })?
-                        .map_err(napi_error)?;
-                    Ok(Uint8Array::new(Vec::new()))
-                }))
-            }};
-        }
-        prepare!(&inner.core, inner.drives_mutations_inline).map_err(BindingError::from)
+        inner
+            .core
+            .binding
+            .record_initialization_insert_absence(&open_id.to_string(), &table, &row_id.to_bytes())
+            .map_err(napi_error)?;
+        Ok(Either::A(Uint8Array::new(Vec::new())))
     }
 
     #[napi(js_name = "initializationTransactionStatus")]
@@ -367,62 +355,35 @@ impl NapiDb {
             )
             .into());
         }
-        let ids = ids
-            .iter()
-            .map(|id| ReservedTxId::decode(id))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(napi_error)?;
         let inner = self.inner.borrow();
         let inner = inner
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        macro_rules! status {
-            ($db:expr) => {{
-                let db = Rc::clone($db);
-                let lifecycle = Rc::clone(&self.streaming);
-                let view_id = self.view_id;
-                native_permission_advice_or_pending(Box::pin(async move {
-                    let statuses = db
-                        .initialization_transaction_status(&ids)
-                        .await
-                        .map_err(napi_error)?;
-                    lifecycle.ensure_admitted(view_id)?;
-                    jazz::binding_codec::encode_initialization_statuses(&ids, &statuses)
-                        .map_err(napi_error)
-                }))
-            }};
-        }
-        status!(&inner.core).map_err(BindingError::from)
+        let status = inner
+            .core
+            .binding
+            .initialization_transaction_status(&ids)
+            .map_err(napi_error)?;
+        Ok(Either::A(status))
     }
 }
 
-pub(super) fn open_cached_db<S>(
+pub(super) fn open_cached_db(
     schema: JazzSchema,
-    storage: S,
+    storage: NativeStorage,
     config: CoreOpenDbConfig,
     identity: CoreDbIdentity,
     cached: Option<&[u8]>,
-) -> napi::Result<CoreDb>
-where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
-{
-    let Some(cached) = cached else {
-        return open_core_db(schema, storage, config, identity, false);
-    };
-    if config.history_complete {
+) -> napi::Result<CoreDb> {
+    if cached.is_some() && config.history_complete {
         return Err(napi::Error::from_reason(
             "cached catalogue cannot establish history completeness",
         ));
     }
-    let mut db_config = CoreDbConfig::new(schema, storage, identity);
-    if let Some(seed) = config.row_id_seed {
-        db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
+    let db = open_core_db(schema, storage, config, identity, false)?;
+    if let Some(cached) = cached {
+        // SAFETY: the host owns and validates this app/environment cache.
+        unsafe { db.install_cached_catalogue(cached) }.map_err(napi_error)?;
     }
-    // SAFETY: the private runtime host validates registry/application/environment
-    // scope and capture provenance before passing these opaque cache bytes.
-    let db = core_block_on(unsafe { CoreDb::open_with_cached_catalogue(db_config, Some(cached)) })
-        .map_err(napi_error)?;
-    configure_initial_sync_flush_cadence(&db, config.initial_sync_flush_every)
-        .map_err(napi_error)?;
     Ok(db)
 }

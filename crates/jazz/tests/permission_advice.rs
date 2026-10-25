@@ -228,3 +228,141 @@ fn without_an_authority_or_once_cancelled_the_advice_is_unknown() {
         PermissionAdvice::Unknown
     );
 }
+
+/// Alice asks an authority to edit her and Bob's rows. Optional UPDATE clauses
+/// constrain only their named images; no UPDATE clauses still denies the edit.
+/// Advice must agree with the real uploaded write and must not change rows.
+#[test]
+fn optional_update_clauses_agree_for_advice_and_uploaded_writes() {
+    use jazz::db::UpdateOptions;
+    use jazz::model::public_schema::OperationPolicy;
+    use jazz::tx::DurabilityTier;
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let owned = owned_by_session();
+    let cases = [
+        (OperationPolicy::using(owned.clone()), alice, bob, true),
+        (OperationPolicy::using(owned.clone()), bob, alice, false),
+        (OperationPolicy::with_check(owned.clone()), bob, alice, true),
+        (
+            OperationPolicy::with_check(owned.clone()),
+            alice,
+            bob,
+            false,
+        ),
+        (
+            OperationPolicy::using_and_check(owned.clone(), owned.clone()),
+            alice,
+            alice,
+            true,
+        ),
+        (
+            OperationPolicy::using_and_check(owned.clone(), owned.clone()),
+            alice,
+            bob,
+            false,
+        ),
+        (
+            OperationPolicy::using_and_check(owned.clone(), owned),
+            bob,
+            alice,
+            false,
+        ),
+        (OperationPolicy::default(), alice, alice, false),
+    ];
+    for (update, before, after, allowed) in cases {
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("owner", ColumnType::Text)
+                        .column("title", ColumnType::Text)
+                        .policies(TablePolicies {
+                            update,
+                            ..TablePolicies::new().with_select(PolicyExpr::True)
+                        }),
+                )
+                .build(),
+        );
+        let server = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xee; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let client = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xa1; 16]),
+                author: alice,
+            },
+        )))
+        .unwrap();
+        let row = block_on(server.insert("notes", note(before, "original"), Default::default()))
+            .unwrap()
+            .row_uuid();
+        connect(&client, &server, alice);
+        let query = client.prepare_query(&Query::from("notes")).unwrap();
+        let _subscription = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(
+            count(&client, "notes"),
+            1,
+            "Alice has the current row before editing"
+        );
+        let patch = note(after, "edited");
+        let advice = ask(
+            &client,
+            &server,
+            PermissionAdviceAction::Update {
+                table: "notes".into(),
+                row,
+                patch: patch.clone(),
+            },
+        );
+        assert_eq!(
+            advice,
+            if allowed {
+                PermissionAdvice::Allowed
+            } else {
+                PermissionAdvice::Denied
+            }
+        );
+        let query = server.prepare_query(&Query::from("notes")).unwrap();
+        let read = || block_on(server.all(&query, ReadOpts::default())).unwrap();
+        assert_eq!(
+            read()[0]
+                .cells()
+                .find(|(name, _)| *name == "title")
+                .unwrap()
+                .1,
+            Some(&Value::String("original".into())),
+            "advice never mutates the row"
+        );
+        let write = block_on(client.update("notes", row, patch, UpdateOptions::default())).unwrap();
+        let result = drive(
+            &[&client, &server, &client],
+            client.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global),
+        );
+        assert_eq!(
+            result.is_ok(),
+            allowed,
+            "advice and real write must agree: {result:?}"
+        );
+        assert_eq!(
+            read()[0]
+                .cells()
+                .find(|(name, _)| *name == "title")
+                .unwrap()
+                .1,
+            Some(&Value::String(
+                if allowed { "edited" } else { "original" }.into()
+            ))
+        );
+    }
+}

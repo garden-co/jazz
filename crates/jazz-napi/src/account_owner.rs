@@ -11,6 +11,22 @@ const MARKER_HEADER: &[u8] = b"JAZZ-NODE-ACCOUNT-OWNER\0\x01";
 const MAX_OWNER_FIELD_BYTES: usize = 64 * 1024;
 const MAX_MARKER_BYTES: usize = MARKER_HEADER.len() + 8 + 2 * MAX_OWNER_FIELD_BYTES;
 
+// A crash before or after the atomic marker installation may leave this file.
+// It is not an owner marker and its contents never admit an account. Only the
+// canonical UUID-v7 names emitted by admit_marker belong to this root format.
+pub(super) fn is_temporary_marker_name(name: &str) -> bool {
+    let Some(id) = name
+        .strip_prefix(".jazz-account-owner-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+    else {
+        return false;
+    };
+    let Ok(parsed) = id.parse::<CoreOpenTransactionId>() else {
+        return false;
+    };
+    parsed.to_string() == id && parsed.as_bytes()[6] >> 4 == 7 && parsed.as_bytes()[8] >> 6 == 2
+}
+
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct HostStorageOwner {
@@ -74,7 +90,7 @@ fn encode_marker(owner: &str, author: &str) -> napi::Result<Vec<u8>> {
     Ok(marker)
 }
 
-/// Called only while the admitted RocksDB handle holds the root's exclusive
+/// Called only while the admitted SQLite host holds the root's exclusive
 /// open lock. Only this host account-owner route may claim a markerless legacy
 /// root selected by the unchanged AccountHandle-derived hashed namespace.
 fn admit_marker(root: &Path, expected: &[u8]) -> napi::Result<()> {
@@ -180,8 +196,7 @@ fn open_owner(
     )?;
     // SAFETY: this host-only path has durably admitted the exact configured
     // account author under the existing root lock before exposing any runtime.
-    core_block_on(unsafe { db.restore_initialization_owner_pending_uploads() })
-        .map_err(napi_error)?;
+    db.set_scope_isolated_storage_owner().map_err(napi_error)?;
     Ok(NapiDb {
         inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::persistent(Rc::new(
             db,

@@ -1,5 +1,5 @@
 use crate::*;
-use jazz::groove::records::{RecordDescriptor, ValueType};
+use jazz::records::{RecordDescriptor, ValueType};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
 
 fn author(subject: &str, byte: u8) -> CoreAuthorSubject {
@@ -95,10 +95,9 @@ fn publish(db: &NapiDb) -> String {
     let raw = descriptor
         .create(&[CoreValue::String("legacy pending row".into())])
         .unwrap();
-    let cells = jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
-        raw, descriptor,
-    ))
-    .unwrap();
+    let cells =
+        jazz::binding_codec::encode_named_cells(&jazz::records::OwnedRecord::new(raw, descriptor))
+            .unwrap();
     db.insert_in_transaction(
         open.clone(),
         "items".into(),
@@ -128,17 +127,17 @@ fn row(db: &NapiDb) -> Vec<u8> {
         .to_vec()
 }
 
-struct OutboundCapture(Rc<RefCell<Vec<jazz::protocol::SyncMessage>>>);
+struct OutboundCapture(Rc<RefCell<Vec<jazz::db::SyncMessage>>>);
 
 impl jazz::db::Transport for OutboundCapture {
     fn send(
         &mut self,
-        message: jazz::protocol::SyncMessage,
+        message: jazz::db::SyncMessage,
     ) -> std::result::Result<(), jazz::wire::TransportError> {
         self.0.borrow_mut().push(message);
         Ok(())
     }
-    fn try_recv(&mut self) -> Option<jazz::protocol::SyncMessage> {
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
         None
     }
 }
@@ -159,17 +158,21 @@ fn take_original_pending_unit(db: &NapiDb) -> Vec<u8> {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            jazz::protocol::SyncMessage::CommitUnit { versions, .. }
-                if versions
-                    .iter()
-                    .any(|version| version.row_uuid() == CoreRowUuid::from_bytes([0xb2; 16])) =>
+            jazz::db::SyncMessage::Commit { ops, .. }
+                if ops.iter().any(|op| {
+                    // The public sync envelope exposes its serialized operation;
+                    // WireOp's Rust variants live in the private engine module.
+                    let operation = serde_json::to_value(op).unwrap();
+                    operation.get("Insert").and_then(|insert| insert.get("row"))
+                        == Some(&serde_json::to_value([0xb2_u8; 16]).unwrap())
+                }) =>
             {
                 Some(postcard::to_allocvec(message).unwrap())
             }
             _ => None,
         })
         .expect("original pending unit reaches a newly attached upstream");
-    core_block_on(core.detach_connection_async(&upstream)).unwrap();
+    assert!(core.detach_connection(&upstream));
     unit
 }
 

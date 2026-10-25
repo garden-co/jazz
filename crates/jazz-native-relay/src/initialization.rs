@@ -1,6 +1,31 @@
 use super::*;
 use jazz::db::ReservedTxId;
 
+/// The core may fail before taking a batch, or consume it before an owner
+/// reservation fails/is cancelled. Match that actual lifetime on every exit,
+/// including dropping an unpolled or suspended native operation.
+struct SealingTransaction {
+    db: Rc<Db>,
+    transactions: Rc<RefCell<BTreeMap<u64, ForegroundTransaction>>>,
+    handle: u64,
+    open: OpenTransactionId,
+    retained_by_token: bool,
+}
+
+impl SealingTransaction {
+    fn retain_by_token(&mut self) {
+        self.retained_by_token = true;
+    }
+}
+
+impl Drop for SealingTransaction {
+    fn drop(&mut self) {
+        if !self.retained_by_token && !self.db.has_open_transaction(self.open) {
+            self.transactions.borrow_mut().remove(&self.handle);
+        }
+    }
+}
+
 /// Frozen local V1 tags: Seal=0, Publish=1, Cancel=2, RecordAbsence=3,
 /// Status=4, HasAuthenticatedCatalogue=5.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -63,10 +88,8 @@ impl RelayWorker {
                     })?;
                 let owner = Rc::clone(&self.persistent);
                 Box::pin(async move {
-                    let requested_ready = db
-                        .has_authenticated_catalogue()
-                        .await
-                        .map_err(RelayError::Db)?;
+                    let requested_ready =
+                        db.has_authenticated_catalogue().map_err(RelayError::Db)?;
                     let ready = std::future::poll_fn(move |context| {
                         cache.borrow_mut().poll_refresh(&owner, context)
                     })
@@ -82,9 +105,9 @@ impl RelayWorker {
             }
             InitializationAction::Seal { transaction } => {
                 let (_, tx) = self.foreground_transaction(client, transaction)?;
-                if tx.kind != ForegroundTransactionKind::Exclusive {
+                if tx.kind != ForegroundTransactionKind::Serializable {
                     return Err(RelayError::ForegroundCommand(
-                        "initialization requires an exclusive transaction".into(),
+                        "initialization requires a serializable transaction".into(),
                     ));
                 }
                 if seals.borrow().len() >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX {
@@ -92,20 +115,26 @@ impl RelayWorker {
                         "initialization seal capacity exceeded".into(),
                     ));
                 }
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|error| RelayError::ForegroundCommand(error.to_string()))?
-                    .as_millis();
-                let now_ms = u64::try_from(now_ms)
-                    .map_err(|error| RelayError::ForegroundCommand(error.to_string()))?;
+                let mut transaction_lifetime = SealingTransaction {
+                    db: Rc::clone(&db),
+                    transactions: Rc::clone(&self.foreground_client(client)?.transactions),
+                    handle: transaction,
+                    open: tx.open_tx_id,
+                    retained_by_token: false,
+                };
                 Box::pin(async move {
                     let seal = db
-                        .seal_initialization_transaction_at_ms(tx.open_tx_id, now_ms)
+                        .binding
+                        .seal_initialization_transaction_with_owner(&tx.open_tx_id.to_string())
                         .await
-                        .map_err(RelayError::Db)?;
+                        .map_err(engine::host_error)?;
                     let token = OpenTransactionId::new().to_string();
-                    let result = serde_json::json!({ "token": token, "reservedTxId": seal.reservation().encode() });
-                    seals.borrow_mut().insert(token, (transaction, seal));
+                    let result =
+                        serde_json::json!({ "token": token, "reservedTxId": seal.reserved_tx_id });
+                    seals.borrow_mut().insert(token, (transaction, seal.token));
+                    // A successful seal keeps its native slot until the token
+                    // is published or cancelled; it cannot evade the cap.
+                    transaction_lifetime.retain_by_token();
                     Ok(ForegroundOperationResult::Rows(
                         result.to_string().into_bytes(),
                     ))
@@ -116,15 +145,15 @@ impl RelayWorker {
                     seals.borrow_mut().remove(&token).ok_or_else(unknown_seal)?;
                 self.foreground_client_mut(client)?
                     .transactions
+                    .borrow_mut()
                     .remove(&transaction);
                 Box::pin(async move {
                     let write = db
-                        .publish_initialization_transaction(seal)
-                        .await
-                        .map_err(RelayError::Db)?;
-                    db.drive_queued_mutation_once();
-                    let id = TransactionId::from_committed_tx(write.mergeable_tx_id());
-                    writes.borrow_mut().insert(id, Rc::new(write));
+                        .binding
+                        .publish_initialization_transaction(&seal)
+                        .map_err(engine::host_error)?;
+                    let id = write.tx_id;
+                    writes.borrow_mut().insert(id, write);
                     Ok(ForegroundOperationResult::TransactionCommitted(id))
                 })
             }
@@ -133,11 +162,12 @@ impl RelayWorker {
                     seals.borrow_mut().remove(&token).ok_or_else(unknown_seal)?;
                 self.foreground_client_mut(client)?
                     .transactions
+                    .borrow_mut()
                     .remove(&transaction);
                 Box::pin(async move {
-                    db.cancel_initialization_transaction(seal)
-                        .await
-                        .map_err(RelayError::Db)?;
+                    db.binding
+                        .cancel_initialization_transaction(&seal)
+                        .map_err(engine::host_error)?;
                     Ok(ForegroundOperationResult::Rows(Vec::new()))
                 })
             }
@@ -153,7 +183,6 @@ impl RelayWorker {
                         &table,
                         RowUuid::from_bytes(row),
                     )
-                    .await
                     .map_err(RelayError::Db)?;
                     Ok(ForegroundOperationResult::Rows(Vec::new()))
                 })
@@ -173,12 +202,12 @@ impl RelayWorker {
                 // checks this durable owner's admitted relay session and stored author.
                 let owner = Rc::clone(&self.persistent);
                 Box::pin(async move {
-                    let statuses = owner
-                        .initialization_transaction_status(&ids)
-                        .await
-                        .map_err(RelayError::Db)?;
-                    let json = jazz::binding_codec::encode_initialization_statuses(&ids, &statuses)
-                        .map_err(|error| RelayError::ForegroundCommand(error.to_string()))?;
+                    let json = owner
+                        .binding
+                        .initialization_transaction_status(
+                            &ids.iter().map(|id| id.encode()).collect::<Vec<_>>(),
+                        )
+                        .map_err(engine::host_error)?;
                     Ok(ForegroundOperationResult::Rows(json.into_bytes()))
                 })
             }

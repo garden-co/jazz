@@ -2066,38 +2066,6 @@ mod tests {
         );
     }
 
-    /// The relay tier is not built on SQLite: a negotiated relay request is
-    /// refused with a final, explicit error.
-    async fn expect_ws_relay_not_supported_yet(
-        ws: &mut tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    ) {
-        ws.send(WsMessage::Binary(
-            ws_client_hello_batch_with_features(jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY)
-                .into(),
-        ))
-        .await
-        .expect("send client relay hello");
-        let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
-            .await
-            .expect("wait for relay refusal")
-            .expect("server response")
-            .expect("server websocket result");
-        let WsMessage::Binary(response) = response else {
-            panic!("expected binary relay refusal, got {response:?}");
-        };
-        let frames: Vec<Vec<u8>> = postcard::from_bytes(&response).expect("decode refusal batch");
-        match decode_frame(&frames[0]).expect("decode refusal") {
-            WireFrame::Error(WireError {
-                code: WireErrorCode::UnsupportedFeature,
-                retry: WireRetry::Never,
-                message,
-            }) => assert!(message.contains("not supported yet"), "{message}"),
-            other => panic!("expected relay refusal, got {other:?}"),
-        }
-    }
-
     async fn oversized_ws_prelude_never_reaches_admission(message: WsMessage, url: String) {
         let (mut ws, _) = connect_async(url).await.expect("connect websocket");
         // The server may enforce the cap before the oversized send finishes.
@@ -2240,11 +2208,12 @@ mod tests {
                 WsMessage::Binary(json.into_bytes().into())
             };
             ws.send(message).await.expect("send writer prelude");
-            if entry["requested_link"] == "scope_isolated_client_relay" {
-                expect_ws_relay_not_supported_yet(&mut ws).await;
+            let features = if entry["requested_link"] == "scope_isolated_client_relay" {
+                jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
             } else {
-                expect_ws_server_hello(&mut ws, 0).await;
-            }
+                0
+            };
+            expect_ws_server_hello(&mut ws, features).await;
         }
     }
 

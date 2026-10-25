@@ -45,6 +45,13 @@ pub(super) const ACCEPTED_DDL: &str = "\
     CREATE INDEX IF NOT EXISTS _jazz_accepted_rows_by_seq_v1 \
         ON _jazz_accepted_rows_v1(seq,observed);";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettledSnapshot {
+    Transaction,
+    ObservedAtBegin,
+    AuthorityAtBegin,
+}
+
 impl Inner {
     pub(super) fn accepted_content(
         &self,
@@ -459,15 +466,61 @@ impl Db {
     /// only evidence admitted at begin; Remote requires an authority answer.
     pub fn all_settled(
         &self,
-        mut prepared: PreparedQuery,
+        prepared: PreparedQuery,
         opts: ReadOpts,
         id: OpenTransactionId,
         snapshot_at_begin: bool,
         author: Option<AuthorSubject>,
     ) -> Result<impl Future<Output = Result<BindingSettledRead, Error>> + 'static, Error> {
+        self.all_settled_with_snapshot(
+            prepared,
+            opts,
+            id,
+            if snapshot_at_begin {
+                SettledSnapshot::ObservedAtBegin
+            } else {
+                SettledSnapshot::Transaction
+            },
+            author,
+        )
+    }
+
+    /// Hydrate accepted history at the authority coordinate captured at begin.
+    /// Unlike local observation, this may fetch previously unseen evidence, but
+    /// never content accepted after that coordinate. Requires remote coverage;
+    /// an earlier read at another cut cannot be silently rewound.
+    pub fn all_settled_at_authority_begin(
+        &self,
+        prepared: PreparedQuery,
+        opts: ReadOpts,
+        id: OpenTransactionId,
+        author: Option<AuthorSubject>,
+    ) -> Result<impl Future<Output = Result<BindingSettledRead, Error>> + 'static, Error> {
+        self.all_settled_with_snapshot(
+            prepared,
+            opts,
+            id,
+            SettledSnapshot::AuthorityAtBegin,
+            author,
+        )
+    }
+
+    fn all_settled_with_snapshot(
+        &self,
+        mut prepared: PreparedQuery,
+        opts: ReadOpts,
+        id: OpenTransactionId,
+        snapshot: SettledSnapshot,
+        author: Option<AuthorSubject>,
+    ) -> Result<impl Future<Output = Result<BindingSettledRead, Error>> + 'static, Error> {
         let mut guard = self.transaction_read_guard(id, true)?;
         let admission = (|| {
             self.check_accepted_query(&prepared)?;
+            if snapshot == SettledSnapshot::AuthorityAtBegin && opts.tier != ReadTier::Remote {
+                return Err(unsupported(
+                    "authority-at-begin history without remote coverage",
+                ));
+            }
             if opts.read_view.source != Default::default() {
                 return Err(unsupported(
                     "branch or snapshot read views in paired accepted reads",
@@ -542,8 +595,7 @@ impl Db {
             let result = async {
                 guard.wait().await?;
                 db.check_read_guard(id, &guard)?;
-                db.settled_read(&prepared, opts, id, snapshot_at_begin, &guard)
-                    .await
+                db.settled_read(&prepared, opts, id, snapshot, &guard).await
             }
             .await;
             guard.finish(&result);
@@ -556,7 +608,7 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
         id: OpenTransactionId,
-        snapshot_at_begin: bool,
+        snapshot_mode: SettledSnapshot,
         guard: &ReadGuard,
     ) -> Result<BindingSettledRead, Error> {
         let include_deleted = opts.read_view.include_deleted;
@@ -577,6 +629,12 @@ impl Db {
             };
             (*snapshot, *pinned, accepted_begin.clone(), batch.reader())
         };
+        let authority_begin = snapshot_mode == SettledSnapshot::AuthorityAtBegin;
+        if authority_begin && pinned && snapshot != begin.seq {
+            return Err(not_observed(
+                "transaction already read beyond its begin coordinate",
+            ));
+        }
         let mut expected = None;
         let mut scoped = None;
         let mut bound_prepared = prepared.clone();
@@ -589,7 +647,11 @@ impl Db {
             });
             let mut fetch = std::pin::pin!(self.fetch_answer(
                 prepared,
-                pinned.then_some(snapshot),
+                if authority_begin {
+                    Some(begin.seq)
+                } else {
+                    pinned.then_some(snapshot)
+                },
                 include_deleted,
                 Some(deadline),
                 scope,
@@ -606,6 +668,11 @@ impl Db {
             .ok_or_else(|| not_observed("authority coverage unavailable for paired read"))?;
             self.check_read_guard(id, guard)?;
             let (through, rows, evidence) = answer;
+            if authority_begin && through != begin.seq {
+                return Err(not_observed(
+                    "authority answered beyond the begin coordinate",
+                ));
+            }
             bound_prepared.authority_policies =
                 self.inner().needs_authority_policies(prepared, reader)?;
             if let Some(evidence) = evidence {
@@ -661,6 +728,10 @@ impl Db {
                 *snapshot = begin.seq;
                 *pinned = true;
                 begin.clone()
+            } else if authority_begin {
+                // Pending own writes and late acceptance cannot extend the
+                // recipient-eligibility cut beyond the captured global coordinate.
+                Cut::at(begin.seq)
             } else {
                 // Paired reads return only the authority's pinned state. Own
                 // writes pending at begin may settle after that cut; including
@@ -792,7 +863,7 @@ impl Db {
                     }
                 }
                 let settlements = inner.settlements(prepared, &rows, &cut)?;
-                if !local && snapshot_at_begin {
+                if !local && snapshot_mode == SettledSnapshot::ObservedAtBegin {
                     let observed = inner.run(
                         prepared,
                         reader,

@@ -18,3 +18,6 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, Error> {
     jazz_types::postcard_exact::decode_postcard_exact(bytes)
         .map_err(|error| invalid(error.to_string()))
 }
+
+#[cfg(test)]
+mod tests;

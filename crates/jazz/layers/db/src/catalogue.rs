@@ -235,6 +235,7 @@ impl Db {
         if !inner.authority || inner.client.is_some() {
             return Err(absent("catalogue publication requires the authority"));
         }
+        writer_order::require_ready(&inner.conn)?;
         if inner.catalogue_head()?.is_some() {
             return Ok(());
         }

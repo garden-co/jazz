@@ -513,7 +513,7 @@ fn clearing_the_nullable_account_endpoint_revokes_reads_and_writes() {
 
 /// Alice has already cached a protected row when Bob revokes her group seed.
 /// A later strict remote read on her replica returns the authority's empty
-/// answer. Unsupported cross-row reads through a scoped backend fail closed.
+/// answer. A trusted scoped backend rechecks the authority’s exact evidence.
 #[test]
 fn remote_reads_do_not_reuse_a_cached_group_grant_after_revocation() {
     use jazz::db::{ReadTier, SerializedReadResult, duplex};
@@ -581,16 +581,6 @@ fn remote_reads_do_not_reuse_a_cached_group_grant_after_revocation() {
             )
         };
         let before = drive(&server, &replica, read());
-        if scoped {
-            let error = before.unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("scoped remote reads with cross-row permission evidence"),
-                "{error}"
-            );
-            continue;
-        }
         let SerializedReadResult::Rows(before) = before.unwrap() else {
             panic!("rows")
         };

@@ -24,7 +24,7 @@ fn stage(fixture: &NativeHostAbiFixture, foreground: u64, row_id: [u8; 16]) -> u
     let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
         foreground,
         ForegroundDbCommandRequest::BeginTransaction {
-            kind: ForegroundTransactionKind::Exclusive,
+            kind: ForegroundTransactionKind::Serializable,
         },
     ) else {
         panic!("exclusive transaction");
@@ -156,7 +156,7 @@ fn native_initialization_seal_is_unpublished_owner_bound_and_single_use() {
     let record = BorrowedRecord::new(&published.raw, &batch.descriptor);
     assert_eq!(
         record.get("title").unwrap(),
-        Value::Nullable(Some(Box::new(Value::String("sealed only".into())))),
+        Value::String("sealed only".into()),
     );
     let ForegroundDbCommandResponse::Rows { rows } = complete(
         &fixture,
@@ -243,10 +243,12 @@ fn native_catalogue_readiness_requires_an_admitted_cache_owner() {
     ));
 }
 
+/// Alice cancels one real Remote read while another still awaits Bob's authority.
+/// SQLite catalogue observations are immediate: a local schema is false, and
+/// authenticated metadata becomes true only after the real authority handshake
+/// and host cache persistence. The private wire controls reply delivery.
 #[test]
-fn native_catalogue_readiness_waits_for_held_owner_and_survives_waiter_cancellation() {
-    // Only the native owner hook can suspend the exact observation lock. All
-    // readiness, cancellation and completion assertions cross the real C ABI.
+fn native_catalogue_readiness_is_immediate_and_survives_read_cancellation() {
     let directory = tempfile::tempdir().unwrap();
     let fixture = NativeHostAbiFixture::new();
     let capability = fixture.admit(
@@ -256,31 +258,33 @@ fn native_catalogue_readiness_waits_for_held_owner_and_survives_waiter_cancellat
         0xe6,
     );
     let foreground = fixture.open_foreground(&capability);
-    for _ in 0..16 {
-        fixture.tick(foreground);
-    }
-    let relay = unsafe { &*fixture.host }
+    let client = unsafe { &*fixture.host }
         .inner
         .lock()
         .unwrap()
         .foreground_client(foreground)
         .unwrap()
-        .relay
         .clone();
-    hold_persistent_owner(&relay);
+    let relay = client.relay.clone();
     let request = ForegroundDbCommandRequest::InitializationV1 {
         version: 1,
         action: InitializationAction::HasAuthenticatedCatalogue,
     };
+    let read_request = ForegroundDbCommandRequest::All {
+        query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+        options_json: r#"{"tier":"Remote"}"#.into(),
+        transaction: None,
+    };
     let ForegroundDbCommandResponse::Pending {
         operation: cancelled,
-    } = fixture.execute(foreground, request.clone())
+    } = fixture.execute(foreground, read_request.clone())
     else {
-        panic!("contended catalogue observation must be pending, not false");
+        panic!("first Remote read awaits authority");
     };
-    let ForegroundDbCommandResponse::Pending { operation } = fixture.execute(foreground, request)
+    let ForegroundDbCommandResponse::Pending { operation } =
+        fixture.execute(foreground, read_request)
     else {
-        panic!("a second readiness waiter must join the pending observation");
+        panic!("second Remote read awaits authority");
     };
     assert_eq!(
         fixture.execute(
@@ -289,39 +293,80 @@ fn native_catalogue_readiness_waits_for_held_owner_and_survives_waiter_cancellat
                 operation: cancelled
             }
         ),
-        ForegroundDbCommandResponse::Cancelled { cancelled: true },
+        ForegroundDbCommandResponse::Cancelled { cancelled: true }
     );
     for _ in 0..4 {
         fixture.tick(foreground);
         assert_eq!(
+            fixture.execute(foreground, request.clone()),
+            ForegroundDbCommandResponse::Rows {
+                rows: b"false".to_vec()
+            },
+            "a local schema is not authenticated catalogue evidence"
+        );
+        assert_eq!(
             fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation }),
-            ForegroundDbCommandResponse::Pending { operation },
+            ForegroundDbCommandResponse::Pending { operation }
         );
     }
-    relay
-        .run(|worker| {
-            worker.persistent_tick = None;
-            Ok(())
-        })
-        .unwrap();
-    let mut result = ForegroundDbCommandResponse::Pending { operation };
+    let authority = Rc::new(
+        block_on(jazz::db::Db::open_history_complete(DbConfig::new(
+            permissive_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xee; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap(),
+    );
+    let (_, wire) = relay.run(|worker| worker.begin_socket_upstream()).unwrap();
+    let reverse_wire = NativeRelayWire {
+        inbound: Arc::clone(&wire.outbound),
+        outbound: Arc::clone(&wire.inbound),
+        liveness: wire.liveness.clone(),
+        connection_liveness: wire.connection_liveness.clone(),
+    };
+    authority.accept_subscriber(
+        Box::new(QueueTransport { wire: reverse_wire }),
+        AuthorSubject::for_test_bytes([0xe7; 16]),
+    );
+    let mut read_complete = false;
+    let mut ready = false;
     for _ in 0..128 {
+        block_on(authority.tick()).unwrap();
+        relay.pump().unwrap();
         fixture.tick(foreground);
-        result = fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
-        if !matches!(result, ForegroundDbCommandResponse::Pending { .. }) {
+        if !read_complete {
+            match fixture.execute(foreground, ForegroundDbCommandRequest::Poll { operation }) {
+                ForegroundDbCommandResponse::Pending { .. } => {}
+                ForegroundDbCommandResponse::Rows { rows } => {
+                    assert!(
+                        postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
+                            .unwrap()
+                            .iter()
+                            .all(|batch| batch.rows.is_empty())
+                    );
+                    read_complete = true;
+                }
+                other => panic!("surviving Remote read failed: {other:?}"),
+            }
+        }
+        let ForegroundDbCommandResponse::Rows { rows } =
+            fixture.execute(foreground, request.clone())
+        else {
+            panic!("catalogue observation remains synchronous");
+        };
+        assert!(rows.as_slice() == b"false" || rows.as_slice() == b"true");
+        ready = rows.as_slice() == b"true";
+        if ready && read_complete {
             break;
         }
     }
-    assert_eq!(
-        result,
-        ForegroundDbCommandResponse::Rows {
-            rows: b"false".to_vec()
-        },
-        "a local schema is not authenticated catalogue evidence",
-    );
+    assert!(read_complete, "cancelling one reader preserves the other");
+    assert!(ready, "authenticated metadata must become durable-ready");
     assert_eq!(
         fixture.execute(foreground, ForegroundDbCommandRequest::Close),
-        ForegroundDbCommandResponse::Closed { closed: true },
+        ForegroundDbCommandResponse::Closed { closed: true }
     );
 }
 
@@ -407,22 +452,38 @@ fn admitted_owner_restart_replays_exact_pending_leased_foreground_unit() {
         let mut uploaded = None;
         for _ in 0..128 {
             fixture.tick(foreground);
-            for mut message in client.relay.wire().take_outbound().unwrap() {
-                if let SyncMessage::CommitUnit { tx, versions } = &mut message {
-                    if versions.iter().any(|version| version.row_uuid() == row) {
+            for message in client.relay.wire().take_outbound().unwrap() {
+                if let SyncMessage::Commit {
+                    node,
+                    ops,
+                    author: made_by,
+                    session,
+                    ..
+                } = &message
+                {
+                    // WireOp is internal; its derived representation lets this
+                    // binding test inspect the same exact insert identity.
+                    let expected_row = serde_json::to_value(row.as_bytes()).unwrap();
+                    if ops.iter().any(|op| {
+                        serde_json::to_value(op)
+                            .unwrap()
+                            .get("Insert")
+                            .and_then(|insert| insert.get("row"))
+                            == Some(&expected_row)
+                    }) {
                         assert_ne!(
-                            tx.tx_id.node, identity.node,
+                            *node,
+                            *identity.node.as_bytes(),
                             "the transaction belongs to the leased foreground, not the durable owner"
                         );
-                        // Relay ingestion deliberately drops the foreground's
-                        // untrusted policy hint. Terminal authorization uses the
-                        // admitted relay session, never this transport field.
+                        // SQLite persists the relay's authenticated session scope
+                        // with the upload. Restart cannot rewrite or strip it.
                         assert_eq!(
-                            tx.permission_subject,
-                            if reopened { None } else { Some(author) },
+                            made_by.as_deref(),
+                            Some(author.canonical()),
+                            "durable provenance remains exact"
                         );
-                        assert_eq!(tx.made_by, author, "durable provenance remains exact");
-                        tx.permission_subject = None;
+                        assert_eq!(session.as_ref(), Some(&BTreeMap::new()));
                         uploaded = Some(postcard::to_allocvec(&message).unwrap());
                     }
                 }
@@ -437,7 +498,7 @@ fn admitted_owner_restart_replays_exact_pending_leased_foreground_unit() {
             assert_eq!(
                 Some(uploaded),
                 expected,
-                "replay preserves the complete commit unit byte-for-byte except the explicitly checked transient policy capability"
+                "replay preserves the complete commit unit and authenticated session scope byte-for-byte"
             );
         } else {
             expected = Some(uploaded);

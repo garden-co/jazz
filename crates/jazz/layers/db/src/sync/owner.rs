@@ -547,6 +547,13 @@ impl Db {
         result
     }
 
+    /// Only a host-admitted private owner may forward claims for its one
+    /// immutable subject. This capability is not inferred from wire traffic.
+    pub(crate) fn delegated_owner_subject(&self) -> Option<AuthorSubject> {
+        let inner = self.inner();
+        inner.scope_isolated_owner.then_some(inner.identity.author)
+    }
+
     /// Bind this durable replica's private pending projection to its admitted
     /// subject. A generic multi-reader relay must not enable this capability.
     /// Hosts activate it before handing the runtime to any application or peer.

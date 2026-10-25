@@ -21,6 +21,11 @@ mod foreground_mutations;
 mod initialization;
 pub use initialization::InitializationAction;
 mod catalogue_cache;
+mod engine;
+mod sqlite_wire;
+use engine::{ClientRelayScope, RelayDb as Db};
+pub use sqlite_wire::{NativeRelayTransport, SendOutcome};
+use sqlite_wire::{decode_sync_message, encode_sync_message};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
@@ -36,23 +41,19 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
 use futures::lock::Mutex as LocalMutex;
+use jazz::db::SyncMessage;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, PeerConnection, PeerIoPump, ReadOpts, RemoteLinkHint,
-    SerializedReadResult, SerializedSubscriptionAuthorization, SubscriptionEvent,
-    SubscriptionStream, TickScheduler, TickUrgency, Transport, UpdateOptions, UpsertOptions,
-    block_on,
+    DbConfig, DbIdentity, DeleteOptions, ReadOpts, RemoteLinkHint, SerializedReadResult,
+    SubscriberId, SubscriptionEvent, SubscriptionStream, TickScheduler, TickUrgency, Transport,
+    UpdateOptions, UpsertOptions, Upstream, block_on,
 };
 use jazz::foreground_node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
-use jazz::groove::records::Value;
-use jazz::groove::storage::BoxedStorage;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
-use jazz::protocol::SyncMessage;
 use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_len};
 #[cfg(test)]
 use jazz::query::Query;
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::storage_codec_profile::open_node_storage;
 use jazz::time::TxTime;
 use jazz::tools::AppId;
 use jazz::tools::native_transport_connector::{
@@ -60,12 +61,9 @@ use jazz::tools::native_transport_connector::{
 };
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 use jazz::tools::{OpenTransactionId, TransactionId};
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
-use jazz::wire::{TransportError, WireTransport, decode_sync_message, encode_sync_message};
+use jazz::tx::DurabilityTier as CoreDurabilityTier;
+use jazz::wire::{TransportError, WireTransport};
 use jazz_native_transport::NativeWebSocketConnector;
-#[cfg(test)]
-use jazz_storage_sqlite::SqliteStorage;
-use jazz_storage_sqlite::SqliteStorageFactory;
 use thiserror::Error;
 
 /// The current native-relay ABI version. (The name is kept for the exported
@@ -99,18 +97,6 @@ const NATIVE_RELAY_PUMP_MAX_CLIENTS: usize = 64;
 /// waiting for peer I/O. Each operation retains only one local future and is
 /// owned by exactly one foreground alias.
 const NATIVE_RELAY_FOREGROUND_PENDING_MAX: usize = 64;
-/// Admitted-but-unapplied owner operations one foreground may queue behind its
-/// direct mutations. Admission at the cap applies bounded backpressure: it
-/// drives that foreground's queue inline, and rejects without admitting when
-/// the queue cannot make progress. See `ensure_direct_mutation_capacity`.
-const NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX: usize = NATIVE_RELAY_FOREGROUND_PENDING_MAX;
-/// Inline queue polls one at-cap admission may spend before it reports
-/// backpressure instead of blocking the calling JS turn further.
-const NATIVE_RELAY_DIRECT_MUTATION_BACKPRESSURE_POLLS: usize = 8;
-/// Queued mutations one owner drive turn applies per foreground before its
-/// single IVM/relay pump. A later turn continues a longer burst, so a JS
-/// command never waits behind more than one bounded turn.
-const NATIVE_RELAY_DRIVE_MUTATIONS_PER_TURN: usize = 16;
 /// Foreground commands are copied across the JSI/C boundary and decoded before
 /// they reach a foreground owner. Keep this independent from both peer-frame
 /// and trusted-admission budgets.
@@ -1524,10 +1510,11 @@ impl NativeRelayHost {
                 if final_alias && !self.private_scope_workers.contains_key(&scope) {
                     let _ = self.registry.close(&scope);
                 }
-                // No foreground runtime observed this lease, so it is a known
-                // zero-high-water failure rather than an uncertain handoff.
+                // No foreground runtime observed this checkout. Keep the
+                // previously confirmed floor: a reused node may already have
+                // issued transactions even though this attachment failed.
                 if self
-                    .clean_foreground_lease(&scope, lease, TxTime::default())
+                    .clean_foreground_lease(&scope, lease, lease.confirmed_tx_time)
                     .is_err()
                 {
                     self.retire_foreground_lease(&scope, lease);
@@ -2054,6 +2041,12 @@ impl NativeRelayHost {
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema_json =
             serde_json::to_string(&value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        pending.identity = engine::restore_private_node(
+            std::path::Path::new(&pending.sqlite_path),
+            &RelayScope::from(pending.scope.clone()),
+            pending.identity,
+        )
+        .map_err(relay_status)?;
         let socket = pending.socket;
         let admitted = self.admit_scope(RelayScopeAdmissionRequest {
             scope: pending.scope,
@@ -2234,9 +2227,10 @@ fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
         RelayError::Db(error) if error.code == jazz::db::ErrorCode::Backpressure => {
             JazzNativeRelayStatus::Backpressure
         }
-        RelayError::Storage(jazz::groove::storage::Error::UnsupportedStorageCodecs { .. }) => {
-            JazzNativeRelayStatus::UnsupportedStorageCodecs
-        }
+        RelayError::Db(jazz::db::Error {
+            code: jazz::db::ErrorCode::UnsupportedStorageCodecs,
+            ..
+        }) => JazzNativeRelayStatus::UnsupportedStorageCodecs,
         _ => JazzNativeRelayStatus::LifecycleFailure,
     }
 }
@@ -2959,7 +2953,7 @@ impl NativeRelayHost {
                 options_json,
             } => {
                 let client = self.foreground_client(foreground)?;
-                foreground_read_opts_from_json(&options_json)
+                foreground_subscription_opts_from_json(&options_json)
                     .and_then(|opts| client.subscribe_foreground_query_with_options(query, opts))
                     .map(|subscription| Response::Subscribed { subscription })
                     .or_else(foreground_command_error)?
@@ -2986,7 +2980,7 @@ impl NativeRelayHost {
                 client
                     .wait_for_foreground_transaction(
                         tx_id,
-                        jazz::db::WriteWaitOptions { tier, observe_only },
+                        engine::WriteWaitOptions { tier, observe_only },
                     )
                     .map(foreground_operation_response)
                     .or_else(foreground_command_error)?
@@ -3392,7 +3386,7 @@ impl NativeRelayClient {
     /// across JSI/JNI/Swift boundaries.
     pub fn with_db<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&Db) -> Result<T, RelayError> + Send + 'static,
+        operation: impl FnOnce(&jazz::db::Db) -> Result<T, RelayError> + Send + 'static,
     ) -> Result<T, RelayError> {
         let id = self.id;
         self.relay.run(move |worker| {
@@ -3412,16 +3406,11 @@ impl NativeRelayClient {
                 .clients
                 .get_mut(&id)
                 .ok_or(RelayError::UnknownClient(id))?;
-            // Clean handoff retires this foreground. Release any suspended
-            // owner before reading its monotonic minted HLC.
+            // Clean handoff retires this foreground. SQLite allocates its
+            // sequence synchronously on this owner thread; include cancelled
+            // reservations in the floor handed to the next node holder.
             client.cancel_pending_work();
-            let mut read = Box::pin(client.db.minted_tx_time_high_water());
-            match read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
-                Poll::Ready(high_water) => Ok(high_water),
-                Poll::Pending => Err(RelayError::ForegroundCommand(
-                    "foreground HLC readout is busy; retire its node identity".into(),
-                )),
-            }
+            Ok(TxTime(client.db.seq_high_water()))
         })
     }
 
@@ -3476,26 +3465,11 @@ impl NativeRelayClient {
         let id = self.id;
         self.relay.run(move |worker| {
             let client = worker.foreground_client(id)?;
-            let mut read = Box::pin(
-                client
-                    .db
-                    .local_current_row(&table, RowUuid::from_bytes(row_id)),
-            );
-            let row = match read
-                .as_mut()
-                .poll(&mut Context::from_waker(futures::task::noop_waker_ref()))
-            {
-                Poll::Ready(row) => row.map_err(RelayError::Db)?,
-                Poll::Pending => {
-                    return Err(RelayError::ForegroundCommand(
-                        "local write row is temporarily busy; retry after the next native turn"
-                            .into(),
-                    ));
-                }
-            };
-            jazz::binding_codec::encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(
-                |error| RelayError::ForegroundCommand(format!("encode local current row: {error}")),
-            )
+            client
+                .db
+                .binding
+                .local_current_row(&table, &row_id)
+                .map_err(engine::host_error)
         })
     }
 
@@ -3510,9 +3484,10 @@ impl NativeRelayClient {
     fn subscribe_foreground_query_with_options(
         &self,
         query: Vec<u8>,
-        opts: ReadOpts,
+        opts: impl Into<ForegroundSubscriptionOptions>,
     ) -> Result<u64, RelayError> {
         let id = self.id;
+        let opts = opts.into();
         self.relay
             .run(move |worker| worker.subscribe_foreground_query_with_options(id, query, opts))
     }
@@ -3534,7 +3509,7 @@ impl NativeRelayClient {
     fn wait_for_foreground_transaction(
         &self,
         tx_id: [u8; 16],
-        options: impl Into<jazz::db::WriteWaitOptions>,
+        options: impl Into<engine::WriteWaitOptions>,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let id = self.id;
         let options = options.into();
@@ -3869,10 +3844,6 @@ impl TickScheduler for ForegroundWakeScheduler {
     fn schedule_tick_after(&self, delay_ms: u64) {
         self.schedule(FOREGROUND_WAKE_AFTER, delay_ms)
     }
-
-    fn query_runtime_waker(&self) -> Option<Waker> {
-        Some(Waker::from(Arc::new(self.clone())))
-    }
 }
 
 impl Wake for ForegroundWakeScheduler {
@@ -3937,10 +3908,6 @@ impl TickScheduler for RelayWakeScheduler {
 
     fn schedule_tick_after(&self, delay_ms: u64) {
         self.0.signal(delay_ms);
-    }
-
-    fn query_runtime_waker(&self) -> Option<Waker> {
-        Some(Waker::from(Arc::clone(&self.0)))
     }
 }
 
@@ -4041,7 +4008,6 @@ pub struct NativeRelayWire {
     outbound: Arc<Mutex<BoundedMessageQueue>>,
     liveness: Option<Arc<RelayLiveness>>,
     connection_liveness: Option<Arc<RelayLiveness>>,
-    trusted_encoder: Arc<AtomicBool>,
 }
 
 impl Default for NativeRelayWire {
@@ -4051,7 +4017,6 @@ impl Default for NativeRelayWire {
             outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             liveness: None,
             connection_liveness: None,
-            trusted_encoder: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -4068,21 +4033,6 @@ struct BoundedMessageQueue {
 }
 
 impl BoundedMessageQueue {
-    fn pop_auxiliary(&mut self) -> Option<SyncMessage> {
-        let position = self.messages.iter().position(|queued| {
-            matches!(
-                queued.message,
-                SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_)
-            )
-        })?;
-        let queued = self
-            .messages
-            .remove(position)
-            .expect("position was present");
-        self.encoded_bytes -= queued.encoded_len;
-        Some(queued.message)
-    }
-
     fn push(&mut self, message: SyncMessage, direction: &'static str) -> Result<(), RelayError> {
         if self.messages.len() >= NATIVE_RELAY_QUEUE_MAX_MESSAGES {
             return Err(RelayError::QueueCapacityExceeded {
@@ -4173,7 +4123,6 @@ impl NativeRelayWire {
             outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
             liveness: Some(liveness),
             connection_liveness: Some(Arc::new(RelayLiveness::new())),
-            trusted_encoder: Arc::new(AtomicBool::new(false)),
         }
     }
     fn enter(&self) -> Result<WireLivenessGuards<'_>, RelayError> {
@@ -4243,12 +4192,7 @@ impl NativeRelayWire {
     /// framing and fragmentation remain the responsibility of its transport.
     pub fn push_inbound_encoded(&self, bytes: &[u8]) -> Result<(), RelayError> {
         validate_encoded_peer_message_len(bytes.len())?;
-        let message = if self.trusted_encoder.load(Ordering::Acquire) {
-            jazz::wire::decode_sync_message_trusted(bytes)
-        } else {
-            decode_sync_message(bytes)
-        }
-        .map_err(RelayError::DecodePeerMessage)?;
+        let message = decode_sync_message(bytes).map_err(RelayError::DecodePeerMessage)?;
         self.push_inbound(message)
     }
 
@@ -4308,7 +4252,7 @@ impl NativeRelayWire {
 
 /// Move ordinary semantic messages between the relay's owner-local queue and
 /// a negotiated native socket. The socket is always wrapped in
-/// `WireTransportAdapter`: this bridge never serializes `SyncMessage` bytes,
+/// `NativeRelayTransport`: this bridge never serializes `SyncMessage` bytes,
 /// frames, fragments, or reconnect protocol itself.
 ///
 /// A native worker calls this in each bounded network turn, then requests the
@@ -4326,7 +4270,7 @@ enum NativeRelayWireBridgeError {
 
 fn bridge_native_relay_wire_once_classified<T: WireTransport>(
     relay_wire: &NativeRelayWire,
-    upstream: &mut jazz::db::WireTransportAdapter<T>,
+    upstream: &mut NativeRelayTransport<T>,
 ) -> Result<bool, NativeRelayWireBridgeError> {
     let mut progressed = false;
     let batch = {
@@ -4350,14 +4294,14 @@ fn bridge_native_relay_wire_once_classified<T: WireTransport>(
         let _live_connection = relay_wire
             .enter()
             .map_err(NativeRelayWireBridgeError::Relay)?;
-        match upstream.offer(message) {
-            Ok(jazz::db::WireSendOutcome::Accepted) => progressed = true,
-            Ok(jazz::db::WireSendOutcome::Rejected(message)) => {
+        match upstream.try_send(message) {
+            Ok(sqlite_wire::SendOutcome::Accepted) => progressed = true,
+            Ok(sqlite_wire::SendOutcome::Rejected(message)) => {
                 // Backpressure is transient: the adapter did not admit this
                 // message, so it and the rest of the drained batch go back to
                 // the head of the relay queue, in order, for the next turn.
                 let mut unsent = vec![QueuedMessage {
-                    message,
+                    message: *message,
                     encoded_len,
                 }];
                 unsent.extend(batch);
@@ -4406,14 +4350,29 @@ fn bridge_native_relay_wire_once_classified<T: WireTransport>(
                     .map_err(NativeRelayWireBridgeError::Relay)?;
                 progressed = true;
             }
-            None => return Ok(progressed),
+            None => {
+                if let Err(error) = upstream.check() {
+                    if upstream
+                        .remote_wire_error()
+                        .is_some_and(|error| error.asks_reconnect_later())
+                    {
+                        return Err(NativeRelayWireBridgeError::SocketPumpClosed);
+                    }
+                    return Err(NativeRelayWireBridgeError::Relay(
+                        RelayError::ForegroundCommand(format!(
+                            "native upstream receive: {error:?}"
+                        )),
+                    ));
+                }
+                return Ok(progressed);
+            }
         }
     }
 }
 
 pub fn bridge_native_relay_wire_once<T: WireTransport>(
     relay_wire: &NativeRelayWire,
-    upstream: &mut jazz::db::WireTransportAdapter<T>,
+    upstream: &mut NativeRelayTransport<T>,
 ) -> Result<bool, RelayError> {
     bridge_native_relay_wire_once_classified(relay_wire, upstream).map_err(|error| match error {
         NativeRelayWireBridgeError::Relay(error) => error,
@@ -4463,7 +4422,8 @@ impl std::fmt::Debug for NativeRelaySocketConfig {
 pub enum NativeRelaySocketEvent {
     Connected,
     Reconnecting,
-    /// A bridge or transport failed non-retryably; the worker retries unless
+    /// A bridge or transport failed non-retryably. Handshake rejection stops
+    /// the worker; loss of an established transport still retries unless
     /// `Stopped` follows. The scope-owned host surfaces a failure before
     /// `Connected` (the upstream rejected the session), or one the worker
     /// stops on, to foreground ticks until a subsequent `Connected`. Losing an
@@ -4630,6 +4590,10 @@ async fn run_native_relay_socket_worker(
                     (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
                         "native relay socket connect failed: {error}"
                     )));
+                    // Retrying unchanged credentials or an incompatible
+                    // handshake cannot repair a terminal admission failure.
+                    // The host's explicit reconnect replaces this worker.
+                    break 'reconnect;
                 }
                 (config.on_event)(NativeRelaySocketEvent::Reconnecting);
                 tokio::select! {
@@ -4639,33 +4603,11 @@ async fn run_native_relay_socket_worker(
                 continue;
             }
         };
-        if connected.permits_delegated_sessions {
-            (config.on_event)(NativeRelaySocketEvent::TerminalError(
-                "native relay socket connector granted forbidden delegated-session authority"
-                    .to_owned(),
-            ));
-            (config.on_event)(NativeRelaySocketEvent::Reconnecting);
-            tokio::select! {
-                _ = tokio::time::sleep(config.reconnect_delay) => {},
-                _ = wake.notified() => break,
-            }
-            continue;
-        }
-        if connected
-            .session_context
-            .is_some_and(|context| context.link_identity != config.peer_identity)
-        {
-            (config.on_event)(NativeRelaySocketEvent::TerminalError(
-                "native relay connector session identity differs from admission".into(),
-            ));
-            break;
-        }
-        let session_context = connected.session_context;
         let (generation, wire) = loop {
             if cancelled.load(Ordering::Acquire) {
                 break 'reconnect;
             }
-            match relay.run(move |worker| worker.begin_socket_upstream(session_context)) {
+            match relay.run(move |worker| worker.begin_socket_upstream()) {
                 Ok(installed) => break installed,
                 Err(RelayError::OwnerQueueFull) => {
                     tokio::select! {
@@ -4692,11 +4634,10 @@ async fn run_native_relay_socket_worker(
                 break 'reconnect;
             }
             match relay.run(move |worker| {
-                worker.poll_upstream_transition()?;
                 if worker.socket_generation != generation || worker.socket_wire.is_none() {
                     return Err(RelayError::Closed);
                 }
-                Ok(worker.upstream_attached && worker.upstream_transition.is_none())
+                Ok(worker.upstream_attached)
             }) {
                 Ok(true) => break,
                 Ok(false) | Err(RelayError::OwnerQueueFull) => {}
@@ -4720,13 +4661,7 @@ async fn run_native_relay_socket_worker(
             }
         }
         (config.on_event)(NativeRelaySocketEvent::Connected);
-        let mut upstream = jazz::db::WireTransportAdapter::new_with_session_context(
-            connected.transport,
-            connected.protocol_version,
-            connected.features,
-            None,
-            connected.session_context,
-        );
+        let mut upstream = NativeRelayTransport::current(connected.transport);
         let mut terminal = connected.terminal;
         loop {
             if cancelled.load(Ordering::Acquire) {
@@ -4817,99 +4752,35 @@ fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
 
 struct QueueTransport {
     wire: NativeRelayWire,
-    session_context: Option<jazz::db::ConnectionSessionContext>,
 }
-
 impl Transport for QueueTransport {
-    fn set_trusted_encoder(&mut self, trusted: bool) {
-        self.wire.trusted_encoder.store(trusted, Ordering::Release);
-    }
-    fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
-        self.session_context
-    }
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let _terminal = self.wire.enter_queue_transport()?;
         self.wire
             .outbound
             .lock()
-            .map_err(|_| TransportError::Failed("native relay outbound queue poisoned".to_owned()))?
+            .map_err(|_| TransportError::Failed("native relay outbound queue poisoned".into()))?
             .push(message, "outbound")
             .map_err(transport_queue_error)
     }
-
     fn try_recv(&mut self) -> Option<SyncMessage> {
         let _terminal = self.wire.enter().ok()?;
         self.wire.inbound.lock().ok()?.pop()
     }
 }
-
-struct DuplexTransport {
-    wire: NativeRelayWire,
-    session_context: jazz::db::ConnectionSessionContext,
-}
-
-impl Transport for DuplexTransport {
-    fn set_trusted_encoder(&mut self, trusted: bool) {
-        self.wire.trusted_encoder.store(trusted, Ordering::Release);
-    }
-    fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
-        Some(self.session_context)
-    }
-
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        let _terminal = self.wire.enter().map_err(transport_queue_error)?;
-        self.wire
-            .outbound
-            .lock()
-            .map_err(|_| TransportError::Failed("native relay client queue poisoned".to_owned()))?
-            .push(message, "client outbound")
-            .map_err(transport_queue_error)
-    }
-
-    fn try_recv(&mut self) -> Option<SyncMessage> {
-        let _terminal = self.wire.enter().ok()?;
-        self.wire.inbound.lock().ok()?.pop()
-    }
-}
-
 fn duplex(
     liveness: Arc<RelayLiveness>,
-    client: DbIdentity,
-    relay: DbIdentity,
 ) -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
-    // The host has admitted this foreground to one account-scoped relay.
-    // Retain per-hop receipt epochs without treating the foreground as an
-    // authority or allowing it to select a different session.
-    let relay_endpoint = jazz::wire::WireAuthorityEndpoint::fresh(relay.node);
-    let client_context = jazz::db::ConnectionSessionContext {
-        local: jazz::wire::WireAuthorityEndpoint::fresh(client.node),
-        remote: Some(relay_endpoint),
-        link_identity: client.author,
-        negotiated_features: jazz::wire::current_wire_features(),
-    };
-    let relay_context = jazz::db::ConnectionSessionContext {
-        local: relay_endpoint,
-        remote: None,
-        link_identity: client.author,
-        negotiated_features: jazz::wire::current_wire_features(),
-    };
     let wire = NativeRelayWire::for_owner(liveness);
     let reverse = NativeRelayWire {
         inbound: Arc::clone(&wire.outbound),
         outbound: Arc::clone(&wire.inbound),
         liveness: wire.liveness.clone(),
         connection_liveness: wire.connection_liveness.clone(),
-        trusted_encoder: Arc::new(AtomicBool::new(false)),
     };
     (
-        Box::new(DuplexTransport {
-            wire: wire.clone(),
-            session_context: client_context,
-        }),
-        Box::new(DuplexTransport {
-            wire: reverse,
-            session_context: relay_context,
-        }),
+        Box::new(QueueTransport { wire: wire.clone() }),
+        Box::new(QueueTransport { wire: reverse }),
         wire,
     )
 }
@@ -4927,8 +4798,6 @@ struct ConnectedClient {
     relay_link_hint: Option<RemoteLinkHint>,
     db: Rc<Db>,
     tick: Option<RelayTickFuture>,
-    upstream_io: RelayPeerIo,
-    served_io: Option<RelayPeerIo>,
     admission: Option<RelayAdmissionFuture>,
     admission_error: Option<jazz::db::Error>,
     wire: NativeRelayWire,
@@ -4938,17 +4807,17 @@ struct ConnectedClient {
     mutation_cleanups: Vec<ForegroundOperationFuture>,
     read_cleanups: Rc<RefCell<VecDeque<jazz::db::QueryAttachment>>>,
     read_cleanup: Option<Pin<Box<dyn Future<Output = ()>>>>,
-    transactions: BTreeMap<u64, ForegroundTransaction>,
-    initialization_seals: Rc<RefCell<BTreeMap<String, (u64, jazz::db::InitializationSeal)>>>,
+    transactions: Rc<RefCell<BTreeMap<u64, ForegroundTransaction>>>,
+    initialization_seals: Rc<RefCell<BTreeMap<String, (u64, String)>>>,
     /// Public transaction ids are opaque digests, while only the foreground
     /// owner may retain the core causal id needed for a settlement wait.
-    committed_transactions: BTreeMap<TransactionId, TxId>,
     mutations: foreground_mutations::MutationHandles,
     next_foreground_handle: u64,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
-    _upstream: Rc<LocalMutex<PeerConnection<BoxedStorage>>>,
-    _served: Option<Rc<LocalMutex<PeerConnection<BoxedStorage>>>>,
+    _upstream: Upstream,
+    owner: Rc<Db>,
+    _served: Option<SubscriberId>,
 }
 
 #[derive(Clone, Copy)]
@@ -4982,11 +4851,12 @@ impl ConnectedClient {
     }
 
     fn poll_claim_refresh(&mut self) {
-        if let (Some(claims), Some(served)) = (&self.refreshed_claims, &self._served)
-            && let Some(mut peer) = served.try_lock()
+        if self._served.is_some()
+            && let Some(claims) = self.refreshed_claims.take()
         {
-            peer.update_authenticated_session_claims(claims.clone());
-            self.refreshed_claims = None;
+            // Foregrounds share this exact admitted account/session scope.
+            // Ordinary cross-session server connections still use per-link claims.
+            self.owner.set_identity_claims(self.author, claims);
         }
     }
 
@@ -4999,35 +4869,15 @@ impl ConnectedClient {
         match admission.as_mut().poll(&mut context) {
             Poll::Pending => self.admission = Some(admission),
             Poll::Ready(Ok(served)) => {
-                self.served_io = Some(RelayPeerIo::new(
-                    served
-                        .try_lock()
-                        .expect("newly admitted peer is not borrowed")
-                        .io_pump(),
-                    NativeRelayWire {
-                        inbound: Arc::clone(&self.wire.outbound),
-                        outbound: Arc::clone(&self.wire.inbound),
-                        liveness: self.wire.liveness.clone(),
-                        connection_liveness: self.wire.connection_liveness.clone(),
-                        trusted_encoder: Arc::new(AtomicBool::new(false)),
-                    },
-                ));
                 self._served = Some(served);
                 self.poll_claim_refresh();
             }
             Poll::Ready(Err(error)) => {
                 self.cancel_pending_work();
                 self.admission_error = Some(error);
-                self.db.schedule_tick(TickUrgency::Immediate);
+                self.db.binding.hooks.schedule_tick();
             }
         }
-    }
-
-    fn poll_served_io(&mut self, waker: &Waker) -> Result<(), RelayError> {
-        if let Some(io) = &mut self.served_io {
-            io.poll(waker)?;
-        }
-        Ok(())
     }
 
     fn poll_read_cleanup(&mut self, waker: &Waker) {
@@ -5036,7 +4886,7 @@ impl ConnectedClient {
         {
             let db = Rc::clone(&self.db);
             self.read_cleanup = Some(Box::pin(async move {
-                db.detach_query_async(attachment).await;
+                db.detach_query(attachment);
             }));
         }
         if let Some(cleanup) = self.read_cleanup.as_mut() {
@@ -5060,15 +4910,16 @@ impl ConnectedClient {
             }
         }
         self.tick = None;
+        for operation in self.pending_operations.values() {
+            if let Some(request) = operation.advice_request {
+                retire_advice(&self.owner, request);
+            }
+        }
         self.pending_operations.clear();
         self.pending_subscriptions.clear();
         self.mutation_cleanups.clear();
         self.read_cleanup = None;
         self.read_cleanups.borrow_mut().clear();
-        self.upstream_io.incoming = None;
-        if let Some(io) = &mut self.served_io {
-            io.incoming = None;
-        }
     }
 
     /// Abandon every foreground-owned transaction before dropping the client.
@@ -5081,11 +4932,10 @@ impl ConnectedClient {
         }
         self.retiring = true;
         self.cancel_pending_work();
-        let transactions = std::mem::take(&mut self.transactions);
+        let transactions = std::mem::take(&mut *self.transactions.borrow_mut());
         let first_error = self.mutations.close(&self.db).err();
         for transaction in transactions.into_values() {
-            self.db
-                .enqueue_abandon_transaction_handle(transaction.open_tx_id);
+            let _ = self.db.abandon_transaction_handle(transaction.open_tx_id);
         }
         first_error.map_or(Ok(()), Err)
     }
@@ -5094,6 +4944,10 @@ impl ConnectedClient {
 impl Drop for ConnectedClient {
     fn drop(&mut self) {
         let _ = self.abandon_foreground_transactions();
+        if let Some(served) = self._served.take() {
+            self.owner.disconnect_subscriber(served);
+        }
+        self.db.detach_connection(&self._upstream);
     }
 }
 
@@ -5101,95 +4955,18 @@ type ForegroundOperationFuture =
     Pin<Box<dyn Future<Output = Result<ForegroundOperationResult, RelayError>> + 'static>>;
 
 type RelayTickFuture = Pin<Box<dyn Future<Output = Result<(), jazz::db::Error>>>>;
-type RelayAdmissionFuture = Pin<
-    Box<dyn Future<Output = Result<Rc<LocalMutex<PeerConnection<BoxedStorage>>>, jazz::db::Error>>>,
->;
+type RelayAdmissionFuture = Pin<Box<dyn Future<Output = Result<SubscriberId, jazz::db::Error>>>>;
 
-/// A peer's chunk lane must progress even while its semantic tick or a
-/// foreground read owns the node. Retain both the endpoint and any suspended
-/// local chunk read without borrowing the semantic connection.
-struct RelayPeerIo {
-    pump: PeerIoPump,
-    wire: NativeRelayWire,
-    incoming: Option<Pin<Box<dyn Future<Output = ()>>>>,
-}
-
-impl RelayPeerIo {
-    fn new(pump: PeerIoPump, wire: NativeRelayWire) -> Self {
-        Self {
-            pump,
-            wire,
-            incoming: None,
-        }
-    }
-
-    fn poll(&mut self, waker: &Waker) -> Result<(), RelayError> {
-        let mut context = Context::from_waker(waker);
-        for _ in 0..NATIVE_RELAY_DRAIN_MAX_MESSAGES {
-            if self.incoming.is_none() {
-                let message = self
-                    .wire
-                    .inbound
-                    .lock()
-                    .map_err(|_| RelayError::Poisoned("auxiliary inbound queue"))?
-                    .pop_auxiliary();
-                let Some(message) = message else { break };
-                let pump = self.pump.clone();
-                self.incoming = Some(Box::pin(async move {
-                    // Only chunk messages are extracted; canonical traffic
-                    // remains in its original FIFO for the semantic tick.
-                    let _ = pump.route_incoming(message).await;
-                }));
-            }
-            if self
-                .incoming
-                .as_mut()
-                .expect("incoming was installed")
-                .as_mut()
-                .poll(&mut context)
-                .is_pending()
-            {
-                break;
-            }
-            self.incoming = None;
-        }
-        let mut transport = QueueTransport {
-            wire: self.wire.clone(),
-            session_context: None,
-        };
-        for _ in 0..NATIVE_RELAY_DRAIN_MAX_MESSAGES {
-            match self.pump.send_outbound(&mut transport, 1) {
-                Ok(true) => {}
-                Ok(false) | Err(TransportError::Backpressure) => break,
-                Err(error) => {
-                    return Err(RelayError::ForegroundCommand(format!(
-                        "auxiliary transport failed: {error:?}"
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-fn poll_relay_tick<S>(
-    db: &Rc<Db<S>>,
+fn poll_relay_tick(
+    db: &Rc<Db>,
     pending: &mut Option<RelayTickFuture>,
     waker: &Waker,
-) -> Result<(), RelayError>
-where
-    S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
-{
-    // The storage waker only records cross-thread readiness. The Db consumes
-    // that marker here, on the relay owner, before its thread-affine peers
-    // are ticked; ordinary native pumps do not dirty every subscriber.
-    db.mark_subscriber_connections_dirty_after_query_runtime_wake();
+) -> Result<(), RelayError> {
     let tick = pending.get_or_insert_with(|| {
         let db = Rc::clone(db);
         Box::pin(async move { db.tick().await })
     });
-    let mut context = Context::from_waker(waker);
-    match tick.as_mut().poll(&mut context) {
+    match tick.as_mut().poll(&mut Context::from_waker(waker)) {
         Poll::Ready(result) => {
             *pending = None;
             map_tick_result(result)
@@ -5202,7 +4979,7 @@ where
 /// independent from the JSI call that started it. Dropping it cancels any
 /// chunk-demand waiter held by the future.
 struct ForegroundPendingOperation {
-    advice_request: Option<jazz::protocol::PermissionAdviceRequestId>,
+    advice_request: Option<u64>,
     subscription: Option<u64>,
     future: ForegroundOperationFuture,
     finish_on_cancel: bool,
@@ -5337,8 +5114,16 @@ fn decode_foreground_command(bytes: &[u8]) -> Result<ForegroundDbCommandRequest,
     Ok(command)
 }
 
+fn retire_advice(owner: &Db, request: u64) {
+    owner.binding.cancel_permission_advice(request);
+    // Cancellation makes this immediately ready; consuming it releases the
+    // owner's response slot even though the foreground future is discarded.
+    let _ = block_on(owner.permission_advice(request));
+}
+
 struct ClosingForeground {
-    client: ConnectedClient,
+    // Retain peer handles until local close has drained.
+    _client: ConnectedClient,
     close: Option<RelayTickFuture>,
 }
 
@@ -5346,33 +5131,15 @@ impl ClosingForeground {
     fn poll(&mut self, waker: &Waker) -> Result<bool, RelayError> {
         // Retirement is local. Failed peer I/O cannot prevent the local drain
         // from being polled or make a completed close wait for network recovery.
-        let _ = self.client.upstream_io.poll(waker);
-        let _ = self.client.poll_served_io(waker);
         if let Some(close) = &mut self.close
             && let Poll::Ready(result) = close.as_mut().poll(&mut Context::from_waker(waker))
         {
             self.close = None;
             result.map_err(RelayError::Db)?;
         }
-        let _ = self.client.upstream_io.poll(waker);
-        let _ = self.client.poll_served_io(waker);
         Ok(self.close.is_none())
     }
 }
-
-type UpstreamTransition = Pin<
-    Box<
-        dyn Future<
-            Output = Result<
-                Option<(
-                    Rc<LocalMutex<PeerConnection<BoxedStorage>>>,
-                    NativeRelayWire,
-                )>,
-                RelayError,
-            >,
-        >,
-    >,
->;
 
 struct RelayWorker {
     wake: Arc<RelayWake>,
@@ -5383,15 +5150,14 @@ struct RelayWorker {
     drive_turns: u64,
     persistent: Rc<Db>,
     persistent_tick: Option<RelayTickFuture>,
-    upstream_io: RelayPeerIo,
     pending_foreground_wakes: PendingForegroundWakes,
     foreground_wake_generations: BTreeMap<u64, Arc<AtomicU64>>,
     owner_wake_queued: Arc<AtomicBool>,
-    _upstream: Rc<LocalMutex<PeerConnection>>,
+    _upstream: Upstream,
+    upstream_wire: NativeRelayWire,
     upstream_attached: bool,
     socket_generation: u64,
     socket_wire: Option<NativeRelayWire>,
-    upstream_transition: Option<UpstreamTransition>,
     clients: BTreeMap<u64, ConnectedClient>,
     closing: VecDeque<ClosingForeground>,
     next_client_id: u64,
@@ -5420,7 +5186,7 @@ impl RelayWorker {
 
     fn open(
         config: RelayOpenConfig,
-        client_relay_scope: Option<jazz::db::ClientRelayScope>,
+        client_relay_scope: Option<ClientRelayScope>,
         wire: NativeRelayWire,
         liveness: Arc<RelayLiveness>,
         owner_wake_queued: Arc<AtomicBool>,
@@ -5433,54 +5199,20 @@ impl RelayWorker {
         let cached = catalogue_cache
             .as_ref()
             .and_then(|cache| cache.capture.as_deref());
-        let column_families = config.schema.column_families();
-        let db_config = DbConfig {
-            schema: config.schema.clone(),
-            storage: block_on(open_node_storage(
-                &SqliteStorageFactory::default(),
-                config.sqlite_path,
-                column_families,
-            ))
-            .map_err(RelayError::Storage)?,
-            identity: config.identity,
-            id_source: None,
-        };
-        let admitted_account_owner = client_relay_scope.is_some();
-        let persistent = Rc::new(
-            match client_relay_scope {
-                Some(scope) => {
-                    // SAFETY: only the trusted host's admitted-scope path constructs
-                    // this capability, before storage or foreground peers are exposed.
-                    // Trusted platform admission owns the durable account/root binding;
-                    // account-session setup derives that root from versioned account data.
-                    block_on(unsafe {
-                        Db::open_scope_isolated_client_relay_with_cached_catalogue(
-                            db_config, scope, cached,
-                        )
-                    })
-                }
-                None => block_on(Db::open(db_config)),
-            }
-            .map_err(RelayError::Db)?,
-        );
-        if admitted_account_owner {
-            // SAFETY: the host admitted this exact account/root before opening
-            // its scope-isolated owner. Restore original leased-foreground units
-            // before any upstream or new foreground can observe the runtime.
-            block_on(unsafe { persistent.restore_initialization_owner_pending_uploads() })
-                .map_err(RelayError::Db)?;
-        }
-        let upstream = block_on(persistent.connect_upstream(Box::new(QueueTransport {
-            wire: wire.clone(),
-            session_context: None,
-        })));
-        let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire);
+        let persistent = Rc::new(Db::open_persistent(
+            &config,
+            client_relay_scope.as_ref(),
+            cached,
+        )?);
+        let upstream =
+            block_on(persistent.connect_upstream(Box::new(QueueTransport { wire: wire.clone() })));
         let drive = Arc::new(OwnerDrive::default());
         let wake = Arc::new(RelayWake::new(OwnerWakeNotifier {
             commands: owner_commands,
             queued: Arc::clone(&owner_wake_queued),
             drive: Arc::clone(&drive),
         }));
+        persistent.set_binding_scheduler(Arc::clone(&wake));
         Ok(Self {
             catalogue_cache: catalogue_cache.map(|cache| Rc::new(RefCell::new(cache))),
             wake,
@@ -5493,12 +5225,11 @@ impl RelayWorker {
             owner_wake_queued,
             persistent,
             persistent_tick: None,
-            upstream_io,
+            upstream_wire: wire,
             _upstream: upstream,
             upstream_attached: true,
             socket_generation: 0,
             socket_wire: None,
-            upstream_transition: None,
             clients: BTreeMap::new(),
             closing: VecDeque::new(),
             next_client_id: 1,
@@ -5508,94 +5239,39 @@ impl RelayWorker {
         })
     }
 
-    fn begin_socket_upstream(
-        &mut self,
-        session_context: Option<jazz::db::ConnectionSessionContext>,
-    ) -> Result<(u64, NativeRelayWire), RelayError> {
+    fn begin_socket_upstream(&mut self) -> Result<(u64, NativeRelayWire), RelayError> {
         self.socket_generation = self
             .socket_generation
             .checked_add(1)
             .ok_or(RelayError::ClientIdExhausted)?;
-        self.upstream_io.wire.retire_connection();
+        self.upstream_wire.retire_connection();
         if let Some(wire) = self.socket_wire.take() {
             wire.retire_connection();
         }
         self.persistent_tick = None;
-        self.upstream_io.incoming = None;
-        self.upstream_transition = None;
+        self.persistent.detach_connection(&self._upstream);
         let wire = NativeRelayWire::for_owner(Arc::clone(&self.liveness));
+        self._upstream = block_on(
+            self.persistent
+                .connect_upstream(Box::new(QueueTransport { wire: wire.clone() })),
+        );
+        self.upstream_wire = wire.clone();
         self.socket_wire = Some(wire.clone());
-        let next_wire = wire.clone();
-        let persistent = Rc::clone(&self.persistent);
-        let previous = Rc::clone(&self._upstream);
-        self.upstream_attached = false;
-        self.upstream_transition = Some(Box::pin(async move {
-            persistent
-                .detach_connection_async(&previous)
-                .await
-                .map_err(RelayError::Db)?;
-            let connection = persistent
-                .try_connect_upstream(Box::new(QueueTransport {
-                    wire: next_wire.clone(),
-                    session_context,
-                }))
-                .await
-                .map_err(RelayError::Db)?;
-            Ok(Some((connection, next_wire)))
-        }));
-        self.poll_upstream_transition()?;
+        self.upstream_attached = true;
+        self.persistent.set_remote_link_hint(RemoteLinkHint::Live);
         Ok((self.socket_generation, wire))
     }
-
     fn retire_socket_upstream(&mut self, generation: u64) -> Result<bool, RelayError> {
         if generation != self.socket_generation || self.socket_wire.is_none() {
             return Ok(false);
         }
         self.socket_wire.take().unwrap().retire_connection();
         self.persistent_tick = None;
-        self.upstream_io.incoming = None;
-        self.upstream_transition = None;
-        let persistent = Rc::clone(&self.persistent);
-        let previous = Rc::clone(&self._upstream);
+        self.persistent.detach_connection(&self._upstream);
         self.upstream_attached = false;
-        self.upstream_transition = Some(Box::pin(async move {
-            persistent
-                .detach_connection_async(&previous)
-                .await
-                .map_err(RelayError::Db)?;
-            Ok(None)
-        }));
-        self.poll_upstream_transition()?;
+        self.persistent
+            .set_remote_link_hint(RemoteLinkHint::NoServer);
         Ok(true)
-    }
-
-    fn poll_upstream_transition(&mut self) -> Result<(), RelayError> {
-        let Some(mut transition) = self.upstream_transition.take() else {
-            return Ok(());
-        };
-        let waker = Waker::from(Arc::clone(&self.wake));
-        match transition.as_mut().poll(&mut Context::from_waker(&waker)) {
-            Poll::Pending => self.upstream_transition = Some(transition),
-            Poll::Ready(Ok(Some((connection, wire)))) => {
-                self.upstream_io = RelayPeerIo::new(
-                    connection
-                        .try_lock()
-                        .expect("installed upstream owner is available")
-                        .io_pump(),
-                    wire,
-                );
-                self._upstream = connection;
-                self.upstream_attached = true;
-            }
-            Poll::Ready(Ok(None)) => {}
-            Poll::Ready(Err(error)) => {
-                if let Some(wire) = self.socket_wire.take() {
-                    wire.retire_connection();
-                }
-                return Err(error);
-            }
-        }
-        Ok(())
     }
 
     fn retire_foreground(&mut self, id: u64) -> Result<(), RelayError> {
@@ -5608,9 +5284,15 @@ impl RelayWorker {
         }
         client.initialization_seals.borrow_mut().clear();
         let abandoned = client.abandon_foreground_transactions();
+        // Public capability retirement ends this foreground's network work.
+        // Close drains local storage; it does not promise an upstream flush.
+        // Detach before SQLite's close tick so a failed or terminal transport
+        // cannot turn that local drain into a peer I/O failure. Writes already
+        // acknowledged at Local remain owned by the persistent relay.
+        client.db.detach_connection(&client._upstream);
         let db = Rc::clone(&client.db);
         self.closing.push_back(ClosingForeground {
-            client,
+            _client: client,
             close: Some(Box::pin(async move { db.close().await })),
         });
         // Cleanup is owned by this worker after public handle retirement. Its
@@ -5689,30 +5371,16 @@ impl RelayWorker {
         tx_time_floor: Option<TxTime>,
         admitted_scope_advice: bool,
     ) -> Result<u64, RelayError> {
-        let column_families = self.schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         let catalogue_cache = self.catalogue_cache.as_ref().map(|cache| cache.borrow());
-        let db = Rc::new(
-            // SAFETY: cache scope was derived from the admitted relay root.
-            block_on(unsafe {
-                Db::open_with_cached_catalogue(
-                    DbConfig {
-                        schema: self.schema.clone(),
-                        storage: MemoryStorage::new(&refs).expect("valid memory storage families"),
-                        identity,
-                        id_source: None,
-                    },
-                    catalogue_cache
-                        .as_ref()
-                        .and_then(|cache| cache.capture.as_deref()),
-                )
-            })
-            .map_err(RelayError::Db)?,
-        );
+        let db = Rc::new(Db::open_memory(
+            self.schema.clone(),
+            identity,
+            catalogue_cache
+                .as_ref()
+                .and_then(|cache| cache.capture.as_deref()),
+        )?);
         drop(catalogue_cache);
+        db.set_binding_scheduler(Arc::clone(&self.wake));
         // A foreground owns only an in-memory preview. Its paired persistent
         // relay provides Local durability and the relay-authority subscription
         // handoff; treating this Db as durable makes sibling subscriptions wait
@@ -5720,25 +5388,21 @@ impl RelayWorker {
         db.set_non_durable_client();
         db.set_identity_claims(identity.author, claims.clone());
         if let Some(high_water) = tx_time_floor {
-            block_on(db.reserve_minted_tx_time_after(high_water)).map_err(RelayError::Db)?;
+            // Reserve a fresh clock position before exposing a reused node,
+            // including when this holder closes without making a write.
+            let reserved = high_water.0.checked_add(1).ok_or_else(|| {
+                RelayError::ForegroundCommand("foreground transaction clock exhausted".into())
+            })?;
+            db.seed_seq_floor(reserved);
         }
-        let (client_transport, relay_transport, wire) = duplex(
-            Arc::clone(&self.liveness),
-            identity,
-            self.persistent.identity(),
-        );
+        let (client_transport, relay_transport, wire) = duplex(Arc::clone(&self.liveness));
         let upstream = block_on(db.connect_upstream(client_transport));
-        // The scope and claims are captured now, while the capability is
-        // admitted. Only the ordinary peer's owner/storage preparation may
-        // wait; opening the new memory foreground must return synchronously.
         let persistent = Rc::clone(&self.persistent);
         let admitted_claims = claims.clone();
         let admission: RelayAdmissionFuture = Box::pin(async move {
-            persistent
-                .accept_subscriber_with_claims_async(relay_transport, identity.author, claims)
-                .await
+            persistent.set_identity_claims(identity.author, claims);
+            Ok(persistent.accept_subscriber(relay_transport, identity.author))
         });
-        let upstream_io = RelayPeerIo::new(block_on(upstream.lock()).io_pump(), wire.clone());
         let id = self.next_client_id;
         self.next_client_id = self
             .next_client_id
@@ -5756,8 +5420,6 @@ impl RelayWorker {
                 mutations: foreground_mutations::MutationHandles::new(&db),
                 db,
                 tick: None,
-                upstream_io,
-                served_io: None,
                 admission: Some(admission),
                 admission_error: None,
                 wire,
@@ -5767,11 +5429,11 @@ impl RelayWorker {
                 mutation_cleanups: Vec::new(),
                 read_cleanups: Rc::new(RefCell::new(VecDeque::new())),
                 read_cleanup: None,
-                transactions: BTreeMap::new(),
+                transactions: Rc::default(),
                 initialization_seals: Rc::default(),
-                committed_transactions: BTreeMap::new(),
                 next_foreground_handle: 1,
                 _upstream: upstream,
+                owner: Rc::clone(&self.persistent),
                 _served: None,
             },
         );
@@ -5788,49 +5450,29 @@ impl RelayWorker {
         Ok(id)
     }
 
-    /// One bounded owner drive turn, run on the owner thread after a JS call
-    /// has already returned. It applies a bounded slice of each foreground's
-    /// admitted direct mutations, runs one ordinary relay pump (Db ticks, and
-    /// so IVM, plus relay/persistence IO), and then tells every foreground
-    /// with a consumer that already-computed results may be ready.
+    /// One bounded owner drive turn advances ordinary relay and subscription
+    /// work, then notifies foreground consumers. Direct SQLite mutations have
+    /// already completed on this owner thread before their command returns.
     fn drive_turn(&mut self) {
         self.drive.take_due();
         #[cfg(test)]
         {
             self.drive_turns += 1;
         }
-        let mut applied = BTreeSet::new();
-        let mut more = false;
-        for (id, client) in &self.clients {
-            if client.admission_error.is_some() {
-                continue;
-            }
-            for _ in 0..NATIVE_RELAY_DRIVE_MUTATIONS_PER_TURN {
-                let before = client.db.queued_mutation_count();
-                if before == 0 {
-                    break;
-                }
-                client.db.drive_queued_mutation_once();
-                if client.db.queued_mutation_count() >= before {
-                    // Cold or remote work: its waker requests the next turn.
-                    break;
-                }
-                applied.insert(*id);
-            }
-            more |= applied.contains(id) && client.db.queued_mutation_count() > 0;
-        }
         if let Err(error) = self.pump() {
             self.drive_error.get_or_insert(error);
         }
-        if more {
-            self.drive.request(0);
-        }
+    }
+
+    fn notify_foreground_consumers(&mut self) {
         let consumers = self
             .clients
             .iter()
-            .filter(|(id, client)| {
-                applied.contains(id)
-                    || !client.subscriptions.is_empty()
+            .filter(|(_, client)| {
+                client
+                    .subscriptions
+                    .values()
+                    .any(SubscriptionStream::has_pending_event)
                     || !client.pending_subscriptions.is_empty()
                     || !client.pending_operations.is_empty()
                     || client.mutations.has_errors()
@@ -5856,9 +5498,9 @@ impl RelayWorker {
     /// relay: its connected clients' own upstream is the relay, which answers
     /// for the authority only while its socket upstream is installed.
     fn relay_link_hint(&self) -> RemoteLinkHint {
-        match (&self.socket_wire, &self.upstream_transition) {
+        match (&self.socket_wire, self.upstream_attached) {
             (None, _) => RemoteLinkHint::NoServer,
-            (Some(_), None) if self.upstream_attached => RemoteLinkHint::Live,
+            (Some(_), true) if self.upstream_attached => RemoteLinkHint::Live,
             (Some(_), _) => RemoteLinkHint::Attempting,
         }
     }
@@ -5876,8 +5518,16 @@ impl RelayWorker {
     }
 
     fn pump(&mut self) -> Result<(), RelayError> {
+        let result = self.pump_once();
+        // Socket ingress also pumps directly, outside a scheduled drive turn.
+        // Deliver its results through the same foreground wake path: an
+        // unwaited rejection has no parked future to wake on its own.
+        self.notify_foreground_consumers();
+        result
+    }
+
+    fn pump_once(&mut self) -> Result<(), RelayError> {
         let waker = Waker::from(Arc::clone(&self.wake));
-        self.poll_upstream_transition()?;
         self.report_relay_link();
         self.poll_closing(&waker)?;
         // One fair relay turn has exactly three protocol phases. A UI upload
@@ -5895,14 +5545,9 @@ impl RelayWorker {
             if client.admission_error.is_some() {
                 continue;
             }
-            client.upstream_io.poll(&waker)?;
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
-            client.poll_served_io(&waker)?;
             client.poll_read_cleanup(&waker);
             client.poll_mutation_cleanup(&waker);
-        }
-        if self.upstream_attached {
-            self.upstream_io.poll(&waker)?;
         }
         poll_relay_tick(&self.persistent, &mut self.persistent_tick, &waker)?;
         if let Some(cache) = &self.catalogue_cache {
@@ -5919,8 +5564,6 @@ impl RelayWorker {
             if client.admission_error.is_some() {
                 continue;
             }
-            client.poll_served_io(&waker)?;
-            client.upstream_io.poll(&waker)?;
             poll_relay_tick(&client.db, &mut client.tick, &waker)?;
             client.poll_read_cleanup(&waker);
             client.poll_mutation_cleanup(&waker);
@@ -5986,19 +5629,10 @@ impl RelayWorker {
             let client = self.foreground_client(client)?;
             Rc::clone(&client.db)
         };
-        // Direct mutations are applied in later owner turns. A plain read
-        // admitted after them observes them (read-your-writes), while a
-        // transaction read keeps its transaction-local ordering below.
-        let mutation_barrier = open_tx.is_none().then(|| db.queued_mutation_barrier());
+        // SQLite completes preceding local mutations before this command.
         self.drive.request(0);
         let read_db = Rc::clone(&db);
         let future: ForegroundOperationFuture = Box::pin(async move {
-            if let Some(barrier) = mutation_barrier {
-                barrier
-                    .await
-                    .map_err(|_| RelayError::Closed)?
-                    .map_err(RelayError::Db)?;
-            }
             let release_db = Rc::clone(&read_db);
             let result = read_db
                 .all_serialized_query(
@@ -6011,7 +5645,7 @@ impl RelayWorker {
                     || false,
                     move |attachment| {
                         cleanups.borrow_mut().push_back(attachment);
-                        release_db.schedule_tick(TickUrgency::Immediate);
+                        release_db.binding.hooks.schedule_tick();
                     },
                 )
                 .await
@@ -6029,29 +5663,8 @@ impl RelayWorker {
             };
             Ok(ForegroundOperationResult::Rows(rows))
         });
-        // Admit at command arrival, before a later commit can retire the open
-        // transaction. Deferred query preparation must not reorder this read.
-        let future = if let Some(tx) = open_tx {
-            let (cancel, cancelled) = futures::channel::oneshot::channel::<()>();
-            let receive = db.enqueue_transaction_read(tx, async move {
-                // Dropping the observation retires its coverage and releases
-                // the FIFO fence, without cancelling a later admitted commit.
-                let result = match futures::future::select(cancelled, future).await {
-                    futures::future::Either::Left(_) => Err(RelayError::Closed),
-                    futures::future::Either::Right((result, _)) => result,
-                };
-                Ok(result)
-            });
-            Box::pin(async move {
-                let _cancel_on_drop = cancel;
-                receive
-                    .await
-                    .map_err(|_| RelayError::Closed)?
-                    .map_err(RelayError::Db)?
-            }) as ForegroundOperationFuture
-        } else {
-            future
-        };
+        // The first poll below admits the core read before a later command.
+        // Core retains its transaction read guard until completion or cancellation.
         self.start_foreground_operation(client, None, future)
     }
 
@@ -6059,28 +5672,30 @@ impl RelayWorker {
         &mut self,
         client: u64,
         query: Vec<u8>,
-        opts: ReadOpts,
+        opts: impl Into<ForegroundSubscriptionOptions>,
     ) -> Result<u64, RelayError> {
+        let opts = opts.into();
         let client_id = client;
         let client = self.foreground_client_mut(client)?;
         let db = Rc::clone(&client.db);
-        // Fence the first frame behind every direct mutation admitted before
-        // this subscription, exactly like a plain read.
-        let mutation_barrier = db.queued_mutation_barrier();
         self.drive.request(0);
         let opener: ForegroundSubscriptionOpen = Box::pin(async move {
-            mutation_barrier
+            let query: jazz::query::Query = postcard::from_bytes(&query)
+                .map_err(|e| RelayError::ForegroundCommand(e.to_string()))?;
+            let prepared = db.prepare_query(&query).map_err(RelayError::Db)?;
+            // Use the binding's ordinary local view, as one-shot reads do.
+            // Explicit identity reads reapply authority policies to the local
+            // preview and hide unaccepted writes in an offline foreground.
+            // Its owner connection still authenticates this subject and the
+            // upstream authority still authorizes all remote delivery.
+            let mut stream = db
+                .subscribe(&prepared, opts.read)
                 .await
-                .map_err(|_| RelayError::Closed)?
                 .map_err(RelayError::Db)?;
-            db.subscribe_serialized_query(
-                &query,
-                opts,
-                None,
-                SerializedSubscriptionAuthorization::ClientLocal,
-            )
-            .await
-            .map_err(RelayError::Db)
+            if opts.observe_accepted_evidence {
+                stream.observe_accepted_evidence();
+            }
+            Ok(stream)
         });
         self.start_foreground_subscription(client_id, opener)
     }
@@ -6139,7 +5754,7 @@ impl RelayWorker {
         if let Some(operation) = existing {
             return Ok(ForegroundOperationPoll::Pending { operation });
         }
-        let (db, pending) = {
+        let (_db, pending) = {
             let client = self.foreground_client_mut(client)?;
             let mut pending = Vec::new();
             {
@@ -6164,13 +5779,8 @@ impl RelayWorker {
         }
         let future: ForegroundOperationFuture = Box::pin(async move {
             let mut events = Vec::with_capacity(pending.len());
-            for mut event in pending {
-                // A missing chunk is intentionally allowed to suspend this
-                // retained future. The foreground owner can then tick peer
-                // I/O and poll again; never block the owner thread here.
-                db.hydrate_subscription_event_for_binding(&mut event)
-                    .await
-                    .map_err(RelayError::Db)?;
+            for event in pending {
+                // SQLite hydrates rows before its subscription emits them.
                 events.push(encode_foreground_subscription_event(event)?);
             }
             Ok(ForegroundOperationResult::SubscriptionEvents(events))
@@ -6183,7 +5793,7 @@ impl RelayWorker {
         client: u64,
         action: ForegroundPermissionAdviceAction,
     ) -> Result<ForegroundOperationPoll, RelayError> {
-        use jazz::protocol::{PermissionAdvice, PermissionAdviceAction};
+        use jazz::protocol::PermissionAdviceAction;
         let action = match action {
             ForegroundPermissionAdviceAction::Insert { table, cells } => {
                 PermissionAdviceAction::Insert {
@@ -6219,25 +5829,20 @@ impl RelayWorker {
         // authenticated upstream subject. Capture its exact current binding for
         // the scoped relay link; cancellation and delivery remain foreground-owned.
         let admitted = self.foreground_client(client)?;
-        let advice = self
-            .persistent
-            .request_permission_advice_with_delegated_session(
-                action,
-                jazz::protocol::DelegatedSessionBinding {
-                    identity: admitted.author,
-                    claims: admitted.claims.clone(),
-                },
-            );
-        let request_id = advice.request_id();
+        if admitted.author != self.persistent.identity().author {
+            return Err(RelayError::ScopeConfigurationMismatch);
+        }
+        self.ensure_mutation_operation_capacity(client)?;
+        let (request_id, advice) = self.persistent.binding.request_permission_advice(action);
         let result = self.start_foreground_operation(
             client,
             None,
             Box::pin(async move {
                 Ok(ForegroundOperationResult::PermissionAdvice(
-                    match advice.await {
-                        PermissionAdvice::Allowed => ForegroundPermissionAdvice::Allowed,
-                        PermissionAdvice::Denied => ForegroundPermissionAdvice::Denied,
-                        PermissionAdvice::Unknown => ForegroundPermissionAdvice::Unknown,
+                    match advice.await.map_err(engine::host_error)? {
+                        "allowed" => ForegroundPermissionAdvice::Allowed,
+                        "denied" => ForegroundPermissionAdvice::Denied,
+                        _ => ForegroundPermissionAdvice::Unknown,
                     },
                 ))
             }),
@@ -6329,6 +5934,9 @@ impl RelayWorker {
         let Some(pending) = client.pending_operations.remove(&operation) else {
             return Ok(false);
         };
+        if let Some(request) = pending.advice_request {
+            retire_advice(&client.owner, request);
+        }
         if pending.finish_on_cancel {
             // Cancellation retires the caller's result, not admitted finish/abort.
             client.mutation_cleanups.push(pending.future);
@@ -6369,7 +5977,7 @@ impl RelayWorker {
     ) -> Result<u64, RelayError> {
         let (db, handle) = {
             let client = self.foreground_client_mut(client)?;
-            if client.transactions.len() >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX {
+            if client.transactions.borrow().len() >= NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX {
                 return Err(RelayError::ForegroundCommand(format!(
                     "foreground transaction capacity {} exceeded",
                     NATIVE_RELAY_FOREGROUND_TRANSACTION_MAX
@@ -6379,22 +5987,13 @@ impl RelayWorker {
         };
         let open_tx_id = OpenTransactionId::new();
         match kind {
-            ForegroundTransactionKind::Mergeable => {
-                db.enqueue_begin_mergeable(open_tx_id, None, None)
-            }
-            ForegroundTransactionKind::Serializable => {
-                db.enqueue_begin_serializable(open_tx_id, None, None)
-            }
+            ForegroundTransactionKind::Mergeable => block_on(db.begin_mergeable(open_tx_id)),
+            ForegroundTransactionKind::Serializable => block_on(db.begin_serializable(open_tx_id)),
         }
         .map_err(RelayError::Db)?;
-        db.drive_queued_mutation_once();
-        if let Some(error) = db.queued_transaction_error(open_tx_id) {
-            db.enqueue_abandon_transaction_handle(open_tx_id);
-            db.drive_queued_mutation_once();
-            return Err(RelayError::Db(error));
-        }
         self.foreground_client_mut(client)?
             .transactions
+            .borrow_mut()
             .insert(handle, ForegroundTransaction { open_tx_id, kind });
         Ok(handle)
     }
@@ -6407,6 +6006,7 @@ impl RelayWorker {
         let client = self.foreground_client(client)?;
         let transaction = client
             .transactions
+            .borrow()
             .get(&transaction)
             .copied()
             .ok_or_else(|| {
@@ -6457,7 +6057,7 @@ impl RelayWorker {
         let id = transaction.open_tx_id;
         let result = match mutation {
             ForegroundMutationKind::Insert => db
-                .enqueue_transaction_insert(
+                .apply_transaction_insert(
                     id,
                     table,
                     cells,
@@ -6474,7 +6074,7 @@ impl RelayWorker {
                     RelayError::ForegroundCommand("mutation requires row id".into())
                 })?;
                 match mutation {
-                    ForegroundMutationKind::Update => db.enqueue_transaction_update(
+                    ForegroundMutationKind::Update => db.apply_transaction_update(
                         id,
                         table,
                         row,
@@ -6485,7 +6085,7 @@ impl RelayWorker {
                             ..Default::default()
                         },
                     ),
-                    ForegroundMutationKind::Upsert => db.enqueue_transaction_upsert(
+                    ForegroundMutationKind::Upsert => db.apply_transaction_upsert(
                         id,
                         table,
                         row,
@@ -6496,7 +6096,7 @@ impl RelayWorker {
                             ..Default::default()
                         },
                     ),
-                    ForegroundMutationKind::Delete => db.enqueue_transaction_delete(
+                    ForegroundMutationKind::Delete => db.apply_transaction_delete(
                         id,
                         table,
                         row,
@@ -6506,7 +6106,7 @@ impl RelayWorker {
                             ..Default::default()
                         },
                     ),
-                    ForegroundMutationKind::Restore => db.enqueue_transaction_restore(
+                    ForegroundMutationKind::Restore => db.apply_transaction_restore(
                         id,
                         table,
                         row,
@@ -6523,10 +6123,6 @@ impl RelayWorker {
             }
         }
         .map_err(RelayError::Db)?;
-        db.drive_queued_mutation_once();
-        if let Some(error) = db.queued_transaction_error(id) {
-            return Err(RelayError::Db(error));
-        }
         Ok(result)
     }
 
@@ -6615,28 +6211,28 @@ impl RelayWorker {
         transaction: u64,
     ) -> Result<TransactionId, RelayError> {
         let (db, transaction_state) = self.foreground_transaction(client, transaction)?;
-        let write = match transaction_state.kind {
-            ForegroundTransactionKind::Mergeable => {
-                db.enqueue_commit_mergeable_handle(transaction_state.open_tx_id)
-            }
-            ForegroundTransactionKind::Serializable => {
-                db.enqueue_commit_serializable_handle(transaction_state.open_tx_id)
-            }
-        }
-        .map_err(RelayError::Db)?;
+        let kind = match transaction_state.kind {
+            ForegroundTransactionKind::Mergeable => "mergeable",
+            ForegroundTransactionKind::Serializable => "serializable",
+        };
+        // SQLite consumes the batch even when commit returns an error (for
+        // example an unfinished read). Retire the native handle on that same
+        // boundary so failed commits cannot exhaust foreground capacity.
         self.foreground_client_mut(client)?
             .transactions
+            .borrow_mut()
             .remove(&transaction);
-        db.drive_queued_mutation_once();
-        if let Some(error) = db.take_queued_mutation_failure(write.mergeable_tx_id()) {
-            return Err(RelayError::Db(error));
-        }
-        let public_id = TransactionId::from_committed_tx(write.mergeable_tx_id());
+        let write = db
+            .binding
+            .commit_transaction(&transaction_state.open_tx_id.to_string(), Some(kind))
+            .map_err(engine::host_error)?;
+        let public_id = write.tx_id;
+        db.report_write(write.clone());
         self.foreground_client_mut(client)?
             .mutations
             .writes
             .borrow_mut()
-            .insert(public_id, Rc::new(write));
+            .insert(public_id, write);
         Ok(public_id)
     }
 
@@ -6647,15 +6243,12 @@ impl RelayWorker {
         let captured = self
             .foreground_client(client)?
             .db
-            .enqueue_capture_snapshot();
+            .binding
+            .capture_snapshot();
         self.drive.request(0);
         let future: ForegroundOperationFuture = Box::pin(async move {
-            let snapshot = captured
-                .await
-                .map_err(|_| RelayError::Closed)?
-                .map_err(RelayError::Db)?;
             Ok(ForegroundOperationResult::Rows(
-                snapshot.to_persisted().into_bytes(),
+                captured.await.map_err(engine::host_error)?,
             ))
         });
         self.start_foreground_operation(client, None, future)
@@ -6699,7 +6292,7 @@ impl RelayWorker {
         &mut self,
         client: u64,
         public_tx_id: [u8; 16],
-        options: jazz::db::WriteWaitOptions,
+        options: engine::WriteWaitOptions,
     ) -> Result<ForegroundOperationPoll, RelayError> {
         let retained = {
             let client = self.foreground_client(client)?;
@@ -6709,47 +6302,31 @@ impl RelayWorker {
                 .borrow()
                 .iter()
                 .find(|(id, _)| *id.as_bytes() == public_tx_id)
-                .map(|(id, write)| (*id, Rc::clone(write)))
+                .map(|(id, write)| (*id, write.clone()))
         };
         if let Some((id, write)) = retained {
-            // WriteHandle::wait is a snapshot check. The core callback API
-            // owns the asynchronous waiter and preserves queued no-op aliases.
             let db = Rc::clone(&self.foreground_client(client)?.db);
+            if !options.observe_only {
+                db.claim_write(&write);
+            }
             let future: ForegroundOperationFuture = Box::pin(async move {
-                // Register only after the bounded operation slot is admitted.
-                let (send, receive) = futures::channel::oneshot::channel();
-                db.wait_for_write_with(&write, options, move |result| {
-                    let _ = send.send(result);
-                });
-                let _retained_write = write;
-                receive
+                let tier = match options.tier {
+                    CoreDurabilityTier::None => "none",
+                    CoreDurabilityTier::Local => "local",
+                    CoreDurabilityTier::Global => "global",
+                };
+                db.binding
+                    .wait_for_write(&write, tier)
+                    .map_err(engine::host_error)?
                     .await
-                    .map_err(|_| RelayError::Closed)?
-                    .map_err(RelayError::Db)?;
+                    .map_err(engine::host_error)?;
                 Ok(ForegroundOperationResult::TransactionSettled(id))
             });
             return self.start_foreground_operation(client, None, future);
         }
-        let (db, public_tx_id, tx_id) = {
-            let client = self.foreground_client(client)?;
-            let (&public_tx_id, &tx_id) = client
-                .committed_transactions
-                .iter()
-                .find(|(public, _)| *public.as_bytes() == public_tx_id)
-                .ok_or_else(|| {
-                    RelayError::ForegroundCommand(
-                        "unknown foreground transaction id for Core settlement".to_owned(),
-                    )
-                })?;
-            (Rc::clone(&client.db), public_tx_id, tx_id)
-        };
-        let future: ForegroundOperationFuture = Box::pin(async move {
-            db.wait_for_transaction(tx_id, options)
-                .await
-                .map_err(RelayError::Db)?;
-            Ok(ForegroundOperationResult::TransactionSettled(public_tx_id))
-        });
-        self.start_foreground_operation(client, None, future)
+        Err(RelayError::ForegroundCommand(
+            "unknown foreground write".to_owned(),
+        ))
     }
 
     fn rollback_foreground_transaction(
@@ -6758,13 +6335,50 @@ impl RelayWorker {
         transaction: u64,
     ) -> Result<bool, RelayError> {
         let (db, transaction_state) = self.foreground_transaction(client, transaction)?;
-        db.enqueue_abandon_transaction_handle(transaction_state.open_tx_id);
-        db.drive_queued_mutation_once();
+        db.binding
+            .rollback_transaction(&transaction_state.open_tx_id.to_string())
+            .map_err(engine::host_error)?;
         self.foreground_client_mut(client)?
             .transactions
+            .borrow_mut()
             .remove(&transaction);
         Ok(true)
     }
+}
+
+struct ForegroundSubscriptionOptions {
+    read: ReadOpts,
+    observe_accepted_evidence: bool,
+}
+
+impl From<ReadOpts> for ForegroundSubscriptionOptions {
+    fn from(read: ReadOpts) -> Self {
+        Self {
+            read,
+            observe_accepted_evidence: false,
+        }
+    }
+}
+
+fn foreground_subscription_opts_from_json(
+    json: &str,
+) -> Result<ForegroundSubscriptionOptions, RelayError> {
+    let read = foreground_read_opts_from_json(json)?;
+    let supplied: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| RelayError::ForegroundCommand(format!("invalid read options: {error}")))?;
+    let observe_accepted_evidence = match supplied.get("observe_accepted_evidence") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(RelayError::ForegroundCommand(
+                "invalid read options: observe_accepted_evidence must be a boolean".into(),
+            ));
+        }
+    };
+    Ok(ForegroundSubscriptionOptions {
+        read,
+        observe_accepted_evidence,
+    })
 }
 
 fn foreground_read_opts_from_json(json: &str) -> Result<ReadOpts, RelayError> {
@@ -6844,58 +6458,30 @@ struct ForegroundMutationOptions {
 /// Decode the established NAPI/WASM encoded-cell record envelope. The
 /// foreground ABI deliberately shares this compact descriptor-plus-bytes
 /// representation; it does not invent a React-Native row/value object shape.
-fn decode_foreground_cells(bytes: &[u8]) -> Result<jazz::db::RowCells, RelayError> {
+fn decode_foreground_cells(bytes: &[u8]) -> Result<BTreeMap<String, Value>, RelayError> {
     jazz::binding_codec::decode_named_cells(bytes)
         .map_err(|error| RelayError::ForegroundCommand(format!("decode cells: {error}")))
 }
 
 fn encode_foreground_subscription_event(
-    mut event: SubscriptionEvent,
+    event: SubscriptionEvent,
 ) -> Result<ForegroundSubscriptionEvent, RelayError> {
-    match &mut event {
-        SubscriptionEvent::Delta {
+    use jazz::binding_host::{EventChunk, event_chunk};
+    Ok(match event_chunk(event).map_err(engine::host_error)? {
+        EventChunk::Delta {
+            delta,
             reset,
-            added,
-            updated,
-            removed,
-            terminal_operations,
             settled,
             tier,
-            ..
-        } => {
-            let delta = jazz::binding_codec::encode_subscription_delta(added, updated, removed)
-                .map_err(|error| {
-                    RelayError::ForegroundCommand(format!("encode subscription delta: {error}"))
-                })?;
-            if !terminal_operations.is_empty() {
-                let terminal_operations_json =
-                    jazz::binding_codec::terminal_operations_to_json(terminal_operations)
-                        .map_err(|error| {
-                            RelayError::ForegroundCommand(format!(
-                                "encode terminal operations: {error}"
-                            ))
-                        })?
-                        .to_string();
-                return Ok(ForegroundSubscriptionEvent::StructuredDelta {
-                    reset: *reset,
-                    settled: *settled,
-                    tier: format!("{tier:?}").to_ascii_lowercase(),
-                    delta,
-                    terminal_operations_json,
-                });
-            }
-            Ok(ForegroundSubscriptionEvent::Delta {
-                reset: *reset,
-                settled: *settled,
-                tier: format!("{tier:?}").to_ascii_lowercase(),
-                delta,
-            })
-        }
-        SubscriptionEvent::Rejected { reason } => Ok(ForegroundSubscriptionEvent::Rejected {
-            reason: format!("{reason:?}"),
-        }),
-        SubscriptionEvent::Closed => Ok(ForegroundSubscriptionEvent::Closed),
-    }
+        } => ForegroundSubscriptionEvent::Delta {
+            delta,
+            reset,
+            settled,
+            tier: tier.to_ascii_lowercase(),
+        },
+        EventChunk::Rejected { detail } => ForegroundSubscriptionEvent::Rejected { reason: detail },
+        EventChunk::Closed => ForegroundSubscriptionEvent::Closed,
+    })
 }
 
 fn map_tick_result<T>(result: Result<T, jazz::db::Error>) -> Result<(), RelayError> {
@@ -6957,7 +6543,7 @@ impl NativeRelay {
 
     fn spawn_with_scope(
         config: RelayOpenConfig,
-        client_relay_scope: Option<jazz::db::ClientRelayScope>,
+        client_relay_scope: Option<ClientRelayScope>,
     ) -> Result<Self, RelayError> {
         let scope_admitted = client_relay_scope.is_some();
         // This is before channel/thread creation and the worker's SQLite open.
@@ -7236,7 +6822,7 @@ impl NativeRelayRegistry {
         // SAFETY: callers resolved an immutable trusted host admission capability;
         // arbitrary public RelayScope text never reaches this constructor.
         let scope = unsafe {
-            jazz::db::ClientRelayScope::from_admitted_storage_owner(
+            ClientRelayScope::from_admitted_storage_owner(
                 config.scope.ledger_owner_encoding(),
                 config.identity.author,
             )
@@ -7247,7 +6833,7 @@ impl NativeRelayRegistry {
     fn open_with_scope(
         &self,
         config: RelayOpenConfig,
-        client_relay_scope: Option<jazz::db::ClientRelayScope>,
+        client_relay_scope: Option<ClientRelayScope>,
     ) -> Result<NativeRelay, RelayError> {
         config.validate()?;
         let mut relays = self
@@ -7346,7 +6932,7 @@ pub enum RelayError {
     #[error("native relay UI client id space exhausted")]
     ClientIdExhausted,
     #[error("SQLite storage failed: {0}")]
-    Storage(jazz::groove::storage::Error),
+    Storage(std::io::Error),
     #[error("Jazz database failed: {0}")]
     Db(jazz::db::Error),
     #[error("foreground NativeDb command failed: {0}")]
@@ -7356,6 +6942,7 @@ pub enum RelayError {
 #[cfg(test)]
 mod tests {
     mod initialization;
+    mod legacy_storage;
     mod publication_codec;
     mod snapshot_capture_codec;
 
@@ -7365,9 +6952,9 @@ mod tests {
     // store per UI runtime or share it across explicit auth scopes.
     use super::*;
     use jazz::db::{InsertOptions, Transport, WireTransportAdapter};
-    use jazz::groove::records::{BorrowedRecord, RecordDescriptor, ValueType};
     use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
+    use jazz::records::{BorrowedRecord, RecordDescriptor, ValueType};
     use jazz::time::TxTime;
     use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
     use jazz::tx::TxId;
@@ -7410,8 +6997,6 @@ mod tests {
                         transport: Box::new(IdleWire),
                         protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                         features: jazz::wire::current_wire_features(),
-                        session_context: None,
-                        permits_delegated_sessions: false,
                         terminal: if call == 0 {
                             Box::pin(async {
                                 jazz::tools::native_transport_connector::NativeTransportTerminal::PeerClosed(
@@ -7475,8 +7060,6 @@ mod tests {
                         },
                         protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                         features: jazz::wire::current_wire_features(),
-                        session_context: None,
-                        permits_delegated_sessions: false,
                         terminal,
                     },
                 )
@@ -7500,8 +7083,6 @@ mod tests {
                         transport: Box::new(IdleWire),
                         protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                         features: jazz::wire::current_wire_features(),
-                        session_context: None,
-                        permits_delegated_sessions: false,
                         terminal: Box::pin(std::future::pending()),
                     },
                 )
@@ -7693,8 +7274,8 @@ mod tests {
         ConnectThenTerminal(tokio::sync::oneshot::Receiver<()>),
         /// Hold the attempt until released, then connect and stay connected.
         ConnectWhenReleased(tokio::sync::oneshot::Receiver<()>),
-        /// Connect as a different authenticated identity than was admitted,
-        /// which makes the worker give up for good.
+        /// The authenticated handshake rejects a different identity, which
+        /// makes the worker give up before installing a semantic connection.
         ForeignIdentity,
     }
 
@@ -7718,44 +7299,29 @@ mod tests {
         ) -> jazz::tools::native_transport_connector::NativeTransportFuture {
             let step = self.steps.lock().unwrap().pop_front();
             Box::pin(async move {
-                let connected = |session_context, terminal| {
-                    jazz::tools::native_transport_connector::ConnectedNativeTransport {
+                let connected =
+                    |terminal| jazz::tools::native_transport_connector::ConnectedNativeTransport {
                         transport: Box::new(IdleWire),
                         protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
                         features: jazz::wire::current_wire_features(),
-                        session_context,
-                        permits_delegated_sessions: false,
                         terminal,
-                    }
-                };
+                    };
                 match step {
-                    Some(HostSocketStep::ConnectThenTerminal(release)) => Ok(connected(
-                        None,
-                        Box::pin(async move {
+                    Some(HostSocketStep::ConnectThenTerminal(release)) => {
+                        Ok(connected(Box::pin(async move {
                             let _ = release.await;
                             NativeTransportTerminal::Failed(NativeTransportError::Terminal(
                                 "websocket peer sent a non-binary wire batch".into(),
                             ))
-                        }),
-                    )),
+                        })))
+                    }
                     Some(HostSocketStep::ConnectWhenReleased(release)) => {
                         let _ = release.await;
-                        Ok(connected(None, Box::pin(std::future::pending())))
+                        Ok(connected(Box::pin(std::future::pending())))
                     }
-                    Some(HostSocketStep::ForeignIdentity) => {
-                        let endpoint = jazz::wire::WireAuthorityEndpoint::fresh(
-                            NodeUuid::from_bytes([0x3c; 16]),
-                        );
-                        Ok(connected(
-                            Some(jazz::db::ConnectionSessionContext {
-                                local: endpoint,
-                                remote: None,
-                                link_identity: AuthorSubject::for_test_bytes([0x3c; 16]),
-                                negotiated_features: jazz::wire::current_wire_features(),
-                            }),
-                            Box::pin(std::future::pending()),
-                        ))
-                    }
+                    Some(HostSocketStep::ForeignIdentity) => Err(NativeTransportError::Terminal(
+                        "authenticated handshake rejected a different peer identity".into(),
+                    )),
                     None => std::future::pending().await,
                 }
             })
@@ -7920,10 +7486,8 @@ mod tests {
     }
 
     fn encoded_cells(descriptor: RecordDescriptor, raw: Vec<u8>) -> Vec<u8> {
-        jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
-            raw, descriptor,
-        ))
-        .expect("fixture cells encode")
+        jazz::binding_codec::encode_named_cells(&jazz::records::OwnedRecord::new(raw, descriptor))
+            .expect("fixture cells encode")
     }
 
     fn encoded_title_cells(title: &str) -> Vec<u8> {
@@ -7939,11 +7503,11 @@ mod tests {
     #[test]
     fn foreground_staged_upload_commit_and_rollback_are_atomic() {
         let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("staged.sqlite"),
-            Some("staged"),
-        ))
-        .unwrap();
+        let mut relay_config = config(directory.path().join("staged.sqlite"), Some("staged"));
+        relay_config.identity.author = AuthorSubject::for_test_bytes([0x4a; 16]);
+        let relay = NativeRelayRegistry::default()
+            .open_admitted(relay_config)
+            .unwrap();
         let client = relay
             .attach_client(
                 fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
@@ -8002,7 +7566,7 @@ mod tests {
                 panic!("staged handle")
             };
             let transaction = client
-                .begin_foreground_transaction(ForegroundTransactionKind::Exclusive)
+                .begin_foreground_transaction(ForegroundTransactionKind::Serializable)
                 .unwrap();
             assert!(matches!(
                 settle(
@@ -8057,7 +7621,7 @@ mod tests {
                 let record = BorrowedRecord::new(&row.raw, &batch.descriptor);
                 assert_eq!(
                     record.get("title").unwrap(),
-                    Value::Nullable(Some(Box::new(Value::String("staged body".into())))),
+                    Value::String("staged body".into()),
                 );
             } else {
                 assert!(client.rollback_foreground_transaction(transaction).unwrap());
@@ -8119,19 +7683,12 @@ mod tests {
         );
         assert!(!row.deleted, "the persisted row remains live");
         let record = BorrowedRecord::new(&row.raw, &batch.descriptor);
-        let values = record
-            .to_values()
-            .expect("the row decodes through its binding descriptor");
+        // SQLite carries physical identity in the row envelope checked above.
+        // Decode the logical column by its binding descriptor, not an ordinal
+        // from the retired query layout that duplicated the id in its cells.
         assert_eq!(
-            values.first(),
-            Some(&Value::Uuid(row_id.0)),
-            "the physical row identity is exact"
-        );
-        assert_eq!(
-            values.get(1),
-            Some(&Value::Nullable(Some(Box::new(Value::String(
-                title.to_owned()
-            ))))),
+            record.get("title").unwrap(),
+            Value::String(title.to_owned()),
             "the declared logical title is exact"
         );
     }
@@ -8534,13 +8091,12 @@ mod tests {
                         .len()
                 };
                 let scheduling = format!(
-                    "upstream_attached={} transition={} socket={} persistent_tick={} \
+                    "upstream_attached={} socket={} persistent_tick={} \
                      admission={} foreground_tick={} pending_subscriptions={} \
-                     subscriptions={} pending_operations={} coverage={:?} \
+                     subscriptions={} pending_operations={} \
                      foreground_inbound={} foreground_outbound={} \
                      upstream_inbound={} upstream_outbound={}",
                     worker.upstream_attached,
-                    worker.upstream_transition.is_some(),
                     worker.socket_wire.is_some(),
                     worker.persistent_tick.is_some(),
                     state.admission.is_some(),
@@ -8548,22 +8104,11 @@ mod tests {
                     state.pending_subscriptions.len(),
                     state.subscriptions.len(),
                     state.pending_operations.len(),
-                    state.db.query_coverage_attachment_counts_for_test(),
                     queue_len(&state.wire.inbound),
                     queue_len(&state.wire.outbound),
-                    queue_len(&worker.upstream_io.wire.inbound),
-                    queue_len(&worker.upstream_io.wire.outbound),
+                    queue_len(&worker.upstream_wire.inbound),
+                    queue_len(&worker.upstream_wire.outbound),
                 );
-                let foreground_db = Rc::clone(&state.db);
-                eprintln!(
-                    "NATIVE_READ_DIAGNOSTIC foreground before repoll:\n{}",
-                    foreground_db.query_delivery_diagnostics_for_test()
-                );
-                eprintln!(
-                    "NATIVE_READ_DIAGNOSTIC owner before repoll:\n{}",
-                    worker.persistent.query_delivery_diagnostics_for_test()
-                );
-                foreground_db.set_query_coverage_trace_for_test(true);
                 eprintln!("NATIVE_READ_DIAGNOSTIC repoll operation={operation} begin");
                 let repoll = match worker.poll_foreground_operation(client.id, operation) {
                     Ok(ForegroundOperationPoll::Pending { .. }) => "pending",
@@ -8574,7 +8119,6 @@ mod tests {
                     Ok(ForegroundOperationPoll::Error { .. }) => "operation_error",
                     Err(_) => "relay_error",
                 };
-                foreground_db.set_query_coverage_trace_for_test(false);
                 eprintln!("NATIVE_READ_DIAGNOSTIC repoll operation={operation} result={repoll}");
                 Ok(format!("{scheduling} diagnostic_repoll={repoll}"))
             });
@@ -8678,11 +8222,7 @@ mod tests {
         jazz_testkit::wait_for(Duration::from_secs(5), "real upstream installed", || {
             let installed = client
                 .relay
-                .run(|worker| {
-                    Ok(worker.upstream_attached
-                        && worker.socket_wire.is_some()
-                        && worker.upstream_transition.is_none())
-                })
+                .run(|worker| Ok(worker.upstream_attached && worker.socket_wire.is_some()))
                 .unwrap();
             async move { installed.then_some(()) }
         })
@@ -8775,11 +8315,7 @@ mod tests {
         jazz_testkit::wait_for(Duration::from_secs(5), "real upstream installed", || {
             let installed = client
                 .relay
-                .run(|worker| {
-                    Ok(worker.upstream_attached
-                        && worker.socket_wire.is_some()
-                        && worker.upstream_transition.is_none())
-                })
+                .run(|worker| Ok(worker.upstream_attached && worker.socket_wire.is_some()))
                 .unwrap();
             async move { installed.then_some(()) }
         })
@@ -9842,7 +9378,7 @@ mod tests {
                 host.foreground_client(foreground)
                     .unwrap()
                     .with_db(|db| {
-                        db.schedule_tick(TickUrgency::Deferred);
+                        db.schedule_tick_for_test(TickUrgency::Deferred);
                         Ok(())
                     })
                     .unwrap();
@@ -10083,7 +9619,7 @@ mod tests {
             // touch that raw context again.
             a_client
                 .with_db(|db| {
-                    db.schedule_tick(TickUrgency::Immediate);
+                    db.schedule_tick_for_test(TickUrgency::Immediate);
                     Ok(())
                 })
                 .expect("orphaned owner client remains available until terminal cleanup");
@@ -10135,12 +9671,11 @@ mod tests {
         cells.push(0);
         assert!(decode_foreground_cells(&cells).is_err());
 
-        let canonical =
-            jazz::binding_codec::encode_named_cells(&jazz::groove::records::OwnedRecord::new(
-                7_u64.to_le_bytes().to_vec(),
-                RecordDescriptor::new([("count", ValueType::U64)]),
-            ))
-            .unwrap();
+        let canonical = jazz::binding_codec::encode_named_cells(&jazz::records::OwnedRecord::new(
+            7_u64.to_le_bytes().to_vec(),
+            RecordDescriptor::new([("count", ValueType::U64)]),
+        ))
+        .unwrap();
         assert_eq!(
             canonical,
             vec![
@@ -10187,12 +9722,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("relay.sqlite");
         let config = config(path.clone(), Some("alice"));
-        let column_families = config.schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        drop(SqliteStorage::open(&path, &refs).expect("plant generic Groove manifest"));
+        legacy_storage::plant(&path, "groove_only");
 
         let registry = NativeRelayRegistry::default();
         assert!(
@@ -10336,61 +9866,38 @@ mod tests {
         client.close().unwrap();
     }
 
-    // The native socket queue and owner suspension are private scheduling
-    // boundaries; public row receipts below prove accepted work survives them.
+    /// Alice retires a just-installed socket and replaces it. A stale generation
+    /// cannot detach the replacement, and her admitted local write still settles.
+    /// The private owner-turn seam makes installation and retirement atomic with
+    /// respect to background drives; SQLite installs the connection synchronously.
     #[test]
-    fn socket_install_cancellation_waits_for_owner_and_preserves_local_writes() {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("socket-owner.sqlite"),
-            Some("socket-owner"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x47; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+    fn socket_install_cancellation_preserves_local_writes() {
+        let (_directory, relay, client, _wake) = attached_write_client("socket-owner", 0x47);
+        settle_owner(&relay);
         let id = client.id;
         let (generation, wire, committed) = relay
             .run(move |worker| {
-                let persistent = Rc::clone(&worker.persistent);
-                let mut held: RelayTickFuture = Box::pin(async move {
-                    persistent.hold_node_owner_for_test().await;
-                    Ok(())
-                });
-                assert!(
-                    held.as_mut()
-                        .poll(&mut Context::from_waker(Waker::noop()))
-                        .is_pending()
-                );
-                worker.clients.get_mut(&id).unwrap().tick = Some(held);
                 let start = std::time::Instant::now();
-                let (generation, wire) = worker.begin_socket_upstream(None)?;
+                let (generation, wire) = worker.begin_socket_upstream()?;
                 assert!(start.elapsed() < std::time::Duration::from_millis(100));
-                assert!(worker.upstream_transition.is_some());
+                assert!(worker.upstream_attached);
+                assert!(worker.socket_wire.is_some());
                 let (committed, _) = worker.direct_foreground_mutation(
                     id,
                     ForegroundMutationKind::Insert,
                     "todos".into(),
                     None,
-                    encoded_title_cells("accepted while install waits"),
+                    encoded_title_cells("accepted before socket retirement"),
                     "{}".into(),
                 )?;
                 assert!(worker.retire_socket_upstream(generation)?);
-                assert!(worker.upstream_transition.is_some());
-                worker.clients.get_mut(&id).unwrap().tick = None;
-                worker.poll_upstream_transition()?;
-                assert!(worker.upstream_transition.is_none());
+                assert!(worker.socket_wire.is_none());
                 assert!(!worker.upstream_attached);
                 Ok((generation, wire, committed))
             })
             .unwrap();
         assert!(matches!(wire.take_outbound(), Err(RelayError::Closed)));
-        let (replacement, fresh) = relay
-            .run(|worker| worker.begin_socket_upstream(None))
-            .unwrap();
+        let (replacement, fresh) = relay.run(|worker| worker.begin_socket_upstream()).unwrap();
         assert!(replacement > generation);
         assert!(
             !relay
@@ -10419,14 +9926,8 @@ mod tests {
     fn retired_connection_backpressures_but_owner_close_stays_terminal() {
         let owner = Arc::new(RelayLiveness::new());
         let wire = NativeRelayWire::for_owner(Arc::clone(&owner));
-        let mut transport = QueueTransport {
-            wire: wire.clone(),
-            session_context: None,
-        };
-        let message = SyncMessage::SessionClaims {
-            identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::new(),
-        };
+        let mut transport = QueueTransport { wire: wire.clone() };
+        let message = SyncMessage::Unsubscribe { id: 0 };
 
         wire.retire_connection();
         assert!(matches!(
@@ -10450,16 +9951,12 @@ mod tests {
             Some("socket-epoch"),
         ))
         .unwrap();
-        let (first, stale) = relay
-            .run(|worker| worker.begin_socket_upstream(None))
-            .unwrap();
-        let (second, fresh) = relay
-            .run(|worker| worker.begin_socket_upstream(None))
-            .unwrap();
+        let (first, stale) = relay.run(|worker| worker.begin_socket_upstream()).unwrap();
+        let (second, fresh) = relay.run(|worker| worker.begin_socket_upstream()).unwrap();
         assert!(second > first);
         assert!(matches!(
-            stale.push_inbound(SyncMessage::AuthorizationScopeDecision {
-                request_id: jazz::protocol::PermissionAdviceRequestId([1; 16]),
+            stale.push_inbound(SyncMessage::Advice {
+                id: 1,
                 advice: jazz::protocol::PermissionAdvice::Allowed,
             }),
             Err(RelayError::Closed)
@@ -10479,20 +9976,13 @@ mod tests {
         assert!(matches!(fresh.take_outbound(), Err(RelayError::Closed)));
     }
 
+    /// Alice closes with a push waiting on its native upload slot. Closing drops
+    /// both the held guard and the pending push, leaving her relay usable. Holding
+    /// the actual mutex is an internal seam unavailable through the public ABI.
     #[test]
-    fn streaming_push_yields_to_a_held_owner_and_close_cancels_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("upload-owner.sqlite"),
-            Some("upload"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x47; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+    fn streaming_push_waits_for_its_upload_slot_and_close_cancels_it() {
+        let (_directory, relay, client, _wake) = attached_write_client("upload-owner", 0x47);
+        settle_owner(&relay);
         let id = client.id;
         let upload = relay
             .run(move |worker| {
@@ -10514,15 +10004,11 @@ mod tests {
             .unwrap();
         let held = relay
             .run(move |worker| {
-                let db = Rc::clone(&worker.foreground_client(id)?.db);
-                worker.start_foreground_operation(
-                    id,
-                    None,
-                    Box::pin(async move {
-                        db.hold_node_owner_for_test().await;
-                        unreachable!()
-                    }),
-                )
+                let held = worker
+                    .foreground_client(id)?
+                    .mutations
+                    .hold_upload_for_test(upload)?;
+                worker.start_foreground_operation(id, None, held)
             })
             .unwrap();
         assert!(matches!(held, ForegroundOperationPoll::Pending { .. }));
@@ -10540,31 +10026,24 @@ mod tests {
             .expect("relay remains usable after pending upload teardown");
     }
 
-    // Internal scheduling receipt: JavaScript cannot deterministically suspend the
-    // semantic owner between native commands. All data and uploads still use core.
+    /// Alice aborts an upload while its push waits for the same native slot lock.
+    /// Releasing that lock and completing the push cannot resurrect the upload.
+    /// The helper holds the actual lock; all push and abort work uses SQLite.
     #[test]
     fn streaming_abort_during_pending_push_cannot_resurrect_upload() {
         pending_push_abort_receipt(false);
     }
 
+    /// Alice cancels a push waiting for its upload slot, then finishes the queued
+    /// abort. Cancellation releases the observer without losing upload cleanup.
     #[test]
     fn cancelled_streaming_push_remains_abortable() {
         pending_push_abort_receipt(true);
     }
 
     fn pending_push_abort_receipt(cancel_push: bool) {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("upload-owner.sqlite"),
-            Some("upload"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x47; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+        let (_directory, relay, client, _wake) = attached_write_client("upload-owner", 0x47);
+        settle_owner(&relay);
         let id = client.id;
         let upload = relay
             .run(move |worker| {
@@ -10586,15 +10065,11 @@ mod tests {
             .unwrap();
         let held = relay
             .run(move |worker| {
-                let db = Rc::clone(&worker.foreground_client(id)?.db);
-                worker.start_foreground_operation(
-                    id,
-                    None,
-                    Box::pin(async move {
-                        db.hold_node_owner_for_test().await;
-                        unreachable!()
-                    }),
-                )
+                let held = worker
+                    .foreground_client(id)?
+                    .mutations
+                    .hold_upload_for_test(upload)?;
+                worker.start_foreground_operation(id, None, held)
             })
             .unwrap();
         assert!(matches!(held, ForegroundOperationPoll::Pending { .. }));
@@ -10643,22 +10118,14 @@ mod tests {
         client.close().unwrap();
     }
 
-    // Internal cancellation receipt: public JavaScript cannot hold the node owner
-    // across an exact native operation boundary or inspect core upload journals.
+    /// Alice cancels terminal upload results while the native slot is locked.
+    /// Admitted finish/abort work must complete after the guard is released and
+    /// retire every upload and cleanup slot. The internal seam holds the actual
+    /// per-upload mutex and inspects real persisted upload leases.
     #[test]
     fn cancelled_upload_results_finish_cleanup_without_pinning_capacity() {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("cancel-upload.sqlite"),
-            Some("uploads"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x51; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+        let (_directory, relay, client, _wake) = attached_write_client("cancel-upload", 0x51);
+        settle_owner(&relay);
         let id = client.id;
         for finish in [false, true] {
             for round in 0..4 {
@@ -10698,15 +10165,11 @@ mod tests {
                 ));
                 let held = relay
                     .run(move |worker| {
-                        let db = Rc::clone(&worker.foreground_client(id)?.db);
-                        worker.start_foreground_operation(
-                            id,
-                            None,
-                            Box::pin(async move {
-                                db.hold_node_owner_for_test().await;
-                                unreachable!()
-                            }),
-                        )
+                        let held = worker
+                            .foreground_client(id)?
+                            .mutations
+                            .hold_upload_for_test(upload)?;
+                        worker.start_foreground_operation(id, None, held)
                     })
                     .unwrap();
                 let ForegroundOperationPoll::Pending { operation: holder } = held else {
@@ -10722,7 +10185,7 @@ mod tests {
                     })
                     .unwrap();
                 let ForegroundOperationPoll::Pending { operation } = result else {
-                    panic!("held owner must defer terminal upload operation");
+                    panic!("held upload slot must defer terminal upload operation");
                 };
                 assert!(client.cancel_foreground_operation(operation).unwrap());
                 assert!(client.poll_foreground_operation(operation).is_err());
@@ -10836,7 +10299,10 @@ mod tests {
                 .build(),
         )
         .unwrap();
-        let relay = NativeRelay::spawn(config).unwrap();
+        config.identity.author = AuthorSubject::for_test_bytes([0x54; 16]);
+        let relay = NativeRelayRegistry::default()
+            .open_admitted(config)
+            .unwrap();
         let client = relay
             .attach_client(
                 fresh_client_identity(AuthorSubject::for_test_bytes([0x54; 16])).unwrap(),
@@ -10907,11 +10373,11 @@ mod tests {
         Arc<QueuedNativeWake>,
     ) {
         let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join(format!("{name}.sqlite")),
-            Some(name),
-        ))
-        .unwrap();
+        let mut relay_config = config(directory.path().join(format!("{name}.sqlite")), Some(name));
+        relay_config.identity.author = AuthorSubject::for_test_bytes([author; 16]);
+        let relay = NativeRelayRegistry::default()
+            .open_admitted(relay_config)
+            .unwrap();
         let client = relay
             .attach_client(
                 fresh_client_identity(AuthorSubject::for_test_bytes([author; 16])).unwrap(),
@@ -10933,24 +10399,85 @@ mod tests {
         (directory, relay, client, wake)
     }
 
-    fn hold_foreground_owner(relay: &NativeRelay, id: u64) -> u64 {
-        let holder = relay
-            .run(move |worker| {
-                let db = Rc::clone(&worker.foreground_client(id)?.db);
-                worker.start_foreground_operation(
-                    id,
-                    None,
-                    Box::pin(async move {
-                        db.hold_node_owner_for_test().await;
-                        unreachable!()
-                    }),
-                )
-            })
+    /// A real relay/authority connection with the admitted test identity whose authority is driven
+    /// only by the test. Holding its replies needs no simulated owner lock.
+    fn attached_transaction_authority(
+        name: &str,
+        author_byte: u8,
+    ) -> (
+        tempfile::TempDir,
+        NativeRelay,
+        NativeRelayClient,
+        Rc<jazz::db::Db>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let author = AuthorSubject::for_test_bytes([author_byte; 16]);
+        let mut relay_config = config(directory.path().join(format!("{name}.sqlite")), Some(name));
+        relay_config.schema = permissive_schema();
+        relay_config.identity.author = author;
+        let relay = NativeRelayRegistry::default()
+            .open_admitted(relay_config)
             .unwrap();
-        let ForegroundOperationPoll::Pending { operation } = holder else {
-            unreachable!()
+        let client = relay
+            .attach_client(fresh_client_identity(author).unwrap(), BTreeMap::new())
+            .unwrap();
+        let authority = Rc::new(
+            block_on(jazz::db::Db::open_history_complete(DbConfig::new(
+                permissive_schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xe9; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            )))
+            .unwrap(),
+        );
+        let (_, wire) = relay.run(|worker| worker.begin_socket_upstream()).unwrap();
+        let reverse_wire = NativeRelayWire {
+            inbound: Arc::clone(&wire.outbound),
+            outbound: Arc::clone(&wire.inbound),
+            liveness: wire.liveness.clone(),
+            connection_liveness: wire.connection_liveness.clone(),
         };
-        operation
+        authority.accept_subscriber(Box::new(QueueTransport { wire: reverse_wire }), author);
+        for _ in 0..16 {
+            block_on(authority.tick()).unwrap();
+            relay.pump().unwrap();
+        }
+        (directory, relay, client, authority)
+    }
+
+    /// Complete a native operation through real transport drives. Omitting the
+    /// authority proves that owner-local reads and receipts need no server reply.
+    fn complete_transaction_operation(
+        relay: &NativeRelay,
+        client: &NativeRelayClient,
+        mut poll: ForegroundOperationPoll,
+        authority: Option<&jazz::db::Db>,
+    ) -> ForegroundOperationResult {
+        for _ in 0..100 {
+            match poll {
+                ForegroundOperationPoll::Ready(result) => return result,
+                ForegroundOperationPoll::Pending { operation } => {
+                    if let Some(authority) = authority {
+                        block_on(authority.tick()).unwrap();
+                    }
+                    relay.pump().unwrap();
+                    poll = client.poll_foreground_operation(operation).unwrap();
+                }
+                ForegroundOperationPoll::Error { code, reason } => {
+                    panic!("transaction operation failed: {code:?}: {reason}");
+                }
+            }
+        }
+        match poll {
+            ForegroundOperationPoll::Ready(result) => result,
+            ForegroundOperationPoll::Error { code, reason } => {
+                panic!("transaction operation failed: {code:?}: {reason}");
+            }
+            ForegroundOperationPoll::Pending { .. } => {
+                panic!("transaction operation did not complete within 100 transport drives");
+            }
+        }
     }
 
     fn admit_title(
@@ -11061,13 +10588,10 @@ mod tests {
     // foreground opens a subscription and then admits a write in the same JS
     // turn. Driven only by platform wakes, the write must reach that
     // subscription; a lost wake would park JS forever.
-    fn attach_with_wake(
-        relay: &NativeRelay,
-        author: u8,
-    ) -> (NativeRelayClient, Arc<QueuedNativeWake>) {
+    fn attach_with_wake(relay: &NativeRelay) -> (NativeRelayClient, Arc<QueuedNativeWake>) {
         let client = relay
             .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([author; 16])).unwrap(),
+                fresh_client_identity(relay.inner.identity.author).unwrap(),
                 BTreeMap::new(),
             )
             .unwrap();
@@ -11093,7 +10617,7 @@ mod tests {
         admit_title(&relay, sibling.id, "seed".into()).unwrap();
         for round in 0..30u8 {
             // An earlier public client: subscribe, observe a write, close.
-            let (earlier, earlier_wake) = attach_with_wake(&relay, 0x50 + (round % 8));
+            let (earlier, earlier_wake) = attach_with_wake(&relay);
             let subscription = earlier
                 .subscribe_foreground_query_with_options(query.clone(), ReadOpts::default())
                 .unwrap();
@@ -11111,7 +10635,7 @@ mod tests {
             );
             earlier.close().unwrap();
             // The composer client: subscribe, then insert in the same turn.
-            let (composer, composer_wake) = attach_with_wake(&relay, 0x60 + (round % 8));
+            let (composer, composer_wake) = attach_with_wake(&relay);
             let subscription = composer
                 .subscribe_foreground_query_with_options(query.clone(), ReadOpts::default())
                 .unwrap();
@@ -11157,35 +10681,49 @@ mod tests {
         }
     }
 
-    // Internal receipt (#3273): "admitted but not yet applied" and the owner's
-    // self-driven turns are not observable through the public JS API. The RN
-    // public-API harness pins the same fence through `Db` in
-    // packages/jazz-tools/tests/react-native/write-contract.test.ts.
+    /// Alice's direct write is applied before the native command returns, and
+    /// both her next read and the first subscription frame must contain it.
+    /// The owner-turn inspection is internal because public calls can interleave
+    /// owner drive turns and cannot distinguish application from later delivery.
     #[test]
-    fn direct_mutations_return_before_apply_and_fence_reads_and_subscriptions() {
+    fn direct_mutations_apply_before_return_and_fence_reads_and_subscriptions() {
         let (_directory, relay, client, _wake) = attached_write_client("fence", 0x61);
         let id = client.id;
-        let holder = hold_foreground_owner(&relay, id);
-        let (tx_id, row_id) = admit_title(&relay, id, "fenced".into()).unwrap();
-        assert_eq!(
-            relay
-                .run(move |worker| worker.foreground_write_state(id, *tx_id.as_bytes()))
-                .unwrap(),
-            "{\"fate\":\"Pending\",\"global_time\":null,\"durability\":\"None\"}",
-            "admission returns before the owner applies the write"
-        );
+        let row_id = relay
+            .run(move |worker| {
+                let (_, row) = worker.direct_foreground_mutation(
+                    id,
+                    ForegroundMutationKind::Insert,
+                    "todos".into(),
+                    None,
+                    encoded_title_cells("fenced"),
+                    "{}".into(),
+                )?;
+                // The same owner turn cannot interleave a later drive. SQLite
+                // must already expose the applied local write at this boundary.
+                let db = &worker.foreground_client(id)?.db;
+                let query = db
+                    .prepare_query(&Query::from("todos"))
+                    .map_err(RelayError::Db)?;
+                let rows = block_on(db.all(
+                    &query,
+                    ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly),
+                ))
+                .map_err(RelayError::Db)?;
+                assert_eq!(
+                    rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+                    vec![row]
+                );
+                Ok(row)
+            })
+            .unwrap();
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         let read = client
             .start_foreground_read(query.clone(), "{}".into(), None)
             .unwrap();
-        assert!(
-            matches!(read, ForegroundOperationPoll::Pending { .. }),
-            "a read admitted after an unapplied write waits for it"
-        );
         let subscription = client
             .subscribe_foreground_query_with_options(query, ReadOpts::default())
             .unwrap();
-        assert!(client.cancel_foreground_operation(holder).unwrap());
 
         assert_eq!(owner_driven_rows(&client, read), vec![row_id]);
         let mut first_frame = None;
@@ -11222,30 +10760,29 @@ mod tests {
         client.close().unwrap();
     }
 
-    // Internal receipt (#3273): the per-foreground owner-queue depth is not a
-    // public API value. The public burst scenario lives in write-contract.test.ts.
+    /// Alice's write is refused when the bounded native command queue is full.
+    /// Releasing the owner preserves every admitted row and allows another write;
+    /// the refused row must never appear. Blocking the owner is an internal seam
+    /// because a public caller cannot deterministically fill its command queue.
     #[test]
-    fn direct_mutation_queue_rejects_without_admitting_when_it_cannot_progress() {
+    fn direct_mutation_command_queue_rejects_without_admitting_when_full() {
         let (_directory, relay, client, _wake) = attached_write_client("cap-held", 0x62);
         let id = client.id;
-        let holder = hold_foreground_owner(&relay, id);
         let mut admitted = Vec::new();
-        for index in 0..NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX {
-            admitted.push(admit_title(&relay, id, format!("held-{index}")).unwrap().1);
+        for index in 0..16 {
+            admitted.push(
+                admit_title(&relay, id, format!("before-full-{index}"))
+                    .unwrap()
+                    .1,
+            );
         }
-        let error = admit_title(&relay, id, "over the cap".into()).unwrap_err();
-        assert!(
-            error.to_string().contains("backpressure"),
-            "unexpected error: {error}"
-        );
-        assert_eq!(
-            relay
-                .run(move |worker| Ok(worker.foreground_client(id)?.db.queued_mutation_count()))
-                .unwrap(),
-            NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX,
-            "a rejected admission enqueues nothing"
-        );
-        assert!(client.cancel_foreground_operation(holder).unwrap());
+        let saturated = saturate_owner(&relay);
+        assert!(matches!(
+            admit_title(&relay, id, "over the cap".into()),
+            Err(RelayError::OwnerQueueFull)
+        ));
+        saturated.release_and_wait();
+        admitted.push(admit_title(&relay, id, "after-drain".into()).unwrap().1);
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         let read = client
             .start_foreground_read(query, "{}".into(), None)
@@ -11253,21 +10790,21 @@ mod tests {
         let mut rows = owner_driven_rows(&client, read);
         rows.sort();
         admitted.sort();
-        assert_eq!(rows, admitted, "every admitted write is applied");
+        assert_eq!(rows, admitted, "only admitted writes are applied");
         client.close().unwrap();
     }
 
-    // Internal receipt (#3273), as above: a burst admitted inside one owner
-    // turn (no drive turn can interleave) is bounded by inline backpressure.
+    /// Alice admits a burst in one owner turn. Every synchronous SQLite mutation
+    /// must appear exactly once in her next read. The internal owner-turn seam
+    /// prevents background delivery from hiding lost or deferred applications.
     #[test]
-    fn direct_mutation_burst_stays_within_the_queue_cap_and_loses_nothing() {
+    fn direct_mutation_burst_loses_nothing_in_one_owner_turn() {
         let (_directory, relay, client, _wake) = attached_write_client("cap-burst", 0x63);
         let id = client.id;
-        let burst = 3 * NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX;
-        let (mut admitted, max_depth) = relay
+        let burst = 192;
+        let mut admitted = relay
             .run(move |worker| {
                 let mut admitted = Vec::new();
-                let mut max_depth = 0;
                 for index in 0..burst {
                     let (_, row) = worker.direct_foreground_mutation(
                         id,
@@ -11278,16 +10815,10 @@ mod tests {
                         "{}".into(),
                     )?;
                     admitted.push(row);
-                    max_depth =
-                        max_depth.max(worker.foreground_client(id)?.db.queued_mutation_count());
                 }
-                Ok((admitted, max_depth))
+                Ok(admitted)
             })
             .unwrap();
-        assert!(
-            max_depth <= NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX,
-            "queue depth {max_depth} exceeded the cap"
-        );
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         let read = client
             .start_foreground_read(query, "{}".into(), None)
@@ -11300,100 +10831,62 @@ mod tests {
         client.close().unwrap();
     }
 
-    // Internal receipt: deterministic owner contention is not exposed by the public JS API.
+    /// Alice sees her synchronous mutation before the storage owner acknowledges
+    /// Local durability. The private owner turn prevents a background drive from
+    /// acknowledging the write before the pending receipt and preview are checked.
     #[test]
-    fn standalone_mutation_queues_behind_a_held_owner() {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("write-owner.sqlite"),
-            Some("write"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x48; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+    fn standalone_mutation_is_visible_before_owner_acknowledgement() {
+        let (_directory, relay, client, _wake) = attached_write_client("write-owner", 0x48);
+        settle_owner(&relay);
         let id = client.id;
-        let holder = relay
-            .run(move |worker| {
-                let db = Rc::clone(&worker.foreground_client(id)?.db);
-                worker.start_foreground_operation(
-                    id,
-                    None,
-                    Box::pin(async move {
-                        db.hold_node_owner_for_test().await;
-                        unreachable!()
-                    }),
-                )
-            })
-            .unwrap();
-        let ForegroundOperationPoll::Pending { operation: holder } = holder else {
-            unreachable!()
-        };
         let (tx_id, row_id) = relay
             .run(move |worker| {
-                worker.direct_foreground_mutation(
+                let (tx_id, row_id) = worker.direct_foreground_mutation(
                     id,
                     ForegroundMutationKind::Insert,
                     "todos".into(),
                     None,
-                    encoded_title_cells("queued"),
+                    encoded_title_cells("local preview"),
                     "{}".into(),
-                )
+                )?;
+                assert_eq!(
+                    worker.foreground_write_state(id, *tx_id.as_bytes())?,
+                    "{\"fate\":\"Pending\",\"global_time\":null,\"durability\":\"None\"}"
+                );
+                let rows = worker
+                    .foreground_client(id)?
+                    .db
+                    .binding
+                    .local_current_row("todos", row_id.as_bytes())
+                    .map_err(engine::host_error)?;
+                assert_exact_todo_rows(&rows, row_id, "local preview");
+                Ok((tx_id, row_id))
             })
             .unwrap();
-        assert_eq!(
-            relay
-                .run(move |worker| worker.foreground_write_state(id, *tx_id.as_bytes()))
-                .unwrap(),
-            "{\"fate\":\"Pending\",\"global_time\":null,\"durability\":\"None\"}"
-        );
-        assert!(
-            client
-                .local_current_foreground_row("todos".into(), *row_id.as_bytes())
-                .unwrap_err()
-                .to_string()
-                .contains("temporarily busy")
-        );
-        assert!(client.cancel_foreground_operation(holder).unwrap());
-        let mut wait = client
+        let wait = client
             .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
             .unwrap();
-        for _ in 0..100 {
-            let ForegroundOperationPoll::Pending { operation } = wait else {
-                break;
-            };
-            relay.pump().unwrap();
-            wait = client.poll_foreground_operation(operation).unwrap();
-        }
         assert!(matches!(
-            wait,
-            ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
+            complete_transaction_operation(&relay, &client, wait, None),
+            ForegroundOperationResult::TransactionSettled(settled) if settled == tx_id
         ));
         let rows = client
             .local_current_foreground_row("todos".into(), *row_id.as_bytes())
             .unwrap();
-        let batches: Vec<DecodedForegroundRowBatch> = postcard::from_bytes(&rows).unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].rows.len(), 1);
-        assert_eq!(batches[0].rows[0].row_id, row_id);
-        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-        let mut read = client
-            .start_foreground_read(query, "{}".into(), None)
+        assert_exact_todo_rows(&rows, row_id, "local preview");
+        let read = client
+            .start_foreground_read(
+                postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                "{}".into(),
+                None,
+            )
             .unwrap();
-        for _ in 0..100 {
-            let ForegroundOperationPoll::Pending { operation } = read else {
-                break;
-            };
-            relay.pump().unwrap();
-            read = client.poll_foreground_operation(operation).unwrap();
-        }
-        let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
-            panic!("queued row must become readable");
+        let ForegroundOperationResult::Rows(rows) =
+            complete_transaction_operation(&relay, &client, read, None)
+        else {
+            panic!("acknowledged row must remain readable");
         };
-        assert_exact_todo_rows(&rows, row_id, "queued");
+        assert_exact_todo_rows(&rows, row_id, "local preview");
         client.close().unwrap();
     }
 
@@ -11422,7 +10915,7 @@ mod tests {
         let generation = relay
             .run(|worker| {
                 worker
-                    .begin_socket_upstream(None)
+                    .begin_socket_upstream()
                     .map(|(generation, _)| generation)
             })
             .unwrap();
@@ -11483,42 +10976,19 @@ mod tests {
         );
     }
 
-    // Internal receipt: JS cannot deliberately hold the native owner. All results
-    // are asserted through the foreground transaction/read/settlement boundary.
+    /// Alice reads a staged prefix, then stages a later value. Mergeable reads
+    /// finish synchronously; serializable reads await Bob's real authority reply.
+    /// The native seam controls reply delivery, which JS cannot hold explicitly.
+    /// stage queued -> admit read -> stage after-read -> finish read -> commit.
     #[test]
-    fn explicit_transactions_queue_reads_before_commit_under_owner_contention() {
+    fn explicit_transactions_preserve_read_order_before_commit() {
         for kind in [
             ForegroundTransactionKind::Mergeable,
             ForegroundTransactionKind::Serializable,
         ] {
-            let directory = tempfile::tempdir().unwrap();
-            let relay =
-                NativeRelay::spawn(config(directory.path().join("tx-owner.sqlite"), Some("tx")))
-                    .unwrap();
-            let client = relay
-                .attach_client(
-                    fresh_client_identity(AuthorSubject::for_test_bytes([0x49; 16])).unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap();
-            let id = client.id;
+            let (_directory, relay, client, authority) =
+                attached_transaction_authority("tx-owner", 0x49);
             let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-            let holder = relay
-                .run(move |worker| {
-                    let db = Rc::clone(&worker.foreground_client(id)?.db);
-                    worker.start_foreground_operation(
-                        id,
-                        None,
-                        Box::pin(async move {
-                            db.hold_node_owner_for_test().await;
-                            unreachable!()
-                        }),
-                    )
-                })
-                .unwrap();
-            let ForegroundOperationPoll::Pending { operation: holder } = holder else {
-                unreachable!()
-            };
             let transaction = client.begin_foreground_transaction(kind).unwrap();
             let row = client
                 .insert_foreground_transaction(
@@ -11538,10 +11008,17 @@ mod tests {
                     "{}".into(),
                 )
                 .unwrap();
-            let mut read = client
+            let read = client
                 .start_foreground_read(query.clone(), "{}".into(), Some(transaction))
                 .unwrap();
-            assert!(matches!(read, ForegroundOperationPoll::Pending { .. }));
+            match kind {
+                ForegroundTransactionKind::Mergeable => {
+                    assert!(matches!(read, ForegroundOperationPoll::Ready(_)));
+                }
+                ForegroundTransactionKind::Serializable => {
+                    assert!(matches!(read, ForegroundOperationPoll::Pending { .. }));
+                }
+            }
             client
                 .update_foreground_transaction(
                     transaction,
@@ -11550,88 +11027,47 @@ mod tests {
                     encoded_title_cells("after-read"),
                 )
                 .unwrap();
-            let tx_id = client.commit_foreground_transaction(transaction).unwrap();
-            assert!(client.cancel_foreground_operation(holder).unwrap());
-            for _ in 0..100 {
-                let ForegroundOperationPoll::Pending { operation } = read else {
-                    break;
-                };
-                relay.pump().unwrap();
-                read = client.poll_foreground_operation(operation).unwrap();
-            }
-            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
-                panic!("transaction read did not complete")
+            let ForegroundOperationResult::Rows(rows) =
+                complete_transaction_operation(&relay, &client, read, Some(&authority))
+            else {
+                panic!("transaction read did not return rows");
             };
             assert_exact_todo_rows(&rows, row, "queued");
-            let mut wait = client
+            // SQLite consumes and refuses a commit with an unfinished read.
+            // native_failed_commits_release_transaction_capacity covers that
+            // boundary through the public C ABI. Here the read must finish first.
+            let tx_id = client.commit_foreground_transaction(transaction).unwrap();
+            let wait = client
                 .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
                 .unwrap();
-            for _ in 0..100 {
-                let ForegroundOperationPoll::Pending { operation } = wait else {
-                    break;
-                };
-                relay.pump().unwrap();
-                wait = client.poll_foreground_operation(operation).unwrap();
-            }
             assert!(matches!(
-                wait,
-                ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(_))
+                complete_transaction_operation(&relay, &client, wait, None),
+                ForegroundOperationResult::TransactionSettled(settled) if settled == tx_id
             ));
-            let mut committed = client
+            let committed = client
                 .start_foreground_read(query, "{}".into(), None)
                 .unwrap();
-            for _ in 0..100 {
-                let ForegroundOperationPoll::Pending { operation } = committed else {
-                    break;
-                };
-                relay.pump().unwrap();
-                committed = client.poll_foreground_operation(operation).unwrap();
-            }
-            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = committed
+            let ForegroundOperationResult::Rows(rows) =
+                complete_transaction_operation(&relay, &client, committed, None)
             else {
-                panic!("committed row absent")
+                panic!("committed row absent");
             };
             assert_exact_todo_rows(&rows, row, "after-read");
             client.close().unwrap();
         }
     }
 
-    // Internal owner hold makes cancellation and rollback contention deterministic.
+    /// Alice cancels a serializable read awaiting Bob's authority. Cancelling
+    /// releases its real commit fence; commit and rollback remain usable without
+    /// an authority reply. The native seam holds transport delivery deterministically.
     #[test]
     fn cancelled_transaction_read_releases_commit_fence_and_rollback_is_bounded() {
         for rollback in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let relay = NativeRelay::spawn(config(
-                directory.path().join("tx-cancel.sqlite"),
-                Some("tx-cancel"),
-            ))
-            .unwrap();
-            let client = relay
-                .attach_client(
-                    fresh_client_identity(AuthorSubject::for_test_bytes([0x4a; 16])).unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap();
-            let id = client.id;
+            let (_directory, relay, client, _authority) =
+                attached_transaction_authority("tx-cancel", 0x4a);
             let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-            let holder = relay
-                .run(move |worker| {
-                    let db = Rc::clone(&worker.foreground_client(id)?.db);
-                    worker.start_foreground_operation(
-                        id,
-                        None,
-                        Box::pin(async move {
-                            db.hold_node_owner_for_test().await;
-                            unreachable!()
-                        }),
-                    )
-                })
-                .unwrap();
-            let ForegroundOperationPoll::Pending { operation: holder } = holder else {
-                unreachable!()
-            };
             let tx = client
-                .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
+                .begin_foreground_transaction(ForegroundTransactionKind::Serializable)
                 .unwrap();
             let row = client
                 .insert_foreground_transaction(
@@ -11645,8 +11081,9 @@ mod tests {
                 .start_foreground_read(query.clone(), "{}".into(), Some(tx))
                 .unwrap();
             let ForegroundOperationPoll::Pending { operation: read } = read else {
-                unreachable!()
+                panic!("serializable read must await the withheld authority reply");
             };
+            let started = std::time::Instant::now();
             assert!(client.cancel_foreground_operation(read).unwrap());
             let committed = if rollback {
                 assert!(client.rollback_foreground_transaction(tx).unwrap());
@@ -11654,40 +11091,26 @@ mod tests {
             } else {
                 Some(client.commit_foreground_transaction(tx).unwrap())
             };
-            assert!(client.cancel_foreground_operation(holder).unwrap());
-            for _ in 0..20 {
-                relay.pump().unwrap();
-            }
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "cancel followed by commit or rollback must not await the authority"
+            );
             if let Some(tx_id) = committed {
-                let mut wait = client
+                let wait = client
                     .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
                     .unwrap();
-                for _ in 0..100 {
-                    let ForegroundOperationPoll::Pending { operation } = wait else {
-                        break;
-                    };
-                    relay.pump().unwrap();
-                    wait = client.poll_foreground_operation(operation).unwrap();
-                }
                 assert!(matches!(
-                    wait,
-                    ForegroundOperationPoll::Ready(ForegroundOperationResult::TransactionSettled(
-                        _
-                    ))
+                    complete_transaction_operation(&relay, &client, wait, None),
+                    ForegroundOperationResult::TransactionSettled(settled) if settled == tx_id
                 ));
             }
-            let mut read = client
+            let read = client
                 .start_foreground_read(query, "{}".into(), None)
                 .unwrap();
-            for _ in 0..100 {
-                let ForegroundOperationPoll::Pending { operation } = read else {
-                    break;
-                };
-                relay.pump().unwrap();
-                read = client.poll_foreground_operation(operation).unwrap();
-            }
-            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
-                panic!("read did not settle")
+            let ForegroundOperationResult::Rows(rows) =
+                complete_transaction_operation(&relay, &client, read, None)
+            else {
+                panic!("local read did not return rows");
             };
             if rollback {
                 assert!(
@@ -11703,36 +11126,16 @@ mod tests {
         }
     }
 
-    // Internal owner contention has no public JS test control.
+    /// Alice closes with an unfinished read, or cancels it and commits first.
+    /// Her Db allocation must retire despite a retained receipt, stale handles
+    /// must fail, and only the Local-acknowledged row may reach her sibling.
+    /// The private weak reference proves allocation release beyond API rejection.
     #[test]
-    fn foreground_close_with_queued_transaction_is_bounded() {
+    fn foreground_close_releases_pending_transactions_and_retained_receipts() {
         for committed in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let relay = NativeRelay::spawn(config(
-                directory.path().join("tx-close.sqlite"),
-                Some("tx-close"),
-            ))
-            .unwrap();
-            let client = relay
-                .attach_client(
-                    fresh_client_identity(AuthorSubject::for_test_bytes([0x4b; 16])).unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap();
+            let (_directory, relay, client, _authority) =
+                attached_transaction_authority("tx-close", 0x4b);
             let id = client.id;
-            relay
-                .run(move |worker| {
-                    let db = Rc::clone(&worker.foreground_client(id)?.db);
-                    worker.start_foreground_operation(
-                        id,
-                        None,
-                        Box::pin(async move {
-                            db.hold_node_owner_for_test().await;
-                            unreachable!()
-                        }),
-                    )
-                })
-                .unwrap();
             thread_local! { static CLOSED_DB: RefCell<std::rc::Weak<Db>> = const { RefCell::new(std::rc::Weak::new()) }; }
             relay
                 .run(move |worker| {
@@ -11747,20 +11150,24 @@ mod tests {
             let tx = client
                 .begin_foreground_transaction(ForegroundTransactionKind::Serializable)
                 .unwrap();
-            client
+            let row = client
                 .insert_foreground_transaction(
                     tx,
                     "todos".into(),
-                    encoded_title_cells("abandoned"),
+                    encoded_title_cells("closed foreground"),
                     None,
                 )
                 .unwrap();
             let pending = client
-                .start_foreground_read(query, "{}".into(), Some(tx))
+                .start_foreground_read(query.clone(), "{}".into(), Some(tx))
                 .unwrap();
-            assert!(matches!(pending, ForegroundOperationPoll::Pending { .. }));
-            thread_local! { static CLOSED_WRITE: RefCell<Option<Rc<jazz::db::WriteHandle>>> = const { RefCell::new(None) }; }
-            if committed {
+            let ForegroundOperationPoll::Pending { operation: read } = pending else {
+                panic!("serializable read must await the withheld authority reply");
+            };
+            // SQLite receipts contain value data, not a retained Db/WriteHandle.
+            thread_local! { static CLOSED_WRITE: RefCell<Option<jazz::binding_host::Write>> = const { RefCell::new(None) }; }
+            let committed_id = if committed {
+                assert!(client.cancel_foreground_operation(read).unwrap());
                 let tx_id = client.commit_foreground_transaction(tx).unwrap();
                 relay
                     .run(move |worker| {
@@ -11772,14 +11179,30 @@ mod tests {
                                 .writes
                                 .borrow()
                                 .get(&tx_id)
-                                .cloned()
+                                .cloned();
+                            assert!(
+                                write.borrow().is_some(),
+                                "retain the actual binding receipt"
+                            );
                         });
                         Ok(())
                     })
                     .unwrap();
-            }
+                let wait = client
+                    .wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local)
+                    .unwrap();
+                assert!(matches!(
+                    complete_transaction_operation(&relay, &client, wait, None),
+                    ForegroundOperationResult::TransactionSettled(settled) if settled == tx_id
+                ));
+                Some(tx_id)
+            } else {
+                None
+            };
             let stale = client.clone();
+            let closing = std::time::Instant::now();
             client.close().unwrap();
+            assert!(closing.elapsed() < Duration::from_secs(1));
             let mut released = false;
             for _ in 0..100 {
                 released = relay
@@ -11794,40 +11217,48 @@ mod tests {
                 released,
                 "closed foreground must release its Db allocation without JS ticks"
             );
-            assert!(stale.commit_foreground_transaction(tx).is_err());
-            let sibling = relay
-                .attach_client(
-                    fresh_client_identity(AuthorSubject::for_test_bytes([0x4c; 16])).unwrap(),
-                    BTreeMap::new(),
-                )
-                .unwrap();
-            let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-            let mut read = sibling
-                .start_foreground_read(query, "{}".into(), None)
-                .unwrap();
-            for _ in 0..100 {
-                let ForegroundOperationPoll::Pending { operation } = read else {
-                    break;
-                };
-                relay.pump().unwrap();
-                read = sibling.poll_foreground_operation(operation).unwrap();
-            }
-            let ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(rows)) = read else {
-                panic!("sibling read stalled")
-            };
-            if committed {
+            assert!(matches!(
+                stale.commit_foreground_transaction(tx),
+                Err(RelayError::UnknownClient(closed)) if closed == id
+            ));
+            assert!(matches!(
+                stale.poll_foreground_operation(read),
+                Err(RelayError::UnknownClient(closed)) if closed == id
+            ));
+            if let Some(tx_id) = committed_id {
+                assert!(matches!(
+                    stale.wait_for_foreground_transaction(*tx_id.as_bytes(), CoreDurabilityTier::Local),
+                    Err(RelayError::UnknownClient(closed)) if closed == id
+                ));
                 relay
-                    .run(|_| {
+                    .run(move |worker| {
+                        assert!(matches!(
+                            worker.foreground_write_state(id, *tx_id.as_bytes()),
+                            Err(RelayError::UnknownClient(closed)) if closed == id
+                        ));
                         CLOSED_WRITE.with(|write| {
-                            let write = write.borrow_mut().take().unwrap();
-                            let error = block_on(write.write_state())
-                                .expect_err("published write's node has been retired");
-                            assert_eq!(error.code, jazz::db::ErrorCode::NotObserved);
-                            assert_eq!(error.message, "database handle was dropped");
+                            assert_eq!(write.borrow_mut().take().unwrap().tx_id, tx_id);
                         });
                         Ok(())
                     })
                     .unwrap();
+            }
+            let sibling = relay
+                .attach_client(
+                    fresh_client_identity(AuthorSubject::for_test_bytes([0x4b; 16])).unwrap(),
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            let read = sibling
+                .start_foreground_read(query, "{}".into(), None)
+                .unwrap();
+            let ForegroundOperationResult::Rows(rows) =
+                complete_transaction_operation(&relay, &sibling, read, None)
+            else {
+                panic!("sibling read stalled");
+            };
+            if committed {
+                assert_exact_todo_rows(&rows, row, "closed foreground");
             } else {
                 assert!(
                     postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(&rows)
@@ -11845,17 +11276,24 @@ mod tests {
     #[test]
     fn closing_owner_finishes_local_commit_despite_peer_io_failure() {
         let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
+        let mut relay_config = config(
             directory.path().join("close-local.sqlite"),
             Some("close-local"),
-        ))
-        .unwrap();
+        );
+        relay_config.identity.author = AuthorSubject::for_test_bytes([0x4e; 16]);
+        let relay = NativeRelayRegistry::default()
+            .open_admitted(relay_config)
+            .unwrap();
         let client = relay
             .attach_client(
                 fresh_client_identity(AuthorSubject::for_test_bytes([0x4e; 16])).unwrap(),
                 BTreeMap::new(),
             )
             .unwrap();
+        // Complete the real owner identity/schema handshake before staging.
+        for _ in 0..4 {
+            relay.pump().unwrap();
+        }
         let id = client.id;
         let observed = Arc::new(AtomicBool::new(false));
         let receipt = Arc::clone(&observed);
@@ -11864,15 +11302,6 @@ mod tests {
             .run(move |worker| {
                 let db = Rc::clone(&worker.foreground_client(id)?.db);
                 RETIRED_DB.with(|weak| *weak.borrow_mut() = Rc::downgrade(&db));
-                let held = Rc::clone(&db);
-                worker.start_foreground_operation(
-                    id,
-                    None,
-                    Box::pin(async move {
-                        held.hold_node_owner_for_test().await;
-                        unreachable!()
-                    }),
-                )?;
                 let tx = worker
                     .begin_foreground_transaction(id, ForegroundTransactionKind::Mergeable)?;
                 let row = worker.insert_foreground_transaction(
@@ -11885,8 +11314,11 @@ mod tests {
                 worker.commit_foreground_transaction(id, tx)?;
                 worker.retire_foreground(id)?;
                 let closing = worker.closing.back_mut().unwrap();
-                let failed_inbound = Arc::new(Mutex::new(BoundedMessageQueue::default()));
-                let poison = Arc::clone(&failed_inbound);
+                // Fail the actual shared outbound queue retained by SQLite's
+                // transport. Replacing a host-side queue pointer would leave
+                // the core's existing transport unaffected.
+                let wire = closing._client.wire.clone();
+                let poison = Arc::clone(&wire.outbound);
                 assert!(
                     std::panic::catch_unwind(move || {
                         let _held = poison.lock().unwrap();
@@ -11894,14 +11326,25 @@ mod tests {
                     })
                     .is_err()
                 );
-                closing.client.upstream_io.wire.inbound = failed_inbound;
-                assert!(closing.client.upstream_io.poll(Waker::noop()).is_err());
+                assert!(
+                    QueueTransport { wire }
+                        .send(SyncMessage::Unsubscribe { id: 0 })
+                        .is_err()
+                );
                 let close = closing.close.take().unwrap();
                 closing.close = Some(Box::pin(async move {
                     close.await?;
+                    let query = db.prepare_query(&Query::from("todos").filter(jazz::query::eq(
+                        jazz::query::col("id"),
+                        jazz::query::lit(Value::Uuid(row.0)),
+                    )))?;
+                    let mut opts = ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly);
+                    opts.read_view.include_deleted = true;
                     let current = db
-                        .local_current_row("todos", row)
+                        .all(&query, opts)
                         .await?
+                        .into_iter()
+                        .next()
                         .expect("accepted local commit must complete before owner release");
                     assert_eq!(current.row_uuid(), row);
                     assert!(!current.is_deleted());
@@ -11939,8 +11382,8 @@ mod tests {
         assert!(released, "peer I/O failure cannot pin the closing owner");
     }
 
-    // Internal receipt: public hosts cannot deterministically stall the local
-    // transaction FIFO or poison the independent persistent peer queue.
+    // Internal receipt: public hosts cannot deterministically delay a local
+    // close future or poison the independent persistent transport queue.
     #[test]
     fn shutdown_keeps_local_commit_despite_persistent_io_failure() {
         shutdown_failure_receipt(true, false);
@@ -11958,17 +11401,24 @@ mod tests {
 
     fn shutdown_failure_receipt(persistent_io_failure: bool, disconnected: bool) {
         let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
+        let mut relay_config = config(
             directory.path().join("shutdown-local.sqlite"),
             Some("shutdown-local"),
-        ))
-        .unwrap();
+        );
+        relay_config.identity.author = AuthorSubject::for_test_bytes([0x4e; 16]);
+        let relay = NativeRelayRegistry::default()
+            .open_admitted(relay_config)
+            .unwrap();
         let client = relay
             .attach_client(
                 fresh_client_identity(AuthorSubject::for_test_bytes([0x4e; 16])).unwrap(),
                 BTreeMap::new(),
             )
             .unwrap();
+        // Complete the real owner identity/schema handshake before staging.
+        for _ in 0..4 {
+            relay.pump().unwrap();
+        }
         let id = client.id;
         let observed = Arc::new(AtomicBool::new(false));
         let receipt = Arc::clone(&observed);
@@ -11976,11 +11426,23 @@ mod tests {
             .run(move |worker| {
                 let tx = worker
                     .begin_foreground_transaction(id, ForegroundTransactionKind::Mergeable)?;
-                let (db, state) = worker.foreground_transaction(id, tx)?;
+                let (db, _) = worker.foreground_transaction(id, tx)?;
                 let liveness = Arc::clone(&worker.liveness);
-                let _read = db.enqueue_transaction_read(state.open_tx_id, async move {
-                    // Deterministically keep accepted work pending through the
-                    // first shutdown turn, without timing or a JS-owned future.
+                let row = worker.insert_foreground_transaction(
+                    id,
+                    tx,
+                    "todos".into(),
+                    encoded_title_cells("accepted before shutdown"),
+                    None,
+                )?;
+                worker.commit_foreground_transaction(id, tx)?;
+                worker.retire_foreground(id)?;
+                let closing = worker.closing.back_mut().unwrap();
+                let close = closing.close.take().unwrap();
+                closing.close = Some(Box::pin(async move {
+                    // SQLite has already applied the local commit. Delay its
+                    // real close future through the first two shutdown turns
+                    // to exercise the native drain without a retired core FIFO.
                     let mut pending_turns = 2;
                     futures::future::poll_fn(move |context| {
                         if liveness.is_alive() {
@@ -11995,23 +11457,14 @@ mod tests {
                         }
                     })
                     .await;
-                    Ok(())
-                });
-                db.drive_queued_mutation_once();
-                let row = worker.insert_foreground_transaction(
-                    id,
-                    tx,
-                    "todos".into(),
-                    encoded_title_cells("accepted before shutdown"),
-                    None,
-                )?;
-                worker.commit_foreground_transaction(id, tx)?;
-                worker.retire_foreground(id)?;
-                let closing = worker.closing.back_mut().unwrap();
-                let close = closing.close.take().unwrap();
-                closing.close = Some(Box::pin(async move {
                     close.await?;
-                    let current = db.local_current_row("todos", row).await?.expect(
+                    let query = db.prepare_query(&Query::from("todos").filter(jazz::query::eq(
+                        jazz::query::col("id"),
+                        jazz::query::lit(Value::Uuid(row.0)),
+                    )))?;
+                    let mut opts = ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly);
+                    opts.read_view.include_deleted = true;
+                    let current = db.all(&query, opts).await?.into_iter().next().expect(
                         "accepted local commit must finish before shutdown releases its owner",
                     );
                     assert_eq!(current.row_uuid(), row);
@@ -12019,8 +11472,8 @@ mod tests {
                     Ok(())
                 }));
                 if persistent_io_failure {
-                    let failed_inbound = Arc::new(Mutex::new(BoundedMessageQueue::default()));
-                    let poison = Arc::clone(&failed_inbound);
+                    let wire = worker.upstream_wire.clone();
+                    let poison = Arc::clone(&wire.outbound);
                     assert!(
                         std::panic::catch_unwind(move || {
                             let _held = poison.lock().unwrap();
@@ -12028,10 +11481,14 @@ mod tests {
                         })
                         .is_err()
                     );
-                    worker.upstream_io.wire.inbound = failed_inbound;
+                    assert!(
+                        QueueTransport { wire }
+                            .send(SyncMessage::Unsubscribe { id: 0 })
+                            .is_err()
+                    );
                 } else {
                     let failed_id = worker.attach_client(
-                        fresh_client_identity(AuthorSubject::for_test_bytes([0x4f; 16]))?,
+                        fresh_client_identity(AuthorSubject::for_test_bytes([0x4e; 16]))?,
                         BTreeMap::new(),
                         None,
                         false,
@@ -12072,27 +11529,28 @@ mod tests {
         );
     }
 
+    /// Alice repeatedly rolls back a transaction after a synchronous schema error.
+    /// Both the real SQLite batch and its native handle must retire; a subsequent
+    /// foreground read must contain no staged rows. The owner seam observes the
+    /// actual batch lifetime because the public API cannot expose retained state.
     #[test]
-    fn rolled_back_staging_failures_retire_queued_error_bookkeeping() {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("tx-errors.sqlite"),
-            Some("tx-errors"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x4d; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+    fn rolled_back_staging_failures_retire_open_batches() {
+        let (_directory, relay, client, _wake) = attached_write_client("tx-errors", 0x4d);
+        settle_owner(&relay);
         let id = client.id;
         relay
             .run(move |worker| {
-                for _ in 0..32 {
+                for _ in 0..96 {
                     let tx = worker
                         .begin_foreground_transaction(id, ForegroundTransactionKind::Mergeable)?;
                     let (db, state) = worker.foreground_transaction(id, tx)?;
+                    worker.insert_foreground_transaction(
+                        id,
+                        tx,
+                        "todos".into(),
+                        encoded_title_cells("rolled back"),
+                        None,
+                    )?;
                     assert!(
                         worker
                             .insert_foreground_transaction(
@@ -12104,87 +11562,80 @@ mod tests {
                             )
                             .is_err()
                     );
-                    assert!(db.queued_transaction_error(state.open_tx_id).is_some());
+                    assert!(db.has_open_transaction(state.open_tx_id));
                     assert!(worker.rollback_foreground_transaction(id, tx)?);
-                    assert!(db.queued_transaction_error(state.open_tx_id).is_none());
+                    assert!(!db.has_open_transaction(state.open_tx_id));
+                    assert!(worker.foreground_transaction(id, tx).is_err());
                 }
-                assert!(worker.foreground_client(id)?.transactions.is_empty());
+                assert!(
+                    worker
+                        .foreground_client(id)?
+                        .transactions
+                        .borrow()
+                        .is_empty()
+                );
                 Ok(())
             })
             .unwrap();
+        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+        let read = client
+            .start_foreground_read(query, "{}".into(), None)
+            .unwrap();
+        assert!(owner_driven_rows(&client, read).is_empty());
         client.close().unwrap();
     }
 
+    /// Alice starts two Remote reads before Bob's authority can answer. Their
+    /// shared upstream query survives cancelling either observer and is released
+    /// when the last observer drops, without another owner drive. This internal
+    /// turn boundary observes real reference counts before background progress.
     #[test]
-    fn cancelled_read_releases_coverage_after_contended_owner_resumes() {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("coverage-cleanup.sqlite"),
-            Some("cleanup"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x45; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
-        let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-        let read = match client
-            .start_foreground_read(query, "{\"tier\":\"remote\"}".into(), None)
-            .unwrap()
-        {
-            ForegroundOperationPoll::Pending { operation } => operation,
-            _ => panic!("remote coverage without an authority must remain pending"),
-        };
+    fn cancelled_read_releases_shared_coverage_without_an_owner_wait() {
+        let (_directory, relay, client, _wake) = attached_write_client("coverage-cleanup", 0x45);
+        settle_owner(&relay);
         let id = client.id;
-        let holder = relay
+        relay
             .run(move |worker| {
+                let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
+                let mut reads = Vec::new();
+                for _ in 0..2 {
+                    let read = worker.start_foreground_read(
+                        id,
+                        query.clone(),
+                        "{\"tier\":\"remote\"}".into(),
+                        None,
+                    )?;
+                    let ForegroundOperationPoll::Pending { operation } = read else {
+                        panic!("Remote read must wait for the unavailable authority");
+                    };
+                    reads.push(operation);
+                }
                 let db = Rc::clone(&worker.foreground_client(id)?.db);
-                let future: ForegroundOperationFuture = Box::pin(async move {
-                    db.hold_node_owner_for_test().await;
-                    unreachable!("owner holder ends only on cancellation")
-                });
-                worker.start_foreground_operation(id, None, future)
+                assert_eq!(db.query_coverage_attachment_counts_for_test(), (1, 2));
+                assert!(worker.cancel_foreground_operation(id, reads[0])?);
+                assert!(worker.poll_foreground_operation(id, reads[0]).is_err());
+                assert_eq!(db.query_coverage_attachment_counts_for_test(), (1, 1));
+                assert!(matches!(
+                    worker.poll_foreground_operation(id, reads[1])?,
+                    ForegroundOperationPoll::Pending { .. }
+                ));
+                assert!(worker.cancel_foreground_operation(id, reads[1])?);
+                assert_eq!(db.query_coverage_attachment_counts_for_test(), (0, 0));
+                Ok(())
             })
             .unwrap();
-        let ForegroundOperationPoll::Pending { operation: holder } = holder else {
-            panic!("owner holder must remain pending");
-        };
-        assert!(client.cancel_foreground_operation(read).unwrap());
         relay
             .pump()
-            .expect("cleanup cannot wait synchronously for the held owner");
-        // A strict one-shot reads through its own stream (INV-SYNC-48) and,
-        // once that stream is open, also attaches query coverage at its tier
-        // so it waits for an authority receipt newer than its open. Both count
-        // against the same upstream coverage key, and both must survive the
-        // cancellation until the owner resumes to release them.
+            .expect("cancelled reads must not block the owner");
         assert_eq!(
-            relay
-                .run(move |worker| Ok(worker
-                    .foreground_client(id)?
-                    .db
-                    .query_coverage_attachment_counts_for_test()))
-                .unwrap(),
-            (1, 1)
-        );
-        assert!(client.cancel_foreground_operation(holder).unwrap());
-        relay.pump().unwrap();
-        assert_eq!(
-            relay
-                .run(move |worker| Ok(worker
-                    .foreground_client(id)?
-                    .db
-                    .query_coverage_attachment_counts_for_test()))
+            client
+                .with_db(|db| Ok(db.query_coverage_attachment_counts_for_test()))
                 .unwrap(),
             (0, 0)
         );
+        client.close().unwrap();
     }
 
-    // A retained semantic owner and native capability teardown are host
-    // boundaries. Keep the contention deterministic with the existing owner
-    // suspension hook, then assert real C-ABI opens, writes, close and revoke.
     /// Request one owner drive turn and wait until it has run: the owner
     /// runs a due turn after the requesting job, before the next command.
     fn drive_owner_turn(relay: &NativeRelay) {
@@ -12213,22 +11664,12 @@ mod tests {
         panic!("owner drive turns did not reach quiescence");
     }
 
-    fn hold_persistent_owner(relay: &NativeRelay) {
-        relay
-            .run(|worker| {
-                let db = Rc::clone(&worker.persistent);
-                worker.persistent_tick = Some(Box::pin(async move {
-                    db.hold_node_owner_for_test().await;
-                    unreachable!("test owner is released by dropping its future")
-                }));
-                Ok(())
-            })
-            .unwrap();
-        relay.pump().unwrap();
-    }
-
+    /// Alice's foreground is admitted synchronously. Closing it must abandon
+    /// staged writes and a real pending Remote read, release its served peer,
+    /// and leave a sibling able to read a later committed write. The private
+    /// peer counts observe teardown that opaque C ABI handles cannot expose.
     #[test]
-    fn foreground_admission_waits_for_owner_and_close_discards_unadmitted_traffic() {
+    fn synchronous_foreground_admission_and_close_retire_unpublished_work() {
         let directory = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let capability = fixture.admit(
@@ -12238,82 +11679,116 @@ mod tests {
             0x63,
         );
         let keeper = fixture.open_foreground(&capability);
-        let relay = unsafe {
-            (*fixture.host)
-                .inner
-                .lock()
-                .unwrap()
-                .foreground_client(keeper)
-                .unwrap()
-                .relay
-                .clone()
-        };
-        hold_persistent_owner(&relay);
         let closed = fixture.open_foreground(&capability);
-        let closed_client = unsafe {
-            (*fixture.host)
-                .inner
-                .lock()
-                .unwrap()
-                .foreground_client(closed)
-                .unwrap()
-                .clone()
-        };
-        fixture.insert_todo(closed, [0x71; 16], "cancelled before peer admission");
-        fixture.tick(closed);
+        let closed_client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(closed)
+            .unwrap()
+            .clone();
+        let relay = closed_client.relay.clone();
         let id = closed_client.id;
         relay
             .run(move |worker| {
                 let client = &worker.clients[&id];
-                assert!(client.admission.is_some());
+                assert!(client.admission.is_none());
                 assert!(
-                    client._served.is_none(),
-                    "a waiting admission cannot install a peer"
+                    client._served.is_some(),
+                    "open returns after installing the served peer"
                 );
+                assert_eq!(worker.persistent.open_subscribers(), 2);
                 Ok(())
             })
             .unwrap();
-        assert!(
-            closed_client.wire.outbound.lock().unwrap().len() > 0,
-            "ordinary foreground traffic queues before admission"
-        );
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
+            closed,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            },
+        ) else {
+            panic!("begin unpublished transaction");
+        };
+        assert!(matches!(
+            fixture.execute(
+                closed,
+                ForegroundDbCommandRequest::Insert {
+                    transaction,
+                    table: "todos".into(),
+                    cells: encoded_title_cells("abandoned on close"),
+                    row_id: Some([0x71; 16]),
+                }
+            ),
+            ForegroundDbCommandResponse::Inserted { .. }
+        ));
+        let ForegroundDbCommandResponse::Pending { operation } = fixture.execute(
+            closed,
+            ForegroundDbCommandRequest::All {
+                query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                options_json: r#"{"tier":"Remote"}"#.into(),
+                transaction: None,
+            },
+        ) else {
+            panic!("Remote read without an authority remains pending");
+        };
         assert_eq!(
             fixture.execute(closed, ForegroundDbCommandRequest::Close),
             ForegroundDbCommandResponse::Closed { closed: true }
         );
-        assert_eq!(closed_client.wire.outbound.lock().unwrap().len(), 0);
-        assert_eq!(closed_client.wire.inbound.lock().unwrap().len(), 0);
-
-        let admitted = fixture.open_foreground(&capability);
-        let row = [0x72; 16];
-        fixture.insert_todo(admitted, row, "admitted after owner resumed");
-        fixture.tick(admitted);
+        assert_eq!(
+            fixture.tick_status(closed),
+            JazzNativeRelayStatus::InvalidHandle
+        );
+        assert!(closed_client.poll_foreground_operation(operation).is_err());
+        assert!(
+            closed_client
+                .commit_foreground_transaction(transaction)
+                .is_err()
+        );
+        for _ in 0..100 {
+            relay.pump().unwrap();
+            if relay.run(|worker| Ok(worker.closing.is_empty())).unwrap() {
+                break;
+            }
+        }
         relay
-            .run(|worker| {
-                worker.persistent_tick = None;
+            .run(move |worker| {
+                assert!(!worker.clients.contains_key(&id));
+                assert!(worker.closing.is_empty());
+                assert_eq!(worker.persistent.open_subscribers(), 1);
                 Ok(())
             })
             .unwrap();
-        for _ in 0..16 {
-            fixture.tick(admitted);
-        }
+        assert!(
+            postcard::from_bytes::<Vec<DecodedForegroundRowBatch>>(
+                &fixture.rows_after_sync(keeper)
+            )
+            .unwrap()
+            .iter()
+            .all(|batch| batch.rows.is_empty())
+        );
+        let admitted = fixture.open_foreground(&capability);
+        let row = [0x72; 16];
+        fixture.insert_todo(admitted, row, "admitted sibling remains usable");
         assert_exact_todo_rows(
             &fixture.rows_after_sync(keeper),
             RowUuid::from_bytes(row),
-            "admitted after owner resumed",
+            "admitted sibling remains usable",
         );
-        assert_eq!(
-            fixture.execute(admitted, ForegroundDbCommandRequest::Close),
-            ForegroundDbCommandResponse::Closed { closed: true }
-        );
-        assert_eq!(
-            fixture.execute(keeper, ForegroundDbCommandRequest::Close),
-            ForegroundDbCommandResponse::Closed { closed: true }
-        );
+        for foreground in [admitted, keeper] {
+            assert_eq!(
+                fixture.execute(foreground, ForegroundDbCommandRequest::Close),
+                ForegroundDbCommandResponse::Closed { closed: true }
+            );
+        }
     }
 
+    /// Alice revokes a scope while its admitted foreground awaits an authority
+    /// read and owns an unpublished write. All aliases and work in that scope
+    /// must retire; Bob's separate admitted scope must remain writable/readable.
+    /// The private relay handle verifies that the revoked storage owner stops.
     #[test]
-    fn revocation_drops_waiting_subscriber_admission_and_preserves_another_scope() {
+    fn revocation_retires_admitted_pending_work_and_preserves_another_scope() {
         let directory = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let schema = permissive_schema();
@@ -12331,20 +11806,45 @@ mod tests {
         );
         let a = fixture.open_foreground(&a_capability);
         let b = fixture.open_foreground(&b_capability);
-        let relay = unsafe {
-            (*fixture.host)
-                .inner
-                .lock()
-                .unwrap()
-                .foreground_client(a)
-                .unwrap()
-                .relay
-                .clone()
-        };
-        hold_persistent_owner(&relay);
         let waiting = fixture.open_foreground(&a_capability);
-        fixture.insert_todo(waiting, [0x73; 16], "revoked before admission");
-        fixture.tick(waiting);
+        let client = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(waiting)
+            .unwrap()
+            .clone();
+        let relay = client.relay.clone();
+        let ForegroundDbCommandResponse::TransactionOpened { transaction } = fixture.execute(
+            waiting,
+            ForegroundDbCommandRequest::BeginTransaction {
+                kind: ForegroundTransactionKind::Mergeable,
+            },
+        ) else {
+            panic!("begin unpublished transaction");
+        };
+        assert!(matches!(
+            fixture.execute(
+                waiting,
+                ForegroundDbCommandRequest::Insert {
+                    transaction,
+                    table: "todos".into(),
+                    cells: encoded_title_cells("abandoned on revocation"),
+                    row_id: Some([0x73; 16]),
+                }
+            ),
+            ForegroundDbCommandResponse::Inserted { .. }
+        ));
+        let ForegroundDbCommandResponse::Pending { operation } = fixture.execute(
+            waiting,
+            ForegroundDbCommandRequest::All {
+                query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                options_json: r#"{"tier":"Remote"}"#.into(),
+                transaction: None,
+            },
+        ) else {
+            panic!("Remote read without an authority remains pending");
+        };
         assert_eq!(
             unsafe {
                 jazz_native_relay_host_revoke_scope_capability(
@@ -12355,11 +11855,18 @@ mod tests {
             },
             JazzNativeRelayStatus::Ok
         );
+        assert_eq!(fixture.tick_status(a), JazzNativeRelayStatus::InvalidHandle);
         assert_eq!(
             fixture.tick_status(waiting),
             JazzNativeRelayStatus::InvalidHandle
         );
+        assert_eq!(
+            fixture.try_open_foreground(&a_capability),
+            (JazzNativeRelayStatus::InvalidHandle, 0)
+        );
         assert!(matches!(relay.pump(), Err(RelayError::Closed)));
+        assert!(client.poll_foreground_operation(operation).is_err());
+        assert!(client.commit_foreground_transaction(transaction).is_err());
         let row = [0x74; 16];
         fixture.insert_todo(b, row, "independent scope survives");
         assert_exact_todo_rows(
@@ -12369,11 +11876,12 @@ mod tests {
         );
     }
 
+    /// Alice's new foreground fails synchronously at the real catalogue decoder.
+    /// Failed opens expose no handle and retain no aliases; her existing sibling
+    /// continues to serve writes and a later open succeeds once the bad capture
+    /// is removed. Only the fixture mutates the private cache to cause the error.
     #[test]
-    fn delayed_admission_failure_is_owned_by_the_opening_foreground() {
-        // A failing admission future is injected here because this receipt
-        // owns host error delivery, not the storage/auth implementation that
-        // produces the ordinary core Error.
+    fn synchronous_attachment_failure_is_confined_to_the_opening_foreground() {
         let directory = tempfile::tempdir().unwrap();
         let fixture = NativeHostAbiFixture::new();
         let capability = fixture.admit(
@@ -12383,62 +11891,79 @@ mod tests {
             0x66,
         );
         let keeper = fixture.open_foreground(&capability);
-        let relay = unsafe {
-            (*fixture.host)
-                .inner
-                .lock()
-                .unwrap()
-                .foreground_client(keeper)
-                .unwrap()
-                .relay
-                .clone()
+        let relay = unsafe { &*fixture.host }
+            .inner
+            .lock()
+            .unwrap()
+            .foreground_client(keeper)
+            .unwrap()
+            .relay
+            .clone();
+        let before = {
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            (
+                host.foregrounds.len(),
+                host.clients.len(),
+                host.relays.len(),
+            )
         };
-        hold_persistent_owner(&relay);
-        let failed = fixture.open_foreground(&capability);
-        let client = unsafe {
-            (*fixture.host)
-                .inner
-                .lock()
-                .unwrap()
-                .foreground_client(failed)
-                .unwrap()
-                .clone()
-        };
-        let id = client.id;
+        let capture = relay
+            .run(|worker| {
+                Ok(worker
+                    .catalogue_cache
+                    .as_ref()
+                    .unwrap()
+                    .borrow_mut()
+                    .capture
+                    .replace(b"invalid catalogue capture for attachment error".to_vec()))
+            })
+            .unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                fixture.try_open_foreground(&capability),
+                (JazzNativeRelayStatus::LifecycleFailure, 0)
+            );
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            assert_eq!(
+                (
+                    host.foregrounds.len(),
+                    host.clients.len(),
+                    host.relays.len()
+                ),
+                before
+            );
+        }
+        fixture.tick(keeper);
+        let row = [0x75; 16];
+        fixture.insert_todo(keeper, row, "keeper survives failed opens");
+        assert_exact_todo_rows(
+            &fixture.rows_after_sync(keeper),
+            RowUuid::from_bytes(row),
+            "keeper survives failed opens",
+        );
         relay
             .run(move |worker| {
-                worker.clients.get_mut(&id).unwrap().admission = Some(Box::pin(async {
-                    Err(jazz::db::Error::new(
-                        jazz::db::ErrorCode::Protocol,
-                        "admission was rejected",
-                    ))
-                }));
+                worker
+                    .catalogue_cache
+                    .as_ref()
+                    .unwrap()
+                    .borrow_mut()
+                    .capture = capture;
                 Ok(())
             })
             .unwrap();
-        assert_eq!(
-            fixture.tick_status(failed),
-            JazzNativeRelayStatus::LifecycleFailure
+        let recovered = fixture.open_foreground(&capability);
+        assert_exact_todo_rows(
+            &fixture.rows_after_sync(recovered),
+            RowUuid::from_bytes(row),
+            "keeper survives failed opens",
         );
-        assert!(
-            matches!(client.start_foreground_read(postcard::to_allocvec(&Query::from("todos")).unwrap(), "{}".into(), None), Err(RelayError::Db(error)) if error.message == "admission was rejected")
-        );
-        assert_eq!(
-            fixture.tick_status(failed),
-            JazzNativeRelayStatus::LifecycleFailure
-        );
-        fixture.tick(keeper);
-        assert_eq!(
-            fixture.execute(failed, ForegroundDbCommandRequest::Close),
-            ForegroundDbCommandResponse::Closed { closed: true }
-        );
-        relay
-            .run(|worker| {
-                worker.persistent_tick = None;
-                Ok(())
-            })
-            .unwrap();
-        fixture.tick(keeper);
+        for foreground in [recovered, keeper] {
+            assert_eq!(
+                fixture.execute(foreground, ForegroundDbCommandRequest::Close),
+                ForegroundDbCommandResponse::Closed { closed: true }
+            );
+        }
     }
 
     #[test]
@@ -12678,7 +12203,9 @@ mod tests {
         relay
             .run(move |worker| {
                 old_scheduler.schedule_tick(TickUrgency::Immediate);
-                worker.clients[&id].db.schedule_tick(TickUrgency::Deferred);
+                worker.clients[&id]
+                    .db
+                    .schedule_tick_for_test(TickUrgency::Deferred);
                 Ok(())
             })
             .unwrap();
@@ -12732,7 +12259,10 @@ mod tests {
                     .build(),
             )
             .unwrap();
-            let relay = NativeRelay::spawn(relay_config).unwrap();
+            relay_config.identity.author = AuthorSubject::for_test_bytes([0x92; 16]);
+            let relay = NativeRelayRegistry::default()
+                .open_admitted(relay_config)
+                .unwrap();
             let client = relay
                 .attach_client(
                     DbIdentity {
@@ -12922,7 +12452,7 @@ mod tests {
                     timer.schedule_tick_after(20);
                     timer.schedule_tick_after(3);
                     for urgency in urgencies {
-                        db.schedule_tick(urgency);
+                        db.schedule_tick_for_test(urgency);
                     }
                     assert!(
                         done.calls.lock().unwrap().is_empty(),
@@ -12950,7 +12480,7 @@ mod tests {
         client
             .with_db(move |db| {
                 stacker::grow(8 * 1024 * 1024, || {
-                    db.schedule_tick(TickUrgency::Immediate);
+                    db.schedule_tick_for_test(TickUrgency::Immediate);
                     cancel.inert();
                 });
                 Ok(())
@@ -12972,7 +12502,9 @@ mod tests {
         replacement.calls.lock().unwrap().clear();
         client
             .with_db(|db| {
-                stacker::grow(8 * 1024 * 1024, || db.schedule_tick(TickUrgency::Deferred));
+                stacker::grow(8 * 1024 * 1024, || {
+                    db.schedule_tick_for_test(TickUrgency::Deferred)
+                });
                 Ok(())
             })
             .unwrap();
@@ -13003,7 +12535,7 @@ mod tests {
                 stale.schedule_tick(TickUrgency::Immediate);
                 worker.clients[&client_id]
                     .db
-                    .schedule_tick(TickUrgency::Deferred);
+                    .schedule_tick_for_test(TickUrgency::Deferred);
                 Ok(())
             })
             .unwrap();
@@ -13123,36 +12655,15 @@ mod tests {
         );
     }
 
-    // Deterministic owner contention is a native scheduling boundary that the
-    // public TS API cannot hold on demand. The read and subscription still use
-    // the real canonical query and native foreground handlers.
+    /// Alice prepares a read and two subscriptions in one native owner turn.
+    /// SQLite opens the subscriptions synchronously, but delivery waits for the
+    /// storage owner's real reply. Cancelling one opener cannot stall the other.
+    /// The private turn boundary prevents a background reply hiding this wait.
     #[test]
-    fn preparation_and_subscription_wait_for_contended_foreground_owner() {
-        let directory = tempfile::tempdir().unwrap();
-        let relay = NativeRelay::spawn(config(
-            directory.path().join("prepare-held.sqlite"),
-            Some("prepare-held"),
-        ))
-        .unwrap();
-        let client = relay
-            .attach_client(
-                fresh_client_identity(AuthorSubject::for_test_bytes([0x44; 16])).unwrap(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+    fn preparation_and_subscription_wait_for_storage_owner_delivery() {
+        let (_directory, relay, client, _wake) = attached_write_client("prepare-reply", 0x44);
+        settle_owner(&relay);
         let id = client.id;
-        relay
-            .run(move |worker| {
-                let client = worker.foreground_client_mut(id)?;
-                let db = Rc::clone(&client.db);
-                client.tick = Some(Box::pin(async move {
-                    db.hold_node_owner_for_test().await;
-                    unreachable!()
-                }));
-                Ok(())
-            })
-            .unwrap();
-        relay.pump().unwrap();
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
         let operation = relay.run(move |worker| {
             let read = worker.start_foreground_read(
@@ -13162,7 +12673,7 @@ mod tests {
                 None,
             )?;
             let ForegroundOperationPoll::Pending { operation } = read else {
-                panic!("read must await held owner");
+                panic!("read must await the storage owner response");
             };
             let cancelled =
                 worker.subscribe_foreground_query_with_options(
@@ -13172,6 +12683,7 @@ mod tests {
                 )?;
             assert!(worker.close_foreground_subscription(id, cancelled)?);
             assert!(!worker.foreground_client(id)?.pending_subscriptions.contains_key(&cancelled));
+            assert!(!worker.foreground_client(id)?.subscriptions.contains_key(&cancelled));
             let live =
                 worker.subscribe_foreground_query_with_options(
                     id,
@@ -13180,7 +12692,8 @@ mod tests {
                 )?;
             assert!(matches!(worker.drain_foreground_subscription(id, live)?,
                 ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(events)) if events.is_empty()));
-            worker.foreground_client_mut(id)?.tick = None;
+            assert!(worker.foreground_client(id)?.subscriptions.contains_key(&live));
+            assert!(!worker.foreground_client(id)?.pending_subscriptions.contains_key(&live));
             Ok((operation, live))
         }).unwrap();
         let (operation, subscription) = operation;
@@ -13198,11 +12711,11 @@ mod tests {
                             ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(_))
                         )
                     };
-                    let _ = worker.drain_foreground_subscription(id, subscription)?;
-                    let subscribed = worker
-                        .foreground_client(id)?
-                        .subscriptions
-                        .contains_key(&subscription);
+                    let subscribed = subscription_ready || matches!(
+                        worker.drain_foreground_subscription(id, subscription)?,
+                        ForegroundOperationPoll::Ready(ForegroundOperationResult::SubscriptionEvents(events))
+                            if !events.is_empty()
+                    );
                     Ok((read, subscribed))
                 })
                 .unwrap();
@@ -13212,8 +12725,11 @@ mod tests {
                 break;
             }
         }
-        assert!(read_ready, "read resumes after owner release");
-        assert!(subscription_ready, "subscription opens after owner release");
+        assert!(read_ready, "read completes after the owner replies");
+        assert!(
+            subscription_ready,
+            "the retained subscription delivers its initial owner response"
+        );
         client.close().unwrap();
     }
 
@@ -13253,18 +12769,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let registry = NativeRelayRegistry::default();
         let first = registry
-            .open(config(directory.path().join("alice.sqlite"), Some("alice")))
+            .open_admitted(config(directory.path().join("alice.sqlite"), Some("alice")))
             .unwrap();
         let same = registry
-            .open(config(directory.path().join("alice.sqlite"), Some("alice")))
+            .open_admitted(config(directory.path().join("alice.sqlite"), Some("alice")))
             .unwrap();
         let other = registry
-            .open(config(directory.path().join("bob.sqlite"), Some("bob")))
+            .open_admitted(config(directory.path().join("bob.sqlite"), Some("bob")))
             .unwrap();
         assert!(Arc::ptr_eq(&first.inner, &same.inner));
         assert!(!Arc::ptr_eq(&first.inner, &other.inner));
         assert!(matches!(
-            registry.open(config(directory.path().join("wrong.sqlite"), Some("alice"))),
+            registry.open_admitted(config(directory.path().join("wrong.sqlite"), Some("alice"))),
             Err(RelayError::ScopeConfigurationMismatch)
         ));
         let mut wrong_identity = config(directory.path().join("alice.sqlite"), Some("alice"));
@@ -13273,7 +12789,7 @@ mod tests {
             author: AuthorSubject::for_test_bytes([0xe2; 16]),
         };
         assert!(matches!(
-            registry.open(wrong_identity),
+            registry.open_admitted(wrong_identity),
             Err(RelayError::ScopeConfigurationMismatch)
         ));
         let mut wrong_schema = config(directory.path().join("alice.sqlite"), Some("alice"));
@@ -13284,7 +12800,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            registry.open(wrong_schema),
+            registry.open_admitted(wrong_schema),
             Err(RelayError::ScopeConfigurationMismatch)
         ));
 
@@ -13292,7 +12808,7 @@ mod tests {
             .attach_client(
                 DbIdentity {
                     node: NodeUuid::from_bytes([0xb1; 16]),
-                    author: AuthorSubject::for_test_bytes([0xb2; 16]),
+                    author: first.inner.identity.author,
                 },
                 BTreeMap::new(),
             )
@@ -13301,7 +12817,7 @@ mod tests {
             .attach_client(
                 DbIdentity {
                     node: NodeUuid::from_bytes([0xc1; 16]),
-                    author: AuthorSubject::for_test_bytes([0xc2; 16]),
+                    author: same.inner.identity.author,
                 },
                 BTreeMap::new(),
             )
@@ -13340,10 +12856,7 @@ mod tests {
         // Saturate the stateful upstream transport before the relay tries to
         // forward either commit. Core must retain the unsent protocol state on
         // `TransportError::Backpressure`, then retry it after the host drains.
-        let filler = SyncMessage::SessionClaims {
-            identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::new(),
-        };
+        let filler = SyncMessage::Unsubscribe { id: 0 };
         while first.wire().queue_depths().unwrap().1 < NATIVE_RELAY_QUEUE_MAX_MESSAGES {
             first
                 .wire()
@@ -13368,11 +12881,21 @@ mod tests {
         let forwarded_rows = outbound
             .iter()
             .filter_map(|message| match message {
-                SyncMessage::CommitUnit { versions, .. } => Some(versions),
+                SyncMessage::Commit { ops, .. } => Some(ops),
                 _ => None,
             })
             .flatten()
-            .map(jazz::protocol::VersionRecord::row_uuid)
+            .map(|op| {
+                let row = serde_json::to_value(op)
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .next()
+                    .unwrap()["row"]
+                    .clone();
+                RowUuid::from_bytes(serde_json::from_value(row).unwrap())
+            })
             .collect::<Vec<_>>();
         assert_eq!(forwarded_rows.len(), 2);
         assert!(forwarded_rows.contains(&RowUuid::from_bytes([0xd1; 16])));
@@ -13380,7 +12903,7 @@ mod tests {
         assert_eq!(
             outbound
                 .iter()
-                .filter(|message| matches!(message, SyncMessage::CommitUnit { .. }))
+                .filter(|message| matches!(message, SyncMessage::Commit { .. }))
                 .count(),
             2,
             "each in-memory UI client must reach the shared persistent relay and its upstream"
@@ -13395,7 +12918,8 @@ mod tests {
         let registry = NativeRelayRegistry::default();
         let mut relay_config = config(directory.path().join("initial-owner.sqlite"), Some("alice"));
         relay_config.schema = permissive_schema();
-        let relay = registry.open(relay_config).unwrap();
+        relay_config.identity.author = AuthorSubject::for_test_bytes([0xe3; 16]);
+        let relay = registry.open_admitted(relay_config).unwrap();
         let expected = RowUuid::from_bytes([0xe1; 16]);
         if seed_owner {
             relay
@@ -13485,7 +13009,8 @@ mod tests {
         let registry = NativeRelayRegistry::default();
         let mut relay_config = config(directory.path().join("shared.sqlite"), Some("alice"));
         relay_config.schema = permissive_schema();
-        let relay = registry.open(relay_config).unwrap();
+        relay_config.identity.author = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let relay = registry.open_admitted(relay_config).unwrap();
         let writer = relay
             .attach_client(
                 DbIdentity {
@@ -13581,7 +13106,8 @@ mod tests {
             Some("alice"),
         );
         relay_config.schema = permissive_schema();
-        let relay = registry.open(relay_config).unwrap();
+        relay_config.identity.author = AuthorSubject::for_test_bytes([0xb4; 16]);
+        let relay = registry.open_admitted(relay_config).unwrap();
         let writer = relay
             .attach_client(
                 DbIdentity {
@@ -13666,13 +13192,13 @@ mod tests {
         );
     }
 
+    /// Alice's Remote subscription stays pending without an authority. A native
+    /// wake must drive the owner once without storage writes or network retries;
+    /// the same receiver settles exactly once when Bob's authority arrives.
+    /// The internal wake/transport seams make callback coalescing and actual
+    /// upstream registrations observable without replacing the SQLite runtime.
     #[test]
     fn native_relay_storage_wake_progresses_unavailable_authority_and_recovers_once() {
-        // This is the native owner/authority liveness receipt: a retained Global
-        // subscription remains unsettled while its authority is absent, an
-        // unrelated owner RPC still completes, and one host wake is enough to
-        // dirty the subscriber. Installing an in-process history-complete core
-        // then settles the same retained receiver without re-registering it.
         let directory = tempfile::tempdir().unwrap();
         let registry = NativeRelayRegistry::default();
         let mut relay_config = config(
@@ -13680,7 +13206,8 @@ mod tests {
             Some("alice"),
         );
         relay_config.schema = permissive_schema();
-        let relay = registry.open(relay_config).unwrap();
+        relay_config.identity.author = AuthorSubject::for_test_bytes([0xd6; 16]);
+        let relay = registry.open_admitted(relay_config).unwrap();
         let reader = relay
             .attach_client(
                 DbIdentity {
@@ -13725,28 +13252,26 @@ mod tests {
             initial_events.is_empty(),
             "an unavailable authority keeps the Global subscription opener pending"
         );
+        settle_owner(&relay);
         reader_wake.queued.lock().unwrap().clear();
         relay.wire().take_outbound().unwrap();
 
-        let baseline_storage = relay
-            .run(|worker| Ok(block_on(worker.persistent.encoded_storage_bytes_for_test()).unwrap()))
-            .unwrap();
-        let baseline_dirty_epoch = relay
-            .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
-            .unwrap();
-        let baseline_rehydrate_attempts = relay
+        let (baseline_storage, baseline_drive_turns, baseline_coverage) = relay
             .run(|worker| {
-                Ok(worker
-                    .persistent
-                    .maintained_subscription_rehydrate_attempts_for_test())
+                Ok((
+                    worker.persistent.sqlite_total_changes_for_test(),
+                    worker.drive_turns,
+                    worker
+                        .persistent
+                        .query_coverage_attachment_counts_for_test(),
+                ))
             })
             .unwrap();
         let baseline_network_depth = relay.wire().queue_depths().unwrap();
 
         let query_waker = relay
-            .run(|worker| Ok(worker.persistent.query_runtime_waker_for_test()))
-            .unwrap()
-            .expect("installed native foreground scheduler supplies the query waker");
+            .run(|worker| Ok(Waker::from(Arc::clone(&worker.wake))))
+            .unwrap();
         // Rust coalesces pending signals until the owner flushes them. Keep
         // both wakes in one owner operation so its flush cannot race between
         // them; cross-operation callback coalescing belongs to the platform.
@@ -13775,32 +13300,26 @@ mod tests {
         );
         // #3273: the owner consumes the wake in its own drive turn instead of
         // waiting for the platform callback to tick it.
-        settle_owner(&relay);
+        let after_wake_turns = settle_owner(&relay);
         reader_wake.deliver_queued();
         reader.pump_foreground().unwrap();
         assert_eq!(
-            relay
-                .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
-                .unwrap(),
-            baseline_dirty_epoch.wrapping_add(1),
-            "the native owner consumes the wake before ticking subscribers"
+            after_wake_turns,
+            baseline_drive_turns + 1,
+            "two coalesced wakes must request one actual owner drive turn"
         );
         assert_eq!(
             relay
-                .run(|worker| {
-                    Ok(worker
-                        .persistent
-                        .maintained_subscription_rehydrate_attempts_for_test())
-                })
+                .run(|worker| Ok(worker
+                    .persistent
+                    .query_coverage_attachment_counts_for_test()))
                 .unwrap(),
-            baseline_rehydrate_attempts,
-            "an unavailable authority does not spin rehydration"
+            baseline_coverage,
+            "an unavailable authority must not duplicate maintained queries"
         );
         assert_eq!(
             relay
-                .run(|worker| {
-                    Ok(block_on(worker.persistent.encoded_storage_bytes_for_test()).unwrap())
-                })
+                .run(|worker| { Ok(worker.persistent.sqlite_total_changes_for_test()) })
                 .unwrap(),
             baseline_storage,
             "a liveness wake does not write relay storage"
@@ -13810,16 +13329,7 @@ mod tests {
             baseline_network_depth,
             "an unavailable authority does not emit a network retry"
         );
-        assert_eq!(
-            relay
-                .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
-                .unwrap(),
-            baseline_dirty_epoch.wrapping_add(1),
-            "one owner wake dirties the subscriber exactly once"
-        );
         reader_wake.queued.lock().unwrap().clear();
-        let expected_dirty_epoch_after_wake = baseline_dirty_epoch.wrapping_add(1);
-        let idle_rehydrate_attempts = baseline_rehydrate_attempts;
         let mut idle_wakes = 0;
         for idle_turn in 0..16 {
             relay.pump().unwrap();
@@ -13840,31 +13350,23 @@ mod tests {
             0,
             "bounded idle pumping must reach native-wake quiescence"
         );
-        let idle_dirty_epoch = relay
-            .run(|worker| Ok(worker.persistent.subscriber_dirty_epoch_for_test()))
-            .unwrap();
-        let idle_extra_dirty_epochs =
-            idle_dirty_epoch.wrapping_sub(expected_dirty_epoch_after_wake);
+        let idle_drive_turns = settle_owner(&relay);
         assert!(
-            idle_extra_dirty_epochs <= 1,
-            "idle owner turns exceeded one residual native dirty transition: {idle_extra_dirty_epochs}"
+            idle_drive_turns <= after_wake_turns + 1,
+            "idle owner turns exceeded one residual self-scheduled drive"
         );
         assert_eq!(
             relay
-                .run(|worker| {
-                    Ok(worker
-                        .persistent
-                        .maintained_subscription_rehydrate_attempts_for_test())
-                })
+                .run(|worker| Ok(worker
+                    .persistent
+                    .query_coverage_attachment_counts_for_test()))
                 .unwrap(),
-            idle_rehydrate_attempts,
-            "idle owner turns must not retry maintained registration"
+            baseline_coverage,
+            "idle owner turns must not duplicate maintained queries"
         );
         assert_eq!(
             relay
-                .run(|worker| {
-                    Ok(block_on(worker.persistent.encoded_storage_bytes_for_test()).unwrap())
-                })
+                .run(|worker| { Ok(worker.persistent.sqlite_total_changes_for_test()) })
                 .unwrap(),
             baseline_storage,
             "idle authority waits must not grow relay storage"
@@ -13879,22 +13381,23 @@ mod tests {
         // surface while the authority remains unavailable.
         let read_started = std::time::Instant::now();
         let query = postcard::to_allocvec(&Query::from("todos")).unwrap();
-        reader
-            .with_db(move |db| {
-                block_on(db.all_serialized_query(
-                    &query,
-                    ReadOpts::default(),
-                    None,
-                    None,
-                    None,
-                    false,
-                    || false,
-                    |_| {},
-                ))
-                .map_err(RelayError::Db)?;
-                Ok(())
-            })
+        let mut read = reader
+            .start_foreground_read(query, "{}".into(), None)
             .unwrap();
+        loop {
+            match read {
+                ForegroundOperationPoll::Ready(ForegroundOperationResult::Rows(_)) => break,
+                ForegroundOperationPoll::Pending { operation } => {
+                    assert!(
+                        read_started.elapsed() < Duration::from_secs(1),
+                        "unrelated local read must not block the native owner"
+                    );
+                    relay.pump().unwrap();
+                    read = reader.poll_foreground_operation(operation).unwrap();
+                }
+                _ => panic!("unrelated local read failed"),
+            }
+        }
         assert!(
             read_started.elapsed() < Duration::from_secs(1),
             "unrelated local read exceeded its one-second owner deadline"
@@ -13903,52 +13406,51 @@ mod tests {
         let relay_identity = relay
             .run(|worker| Ok(worker.persistent.identity()))
             .unwrap();
-        let relay_endpoint = jazz::wire::WireAuthorityEndpoint::fresh(relay_identity.node);
-        let core_schema = permissive_schema();
-        let core_column_families = core_schema.column_families();
-        let core_refs = core_column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         let core = Rc::new(
-            block_on(Db::open_history_complete(DbConfig {
-                schema: core_schema,
-                storage: MemoryStorage::new(&core_refs).unwrap(),
-                identity: DbIdentity {
+            block_on(jazz::db::Db::open_history_complete(DbConfig::new(
+                permissive_schema(),
+                DbIdentity {
                     node: NodeUuid::from_bytes([0xe5; 16]),
                     author: AuthorSubject::SYSTEM,
                 },
-                id_source: None,
-            }))
+            )))
             .unwrap(),
         );
-        let core_endpoint = jazz::wire::WireAuthorityEndpoint::fresh(core.identity().node);
-        let relay_context = jazz::db::ConnectionSessionContext {
-            local: relay_endpoint,
-            remote: Some(core_endpoint),
-            link_identity: relay_identity.author,
-            negotiated_features: jazz::wire::current_wire_features(),
-        };
-        let core_context = jazz::db::ConnectionSessionContext {
-            local: core_endpoint,
-            remote: Some(relay_endpoint),
-            link_identity: relay_identity.author,
-            negotiated_features: jazz::wire::current_wire_features(),
-        };
         let (_generation, socket_wire) = relay
-            .run(move |worker| worker.begin_socket_upstream(Some(relay_context)))
+            .run(move |worker| worker.begin_socket_upstream())
             .unwrap();
         let reverse_wire = NativeRelayWire {
             inbound: Arc::clone(&socket_wire.outbound),
             outbound: Arc::clone(&socket_wire.inbound),
             liveness: socket_wire.liveness.clone(),
             connection_liveness: socket_wire.connection_liveness.clone(),
-            trusted_encoder: Arc::new(AtomicBool::new(false)),
         };
+        struct RecordingTransport {
+            inner: QueueTransport,
+            subscriptions: Rc<std::cell::Cell<usize>>,
+        }
+        impl Transport for RecordingTransport {
+            fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+                self.inner.send(message)
+            }
+            fn try_recv(&mut self) -> Option<SyncMessage> {
+                let message = self.inner.try_recv()?;
+                if matches!(
+                    &message,
+                    SyncMessage::Subscribe { query, .. }
+                        | SyncMessage::SubscribeReadablePolicyV1 { query, .. }
+                        if query.table == "todos"
+                ) {
+                    self.subscriptions.set(self.subscriptions.get() + 1);
+                }
+                Some(message)
+            }
+        }
+        let subscriptions = Rc::new(std::cell::Cell::new(0));
         let _core_subscriber = core.accept_subscriber(
-            Box::new(QueueTransport {
-                wire: reverse_wire,
-                session_context: Some(core_context),
+            Box::new(RecordingTransport {
+                inner: QueueTransport { wire: reverse_wire },
+                subscriptions: Rc::clone(&subscriptions),
             }),
             relay_identity.author,
         );
@@ -14008,15 +13510,9 @@ mod tests {
             "extra authority and owner turns must not duplicate recovery"
         );
         assert_eq!(
-            relay
-                .run(|worker| {
-                    Ok(worker
-                        .persistent
-                        .maintained_subscription_rehydrate_attempts_for_test())
-                })
-                .unwrap(),
-            baseline_rehydrate_attempts + 1,
-            "authority recovery rehydrates the retained receiver exactly once"
+            subscriptions.get(),
+            1,
+            "authority recovery must register the retained todos query exactly once"
         );
         reader.close().unwrap();
     }
@@ -14113,14 +13609,24 @@ mod tests {
     #[test]
     fn encoded_peer_messages_use_the_shared_postcard_contract() {
         let wire = NativeRelayWire::default();
-        let message = SyncMessage::SessionClaims {
-            identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
+        let message = SyncMessage::Fetch {
+            id: 1,
+            query: Query::from("todos"),
+            binding: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
+            at: None,
+            include_deleted: false,
         };
         let bytes = encode_sync_message(&message).unwrap();
 
         wire.push_inbound_encoded(&bytes).unwrap();
-        assert_eq!(wire.inbound.lock().unwrap().pop(), Some(message.clone()));
+        assert_eq!(
+            wire.inbound
+                .lock()
+                .unwrap()
+                .pop()
+                .map(|message| encode_sync_message(&message).unwrap()),
+            Some(bytes.clone())
+        );
 
         wire.outbound
             .lock()
@@ -14131,24 +13637,22 @@ mod tests {
         assert_eq!(encoded.len(), 1);
         assert_eq!(wire.outbound.lock().unwrap().len(), 0);
         assert_eq!(
-            decode_sync_message(&encoded[0]).unwrap(),
-            SyncMessage::SessionClaims {
-                identity: AuthorSubject::SYSTEM,
-                claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
-            }
+            encode_sync_message(&decode_sync_message(&encoded[0]).unwrap()).unwrap(),
+            encode_sync_message(&SyncMessage::Fetch {
+                id: 1,
+                query: Query::from("todos"),
+                binding: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
+                at: None,
+                include_deleted: false,
+            })
+            .unwrap()
         );
     }
 
     #[test]
     fn native_upstream_bridge_uses_the_negotiated_wire_adapter_in_both_directions() {
-        let outbound = SyncMessage::SessionClaims {
-            identity: AuthorSubject::for_test_bytes([0x61; 16]),
-            claims: BTreeMap::new(),
-        };
-        let inbound = SyncMessage::SessionClaims {
-            identity: AuthorSubject::for_test_bytes([0x62; 16]),
-            claims: BTreeMap::new(),
-        };
+        let outbound = SyncMessage::Unsubscribe { id: 0x61 };
+        let inbound = SyncMessage::Unsubscribe { id: 0x62 };
         let relay_wire = NativeRelayWire::default();
         relay_wire
             .outbound
@@ -14157,9 +13661,9 @@ mod tests {
             .push(outbound.clone(), "test relay outbound")
             .unwrap();
 
-        // A peer adapter produces a real framed network payload. The relay
-        // bridge receives that frame only through another adapter; it cannot
-        // accidentally accept an unframed postcard message as a second wire.
+        // The peer and relay use SQLite semantic frames after the connector's
+        // negotiated handshake. The bridge must cross the byte adapter in both
+        // directions without duplicating or dropping a message.
         struct DuplexWire {
             inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
             outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
@@ -14179,18 +13683,31 @@ mod tests {
             inbound: Arc::clone(&to_peer),
             outbound: Arc::clone(&to_relay),
         });
-        let mut upstream = WireTransportAdapter::current(DuplexWire {
+        let mut upstream = NativeRelayTransport::current(DuplexWire {
             inbound: to_relay,
             outbound: to_peer,
         });
         peer.send(inbound.clone()).unwrap();
         assert!(bridge_native_relay_wire_once(&relay_wire, &mut upstream).unwrap());
-        assert_eq!(relay_wire.inbound.lock().unwrap().pop(), Some(inbound));
-        assert_eq!(peer.try_recv_strict().unwrap(), Some(outbound));
         assert_eq!(
-            peer.try_recv_strict().unwrap(),
+            relay_wire
+                .inbound
+                .lock()
+                .unwrap()
+                .pop()
+                .map(|message| encode_sync_message(&message).unwrap()),
+            Some(encode_sync_message(&inbound).unwrap())
+        );
+        assert_eq!(
+            peer.try_recv()
+                .map(|message| encode_sync_message(&message).unwrap()),
+            Some(encode_sync_message(&outbound).unwrap())
+        );
+        assert_eq!(
+            peer.try_recv()
+                .map(|message| encode_sync_message(&message).unwrap()),
             None,
-            "credits are not semantic messages"
+            "the bridge emits no extra semantic messages"
         );
     }
 
@@ -14246,27 +13763,30 @@ mod tests {
             jazz::wire::WireError::new(code, retry, "server ended the link"),
         ))
         .unwrap();
-        let mut upstream = WireTransportAdapter::current(ScriptedWire {
+        let mut upstream = NativeRelayTransport::current(ScriptedWire {
             inbound: VecDeque::from([error]),
         });
         let relay_wire = NativeRelayWire::default();
 
-        // The error frame lands first and latches the adapter.
-        assert!(!bridge_native_relay_wire_once(&relay_wire, &mut upstream).unwrap());
-        assert!(upstream.remote_wire_error().is_some());
+        // SQLite classifies the terminal frame as soon as it is read, before
+        // a later queued write encounters the same latched adapter failure.
+        let first = bridge_native_relay_wire_once_classified(&relay_wire, &mut upstream);
+        let remote = upstream.remote_wire_error().expect("latched remote error");
+        if remote.asks_reconnect_later() {
+            assert!(matches!(
+                first,
+                Err(NativeRelayWireBridgeError::SocketPumpClosed)
+            ));
+        } else {
+            assert!(matches!(first, Err(NativeRelayWireBridgeError::Relay(_))));
+        }
 
         // A write queued before the close arrives reaches the latched adapter.
         relay_wire
             .outbound
             .lock()
             .unwrap()
-            .push(
-                SyncMessage::SessionClaims {
-                    identity: AuthorSubject::for_test_bytes([0x63; 16]),
-                    claims: BTreeMap::new(),
-                },
-                "test relay outbound",
-            )
+            .push(SyncMessage::Unsubscribe { id: 0x63 }, "test relay outbound")
             .unwrap();
         bridge_native_relay_wire_once_classified(&relay_wire, &mut upstream)
     }
@@ -14306,15 +13826,12 @@ mod tests {
                 self.inbound.lock().unwrap().pop_front()
             }
         }
-        let message = |index: usize| SyncMessage::SessionClaims {
-            identity: AuthorSubject::for_test_bytes([0x70; 16]),
-            claims: BTreeMap::from([("n".to_owned(), Value::String(index.to_string()))]),
-        };
+        let message = |index: usize| SyncMessage::Unsubscribe { id: index as u64 };
 
         let open = Arc::new(AtomicBool::new(false));
         let to_relay = Arc::new(Mutex::new(VecDeque::new()));
         let to_peer = Arc::new(Mutex::new(VecDeque::new()));
-        let mut upstream = WireTransportAdapter::current(GatedWire {
+        let mut upstream = NativeRelayTransport::current(GatedWire {
             open: Arc::clone(&open),
             inbound: Arc::clone(&to_relay),
             outbound: Arc::clone(&to_peer),
@@ -14325,9 +13842,9 @@ mod tests {
         });
         let relay_wire = NativeRelayWire::default();
 
-        // With the socket stalled, the adapter admits one ordered channel's
-        // bounded backlog and then reports Backpressure. Keep producing past
-        // that bound so a relay drain batch straddles the rejection.
+        // With the socket stalled, the relay retains its bounded backlog.
+        // Keep producing beyond that bound so draining and retry must preserve
+        // both the rejected batch and later queued messages.
         let total = 2 * NATIVE_RELAY_QUEUE_MAX_MESSAGES;
         let mut produced = 0;
         let mut received = Vec::new();
@@ -14350,19 +13867,23 @@ mod tests {
                 // The stalled socket drains; the bridge must resume in order.
                 open.store(true, Ordering::Release);
             }
-            if open.load(Ordering::Acquire) {
-                upstream.poll_flush().unwrap();
-            }
-            // Receiving also returns channel credit grants to `upstream`.
-            while let Some(message) = peer.try_recv_strict().unwrap() {
+            // SQLite's carrier sends each semantic frame directly; the next
+            // bridge turn retries the retained batch after the socket opens.
+            while let Some(message) = peer.try_recv() {
                 received.push(message);
             }
             assert!(rounds < 100_000, "bridge made no progress");
         }
         assert_eq!(relay_wire.queue_depths().unwrap().1, 0);
         assert_eq!(
-            received,
-            (0..total).map(message).collect::<Vec<_>>(),
+            received
+                .iter()
+                .map(|message| encode_sync_message(message).unwrap())
+                .collect::<Vec<_>>(),
+            (0..total)
+                .map(message)
+                .map(|message| encode_sync_message(&message).unwrap())
+                .collect::<Vec<_>>(),
             "every drained message is delivered exactly once, in order"
         );
     }
@@ -14526,13 +14047,7 @@ mod tests {
                     .outbound
                     .lock()
                     .unwrap()
-                    .push(
-                        SyncMessage::SessionClaims {
-                            identity: AuthorSubject::SYSTEM,
-                            claims: BTreeMap::new(),
-                        },
-                        "test closed bridge",
-                    )
+                    .push(SyncMessage::Unsubscribe { id: 0 }, "test closed bridge")
             })
             .unwrap();
         let terminal = connector
@@ -14611,10 +14126,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(
-                        SyncMessage::SessionClaims {
-                            identity: AuthorSubject::SYSTEM,
-                            claims: BTreeMap::new(),
-                        },
+                        SyncMessage::Unsubscribe { id: 0 },
                         "test closed bridge cancellation",
                     )
             })
@@ -14752,11 +14264,7 @@ mod tests {
                 BTreeMap::new(),
             )
             .unwrap();
-        let frame = encode_sync_message(&SyncMessage::SessionClaims {
-            identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::new(),
-        })
-        .unwrap();
+        let frame = encode_sync_message(&SyncMessage::Rows { images: Vec::new() }).unwrap();
 
         client.wire().push_inbound_encoded(&frame).unwrap();
         assert_eq!(client.wire().queue_depths().unwrap(), (1, 0));
@@ -14784,10 +14292,7 @@ mod tests {
 
     #[test]
     fn native_queue_applies_count_backpressure_without_losing_admitted_messages() {
-        let message = SyncMessage::SessionClaims {
-            identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::new(),
-        };
+        let message = SyncMessage::Unsubscribe { id: 0 };
         let wire = NativeRelayWire::default();
         for _ in 0..NATIVE_RELAY_QUEUE_MAX_MESSAGES {
             wire.push_inbound(message.clone()).unwrap();
@@ -14812,13 +14317,7 @@ mod tests {
             wire.outbound
                 .lock()
                 .unwrap()
-                .push(
-                    SyncMessage::SessionClaims {
-                        identity: AuthorSubject::SYSTEM,
-                        claims: BTreeMap::new(),
-                    },
-                    "test outbound",
-                )
+                .push(SyncMessage::Unsubscribe { id: 0 }, "test outbound")
                 .unwrap();
         }
         assert_eq!(
@@ -15316,36 +14815,7 @@ mod tests {
     fn foreground_open_over_an_old_storage_format_reports_unsupported_storage_codecs() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("alice.sqlite");
-        let families = schema().column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        // A root from the build before the compact durable index and the
-        // consolidated node-storage profile: it lacks
-        // `groove.durable-index.v2` and `jazz.node-storage.v2`, which this
-        // build requires.
-        let old_profile = jazz::groove::storage::StorageCodecProfile::groove_epoch_1()
-            .with_additional_codecs([
-                "jazz.branch-key.v1",
-                "jazz.catalogue.activation.v1",
-                "jazz.catalogue.bootstrap-ready.v1",
-                "jazz.catalogue.lens.v1",
-                "jazz.catalogue.lineage.v1",
-                "jazz.catalogue.physical-mapping.v1",
-                "jazz.catalogue.schema.v1",
-                "jazz.catalogue.write-pointer.v1",
-                "jazz.transaction-durability.v2",
-                "jazz.history-version-current.v4",
-                "jazz.transaction-record.v1",
-            ])
-            .expect("pre-index-v2 profile");
-        drop(
-            SqliteStorage::open_with_durability_and_codec_profile(
-                &path,
-                &refs,
-                jazz_storage_sqlite::Durability::FullSync,
-                &old_profile,
-            )
-            .expect("pre-index-v2 relay root"),
-        );
+        legacy_storage::plant(&path, "pre_index_v2");
         let before = std::fs::read(&path).unwrap();
 
         let mut host = NativeRelayHost::default();
@@ -15386,6 +14856,134 @@ mod tests {
 
         relay.scope.auth_scope = None;
         assert!(matches!(relay.validate(), Err(RelayError::InvalidScope(_))));
+    }
+
+    /// Alice closes a foreground after issuing writes, then its replacement
+    /// fails while installing a malformed host catalogue capture. Retrying must
+    /// retain the old node's confirmed sequence and never repeat a transaction ID.
+    /// The private cache seam injects a real attachment error; opens, writes and
+    /// closes still cross the C ABI, and no failure-only runtime hook is added.
+    #[test]
+    fn failed_foreground_attachment_preserves_the_reused_node_sequence() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("failed-handoff.sqlite"),
+            "failed-handoff",
+            &permissive_schema(),
+            0xd3,
+        );
+        let first = fixture.open_foreground(&capability);
+        let keeper = fixture.open_foreground(&capability);
+        let (first_node, client) = {
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            (
+                host.foregrounds[&first].lease.node,
+                host.foreground_client(first).unwrap().clone(),
+            )
+        };
+        let mut issued = Vec::new();
+        for index in 0..8_u8 {
+            issued.push(fixture.insert_todo(first, [index; 16], "before failed open"));
+        }
+        let last = *issued.last().unwrap();
+        let mut wait = fixture.execute(
+            first,
+            ForegroundDbCommandRequest::WaitForTransaction {
+                tx_id: last,
+                tier: "local".into(),
+                observe_only: false,
+            },
+        );
+        for _ in 0..100 {
+            let ForegroundDbCommandResponse::Pending { operation } = wait else {
+                break;
+            };
+            fixture.tick(first);
+            wait = fixture.execute(first, ForegroundDbCommandRequest::Poll { operation });
+        }
+        assert_eq!(
+            wait,
+            ForegroundDbCommandResponse::TransactionSettled { tx_id: last }
+        );
+        let floor = client.with_db(|db| Ok(db.seq_high_water())).unwrap();
+        assert!(floor > 1);
+        let relay = client.relay.clone();
+        assert_eq!(
+            fixture.execute(first, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        let before = {
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            (
+                host.foregrounds.len(),
+                host.clients.len(),
+                host.relays.len(),
+            )
+        };
+        let capture = relay
+            .run(|worker| {
+                Ok(worker
+                    .catalogue_cache
+                    .as_ref()
+                    .unwrap()
+                    .borrow_mut()
+                    .capture
+                    .replace(b"invalid catalogue capture for failed-open regression".to_vec()))
+            })
+            .unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                fixture.try_open_foreground(&capability),
+                (JazzNativeRelayStatus::LifecycleFailure, 0),
+                "the real catalogue decoder rejects attachment before exposing a handle"
+            );
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            assert_eq!(
+                (
+                    host.foregrounds.len(),
+                    host.clients.len(),
+                    host.relays.len()
+                ),
+                before,
+                "failed opens cannot leak a client or relay alias"
+            );
+        }
+        relay
+            .run(move |worker| {
+                worker
+                    .catalogue_cache
+                    .as_ref()
+                    .unwrap()
+                    .borrow_mut()
+                    .capture = capture;
+                Ok(())
+            })
+            .unwrap();
+        fixture.tick(keeper);
+        let next = fixture.open_foreground(&capability);
+        let next_tx = fixture.insert_todo(next, [0x90; 16], "after failed open");
+        assert!(
+            !issued.contains(&next_tx),
+            "a rejected attachment must not reset a reused node and repeat a transaction ID"
+        );
+        {
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            let lease = host.foregrounds[&next].lease;
+            assert_eq!(
+                lease.node, first_node,
+                "the cleanly returned node is reused"
+            );
+            assert_eq!(lease.confirmed_tx_time, TxTime(floor));
+        }
+        assert_eq!(
+            fixture.execute(next, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        assert_eq!(
+            fixture.execute(keeper, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
     }
 
     #[test]
@@ -15526,83 +15124,114 @@ mod tests {
         assert!(host.close_foreground(second).unwrap());
     }
 
-    // Internal queue hold models a cold transaction owner during synchronous
-    // native handoff. The public lease must retire rather than reuse an uncertain HLC.
+    /// Alice closes with a Remote read still awaiting an authority. SQLite's
+    /// synchronous sequence readout cancels that work and permits a clean lease
+    /// handoff strictly past every issued write. The host seam checks the exact
+    /// leased node and floor; public commands prove the replacement remains usable.
     #[test]
-    fn contended_hlc_readout_retires_identity_and_keeps_local_close_live() {
+    fn pending_remote_read_does_not_obscure_clean_sequence_handoff() {
         let directory = tempfile::tempdir().unwrap();
-        let mut host = NativeRelayHost::default();
-        let capability = host
-            .admit_scope(RelayScopeAdmissionRequest {
-                scope: RelayScopeRequest {
-                    app_namespace: "contended-handoff".into(),
-                    storage_namespace: "default".into(),
-                    auth_scope: Some("validated".into()),
-                },
-                sqlite_path: directory
-                    .path()
-                    .join("handoff.sqlite")
-                    .display()
-                    .to_string(),
-                schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
-                identity: DbIdentity {
-                    node: NodeUuid::from_bytes([0xc1; 16]),
-                    author: AuthorSubject::for_test_bytes([0xc2; 16]),
-                },
-                claims: BTreeMap::new(),
-            })
-            .unwrap();
-        let first = host.open_foreground(capability, 1).unwrap();
-        let keeper = host.open_foreground(capability, 2).unwrap();
-        let old_node = host.foregrounds[&first].lease.node;
-        let client = host.foreground_client(first).unwrap().clone();
-        let id = client.id;
-        let relay = client.relay.clone();
-        let tx = client
-            .begin_foreground_transaction(ForegroundTransactionKind::Mergeable)
-            .unwrap();
-        let (release, pending_read) = relay
-            .run(move |worker| {
-                let (db, transaction) = worker.foreground_transaction(id, tx)?;
-                let (release, released) = futures::channel::oneshot::channel::<()>();
-                let held = Rc::clone(&db);
-                let read = db.enqueue_transaction_read(transaction.open_tx_id, async move {
-                    let hold = Box::pin(held.hold_node_owner_for_test());
-                    let _ = futures::future::select(released, hold).await;
-                    Ok(())
-                });
-                db.drive_queued_mutation_once();
-                // Dropping the receiver cancels the queued read and releases contention.
-                Ok((release, read))
-            })
-            .unwrap();
-        client
-            .insert_foreground_transaction(
-                tx,
-                "todos".into(),
-                encoded_title_cells("admitted before retirement"),
-                None,
-            )
-            .unwrap();
-        client.commit_foreground_transaction(tx).unwrap();
-        assert_eq!(
-            host.close_foreground(first),
-            Err(JazzNativeRelayStatus::LifecycleFailure)
+        let fixture = NativeHostAbiFixture::new();
+        let capability = fixture.admit(
+            &directory.path().join("handoff.sqlite"),
+            "pending-read-handoff",
+            &permissive_schema(),
+            0xc1,
         );
-        assert!(!host.foregrounds.contains_key(&first));
-        let next = host.open_foreground(capability, 3).unwrap();
-        assert_ne!(host.foregrounds[&next].lease.node, old_node);
-        release.send(()).unwrap();
+        let first = fixture.open_foreground(&capability);
+        let keeper = fixture.open_foreground(&capability);
+        let (old_node, client) = {
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            (
+                host.foregrounds[&first].lease.node,
+                host.foreground_client(first).unwrap().clone(),
+            )
+        };
+        let tx_id = fixture.insert_todo(first, [0xc3; 16], "admitted before handoff");
+        let mut wait = fixture.execute(
+            first,
+            ForegroundDbCommandRequest::WaitForTransaction {
+                tx_id,
+                tier: "local".into(),
+                observe_only: false,
+            },
+        );
         for _ in 0..100 {
-            if relay.run(|worker| Ok(worker.closing.is_empty())).unwrap() {
+            let ForegroundDbCommandResponse::Pending { operation } = wait else {
+                break;
+            };
+            fixture.tick(first);
+            wait = fixture.execute(first, ForegroundDbCommandRequest::Poll { operation });
+        }
+        assert_eq!(
+            wait,
+            ForegroundDbCommandResponse::TransactionSettled { tx_id }
+        );
+        let ForegroundDbCommandResponse::Pending { operation } = fixture.execute(
+            first,
+            ForegroundDbCommandRequest::All {
+                query: postcard::to_allocvec(&Query::from("todos")).unwrap(),
+                options_json: r#"{"tier":"Remote"}"#.into(),
+                transaction: None,
+            },
+        ) else {
+            panic!("Remote read without an authority remains pending");
+        };
+        let floor = client.with_db(|db| Ok(db.seq_high_water())).unwrap();
+        let closing = std::time::Instant::now();
+        assert_eq!(
+            fixture.execute(first, ForegroundDbCommandRequest::Close),
+            ForegroundDbCommandResponse::Closed { closed: true }
+        );
+        assert!(closing.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            fixture.tick_status(first),
+            JazzNativeRelayStatus::InvalidHandle
+        );
+        assert!(client.poll_foreground_operation(operation).is_err());
+        let next = fixture.open_foreground(&capability);
+        {
+            let host = unsafe { &*fixture.host }.inner.lock().unwrap();
+            let lease = host.foregrounds[&next].lease;
+            assert_eq!(lease.node, old_node);
+            assert_eq!(lease.confirmed_tx_time, TxTime(floor));
+            assert!(
+                host.foreground_client(next)
+                    .unwrap()
+                    .with_db(|db| Ok(db.seq_high_water()))
+                    .unwrap()
+                    > floor
+            );
+        }
+        assert_exact_todo_rows(
+            &fixture.rows_after_sync(keeper),
+            RowUuid::from_bytes([0xc3; 16]),
+            "admitted before handoff",
+        );
+        let later = fixture.insert_todo(next, [0xc4; 16], "admitted after handoff");
+        assert_ne!(later, tx_id);
+        for _ in 0..100 {
+            if client
+                .relay
+                .run(|worker| Ok(worker.closing.is_empty()))
+                .unwrap()
+            {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(relay.run(|worker| Ok(worker.closing.is_empty())).unwrap());
-        drop(pending_read);
-        assert!(host.close_foreground(next).unwrap());
-        assert!(host.close_foreground(keeper).unwrap());
+        assert!(
+            client
+                .relay
+                .run(|worker| Ok(worker.closing.is_empty()))
+                .unwrap()
+        );
+        for foreground in [next, keeper] {
+            assert_eq!(
+                fixture.execute(foreground, ForegroundDbCommandRequest::Close),
+                ForegroundDbCommandResponse::Closed { closed: true }
+            );
+        }
     }
 
     #[test]
@@ -16555,8 +16184,8 @@ mod tests {
         assert_eq!(
             rejected_insert,
             ForegroundDbCommandResponse::CodedOperationError {
-                code: "schema".to_owned(),
-                reason: "Schema: unknown table missing_table".to_owned(),
+                code: "query".to_owned(),
+                reason: "Query: unknown table missing_table".to_owned(),
             }
         );
         assert_eq!(

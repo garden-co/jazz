@@ -1,7 +1,7 @@
 //! Relation facade queries on SQLite: a client's hopTo, gather or match read
 //! arrives as relation IR ending in a full-row projection, and is read as
 //! the ordinary query it stands for. Projections that rename or narrow the
-//! output, and unions, are refused as not supported yet.
+//! output are refused; full-row unions preserve their arm occurrences.
 
 mod common;
 use common::compile_schema;
@@ -108,7 +108,7 @@ fn a_full_row_relation_projection_reads_as_its_ordinary_query() {
 }
 
 #[test]
-fn narrowing_projections_and_unions_are_not_supported_yet() {
+fn narrowing_projections_are_refused_and_full_row_unions_are_supported() {
     let db = open();
     let narrowed = db
         .prepare_query(&relation_query(done_todos(&["id", "title"])))
@@ -124,6 +124,10 @@ fn narrowing_projections_and_unions_are_not_supported_yet() {
                 input: done_todos(&["id", "title", "done"]),
             }],
         }))
-        .expect_err("a union is refused");
-    assert!(union.to_string().contains("not supported yet"), "{union}");
+        .expect("a full-row union is supported");
+    assert!(
+        block_on(db.all(&union, ReadOpts::default()))
+            .unwrap()
+            .is_empty()
+    );
 }

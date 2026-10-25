@@ -337,6 +337,7 @@ type NativeDb = {
     | NativeCatalogueStateResult
     | Promise<NativeCatalogueStateResult>;
   validateCatalogueCaptureReplacement?(previous: Uint8Array, next: Uint8Array): void;
+  mergeCatalogueCaptures?(previous: Uint8Array, next: Uint8Array): Uint8Array;
   /** Qualify this schema view without draining the runtime owner's capture. */
   hasAuthenticatedCatalogue?():
     | boolean
@@ -2408,9 +2409,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const validate = this.db.validateCatalogueCaptureReplacement;
     if (!validate)
       throw new InitializationCapabilityError("authenticated catalogue capture/publication");
-    await store.cache.publish(store.scope, capture, (previous, next) =>
-      validate.call(this.db, previous, next),
-    );
+    const merge = this.db.mergeCatalogueCaptures;
+    await store.cache.publish(store.scope, capture, (previous, next) => {
+      // Resolve against the current bytes under the cache's publication lock.
+      if (merge) return merge.call(this.db, previous, next);
+      validate.call(this.db, previous, next);
+    });
     this.pendingCatalogueCapture = undefined;
   }
 

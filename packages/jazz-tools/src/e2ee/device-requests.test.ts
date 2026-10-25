@@ -180,23 +180,29 @@ it("keeps enrolment requests private to their verified author account and immuta
         version: 1,
         challenge: new Uint8Array(32).fill(4),
       };
-      for (const replace of [
-        () => client.insert(requests, replacement, { id: request.id }),
-        () => client.upsert(requests, request.id, replacement),
-        () => client.restore(requests, request.id, replacement),
-      ]) {
+      for (const [operation, replace] of [
+        ["insert", () => client.insert(requests, replacement, { id: request.id })],
+        ["upsert", () => client.upsert(requests, request.id, replacement)],
+        ["restore", () => client.restore(requests, request.id, replacement)],
+      ] as const) {
+        // Bob cannot observe this private row. SQLite refuses his restore
+        // locally because he has no retained version to restore.
         await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
-          /already exists|authorization|policy denied|not deleted|not_deleted|conflict/i,
+          client === bob && operation === "restore"
+            ? /RESTORE target .+ does not exist/i
+            : /already exists|authorization|policy denied|not deleted|not_deleted|conflict/i,
         );
       }
-      await expect(
+      await expect(async () =>
         client
           .update(requests, request.id, {
             publicKey: new Uint8Array(32).fill(3),
           })
           .wait({ tier: "global" }),
       ).rejects.toThrow();
-      await expect(client.delete(requests, request.id).wait({ tier: "global" })).rejects.toThrow();
+      await expect(async () =>
+        client.delete(requests, request.id).wait({ tier: "global" }),
+      ).rejects.toThrow();
     }
     await expect(
       alice.one(requests.where({ id: request.id }), { tier: "remote" }),

@@ -408,6 +408,65 @@ fn native_reader_failure_releases_its_pending_upload() {
     );
 }
 
+/// Alice's streams release persisted upload leases after abort, publication,
+/// and dropped-handle maintenance. The internal inventory is needed because
+/// visible rows alone cannot reveal leaked upload leases or a diagnostic
+/// that silently cleans them up while measuring them.
+#[test]
+fn upload_inventory_observes_leases_without_draining_cleanup() {
+    let alice = open_db();
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+    let count = || jazz::block_on(alice.pending_upload_count_for_test()).unwrap();
+    let mut kept = alice
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .unwrap();
+    let mut aborted = alice
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .unwrap();
+    assert_eq!(count(), 0, "begin alone does not persist a lease");
+
+    let text = "a".repeat(LEAF_MAX_BYTES + 1);
+    jazz::block_on(alice.push_streaming_value_upload(&mut kept, text.as_bytes())).unwrap();
+    assert_eq!(count(), 1);
+    jazz::block_on(alice.push_streaming_value_upload(&mut aborted, b"discarded")).unwrap();
+    assert_eq!(count(), 2);
+    jazz::block_on(alice.abort_streaming_value_upload(aborted)).unwrap();
+    assert_eq!(count(), 1, "abort releases its own lease immediately");
+
+    let write = jazz::block_on(alice.finish_streaming_value_upload(
+        kept,
+        StreamingMutationKind::Insert,
+        "todos",
+        RowUuid::from_bytes([0x78; 16]),
+        cells.clone(),
+        "title",
+        jazz::db::WriteIdentity::Database,
+        None,
+        None,
+        None,
+    ))
+    .unwrap();
+    jazz::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    assert_eq!(count(), 0, "the published row owns the value now");
+
+    let mut dropped = alice
+        .begin_streaming_value_upload("todos", &cells, "title")
+        .unwrap();
+    jazz::block_on(alice.push_streaming_value_upload(&mut dropped, text.as_bytes())).unwrap();
+    drop(dropped);
+    assert_eq!(
+        count(),
+        1,
+        "dropping schedules cleanup without borrowing the owner"
+    );
+    assert_eq!(count(), 1, "reading the diagnostic must not drain cleanup");
+    jazz::block_on(alice.tick()).unwrap();
+    assert_eq!(count(), 0, "maintenance releases the abandoned lease");
+    let published = rows(&alice);
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].get("title"), Some(&Value::String(text)));
+}
+
 #[test]
 fn explicit_streaming_abort_releases_the_pending_upload_immediately() {
     let db = open_db();

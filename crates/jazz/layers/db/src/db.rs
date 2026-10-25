@@ -47,7 +47,9 @@ pub use catalogue_policy::PolicyDescriptorV1;
 
 #[path = "catalogue_cache.rs"]
 mod catalogue_cache;
-pub use catalogue_cache::{AuthenticatedCatalogueState, validate_catalogue_capture_replacement};
+pub use catalogue_cache::{
+    AuthenticatedCatalogueState, merge_catalogue_captures, validate_catalogue_capture_replacement,
+};
 #[path = "initialization.rs"]
 mod initialization;
 pub use initialization::{InitializationSeal, InitializationTransactionStatus, ReservedTxId};
@@ -55,8 +57,12 @@ pub use initialization::{InitializationSeal, InitializationTransactionStatus, Re
 mod accepted;
 #[path = "candidates.rs"]
 mod candidates;
+#[path = "ordinary_unit.rs"]
+mod ordinary_unit;
 #[path = "sync.rs"]
 pub(crate) mod sync;
+#[path = "writer_order.rs"]
+mod writer_order;
 pub use crate::names::LensEffects;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
@@ -225,6 +231,8 @@ pub struct RemovedRow {
     pub joined: Vec<crate::values::JoinedRow>,
     /// A flat join's root version ([`CurrentRow::root_version`]).
     pub version: Option<crate::values::SourceVersion>,
+    /// A UNION leaf at root source position zero.
+    pub union_arm: Option<String>,
     pub index: usize,
 }
 
@@ -524,6 +532,7 @@ struct Inner {
     view_policies_dirty: bool,
     candidate_checks: RefCell<Option<Vec<candidates::DeferredCheck>>>,
     candidate_read_evidence: Option<crate::compile::CandidateEvidence>,
+    ordinary_checks: RefCell<Option<Vec<ordinary_unit::Check>>>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -587,6 +596,7 @@ struct Inner {
     owner_projection_error: Option<Error>,
     deferred_owner_durability: bool,
     retired: bool,
+    mutation_admission_closed: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
     read_deadlines: Vec<Weak<web_time::Instant>>,
     /// The global authority: what it settles is durable at `Global`.
@@ -758,7 +768,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
+pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
     let mut start = 0;
     for (end, _) in script.match_indices(';') {
         let statement = &script[start..=end];
@@ -854,17 +864,15 @@ fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error
 
 /// A relation facade query (hopTo, gather, match), as clients send it: the
 /// ordinary query it stands for, the way Jazz's validation normalizes it.
-/// Unions and projections that rename or narrow the output are not
-/// supported yet. `None` when the query is not a relation query.
-fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, Error> {
+/// Projections that rename or narrow the output are not supported yet.
+/// Unions retain their relation tree for SQL compilation. `None` when the
+/// query is not a relation query.
+pub(super) fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, Error> {
     use crate::query::{RelationProjectExpr, RelationRowIdRef};
     let Some(relation) = &query.relation else {
         return Ok(None);
     };
     let not_yet = |what: &str| crate::values::unsupported(what.to_owned());
-    if crate::query::relation_union_parts(&relation.rel).is_some() {
-        return Err(not_yet("union relation queries"));
-    }
     let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
     let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
     if resolved.table != query.table {
@@ -887,6 +895,9 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
         return Err(crate::values::query_error(
             "relation query cannot be combined with ordinary query clauses",
         ));
+    }
+    if crate::query::relation_union_parts(&relation.rel).is_some() {
+        return Ok(None);
     }
     if let Some(columns) =
         crate::query::relation_output_projection_if_present(relation).map_err(relation_error)?
@@ -1064,6 +1075,7 @@ impl Db {
             execute_script(&conn, &ddl)?;
             physical
         };
+        crate::array_index::install(&conn, &schema)?;
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         conn.execute_batch(sync::RELAY_DDL).map_err(storage)?;
@@ -1096,6 +1108,7 @@ impl Db {
                 seq = seq.max(max.unwrap_or(0) as u64);
             }
         }
+        writer_order::install(&conn, seq == 0)?;
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
@@ -1107,6 +1120,7 @@ impl Db {
                 view_policies_dirty: false,
                 candidate_checks: RefCell::new(None),
                 candidate_read_evidence: None,
+                ordinary_checks: RefCell::new(None),
                 chunks,
                 pending_nodes: Vec::new(),
                 derived: Vec::new(),
@@ -1142,6 +1156,7 @@ impl Db {
                 owner_projection_error: None,
                 deferred_owner_durability: false,
                 retired: false,
+                mutation_admission_closed: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
                 authority: false,
@@ -1268,6 +1283,14 @@ impl Db {
 
     pub async fn close(&self) -> Result<(), Error> {
         self.tick().await
+    }
+
+    /// Permanently stop admitting new application writes in this runtime and
+    /// every retained schema view. Existing uploads, receipts, rollback and
+    /// storage cleanup can still advance through `tick` before retirement.
+    /// This fence is in memory; a new storage owner starts its own lifecycle.
+    pub fn stop_mutation_admission(&self) {
+        self.inner().mutation_admission_closed = true;
     }
 
     /// Revoke the owner connection before its external storage lease is
@@ -1597,6 +1620,13 @@ impl Db {
         }
     }
 
+    /// SQLite's actual row-change count on this connection, including triggers.
+    /// Reading this diagnostic does not run cleanup or alter stored state.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn sqlite_total_changes_for_test(&self) -> u64 {
+        self.inner.borrow().conn.total_changes()
+    }
+
     pub fn active_groove_subscriptions_for_test(&self) -> usize {
         self.inner().fan.live_members().len()
     }
@@ -1680,6 +1710,7 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         if matches!(op.identity(), Some(WriteIdentity::Attribution(_))) {
             self.inner().require_attribution_backend()?;
         }
@@ -1749,6 +1780,7 @@ impl Db {
         let standalone = {
             let mut inner = self.inner();
             inner.require_initialization_allocator()?;
+            let stored_table = inner.schema.stored_table(table)?.to_owned();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
                 None => (inner.seq + 1, true),
@@ -1758,6 +1790,7 @@ impl Db {
             let applied = apply(&mut inner, seq).and_then(|handle| {
                 if standalone && handle.seq == seq {
                     inner.record_local_commit(seq, None, inner.identity.author)?;
+                    inner.record_local_writer_order(seq, mark)?;
                     inner.record_issued_seq(seq)?;
                 }
                 Ok(handle)
@@ -1769,7 +1802,7 @@ impl Db {
                         if standalone {
                             inner.seq = seq;
                         } else if let Some((_, tables)) = &mut inner.tx {
-                            tables.insert(table.to_owned());
+                            tables.insert(stored_table);
                         }
                     }
                     (standalone && handle.seq == seq, handle)
@@ -1807,6 +1840,7 @@ impl Db {
     ) -> Result<(T, TxReceipt), Error> {
         {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             inner.require_foreground_writes("commits")?;
             inner.require_initialization_allocator()?;
             inner.require_owner_subject(author)?;
@@ -1817,24 +1851,36 @@ impl Db {
             inner.changed.borrow_mut().clear();
             let seq = inner.seq + 1;
             inner.tx = Some((seq, BTreeSet::new()));
+            inner.begin_ordinary_callback();
         }
+        let mut guard = CallbackTransactionGuard {
+            db: self,
+            active: true,
+        };
         let mut tx = MergeableTx {
             db: self,
             _author: author,
         };
-        let result = callback(&mut tx).await;
+        let result = callback(&mut tx).await.and_then(|value| {
+            self.inner().require_mutation_admission()?;
+            Ok(value)
+        });
         let captured;
         let changed = {
             let mut inner = self.inner();
             let (seq, tables) = inner.tx.take().expect("open transaction");
             captured = std::mem::take(&mut inner.capture);
+            let checks = inner.ordinary_checks.borrow_mut().take();
             match &result {
                 Ok(_) => {
                     if let Err(error) = inner
-                        .record_local_commit(seq, None, inner.identity.author)
+                        .finish_ordinary_callback(seq, &tables, checks)
+                        .and_then(|()| inner.record_local_commit(seq, None, inner.identity.author))
+                        .and_then(|()| inner.record_callback_writer_order(seq, &tables))
                         .and_then(|()| inner.record_issued_seq(seq))
                     {
                         inner.rollback_savepoint("tx").map_err(storage)?;
+                        guard.active = false;
                         inner.changed.borrow_mut().clear();
                         return Err(error);
                     }
@@ -1843,6 +1889,7 @@ impl Db {
                 }
                 Err(_) => {
                     inner.rollback_savepoint("tx").map_err(storage)?;
+                    guard.active = false;
                     inner.changed.borrow_mut().clear();
                     None
                 }
@@ -1864,6 +1911,7 @@ impl Db {
             .conn
             .execute_batch("RELEASE tx")
             .map_err(storage)?;
+        guard.active = false;
         self.notify()?;
         Ok((value, TxReceipt(seq)))
     }
@@ -1995,6 +2043,7 @@ impl Db {
             }
             let ddl = inner.physical.union(&target)?;
             execute_script(&inner.conn, &ddl)?;
+            crate::array_index::install(&inner.conn, &target)?;
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &target)?;
             if make_current {
@@ -2040,6 +2089,30 @@ fn delta(
         removed,
         settled: true,
         tier: DurabilityTier::Local,
+    }
+}
+
+// A callback may suspend at any await. Dropping its future must retire both
+// SQLite state and the deferred proof collector before another unit starts.
+struct CallbackTransactionGuard<'a> {
+    db: &'a Db,
+    active: bool,
+}
+impl Drop for CallbackTransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut inner = self.db.inner.borrow_mut();
+        if inner.rollback_savepoint("tx").is_err() {
+            // Failed rollback cannot leave this handle open for further writes.
+            inner.mutation_admission_closed = true;
+        }
+        inner.tx = None;
+        inner.ordinary_checks.borrow_mut().take();
+        inner.capture.clear();
+        inner.changed.borrow_mut().clear();
+        inner.clear_derived();
     }
 }
 
@@ -2445,6 +2518,22 @@ impl Inner {
                 types: types.clone(),
                 joined,
                 version: root_version,
+                union_arm: if compiled.union_arms.is_empty() {
+                    None
+                } else {
+                    let arm: u32 = row
+                        .get(first + compiled.projection.len())
+                        .map_err(storage)?;
+                    Some(Arc::from(
+                        compiled
+                            .union_arms
+                            .get(arm as usize)
+                            .ok_or_else(|| {
+                                Error::new(ErrorCode::Storage, "invalid union occurrence")
+                            })?
+                            .as_str(),
+                    ))
+                },
             });
         }
         if blocked {
@@ -2501,17 +2590,6 @@ impl Inner {
             }
         }
         Ok(out)
-    }
-
-    /// The versions of the rows a read returns, its relations' rows included.
-    pub(crate) fn read_versions(
-        &self,
-        prepared: &PreparedQuery,
-        identity: Option<AuthorSubject>,
-        read: &ReadSpec,
-    ) -> Result<Vec<(RowUuid, u64)>, Error> {
-        self.read_rows(prepared, identity, read)
-            .map(|rows| versions(&rows))
     }
 
     fn node(
@@ -2858,8 +2936,11 @@ impl Inner {
         key: &[u8],
         author: AuthorSubject,
         operation: Operation,
+        denial: &str,
     ) -> Result<bool, Error> {
-        if self.defer_candidate_check(table, row, key, author, table.policy(operation))? {
+        if self.defer_ordinary_operation(table, row, key, author, operation, denial)?
+            || self.defer_candidate_check(table, row, key, author, table.policy(operation))?
+        {
             return Ok(true);
         }
         let session = self.session(author);
@@ -2875,8 +2956,11 @@ impl Inner {
         key: &[u8],
         author: AuthorSubject,
         clause: Option<&crate::tools::PolicyExpr>,
+        denial: &str,
     ) -> Result<bool, Error> {
-        if self.defer_candidate_check(table, row, key, author, clause)? {
+        if self.defer_ordinary_check(table, row, key, author, clause, false, denial)?
+            || self.defer_candidate_check(table, row, key, author, clause)?
+        {
             return Ok(true);
         }
         let session = self.session(author);
@@ -3481,7 +3565,14 @@ impl Inner {
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
         if let Some(author) = self.checked(who)
-            && !self.check(table, row, &key, author, Operation::Insert)?
+            && !self.check(
+                table,
+                row,
+                &key,
+                author,
+                Operation::Insert,
+                &format!("INSERT policy denied the new row in `{table_name}`"),
+            )?
         {
             return Err(denied(format_args!(
                 "INSERT policy denied the new row in `{table_name}`"
@@ -3513,24 +3604,40 @@ impl Inner {
         verb: &str,
     ) -> Result<(), Error> {
         if let Who::Session(author) = *who
-            && !self.check(table, row, key, author, Operation::Select)?
+            && !self.check(
+                table,
+                row,
+                key,
+                author,
+                Operation::Select,
+                &format!("read policy denied {verb}: the target requires read permission"),
+            )?
         {
             return Err(denied(format_args!(
                 "read policy denied {verb}: the target requires read permission"
             )));
         }
-        if let Some(author) = self.checked(*who)
-            && !self.check_clause(
-                table,
-                row,
-                key,
-                author,
-                table.policies.update.using.as_ref(),
-            )?
-        {
-            return Err(denied(format_args!(
-                "{verb} policy (USING) denied the target row"
-            )));
+        if let Some(author) = self.checked(*who) {
+            // UPDATE may constrain the old row, the new row, or both. An
+            // absent clause is not an additional denial when the other one
+            // explicitly grants UPDATE; absence of both still denies it.
+            if !table.policies.has_explicit_update_policy() {
+                return Err(denied(format_args!("{verb} requires an UPDATE policy")));
+            }
+            if let Some(using) = table.policies.update.using.as_ref()
+                && !self.check_clause(
+                    table,
+                    row,
+                    key,
+                    author,
+                    Some(using),
+                    &format!("{verb} policy (USING) denied the target row"),
+                )?
+            {
+                return Err(denied(format_args!(
+                    "{verb} policy (USING) denied the target row"
+                )));
+            }
         }
         Ok(())
     }
@@ -3631,23 +3738,22 @@ impl Inner {
         // statement's snapshot: a same-table EXISTS compares the new row
         // with the old one, not with itself.
         if let Some(author) = self.checked(who)
-            && !self.defer_candidate_check(
+            && let Some(with_check) = table.policies.update.with_check.as_ref()
+            && !self.defer_ordinary_check(
                 table,
                 row,
                 &key,
                 author,
-                table.policies.update.with_check.as_ref(),
+                Some(with_check),
+                true,
+                &format!("{verb} policy (WITH CHECK) denied the new row"),
             )?
+            && !self.defer_candidate_check(table, row, &key, author, Some(with_check))?
             && !{
                 let session = self.session(author);
                 let before = Some(Cut::at(seq.saturating_sub(1)));
                 self.holds_at(table, row, &key, before, |ctx| {
-                    ctx.policy_clause(
-                        table.policies.update.with_check.as_ref(),
-                        table,
-                        "a",
-                        &session,
-                    )
+                    ctx.policy_clause(Some(with_check), table, "a", &session)
                 })?
             }
         {
@@ -3697,14 +3803,28 @@ impl Inner {
             // permission: nothing persisted is revealed.
             if let Who::Session(author) = who
                 && !fresh
-                && !inner.check(table, row, key, author, Operation::Select)?
+                && !inner.check(
+                    table,
+                    row,
+                    key,
+                    author,
+                    Operation::Select,
+                    "read policy denied DELETE: the target requires read permission",
+                )?
             {
                 return Err(denied(
                     "read policy denied DELETE: the target requires read permission",
                 ));
             }
             if let Some(author) = inner.checked(who)
-                && !inner.check(table, row, key, author, Operation::Delete)?
+                && !inner.check(
+                    table,
+                    row,
+                    key,
+                    author,
+                    Operation::Delete,
+                    "DELETE policy denied the target row",
+                )?
             {
                 return Err(denied("DELETE policy denied the target row"));
             }
@@ -3799,7 +3919,14 @@ impl Inner {
         )?;
         // A restore writes an existing row back: the UPDATE policy decides.
         if let Some(author) = self.checked(who)
-            && !self.check(table, row, &key, author, Operation::Update)?
+            && !self.check(
+                table,
+                row,
+                &key,
+                author,
+                Operation::Update,
+                "RESTORE policy denied the restored row",
+            )?
         {
             return Err(denied("RESTORE policy denied the restored row"));
         }
@@ -4271,6 +4398,7 @@ impl Db {
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
             let ddl = inner.physical.union(&logical)?;
             execute_script(&inner.conn, &ddl)?;
+            crate::array_index::install(&inner.conn, &logical)?;
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &logical)?;
             inner
@@ -4416,6 +4544,8 @@ fn child_read_rows(node: &ResultNode, out: &mut Vec<CurrentRow>) {
 
 /// jazz.sqlite.serializable-read-content.v1: BLAKE3 derive-key over the
 /// versioned postcard preimage pinned by sqlite_owner_read_content_v1.json.
+/// Union rows bind that preimage to their semantic arm under the separate
+/// serializable-union-read-content.v1 role.
 /// Numeric publication aliases are deliberately excluded; original history
 /// identities, result occurrences, deletion and every projected cell remain.
 fn read_content(row: &CurrentRow) -> Result<[u8; 32], Error> {
@@ -4434,6 +4564,17 @@ fn read_content(row: &CurrentRow) -> Result<[u8; 32], Error> {
         row.version.map(version),
     ))
     .map_err(|error| Error::new(ErrorCode::Storage, error.to_string()))?;
+    if let Some(arm) = row.union_arm() {
+        // A support-row change can move the same unchanged root between arms.
+        // Keep v1 plain-row bytes fixed and bind the semantic union occurrence
+        // in a separately versioned preimage, admitted by the union wire kind.
+        let bytes = postcard::to_allocvec(&(bytes, arm))
+            .map_err(|error| Error::new(ErrorCode::Storage, error.to_string()))?;
+        return Ok(blake3::derive_key(
+            "jazz.sqlite.serializable-union-read-content.v1",
+            &bytes,
+        ));
+    }
     Ok(blake3::derive_key(
         "jazz.sqlite.serializable-read-content.v1",
         &bytes,
@@ -4549,6 +4690,16 @@ impl Inner {
     fn apply(&mut self, op: &StagedOp, seq: u64) -> Result<WriteHandle, Error> {
         let who = op.author().map_or(Who::Local, Who::Attributed);
         self.apply_as(op, who, seq)
+    }
+
+    fn require_mutation_admission(&self) -> Result<(), Error> {
+        if self.mutation_admission_closed || self.retired {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "database is closing or closed",
+            ));
+        }
+        Ok(())
     }
 
     /// Attributed writes require a SYSTEM backend. On a replica the authority
@@ -4765,7 +4916,9 @@ impl Db {
                 snapshot,
                 accepted_begin,
                 reads: Vec::new(),
-                pinned: !self.is_client(),
+                // A cold replica can acquire its first authority coordinate on
+                // read. Once it knows a coordinate, public begin fixes that cut.
+                pinned: !self.is_client() || snapshot != 0,
                 own,
             },
         )
@@ -4807,6 +4960,7 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        inner.require_mutation_admission()?;
         if inner.batches.contains_key(&id) || inner.retired_initializations.contains(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
@@ -4840,6 +4994,13 @@ impl Db {
 
     pub fn abandon_transaction_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.take_batch(id).map(drop)
+    }
+
+    /// Whether this runtime still owns an open mutable batch. Host adapters
+    /// use this after a fallible seal to distinguish a retryable preflight
+    /// failure from a consumed transaction. It grants no publication rights.
+    pub fn has_open_transaction(&self, id: OpenTransactionId) -> bool {
+        self.inner.borrow().batches.contains_key(&id)
     }
 
     pub fn abandon_serializable_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
@@ -5040,7 +5201,8 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
+                let observed = inner.read_rows(&read.prepared, batch.reader(), &spec)?;
+                if versions(&observed) != read.rows || read_contents(&observed)? != read.content {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -5070,6 +5232,7 @@ impl Db {
         kind: sync::Kind,
         reservation: Option<ReservedTxId>,
     ) -> Result<TxReceipt, Error> {
+        self.inner().require_mutation_admission()?;
         self.inner().require_foreground_writes("commits")?;
         self.inner().require_initialization_allocator()?;
         let ops = &batch.ops;
@@ -5087,6 +5250,7 @@ impl Db {
                     inner.apply_with_edits(ops, &batch.edits, 0, seq)
                 })
                 .and_then(|()| inner.record_local_commit(seq, reservation, inner.identity.author))
+                .and_then(|()| inner.record_local_writer_order(seq, mark))
                 .and_then(|()| inner.record_issued_seq(seq));
             if let Err(error) = applied {
                 inner.rollback_savepoint("commit_batch").map_err(storage)?;
@@ -5194,6 +5358,7 @@ impl Db {
     fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
         {
             let inner = self.inner.borrow();
+            inner.require_mutation_admission()?;
             let batch = inner
                 .batches
                 .get(&id)
@@ -5234,6 +5399,7 @@ impl Db {
     ) -> Result<(), Error> {
         let marks = {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -5293,6 +5459,7 @@ impl Db {
             ..
         }) = inner.batches.get_mut(&id)
         {
+            // Initialization absence reads enter here without remote hydration.
             // Once any read has observed this cut, later reads must not advance it.
             *pinned = true;
             reads.push(ReadRecord {
@@ -5400,6 +5567,22 @@ impl TxRef<'_> {
         include_deleted: bool,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        // An explicit host scope cannot silently reinterpret a session-bound
+        // transaction. Keep the transaction's reader and reject the mismatch
+        // before registering a read or waiting for remote coverage.
+        if let Some((requested, _)) = &prepared.request_claims
+            && self
+                .db
+                .inner()
+                .batches
+                .get(&self.id)
+                .and_then(Batch::reader)
+                .is_some_and(|bound| bound != *requested)
+        {
+            return Err(rejected(
+                "open transaction identity differs from its bound identity",
+            ));
+        }
         let mut guard = self.db.transaction_read_guard(self.id, false)?;
         // Capture before waiting for earlier reads. Their authority round trip
         // must not make later staging visible to this already-admitted read.

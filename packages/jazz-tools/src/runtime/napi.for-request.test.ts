@@ -728,10 +728,10 @@ describe("forRequest concurrent session isolation", () => {
 
     // Cross-user update must be rejected.
     expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
-      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
+      'Update failed: WriteError("authorization_denied: read policy denied UPDATE: the target requires read permission")',
     );
     expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
-      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
+      'Update failed: WriteError("authorization_denied: read policy denied UPDATE: the target requires read permission")',
     );
 
     // Upsert of an existing foreign row follows the same read-before-write
@@ -745,7 +745,28 @@ describe("forRequest concurrent session isolation", () => {
         owner_id: bob.user,
       }),
     ).toThrow(
-      'Upsert failed: WriteError("read policy denied UPSERT on table todos: the operation requires read permission on the target row")',
+      'Upsert failed: WriteError("authorization_denied: read policy denied UPSERT: the target requires read permission")',
+    );
+
+    // None of the rejected UPDATE/UPSERT attempts may alter either owner's row.
+    await vi.waitFor(
+      async () => {
+        const [aliceRows, bobRows] = await Promise.all([
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+        ]);
+        expect(aliceRows).toEqual([
+          expect.objectContaining({
+            id: aliceRow.id,
+            title: "alice-upserted",
+            owner_id: alice.user,
+          }),
+        ]);
+        expect(bobRows).toEqual([
+          expect.objectContaining({ id: bobRow.id, title: "bob-updated", owner_id: bob.user }),
+        ]);
+      },
+      { timeout: 10_000 },
     );
 
     // A synchronous admission denial has no returned write handle. It must be
@@ -801,12 +822,28 @@ describe("forRequest concurrent session isolation", () => {
         .wait({ tier: "global" }),
     ]);
 
-    // Cross-user deletes stage locally but are rejected by the serving authority.
-    await expect(aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" })).rejects.toThrow(
-      /AuthorizationDenied|Write rejected by server authorization/,
+    // Read-before-delete admission rejects a foreign row synchronously, before
+    // returning a write handle or staging a transaction for the authority.
+    expect(() => aliceDb.delete(todoApp.todos, bobRow.id)).toThrow(
+      'Delete failed: WriteError("authorization_denied: read policy denied DELETE: the target requires read permission")',
     );
-    await expect(bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" })).rejects.toThrow(
-      /AuthorizationDenied|Write rejected by server authorization/,
+    expect(() => bobDb.delete(todoApp.todos, aliceRow.id)).toThrow(
+      'Delete failed: WriteError("authorization_denied: read policy denied DELETE: the target requires read permission")',
+    );
+    await vi.waitFor(
+      async () => {
+        const [aliceRows, bobRows] = await Promise.all([
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+        ]);
+        expect(aliceRows).toEqual([
+          expect.objectContaining({ id: aliceRow.id, title: "alice-todo", owner_id: alice.user }),
+        ]);
+        expect(bobRows).toEqual([
+          expect.objectContaining({ id: bobRow.id, title: "bob-todo", owner_id: bob.user }),
+        ]);
+      },
+      { timeout: 10_000 },
     );
 
     // Each user can delete their own row concurrently.

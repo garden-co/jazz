@@ -152,6 +152,7 @@ impl Db {
         open: OpenTransactionId,
     ) -> Result<InitializationSeal, Error> {
         let inner = self.inner();
+        inner.require_mutation_admission()?;
         if inner.non_durable {
             return Err(unsupported(
                 "initialization seals on a non-durable foreground",
@@ -199,6 +200,7 @@ impl Db {
         &self,
         seal: InitializationSeal,
     ) -> Result<TxReceipt, Error> {
+        self.inner().require_mutation_admission()?;
         self.check_initialization_owner(&seal)?;
         let id = (
             *seal.reservation.0.node.as_bytes(),

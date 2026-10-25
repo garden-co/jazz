@@ -88,6 +88,8 @@ export async function createNapiNativeRuntimeAdapter(
     appId?: string;
     env?: string;
     peerId?: string;
+    /** Standalone authority by default; use false for pending replica writes. */
+    historyComplete?: boolean;
   },
 ): Promise<TestNapiNativeRuntimeAdapter> {
   const { NapiDb } = await loadNapiModule();
@@ -104,7 +106,7 @@ export async function createNapiNativeRuntimeAdapter(
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
     testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
-    true,
+    opts?.historyComplete ?? true,
   );
   registerRuntimeCleanup(runtime);
 

@@ -220,6 +220,15 @@ pub fn test_validate_wire_frame_batch_corpus(
         .map_err(|error| error.into())
 }
 
+/// Test-only execution of one current SQLite semantic frame through its
+/// production exact decoder. It creates no link and confers no authority.
+#[wasm_bindgen(js_name = __testValidateSqliteSyncFrameCorpus)]
+pub fn test_validate_sqlite_sync_frame_corpus(frame: Vec<u8>) -> Result<(), JsValue> {
+    jazz::sync_codec::decode_sync_message(&frame)
+        .map(drop)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
 /// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[wasm_bindgen(js_name = __testWireFrameCorpusFeatures)]
 pub fn test_wire_frame_corpus_features() -> String {

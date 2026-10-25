@@ -117,6 +117,43 @@ fn warm(owner: &Db, server: &Db) {
     turn(&[owner, server, owner]);
 }
 
+/// Alice's two streams share one upstream query on Bob's authority. Cancelling
+/// one preserves the other; cancelling both releases the authority subscription.
+/// The internal inventory is needed to distinguish a shared remote reference
+/// from two independent queries that happen to return the same public rows.
+#[test]
+fn remote_attachment_inventory_tracks_shared_streams_and_cancellation() {
+    let authority = open(0xf1, true);
+    insert(&authority, "initial");
+    let alice = open(0xf2, false);
+    connect(&alice, &authority);
+    let mut first = subscribe(&alice, ReadOpts::for_read_tier(ReadTier::Remote));
+    let mut second = subscribe(&alice, ReadOpts::for_read_tier(ReadTier::Remote));
+    assert_eq!(alice.query_coverage_attachment_counts_for_test(), (1, 2));
+    assert_eq!(
+        opening(&mut first, &[&alice, &authority, &alice]).0,
+        vec!["initial"]
+    );
+    assert_eq!(
+        opening(&mut second, &[&alice, &authority, &alice]).0,
+        vec!["initial"]
+    );
+    assert_eq!(authority.runtime_stats_for_test().active_subscriptions, 1);
+    drop(first);
+    turn(&[&alice, &authority, &alice]);
+    assert_eq!(alice.query_coverage_attachment_counts_for_test(), (1, 1));
+    assert_eq!(authority.runtime_stats_for_test().active_subscriptions, 1);
+    insert(&authority, "after cancellation");
+    turn(&[&authority, &alice]);
+    assert!(
+        matches!(second.try_next_event(), Some(SubscriptionEvent::Delta { added, .. }) if added.len() == 1)
+    );
+    drop(second);
+    turn(&[&alice, &authority, &alice]);
+    assert_eq!(alice.query_coverage_attachment_counts_for_test(), (0, 0));
+    assert_eq!(authority.runtime_stats_for_test().active_subscriptions, 0);
+}
+
 /// Alice's fresh tab cannot mistake its own empty memory for the owner's cache,
 /// even before the worker connects or after the authority-wait deadline expires.
 #[test]
@@ -809,4 +846,28 @@ fn strict_remote_reconnect_preserves_delivered_row_indexes() {
             .unwrap(),
         &Value::String("offline".into())
     );
+}
+
+/// Alice's real writes advance the SQLite change receipt. Reads, diagnostics and
+/// idle ticks leave it unchanged. This low-level receipt supports host tests
+/// that must distinguish scheduling a wake from writing persistent state.
+#[test]
+fn sqlite_change_receipt_observes_writes_without_mutating_storage() {
+    let alice = open(91, false);
+    let before = alice.sqlite_total_changes_for_test();
+    assert_eq!(alice.sqlite_total_changes_for_test(), before);
+    insert(&alice, "actual stored row");
+    let after_write = alice.sqlite_total_changes_for_test();
+    assert!(
+        after_write > before,
+        "the receipt must observe actual SQL writes"
+    );
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    for _ in 0..16 {
+        let rows =
+            block_on(alice.all(&query, ReadOpts::for_read_tier(ReadTier::LocalOnly))).unwrap();
+        assert_eq!(rows.len(), 1);
+        block_on(alice.tick()).unwrap();
+        assert_eq!(alice.sqlite_total_changes_for_test(), after_write);
+    }
 }

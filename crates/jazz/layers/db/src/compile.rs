@@ -18,8 +18,10 @@ use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
 
+mod array_permissions;
 mod candidate_relations;
 mod history;
+mod unions;
 
 /// Inherits chains with no explicit bound unroll this deep.
 pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
@@ -306,6 +308,7 @@ impl From<CandidateEvidence> for PermissionEvidence {
 mod accepted_permissions;
 
 /// SQL text plus its positional parameters.
+#[derive(Clone)]
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
     catalogue: Option<&'a dyn CatalogueIdentityLookup>,
@@ -391,6 +394,8 @@ pub struct Compiled {
     /// Joined source row ids each row carries after its root's id, seq and
     /// deletion flag (a flat join's occurrence; 0 otherwise).
     pub joined: usize,
+    /// UNION leaf labels, indexed by the trailing SQL occurrence column.
+    pub union_arms: Vec<String>,
     /// Run before the statement.
     pub preps: Vec<Prep>,
     /// The statement with prefix-tie ranks in its order, used instead when
@@ -630,6 +635,9 @@ impl<'a> Ctx<'a> {
         column: &str,
         value: &str,
     ) -> Result<String, Error> {
+        if is_array(table, column) {
+            return self.candidate_array_source(table, include_created, column, value);
+        }
         let scope = self.permission_evidence.ok_or_else(|| {
             unsupported(
                 "ExistsIncludingCreated permission checks without a SQLite authorization unit",
@@ -1032,6 +1040,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: true,
             joined: 0,
+            union_arms: Vec::new(),
             preps: self.preps,
         })
     }
@@ -1041,6 +1050,9 @@ impl<'a> Ctx<'a> {
         query: &Query,
         include_deleted: bool,
     ) -> Result<Compiled, Error> {
+        if query.relation.is_some() {
+            return self.compile_union(query, include_deleted);
+        }
         if let Some(column) = deletion_column(query) {
             if !include_deleted {
                 return Err(query_error(format!(
@@ -1152,6 +1164,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            union_arms: Vec::new(),
             preps: self.preps,
         })
     }
@@ -1410,6 +1423,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: false,
             joined: sources.len() - 1,
+            union_arms: Vec::new(),
             preps: self.preps,
         })
     }
@@ -1586,6 +1600,7 @@ impl<'a> Ctx<'a> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            union_arms: Vec::new(),
             preps: self.preps,
         })
     }
@@ -2196,21 +2211,31 @@ impl<'a> Ctx<'a> {
                 let target = self.table(target_name)?;
                 let p = self.alias("p");
                 let inner = self.inherited_policy(target, *operation, &p, session, depth - 1)?;
-                let source = if self.permission_evidence.is_some() {
-                    if is_array(table, via_column) {
-                        return Err(unsupported(
-                            "array-reference inheritance in candidate authorization units",
-                        ));
+                let root = column_sql(table, alias, via_column)?;
+                if is_array(table, via_column) {
+                    if !crate::array_index::uuid_array(table, via_column) {
+                        return Err(unsupported("inheritance through non-UUID arrays"));
                     }
-                    let value = column_sql(table, alias, via_column)?;
-                    self.candidate_source(target, false, "id", &value)?
+                    let element = self.alias("inherit_element");
+                    let member = array_element_id(&element);
+                    let source = if self.permission_evidence.is_some() {
+                        self.candidate_source(target, false, "id", &member)?
+                    } else {
+                        self.source(target)?
+                    };
+                    format!(
+                        "EXISTS (SELECT 1 FROM json_each({root}) {element} WHERE EXISTS (SELECT 1 FROM {source} {p} WHERE {p}.id={member} AND {p}._del=0 AND {inner}))"
+                    )
                 } else {
-                    self.source(target)?
-                };
-                format!(
-                    "EXISTS (SELECT 1 FROM {source} AS {p} WHERE {p}.id = {alias}.{} AND {p}._del = 0 AND {inner})",
-                    quote(table.stored_name(via_column))
-                )
+                    let source = if self.permission_evidence.is_some() {
+                        self.candidate_source(target, false, "id", &root)?
+                    } else {
+                        self.source(target)?
+                    };
+                    format!(
+                        "EXISTS (SELECT 1 FROM {source} {p} WHERE {p}.id={root} AND {p}._del=0 AND {inner})"
+                    )
+                }
             }
             PolicyExpr::InheritsReferencing {
                 operation,
@@ -2226,17 +2251,12 @@ impl<'a> Ctx<'a> {
                 let s = self.alias("s");
                 let inner = self.inherited_policy(source, *operation, &s, session, depth - 1)?;
                 let from = if self.permission_evidence.is_some() {
-                    if is_array(source, via_column) {
-                        return Err(unsupported(
-                            "array-reference inheritance in candidate authorization units",
-                        ));
-                    }
                     self.candidate_source(source, false, via_column, &format!("{alias}.id"))?
                 } else {
                     self.source(source)?
                 };
-                // Ordinary schemas retain array-reference inheritance. Private
-                // candidate scopes require an indexed scalar reference.
+                // The bounded evidence source already filters scalar or array
+                // membership; exact receipt sources retain their own masking.
                 format!(
                     "EXISTS (SELECT 1 FROM {from} AS {s} WHERE {} AND {s}._del = 0 AND {inner})",
                     correlate(source, &s, via_column, &format!("{alias}.id"))?

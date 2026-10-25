@@ -4,7 +4,12 @@ export interface CatalogueCacheScope {
   readonly environment: string;
 }
 
-export type CatalogueReplacementValidator = (previous: Uint8Array, next: Uint8Array) => void;
+/** Runs inside atomic publication. Return resolved bytes to merge authenticated
+ * captures, or void to accept the supplied replacement. */
+export type CatalogueReplacementValidator = (
+  previous: Uint8Array,
+  next: Uint8Array,
+) => Uint8Array | void;
 
 /** Account-independent host storage; the capture is an opaque, core-validated versioned encoding. */
 export interface CatalogueCache {
@@ -65,8 +70,11 @@ export class EphemeralCatalogueCache implements CatalogueCache {
     validateReplacement: CatalogueReplacementValidator,
   ): Promise<void> {
     const previous = this.entries.get(catalogueCacheKey(scope));
-    if (previous !== undefined) validateReplacement(decodeCatalogueCache(scope, previous), capture);
-    this.entries.set(catalogueCacheKey(scope), encodeCatalogueCache(scope, capture));
+    const resolved =
+      previous === undefined
+        ? capture
+        : (validateReplacement(decodeCatalogueCache(scope, previous), capture) ?? capture);
+    this.entries.set(catalogueCacheKey(scope), encodeCatalogueCache(scope, resolved));
   }
 }
 
@@ -116,7 +124,6 @@ export class BrowserCatalogueCache implements CatalogueCache {
     capture: Uint8Array,
     validateReplacement: CatalogueReplacementValidator,
   ): Promise<void> {
-    const encoded = encodeCatalogueCache(scope, capture);
     const db = await this.open();
     try {
       await new Promise<void>((resolve, reject) => {
@@ -130,12 +137,15 @@ export class BrowserCatalogueCache implements CatalogueCache {
         const previous = store.get(catalogueCacheKey(scope));
         previous.onsuccess = () => {
           try {
+            let resolved = capture;
             if (previous.result !== undefined) {
               if (typeof previous.result !== "string")
                 throw new Error("Malformed catalogue cache value");
-              validateReplacement(decodeCatalogueCache(scope, previous.result), capture);
+              resolved =
+                validateReplacement(decodeCatalogueCache(scope, previous.result), capture) ??
+                capture;
             }
-            store.put(encoded, catalogueCacheKey(scope));
+            store.put(encodeCatalogueCache(scope, resolved), catalogueCacheKey(scope));
           } catch (error) {
             transaction.abort();
             reject(error);

@@ -1,6 +1,6 @@
 //! Test consumer for SPEC 18's publication grammar. Execution descriptor serde
 //! is intentionally absent: the native host receives roles and recursive types.
-use jazz::groove::records::{
+use jazz::records::{
     DescriptorField, EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, ValueType,
 };
 use serde::{Deserialize, Serialize};
@@ -52,13 +52,13 @@ enum NativeType {
 enum InternalType {
     RawString,
     RawBytes,
-    StoredScalar(jazz::groove::large_values::LargeValueKind),
+    StoredScalar(jazz::large_values::LargeValueKind),
 }
 
 fn nested_descriptor(fields: NamedFields) -> RecordDescriptor {
     RecordDescriptor::new_with_fields(fields.into_iter().map(|(name, value_type)| {
         DescriptorField {
-            identity: name.clone().map(jazz::groove::records::FieldIdentity::Name),
+            identity: name.clone().map(jazz::records::FieldIdentity::Name),
             name,
             value_type: value_type.into_value_type(),
         }

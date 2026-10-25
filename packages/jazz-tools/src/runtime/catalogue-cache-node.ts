@@ -35,7 +35,6 @@ export class NodeCatalogueCache implements CatalogueCache {
     capture: Uint8Array,
     validateReplacement: CatalogueReplacementValidator,
   ): Promise<void> {
-    const encoded = encodeCatalogueCache(scope, capture);
     const created = await mkdir(this.directory, { recursive: true, mode: 0o700 });
     if (created) {
       const parent = dirname(resolve(created));
@@ -61,7 +60,8 @@ export class NodeCatalogueCache implements CatalogueCache {
       await waitForLock(lock.fd);
       locked = true;
       const previous = await this.load(scope);
-      if (previous) validateReplacement(previous, capture);
+      const resolved = previous ? (validateReplacement(previous, capture) ?? capture) : capture;
+      const encoded = encodeCatalogueCache(scope, resolved);
       const handle = await open(temporary, "wx", 0o600);
       try {
         await handle.writeFile(encoded, "utf8");

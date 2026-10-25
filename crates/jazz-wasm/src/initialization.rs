@@ -13,6 +13,16 @@ impl WasmDb {
         jazz::db::validate_catalogue_capture_replacement(&previous, &next).map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = mergeCatalogueCaptures)]
+    pub fn merge_catalogue_captures(
+        &self,
+        previous: Vec<u8>,
+        next: Vec<u8>,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.open_inner()?;
+        jazz::db::merge_catalogue_captures(&previous, &next).map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = hasAuthenticatedCatalogue)]
     pub fn has_authenticated_catalogue(&self) -> Result<js_sys::Promise, JsValue> {
         let ready = self

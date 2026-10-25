@@ -502,6 +502,7 @@ impl Db {
         edit: Edit,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         let value = {
             let mut inner = self.inner();
             let (col, cell) =
@@ -528,6 +529,7 @@ impl Db {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         let lowered = {
             let mut inner = self.inner();
             let identity = identity_of(opts.identity);
@@ -644,6 +646,7 @@ impl Db {
         cells: &BTreeMap<String, Value>,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
+        self.inner().require_mutation_admission()?;
         let col = streaming_column(&self.inner(), table, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
@@ -686,6 +689,7 @@ impl Db {
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        self.inner().require_mutation_admission()?;
         self.check_streaming_upload(upload)?;
         let inner = self.inner();
         let now = streaming_now_ms();
@@ -762,6 +766,7 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         if cells.contains_key(column) {
             return Err(rejected(
                 "the streamed column is also set in the other cells",
@@ -897,6 +902,7 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<StagedStreamingValue, Error> {
+        self.inner().require_mutation_admission()?;
         self.check_streaming_upload(&upload)?;
         if head.is_some()
             || base.is_some()
@@ -971,6 +977,7 @@ impl Db {
             .pending
             .take()
             .ok_or_else(|| schema_error("staged streaming upload is closed"))?;
+        self.inner().require_mutation_admission()?;
         self.check_staged_streaming_owner(staged)?;
         {
             let inner = self.inner();
@@ -1030,6 +1037,21 @@ impl Db {
     /// Replace the limits on local streaming uploads.
     pub fn set_large_value_staging_policy(&self, policy: LargeValueStagingPolicy) {
         self.inner().staging = policy;
+    }
+
+    /// Persisted local upload leases, including dropped handles awaiting
+    /// maintenance. Observing the inventory must not perform that cleanup.
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn pending_upload_count_for_test(&self) -> Result<usize, Error> {
+        self.inner
+            .borrow()
+            .conn
+            .query_row("SELECT count(*) FROM _jazz_lv_upload", [], |row| {
+                let count: i64 = row.get(0)?;
+                usize::try_from(count)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, count))
+            })
+            .map_err(storage)
     }
 
     /// End every streaming upload left untouched past the staging policy's
@@ -1363,6 +1385,7 @@ impl TxRef<'_> {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.db.inner().require_mutation_admission()?;
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
             let batch = inner.batches.get(&self.id).expect("validated overlay");
             if opts.identity != WriteIdentity::Database && opts.identity != batch.identity {

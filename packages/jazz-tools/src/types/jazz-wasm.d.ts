@@ -190,6 +190,7 @@ declare module "jazz-wasm" {
     hasAuthenticatedCatalogue(): Promise<boolean>;
     takeAuthenticatedCatalogueState(): Promise<{ capture?: Uint8Array | null; ready: boolean }>;
     validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void;
+    mergeCatalogueCaptures(previous: Uint8Array, next: Uint8Array): Uint8Array;
 
     all(
       query: Uint8Array,

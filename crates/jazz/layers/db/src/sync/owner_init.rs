@@ -48,6 +48,7 @@ impl Db {
         &self,
         open: OpenTransactionId,
     ) -> Result<InitializationSeal, Error> {
+        self.inner().require_mutation_admission()?;
         if !self.inner().non_durable {
             return self.seal_initialization_transaction(open);
         }
@@ -127,6 +128,9 @@ impl Db {
             .expect("deadline");
         let reservation = poll_fn(|_| {
             let mut inner = self.inner();
+            if let Err(error) = inner.require_mutation_admission() {
+                return Poll::Ready(Err(error));
+            }
             if let Err(error) = inner.require_foreground_writes("initialization reservations") {
                 return Poll::Ready(Err(error));
             }

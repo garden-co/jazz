@@ -608,3 +608,108 @@ fn transactions_reject_unpublished_cached_schema_reads_and_writes() {
         alice.abandon_transaction_handle(id).unwrap();
     }
 }
+
+/// Alice and Bob publish different authenticated subsets in either order. Their
+/// host keeps the union at the newer head, including after an offline reopen,
+/// without claiming that cached identities grant any fresh row coverage.
+#[test]
+fn capture_merge_unions_subsets_and_preserves_newer_head_in_either_order() {
+    use jazz::db::merge_catalogue_captures;
+    let mut snapshot = genesis(schema("notes", "text"));
+    let bob = authority(3, &snapshot, None);
+    let first = capture(&bob);
+    let lens = rename(&mut snapshot, "tasks", "body");
+    block_on(
+        bob.activate_schema_with_lenses(snapshot.schemas.last().unwrap().schema.clone(), &[lens]),
+    )
+    .unwrap();
+    bob.install_authority_catalogue(&snapshot).unwrap();
+    let complete = capture(&bob);
+    let (head, records) = unpack(&complete);
+    let partial = pack(
+        &head,
+        &records
+            .iter()
+            .filter(|r| r.schema.id == head.current)
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    for (left, right) in [
+        (&first, &partial),
+        (&partial, &first),
+        (&complete, &partial),
+        (&partial, &complete),
+    ] {
+        let merged = merge_catalogue_captures(left, right).unwrap();
+        assert_eq!(merged, complete);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alice.sqlite");
+        let alice = open(1, snapshot.schemas[0].schema.clone(), Some(&path));
+        install(&alice, &merged).unwrap();
+        block_on(alice.close()).unwrap();
+        drop(alice);
+        let alice = open(1, snapshot.schemas[0].schema.clone(), Some(&path));
+        let current =
+            block_on(alice.register_schema_view(snapshot.schemas.last().unwrap().schema.clone()))
+                .unwrap();
+        assert!(alice.has_authenticated_catalogue().unwrap());
+        assert!(current.has_authenticated_catalogue().unwrap());
+        let old = block_on(alice.register_schema_view(snapshot.schemas[0].schema.clone())).unwrap();
+        let expected = Some(snapshot.genesis_physical_identities.tables["notes"].id);
+        assert_eq!(old.table_identity("notes").unwrap(), expected);
+        assert_eq!(current.table_identity("tasks").unwrap(), expected);
+        assert!(block_on(current.cover_catalogue("tasks", None)).is_err());
+    }
+}
+
+/// Mallory cannot use host merge to replace an authority namespace, disagree
+/// about a revision or an accepted physical identity, or smuggle malformed bytes.
+#[test]
+fn capture_merge_refuses_conflicting_and_malformed_inputs_in_both_orders() {
+    use jazz::db::merge_catalogue_captures;
+    let mut snapshot = genesis(schema("notes", "text"));
+    let bob = authority(3, &snapshot, None);
+    let first = capture(&bob);
+    let lens = rename(&mut snapshot, "tasks", "body");
+    block_on(
+        bob.activate_schema_with_lenses(snapshot.schemas.last().unwrap().schema.clone(), &[lens]),
+    )
+    .unwrap();
+    bob.install_authority_catalogue(&snapshot).unwrap();
+    let complete = capture(&bob);
+    let (head, records) = unpack(&complete);
+    let mut wrong_namespace = head.clone();
+    wrong_namespace.root = [0xee; 32];
+    let mut wrong_revision = head.clone();
+    wrong_revision.current = snapshot.schemas[0].id;
+    let mut incomparable = head.clone();
+    incomparable.through += 1;
+    incomparable.revision -= 1;
+    let mut wrong_ids = records.clone();
+    wrong_ids[0]
+        .identities
+        .tables
+        .values_mut()
+        .next()
+        .unwrap()
+        .id
+        .0 = uuid::Uuid::from_bytes([0xee; 16]);
+    let mut trailing = complete.clone();
+    trailing.push(0);
+    for bad in [
+        pack(&wrong_namespace, &records),
+        pack(&wrong_revision, &records),
+        pack(&incomparable, &records),
+        pack(&head, &wrong_ids),
+        trailing,
+        vec![],
+        complete[..complete.len() - 1].to_vec(),
+    ] {
+        assert!(merge_catalogue_captures(&complete, &bad).is_err());
+        assert!(merge_catalogue_captures(&bad, &complete).is_err());
+    }
+    assert_eq!(
+        merge_catalogue_captures(&complete, &first).unwrap(),
+        complete
+    );
+}

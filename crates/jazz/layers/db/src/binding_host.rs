@@ -35,9 +35,9 @@ use crate::db::{
     InitializationSeal, InitializationTransactionStatus, InsertOptions, LargeValueStagingPolicy,
     LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint, ReservedTxId, RestoreOptions,
     SeededRowIdSource, SerializedReadResult, StreamingMutationKind, StreamingValueUpload,
-    SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError, UpdateOptions,
-    UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle, WriteIdentity,
-    WriteState, block_on,
+    SubscriberId, SubscriptionEvent, SubscriptionStream, SyncMessage, Transport, TransportError,
+    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
+    WriteIdentity, WriteState, block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -704,7 +704,9 @@ impl Binding {
     /// [`Error::is_apply_time_rejection`]) is an apply-time rejection:
     /// the call returns a receipt for a rejected transaction, and the
     /// host reports it through the write's waits.
-    fn write(&self, write: Result<WriteHandle, Error>) -> HostResult<Write> {
+    /// Native hosts with separately verified author proofs may lower typed
+    /// options through `Db`, then use this same receipt and refusal boundary.
+    pub fn write(&self, write: Result<WriteHandle, Error>) -> HostResult<Write> {
         let write = match write {
             Err(error) if error.is_apply_time_rejection() => return self.rejected(error),
             write => write?,
@@ -846,7 +848,18 @@ impl Binding {
             }
             _ => WriteIdentity::Database,
         };
-        match (TransactionKind::parse(kind)?, identity) {
+        self.begin_transaction_with_identity(id, TransactionKind::parse(kind)?, identity)
+    }
+
+    /// Begin with an identity already admitted by the host. This retains the
+    /// explicit backend check for attribution and the core's session checks.
+    pub fn begin_transaction_with_identity(
+        &self,
+        id: OpenTransactionId,
+        kind: TransactionKind,
+        identity: WriteIdentity,
+    ) -> HostResult<()> {
+        match (kind, self.checked(identity)?) {
             (TransactionKind::Mergeable, WriteIdentity::Database) => {
                 block_on(self.db.begin_mergeable(id))?
             }
@@ -1052,7 +1065,9 @@ impl Binding {
     /// [`Self::write`]), a refusal decided by the row's stored state is not
     /// the call's error: the transaction stays open and its commit is
     /// rejected with the first such refusal.
-    fn staged<T>(&self, id: OpenTransactionId, staged: Result<T, Error>) -> HostResult<()> {
+    /// Native typed lowerings must pass their outcomes here too, so a caught
+    /// refusal cannot turn a partially staged transaction into a successful one.
+    pub fn staged<T>(&self, id: OpenTransactionId, staged: Result<T, Error>) -> HostResult<()> {
         match staged {
             Err(error) if error.is_apply_time_rejection() => {
                 self.refused.borrow_mut().entry(id).or_insert(error);
@@ -1321,9 +1336,18 @@ impl Binding {
                 self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
             );
         }
-        let read = self
-            .db
-            .all_settled(prepared, opts, id, snapshot_at_begin, author)?;
+        let read: Pin<Box<dyn Future<Output = Result<crate::db::BindingSettledRead, Error>>>> =
+            if snapshot_at_begin && opts.tier == ReadTier::Remote {
+                Box::pin(
+                    self.db
+                        .all_settled_at_authority_begin(prepared, opts, id, author)?,
+                )
+            } else {
+                Box::pin(
+                    self.db
+                        .all_settled(prepared, opts, id, snapshot_at_begin, author)?,
+                )
+            };
         Ok(Box::pin(self.hooks.progress.parked(async move {
             let result = read.await?;
             let metadata = result
@@ -1649,9 +1673,21 @@ impl Binding {
     /// out on the next tick.
     pub fn connect_upstream(&self) -> Link {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = WireTransportAdapter::current(QueueTransport {
             queues: queues.clone(),
-        }));
+        });
+        // Local identity claims are not upstream credentials. Preserve the
+        // session-write tag (dropping it would turn a checked write into backend
+        // attribution), but ordinary hosts cannot vouch for its claim values.
+        // Apply this after journal replay as well as for newly created writes.
+        let transport: Box<dyn Transport> = if self.trusted_backend {
+            Box::new(transport)
+        } else {
+            Box::new(SessionClaimTransport {
+                transport,
+                admitted_owner: self.db.delegated_owner_subject(),
+            })
+        };
         let upstream = block_on(self.db.connect_upstream(transport));
         self.hooks.schedule_tick();
         Link {
@@ -1928,6 +1964,50 @@ pub struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+}
+
+/// Host admission for upstream write claims. Keeps no Db reference: the core
+/// owns this transport, so retaining its Binding here would create a cycle.
+struct SessionClaimTransport<T> {
+    transport: T,
+    admitted_owner: Option<AuthorSubject>,
+}
+
+impl<T> SessionClaimTransport<T> {
+    fn admit_commit_claims(&self, message: &mut SyncMessage) {
+        if let SyncMessage::Commit {
+            author,
+            session: Some(claims),
+            ..
+        } = message
+            && self
+                .admitted_owner
+                .is_none_or(|owner| author.as_deref() != Some(owner.canonical()))
+        {
+            claims.clear();
+        }
+    }
+}
+
+impl<T: Transport> Transport for SessionClaimTransport<T> {
+    fn send(&mut self, mut message: SyncMessage) -> Result<(), TransportError> {
+        if let SyncMessage::OwnerInitializationPublishV1 { commit, .. } = &mut message {
+            // The envelope reserves an identity; it is not authority to vouch
+            // for claims. Its body still follows the ordinary Commit rules.
+            let mut body: SyncMessage = postcard::from_bytes(commit)
+                .map_err(|error| TransportError::Failed(error.to_string()))?;
+            self.admit_commit_claims(&mut body);
+            *commit = postcard::to_allocvec(&body)
+                .map_err(|error| TransportError::Failed(error.to_string()))?;
+        } else {
+            self.admit_commit_claims(&mut message);
+        }
+        self.transport.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.transport.try_recv()
+    }
 }
 
 struct QueueTransport {

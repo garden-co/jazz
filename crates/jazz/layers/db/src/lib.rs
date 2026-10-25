@@ -28,6 +28,7 @@ mod tools {
     pub use jazz_model::model::transaction::OpenTransactionId;
 }
 
+mod array_index;
 pub mod binding_args;
 pub mod binding_codec;
 pub mod binding_host;

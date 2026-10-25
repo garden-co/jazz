@@ -121,6 +121,7 @@ impl Ctx<'_> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
+            union_arms: Vec::new(),
             preps: self.preps,
         })
     }

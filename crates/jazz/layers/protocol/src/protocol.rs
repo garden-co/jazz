@@ -7701,21 +7701,31 @@ mod tests {
         }
     }
 
+    /// Alice's internal row member uses the complete ResultKey v2 identity.
+    /// This lower-layer byte fixture also rejects the superseded unversioned
+    /// identity; peer source-closure delivery does not transmit result members.
     #[test]
-    fn legacy_row_member_postcard_golden_decodes() {
+    fn row_member_postcard_pins_result_key_v2_and_rejects_legacy_identity() {
         const LEGACY: &[u8] = &[
             0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 1, 1, 1, 1, 1, 1,
             1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
             3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        const RESULT_KEY_V2: &[u8] = &[
+            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 26, 2, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
         ];
         let member = ResultMemberEntry::Row(RealRowMemberEntry::current_content((
             jazz_types::Intern::new("t".to_owned()),
             RowUuid::from_bytes([1; 16]),
             TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
         )));
-        assert_eq!(postcard::to_allocvec(&member).unwrap(), LEGACY);
-        let decoded: ResultMemberEntry = postcard::from_bytes(LEGACY).unwrap();
+        assert_eq!(postcard::to_allocvec(&member).unwrap(), RESULT_KEY_V2);
+        let decoded: ResultMemberEntry = postcard::from_bytes(RESULT_KEY_V2).unwrap();
         assert_eq!(decoded, member);
+        assert!(postcard::from_bytes::<ResultMemberEntry>(LEGACY).is_err());
     }
 
     #[test]

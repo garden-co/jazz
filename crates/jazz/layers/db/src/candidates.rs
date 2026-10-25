@@ -94,8 +94,12 @@ impl Inner {
         provisional: bool,
         apply: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        if self.client.is_some() || !ops.iter().any(|(schema, _)| marked(schema)) {
+        if self.client.is_some() {
             return apply(self);
+        }
+        if self.ordinary_checks.borrow().is_some() || !ops.iter().any(|(schema, _)| marked(schema))
+        {
+            return self.ordinary_unit(seq, provisional, apply);
         }
         if self.candidate_checks.borrow().is_some() || self.candidate_read_evidence.is_some() {
             return Err(unsupported("nested SQLite candidate authorization units"));
@@ -383,11 +387,6 @@ impl Inner {
                 if depth == 0 {
                     return Ok(());
                 }
-                if crate::compile::is_array(table, via_column) {
-                    return Err(unsupported(
-                        "array-reference inheritance in candidate authorization units",
-                    ));
-                }
                 let name = table.references.get(via_column).ok_or_else(|| {
                     unsupported(
                         "inheritance without a declared reference in candidate authorization units",
@@ -417,11 +416,6 @@ impl Inner {
                     return Ok(());
                 }
                 let target = schema.table(source_table)?;
-                if crate::compile::is_array(target, via_column) {
-                    return Err(unsupported(
-                        "array-reference inheritance in candidate authorization units",
-                    ));
-                }
                 let Some(condition) = target.policy(*operation) else {
                     return Ok(());
                 };
@@ -484,53 +478,63 @@ impl Inner {
         if matches!(value, Sql::Null) {
             return Ok(());
         }
-        let claims = Session::default();
-        let binding = BTreeMap::new();
-        let mut ctx = Ctx::new(schema, None, &claims, &binding)
-            .with_catalogue(self)
-            .with_permission_evidence(scope);
-        ctx.params.push(value.clone());
-        let bound = format!("?{}", ctx.params.len());
-        let source = ctx.candidate_source(target, created, column, &bound)?;
-        let params = ctx.params;
-        let sql = format!("SELECT * FROM {source} WHERE _del=0 LIMIT {}", *budget + 1);
-        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-        let names = statement
-            .column_names()
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>();
-        let matches = statement
-            .query_map(params_from_iter(params.iter()), |row| {
-                names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| row.get::<_, Sql>(i).map(|v| (name.clone(), v)))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .map_err(storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
-        drop(statement);
-        for found in matches {
-            charge(budget, 1 + found.len())?;
-            self.candidate_inputs(
-                schema,
-                target,
-                &found,
-                matches!(
-                    policy,
-                    PolicyExpr::Exists { .. } | PolicyExpr::ExistsIncludingCreated { .. }
-                )
-                .then_some((table, root)),
-                session,
-                condition,
-                scope,
-                next_depth,
-                budget,
-                inputs,
-            )?;
-            inputs.push((target.stored.clone(), found));
+        let values = if matches!(policy, PolicyExpr::Inherits { .. })
+            && crate::compile::is_array(table, parent)
+        {
+            crate::array_index::members(value)?
+        } else {
+            vec![value.clone()]
+        };
+        charge(budget, values.len())?;
+        for value in values {
+            let claims = Session::default();
+            let binding = BTreeMap::new();
+            let mut ctx = Ctx::new(schema, None, &claims, &binding)
+                .with_catalogue(self)
+                .with_permission_evidence(scope);
+            ctx.params.push(value);
+            let bound = format!("?{}", ctx.params.len());
+            let source = ctx.candidate_source(target, created, column, &bound)?;
+            let params = ctx.params;
+            let sql = format!("SELECT * FROM {source} WHERE _del=0 LIMIT {}", *budget + 1);
+            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+            let names = statement
+                .column_names()
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>();
+            let matches = statement
+                .query_map(params_from_iter(params.iter()), |row| {
+                    names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| row.get::<_, Sql>(i).map(|v| (name.clone(), v)))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .map_err(storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?;
+            drop(statement);
+            for found in matches {
+                charge(budget, 1 + found.len())?;
+                self.candidate_inputs(
+                    schema,
+                    target,
+                    &found,
+                    matches!(
+                        policy,
+                        PolicyExpr::Exists { .. } | PolicyExpr::ExistsIncludingCreated { .. }
+                    )
+                    .then_some((table, root)),
+                    session,
+                    condition,
+                    scope,
+                    next_depth,
+                    budget,
+                    inputs,
+                )?;
+                inputs.push((target.stored.clone(), found));
+            }
         }
         Ok(())
     }

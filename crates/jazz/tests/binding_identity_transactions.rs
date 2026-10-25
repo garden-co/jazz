@@ -2027,6 +2027,84 @@ fn scoped_relay_schema_activation_requires_a_new_upstream_handshake() {
     );
 }
 
+/// Alice's native host supplies an already-verified session identity. Bob's
+/// provenance alone cannot grant a normal runtime backend admission.
+#[test]
+fn typed_native_transaction_admission_retains_backend_and_session_checks() {
+    use jazz::binding_host::TransactionKind;
+    let alice = open(0xa8, false, None);
+    let id = OpenTransactionId::new();
+    let refused = alice.begin_transaction_with_identity(
+        id,
+        TransactionKind::Mergeable,
+        WriteIdentity::Attribution(author("bob")),
+    );
+    assert!(matches!(refused, Err(HostError::Argument(message)) if message.contains("backend")));
+    assert!(rows(&alice).is_empty());
+
+    let backend = open(0xa9, true, None);
+    backend
+        .begin_transaction_with_identity(
+            id,
+            TransactionKind::Serializable,
+            WriteIdentity::Session(author("alice")),
+        )
+        .unwrap();
+    let staged = block_on(backend.db.mergeable_tx_ref(id).insert(
+        "files",
+        BTreeMap::from([("owner".into(), Value::String("alice".into()))]),
+        Default::default(),
+    ));
+    backend.staged(id, staged).unwrap();
+    let write = backend
+        .commit_transaction(&id.to_string(), Some("serializable"))
+        .unwrap();
+    assert!(write.rejected.is_none());
+    let committed = rows(&backend);
+    assert_eq!(committed.len(), 1);
+    assert_eq!(
+        subject(&committed[0], "$createdBy.identity.subject"),
+        "alice"
+    );
+}
+
+/// Alice stages a valid insert then an incomplete upsert through native typed
+/// lowerings. Catching the stage refusal cannot commit the earlier insert.
+#[test]
+fn typed_native_stage_refusal_rejects_the_entire_batch() {
+    use jazz::binding_host::TransactionKind;
+    let alice = open(0xaa, true, None);
+    let id = OpenTransactionId::new();
+    alice
+        .begin_transaction_with_identity(
+            id,
+            TransactionKind::Mergeable,
+            WriteIdentity::Session(author("alice")),
+        )
+        .unwrap();
+    alice
+        .staged(
+            id,
+            block_on(alice.db.mergeable_tx_ref(id).insert(
+                "files",
+                BTreeMap::from([("owner".into(), Value::String("alice".into()))]),
+                Default::default(),
+            )),
+        )
+        .unwrap();
+    let missing = RowUuid::from_bytes([0xef; 16]);
+    let staged = block_on(alice.db.mergeable_tx_ref(id).upsert(
+        "files",
+        missing,
+        BTreeMap::new(),
+        Default::default(),
+    ));
+    alice.staged(id, staged).unwrap();
+    let write = alice.commit_transaction(&id.to_string(), None).unwrap();
+    assert!(block_on(alice.wait_for_write(&write, "local").unwrap()).is_err());
+    assert!(rows(&alice).is_empty());
+}
+
 /// Alice catches a refused streamed attachment after staging another insert.
 /// The binding rejects the complete unit and rollback retires the refusal.
 #[test]
@@ -2085,4 +2163,218 @@ fn streamed_stage_refusal_rejects_companion_writes_and_retires_on_rollback() {
     let write = alice.commit_transaction(&id, Some("serializable")).unwrap();
     assert!(write.rejected.is_none());
     assert_eq!(rows(&alice).len(), 2);
+}
+
+/// Alice opens a native session batch. Bob's explicit read scope must fail
+/// before reading that batch; Alice can still read it after the failed attempt.
+#[test]
+fn typed_native_read_cannot_replace_the_transaction_session() {
+    use jazz::binding_host::TransactionKind;
+    let backend = open(0xab, true, None);
+    let id = OpenTransactionId::new();
+    backend
+        .begin_transaction_with_identity(
+            id,
+            TransactionKind::Mergeable,
+            WriteIdentity::Session(author("alice")),
+        )
+        .unwrap();
+    let query = postcard::to_allocvec(&Query::from("files")).unwrap();
+    let read = |who| {
+        block_on(backend.db.all_serialized_query(
+            &query,
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+            Some(id),
+            Some((who, BTreeMap::new())),
+            Some(who),
+            false,
+            || false,
+            |_| {},
+        ))
+    };
+    let rejected = read(author("bob")).unwrap_err();
+    assert_eq!(rejected.code, ErrorCode::WriteRejected);
+    assert!(rejected.message.contains("bound identity"));
+    assert!(read(author("alice")).is_ok());
+    backend.rollback_transaction(&id.to_string()).unwrap();
+}
+
+/// Ordinary Alice runtimes cannot turn local claims into authority credentials,
+/// including persisted explicit session batches. Backend and admitted private
+/// owners may vouch for a session; ordinary links use server-admitted claims.
+/// Alice -> [optional restart] -> authenticated link -> authority receipt
+#[test]
+fn upstream_session_claims_require_host_admission_even_after_restart() {
+    for kind in ["mergeable", "serializable"] {
+        for restart in [false, true] {
+            for route in [
+                "ordinary-backend",
+                "ordinary-session",
+                "backend",
+                "private-owner",
+            ] {
+                let policy =
+                    || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("claims.sqlite");
+                let open_client = || {
+                    let binding = open_with_policy(80, route == "backend", Some(&path), policy());
+                    if route == "private-owner" {
+                        binding.db.set_scope_isolated_storage_owner().unwrap();
+                    }
+                    binding
+                };
+                let client = open_client();
+                let up = client.connect_upstream();
+                let alice = author("alice").canonical().to_owned();
+                client
+                    .set_identity_claims(alice.as_bytes(), json!({"owner":"alice"}))
+                    .unwrap();
+                let tx = OpenTransactionId::new().to_string();
+                client
+                    .begin_transaction(&tx, kind, Some(alice.as_bytes()), None)
+                    .unwrap();
+                companion(&client, &tx, 1);
+                let write = client.commit_transaction(&tx, Some(kind)).unwrap();
+                let (client, up) = if restart {
+                    drop(up);
+                    drop(client);
+                    let client = open_client();
+                    let up = client.connect_upstream();
+                    (client, up)
+                } else {
+                    (client, up)
+                };
+                let authority = open_with_policy(81, true, None, policy());
+                authority.db.set_authority();
+                let (peer, claims) = if route == "ordinary-session" {
+                    (
+                        author("alice"),
+                        jazz::binding_host::claims(author("alice"), json!({"owner": "alice"}))
+                            .unwrap(),
+                    )
+                } else {
+                    (AuthorSubject::SYSTEM, BTreeMap::new())
+                };
+                let down = authority.accept_subscriber(peer, claims);
+                let result = drive(&up, &down, client.wait_for_write(&write, "global").unwrap());
+                let allowed = route != "ordinary-backend";
+                assert_eq!(
+                    result.is_ok(),
+                    allowed,
+                    "{route}, {kind}, restart={restart}: {result:?}"
+                );
+                assert_eq!(
+                    rows(&authority).len(),
+                    usize::from(allowed),
+                    "{route}, {kind}, restart={restart}"
+                );
+                if !allowed {
+                    assert_eq!(
+                        core_error(result.unwrap_err()).code,
+                        ErrorCode::WriteRejected
+                    );
+                    assert!(
+                        rows(&client).is_empty(),
+                        "authority rejection retracts the optimistic row"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Alice's foreground reserves and publishes through her admitted durable
+/// owner. The reservation envelope cannot vouch for forged claims; the owner
+/// supplies its authenticated session and the authority decides the fate.
+/// Frame inspection pins this binding security boundary, then real receipts
+/// prove that removing claims neither bypasses checks nor blocks valid writes.
+#[test]
+fn foreground_initialization_envelopes_keep_claim_admission_and_real_receipts() {
+    for requested_owner in ["alice", "mallory"] {
+        let policy = || PolicyExpr::eq_session("owner", vec!["claims".into(), "owner".into()]);
+        let authority = open_with_policy(85, true, None, policy());
+        authority.db.set_authority();
+        let owner = open_with_policy(86, false, None, policy());
+        owner.db.set_scope_isolated_storage_owner().unwrap();
+        let owner_up = owner.connect_upstream();
+        let authority_down = authority.accept_subscriber(AuthorSubject::SYSTEM, BTreeMap::new());
+        let foreground = open_with_policy(87, false, None, policy());
+        foreground.db.set_non_durable_client();
+        let foreground_up = foreground.connect_upstream();
+        let owner_down = owner.accept_subscriber(
+            author("alice"),
+            jazz::binding_host::claims(author("alice"), json!({"owner":"alice"})).unwrap(),
+        );
+        let links = [(&foreground_up, &owner_down), (&owner_up, &authority_down)];
+        drive_network(&links, foreground.db.wait_for_storage_owner()).unwrap();
+        let alice = author("alice").canonical().to_owned();
+        foreground
+            .set_identity_claims(alice.as_bytes(), json!({"owner": requested_owner}))
+            .unwrap();
+        let tx = OpenTransactionId::new().to_string();
+        foreground
+            .begin_transaction(&tx, "serializable", Some(alice.as_bytes()), None)
+            .unwrap();
+        foreground
+            .record_initialization_insert_absence(&tx, "files", &[1; 16])
+            .unwrap();
+        foreground
+            .insert_in_transaction(
+                &tx,
+                "files",
+                &cells(requested_owner),
+                &json!({"rowId":vec![1;16]}),
+            )
+            .unwrap();
+        let seal = drive_network(
+            &links,
+            foreground.seal_initialization_transaction_with_owner(&tx),
+        )
+        .unwrap();
+        let write = foreground
+            .publish_initialization_transaction(&seal.token)
+            .unwrap();
+        block_on(foreground.tick()).unwrap();
+        let frames = foreground_up.take_outbound();
+        let mut published = false;
+        for frame in &frames {
+            if let jazz::db::SyncMessage::OwnerInitializationPublishV1 { commit, .. } =
+                postcard::from_bytes(frame).unwrap()
+            {
+                let jazz::db::SyncMessage::Commit { session, .. } =
+                    postcard::from_bytes(&commit).unwrap()
+                else {
+                    panic!("initialization body must be a Commit")
+                };
+                assert_eq!(
+                    session,
+                    Some(BTreeMap::new()),
+                    "untrusted foreground cannot vouch for claims in a reserved publication"
+                );
+                published = true;
+            }
+        }
+        assert!(
+            published,
+            "the real sealed publication crossed the binding link"
+        );
+        owner_down.receive(frames);
+        let result = drive_network(&links, foreground.wait_for_write(&write, "global").unwrap());
+        assert_eq!(
+            result.is_ok(),
+            requested_owner == "alice",
+            "{requested_owner}: {result:?}"
+        );
+        assert_eq!(
+            rows(&authority).len(),
+            usize::from(requested_owner == "alice")
+        );
+        if requested_owner != "alice" {
+            assert_eq!(
+                core_error(result.unwrap_err()).code,
+                ErrorCode::WriteRejected
+            );
+        }
+    }
 }

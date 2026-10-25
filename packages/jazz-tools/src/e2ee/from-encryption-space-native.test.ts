@@ -679,6 +679,9 @@ it("enforces owner-managed group administration across nested sharing, recovery 
         { tier: "remote" },
       )
     )[0]!;
+    // SQLite updates require a locally observed current row. Load the member
+    // as the reader so this assertion reaches the authority's permission check.
+    await reader.db.one(app.__e2ee_v1_group_members.where({ id: member.id }), { tier: "remote" });
     await expect(
       reader.db
         .update(app.__e2ee_v1_group_members, member.id, { accountId: owner.id })

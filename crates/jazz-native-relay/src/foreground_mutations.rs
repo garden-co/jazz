@@ -1,16 +1,16 @@
 //! Foreground handles for the ordinary core write and streaming APIs.
 //! Commands contain binding data only; core owns mutation, upload, and fate semantics.
 use super::*;
-use jazz::db::{StreamingMutationKind, StreamingValueUpload, WriteHandle};
+use jazz::db::{StreamingMutationKind, StreamingValueUpload};
 use std::cell::{Cell, RefCell};
 
-type Writes = Rc<RefCell<BTreeMap<TransactionId, Rc<WriteHandle>>>>;
+type Writes = Rc<RefCell<BTreeMap<TransactionId, jazz::binding_host::Write>>>;
 
 pub(super) struct MutationHandles {
     pub(super) writes: Writes,
     uploads: Rc<RefCell<BTreeMap<u64, Rc<StreamingUploadSlot>>>>,
     staged: Rc<RefCell<BTreeMap<u64, jazz::db::StagedStreamingValue>>>,
-    errors: Rc<RefCell<Vec<jazz::db::MutationErrorEvent>>>,
+    errors: Rc<RefCell<Vec<serde_json::Value>>>,
 }
 
 impl MutationHandles {
@@ -19,16 +19,29 @@ impl MutationHandles {
         self.uploads.borrow().len()
     }
 
+    /// Hold the real per-upload mutex across polls. Tests use this native
+    /// scheduling boundary because SQLite no longer has a deferred owner lock.
+    /// Dropping the returned operation releases the ordinary mutex guard.
+    #[cfg(test)]
+    pub(super) fn hold_upload_for_test(
+        &self,
+        handle: u64,
+    ) -> Result<ForegroundOperationFuture, RelayError> {
+        let slot = self.uploads.borrow().get(&handle).cloned().ok_or_else(|| {
+            RelayError::ForegroundCommand("unknown streaming upload in fixture".into())
+        })?;
+        Ok(Box::pin(async move {
+            let _held = slot.pending.lock().await;
+            std::future::pending::<Result<ForegroundOperationResult, RelayError>>().await
+        }))
+    }
+
     pub(super) fn retire_staged(&self, handle: u64) {
         self.staged.borrow_mut().remove(&handle);
     }
 
     pub(super) fn new(db: &Db) -> Self {
-        let errors = Rc::new(RefCell::new(Vec::new()));
-        let captured = Rc::clone(&errors);
-        db.on_mutation_error(Rc::new(move |event| {
-            captured.borrow_mut().push(event.clone())
-        }));
+        let errors = Rc::clone(&db.mutation_errors);
         Self {
             writes: Rc::new(RefCell::new(BTreeMap::new())),
             uploads: Rc::new(RefCell::new(BTreeMap::new())),
@@ -38,7 +51,7 @@ impl MutationHandles {
     }
 
     pub(super) fn close(&mut self, db: &Db) -> Result<(), RelayError> {
-        db.clear_mutation_error_callback();
+        db.clear_mutation_reports();
         // Unfinished uploads exist solely in this foreground's MemoryStorage.
         // Closing drops its pending operations and Db; no unfinished scalar is
         // published to the persistent relay. Never await a node lock here.
@@ -69,25 +82,15 @@ struct StreamingMutation {
     upload: StreamingValueUpload,
 }
 
-fn poll_write_state_once(
-    future: impl Future<Output = Result<jazz::db::WriteState, jazz::db::Error>>,
-) -> Result<jazz::db::WriteState, RelayError> {
-    let mut future = std::pin::pin!(future);
-    match future
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        Poll::Ready(result) => result.map_err(RelayError::Db),
-        Poll::Pending => Err(RelayError::ForegroundCommand(
-            "write state is temporarily busy; retry after the next native turn".into(),
-        )),
-    }
-}
-
-fn register_write(writes: &Writes, write: WriteHandle) -> TransactionId {
-    let id = TransactionId::from_committed_tx(write.mergeable_tx_id());
-    writes.borrow_mut().insert(id, Rc::new(write));
-    id
+fn register_write(
+    db: &Db,
+    writes: &Writes,
+    write: jazz::binding_host::Write,
+) -> Result<TransactionId, RelayError> {
+    let id = write.tx_id;
+    db.report_write(write.clone());
+    writes.borrow_mut().insert(id, write);
+    Ok(id)
 }
 
 pub(super) fn parse_mutation_options(
@@ -149,19 +152,10 @@ impl RelayWorker {
         };
         let updated_at_ms = options.updated_at_ms;
         let row_id = row_id.map(RowUuid::from_bytes);
-        let client_id = client;
         let client = self.foreground_client_mut(client)?;
-        // Synchronous class, as on NAPI and WASM: a closed Db and an unknown
-        // table. Everything decided by row state (including a resident
-        // tombstone) is discovered while applying and reaches the write handle.
-        client
-            .db
-            .precheck_mutation_admission(&table)
-            .map_err(RelayError::Db)?;
-        self.ensure_direct_mutation_capacity(client_id)?;
-        let client = self.foreground_client_mut(client_id)?;
+        // SQLite commits local mutations on this owner thread.
         let write = match mutation {
-            ForegroundMutationKind::Insert => client.db.enqueue_insert(
+            ForegroundMutationKind::Insert => client.db.apply_insert(
                 table,
                 cells,
                 jazz::db::InsertOptions {
@@ -176,7 +170,7 @@ impl RelayWorker {
                     RelayError::ForegroundCommand("mutation requires row id".into())
                 })?;
                 match mutation {
-                    ForegroundMutationKind::Update => client.db.enqueue_update(
+                    ForegroundMutationKind::Update => client.db.apply_update(
                         table,
                         row_id,
                         cells,
@@ -192,7 +186,7 @@ impl RelayWorker {
                                 "upsert option `branch` is not supported; use `head`".into(),
                             ));
                         }
-                        client.db.enqueue_upsert(
+                        client.db.apply_upsert(
                             table,
                             row_id,
                             cells,
@@ -203,7 +197,7 @@ impl RelayWorker {
                             },
                         )
                     }
-                    ForegroundMutationKind::Delete => client.db.enqueue_delete(
+                    ForegroundMutationKind::Delete => client.db.apply_delete(
                         table,
                         row_id,
                         DeleteOptions {
@@ -212,7 +206,7 @@ impl RelayWorker {
                             ..Default::default()
                         },
                     ),
-                    ForegroundMutationKind::Restore => client.db.enqueue_restore(
+                    ForegroundMutationKind::Restore => client.db.apply_restore(
                         table,
                         row_id,
                         Some(cells),
@@ -227,15 +221,14 @@ impl RelayWorker {
             }
         }
         .map_err(RelayError::Db)?;
-        // Applying, IVM and relay pumping happen in the owner drive turn that
-        // follows this command's reply, not while the JS caller waits.
-        let row_id = write.row_uuid();
-        let id = register_write(&client.mutations.writes, write);
+        // The local commit is complete; the following turn carries it to peers.
+        let row_id = write.row_id;
+        let id = register_write(&client.db, &client.mutations.writes, write)?;
         self.drive.request(0);
         Ok((id, row_id))
     }
 
-    fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
+    pub(super) fn ensure_mutation_operation_capacity(&self, client: u64) -> Result<(), RelayError> {
         if self.foreground_client(client)?.pending_operations.len()
             + self.foreground_client(client)?.mutation_cleanups.len()
             >= NATIVE_RELAY_FOREGROUND_PENDING_MAX
@@ -243,28 +236,6 @@ impl RelayWorker {
             return Err(RelayError::ForegroundCommand(
                 "foreground operation capacity exceeded".into(),
             ));
-        }
-        Ok(())
-    }
-
-    /// The direct-mutation arm of the foreground capacity policy above.
-    /// Streaming operations are bounded by their retained futures; direct
-    /// mutations by the core owner queue they are admitted into. At the cap,
-    /// admission applies backpressure by applying queued work inline (the
-    /// calling JS turn pays for the excess of a burst), and rejects, admitting
-    /// nothing, only when the queue cannot make progress.
-    fn ensure_direct_mutation_capacity(&self, client: u64) -> Result<(), RelayError> {
-        let client = self.foreground_client(client)?;
-        let mut polls = 0;
-        while client.db.queued_mutation_count() >= NATIVE_RELAY_DIRECT_MUTATION_QUEUE_MAX {
-            if polls == NATIVE_RELAY_DIRECT_MUTATION_BACKPRESSURE_POLLS {
-                return Err(RelayError::ForegroundCommand(
-                    "backpressure: direct mutation queue is full; retry after the next native turn"
-                        .into(),
-                ));
-            }
-            client.db.drive_queued_mutation_once();
-            polls += 1;
         }
         Ok(())
     }
@@ -280,20 +251,13 @@ impl RelayWorker {
             .iter()
             .find(|(id, _)| id.as_bytes() == &public_id)
             .map(|(_, write)| write);
-        let state = match write {
-            Some(write) => poll_write_state_once(write.write_state()),
-            None => {
-                let tx_id = client
-                    .committed_transactions
-                    .iter()
-                    .find(|(id, _)| id.as_bytes() == &public_id)
-                    .map(|(_, tx_id)| *tx_id)
-                    .ok_or_else(|| {
-                        RelayError::ForegroundCommand("unknown foreground write".into())
-                    })?;
-                poll_write_state_once(client.db.write_state_async(tx_id))
-            }
-        }?;
+        let write = write
+            .ok_or_else(|| RelayError::ForegroundCommand("unknown foreground write".into()))?;
+        let state = client
+            .db
+            .binding
+            .write_state(write)
+            .map_err(engine::host_error)?;
         serde_json::to_string(&state)
             .map_err(|error| RelayError::ForegroundCommand(error.to_string()))
     }
@@ -453,9 +417,9 @@ impl RelayWorker {
                 )
                 .await;
             uploads.borrow_mut().remove(&handle);
-            let write = result.map_err(RelayError::Db)?;
+            let write = db.binding.write(result).map_err(engine::host_error)?;
             Ok(ForegroundOperationResult::TransactionCommitted(
-                register_write(&writes, write),
+                register_write(&db, &writes, write)?,
             ))
         });
         let result = self.start_foreground_operation(client, None, future)?;
@@ -592,9 +556,12 @@ impl RelayWorker {
             })?;
         let (db, tx) = self.foreground_transaction(client, transaction)?;
         let future: ForegroundOperationFuture = Box::pin(async move {
-            db.attach_staged_streaming_value(tx.open_tx_id, &mut staged)
-                .await
-                .map_err(RelayError::Db)?;
+            let attached = db
+                .attach_staged_streaming_value(tx.open_tx_id, &mut staged)
+                .await;
+            db.binding
+                .staged(tx.open_tx_id, attached)
+                .map_err(engine::host_error)?;
             Ok(ForegroundOperationResult::StagedStreamingMutationAttached)
         });
         self.start_foreground_operation(client, None, future)
@@ -642,7 +609,7 @@ impl RelayWorker {
         let client = self.foreground_client_mut(client)?;
         let write = client
             .db
-            .enqueue_large_value_update(
+            .apply_large_value_update(
                 table,
                 RowUuid::from_bytes(row_id),
                 patch,
@@ -650,14 +617,7 @@ impl RelayWorker {
                 updated_at_ms,
             )
             .map_err(RelayError::Db)?;
-        client.db.drive_queued_mutation_once();
-        if let Some(error) = client
-            .db
-            .take_queued_mutation_failure(write.mergeable_tx_id())
-        {
-            return Err(RelayError::Db(error));
-        }
-        Ok(register_write(&client.mutations.writes, write))
+        register_write(&client.db, &client.mutations.writes, write)
     }
 }
 

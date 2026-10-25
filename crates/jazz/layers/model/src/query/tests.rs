@@ -2125,11 +2125,13 @@ mod tests {
                 .to_string()
         }
 
+        /// Alice's predicate retains its JSON and postcard byte contracts. This
+        /// lower-layer fixture pins literal tags, including Value::Large at tag 8.
         #[test]
         fn predicate_json_and_postcard_encodings_are_pinned() {
             let predicate = every_variant();
             let json = r#"{"All":[{"Any":[{"Eq":[{"Column":"a"},{"Param":"p"}]},{"Ne":[{"Column":"a"},{"Claim":"c"}]}]},{"Not":{"Gt":[{"Column":"b"},{"Literal":{"I64":-3}}]}},{"Gte":[{"Column":"b"},{"Literal":{"String":"s"}}]},{"Lt":[{"Column":"b"},{"Literal":{"Bool":true}}]},{"Lte":[{"Column":"b"},{"Literal":{"U64":7}}]},{"In":[{"Column":"c"},[{"Literal":{"I32":1}},{"Param":"q"}]]},{"Contains":[{"Column":"d"},{"Literal":{"Bytes":[1,2]}}]},{"EnumMatch":{"column":"e","case":"k","payload":{"Any":[{"IsNull":{"Column":"f"}}]}}},{"All":[]}]}"#;
-            let bytes = "0009010203000161010170040001610201630206000162030d05070001620306017308000162030501090001620303070500016302030e020101710a00016403070201020b0165016b01010c0001660000";
+            let bytes = "0009010203000161010170040001610201630206000162030e05070001620306017308000162030501090001620303070500016302030f020101710a00016403070201020b0165016b01010c0001660000";
             assert_eq!(serde_json::to_string(&predicate).unwrap(), json);
             assert_eq!(
                 hex::encode(postcard::to_allocvec(&predicate).unwrap()),

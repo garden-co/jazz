@@ -10,8 +10,7 @@ rn-test-bridge = ["dep:jazz-native-relay"]
 # advertises the binding's actual wire capabilities, so the default package
 # includes the same native zstd codec used by the shipped jazz-tools server.
 # RocksDB's unrelated zstd dependency does not enable Jazz transport zstd.
-default = ["rocksdb", "transport-compression-zstd"]
-rocksdb = ["dep:jazz-storage-rocksdb"]
+default = ["transport-compression-zstd"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 
 [lib]
@@ -22,7 +21,6 @@ jazz-native-relay = { path = "../jazz-native-relay", optional = true }
 jazz = { path = "../jazz", default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-native-transport = { path = "../jazz-native-transport" }
-jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
 futures = "0.3"
@@ -49,4 +47,4 @@ mimalloc-safe = { version = "0.1", features = ["local_dynamic_tls", "no_opt_arch
 napi-build = "2"
 
 [dev-dependencies]
-groove = { workspace = true, default-features = false, features = ["test"] }
+jazz = { path = "../jazz", default-features = false, features = ["testing"] }

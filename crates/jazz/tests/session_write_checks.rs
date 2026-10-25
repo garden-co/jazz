@@ -200,3 +200,102 @@ fn a_trusted_links_session_write_is_checked_as_that_session_at_the_authority() {
     pump();
     assert_eq!(cell(&server, "protected", "data"), text("alice"));
 }
+
+/// Alice's ordinary replica uploads its own optimistic write. A backend socket
+/// cannot turn that write or client-local claims into SYSTEM authority. A real
+/// Alice session still uses the claims admitted by the server, after reconnect.
+#[test]
+fn ordinary_replica_writes_keep_session_authorization_over_backend_links() {
+    use jazz::db::{FileOptions, InsertOptions, RemoteLinkHint};
+    use jazz::tx::{DurabilityTier, Fate, RejectionReason};
+    let alice = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+    let policy = PolicyExpr::eq_session("owner", vec!["claims".into(), "sub".into()]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("owner", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(policy),
+                    ),
+            )
+            .build(),
+    );
+    for authenticated_session in [false, true] {
+        let server = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xee; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("alice.sqlite");
+        let config = || {
+            DbConfig::new(
+                schema.clone(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0xa1; 16]),
+                    author: alice,
+                },
+            )
+        };
+        let client = block_on(Db::open_at(config(), &path, FileOptions::default())).unwrap();
+        client.set_remote_link_hint(RemoteLinkHint::NoServer);
+        let claims = BTreeMap::from([(jazz::query::provider_claim_key("sub"), text("alice"))]);
+        client.set_identity_claims(alice, claims.clone());
+        let write = block_on(client.insert(
+            "notes",
+            BTreeMap::from([("owner".into(), text("alice"))]),
+            InsertOptions::default(),
+        ))
+        .unwrap();
+        let tx = write.mergeable_tx_id();
+        block_on(client.wait_for_transaction(tx, DurabilityTier::Local)).unwrap();
+        drop(client);
+        let client = block_on(Db::open_at(config(), &path, FileOptions::default())).unwrap();
+        let (up, down) = duplex();
+        block_on(client.connect_upstream(up));
+        server.accept_subscriber_with_claims(
+            down,
+            if authenticated_session {
+                alice
+            } else {
+                AuthorSubject::SYSTEM
+            },
+            Some(if authenticated_session {
+                claims
+            } else {
+                BTreeMap::new()
+            }),
+        );
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(client.tick()).unwrap();
+        let state = client.write_state(tx).unwrap();
+        assert_eq!(
+            state.fate,
+            if authenticated_session {
+                Fate::Accepted
+            } else {
+                Fate::Rejected(RejectionReason::AuthorizationDenied)
+            }
+        );
+        assert_eq!(
+            block_on(client.wait_for_transaction(tx, DurabilityTier::Global)).is_ok(),
+            authenticated_session
+        );
+        let query = server.prepare_query(&Query::from("notes")).unwrap();
+        assert_eq!(
+            block_on(server.all(&query, ReadOpts::default()))
+                .unwrap()
+                .len(),
+            usize::from(authenticated_session)
+        );
+    }
+}

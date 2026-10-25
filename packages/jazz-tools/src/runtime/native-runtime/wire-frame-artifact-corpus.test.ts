@@ -1,10 +1,16 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
 import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
-import { FEATURE_PAYLOAD_ZSTD, decodeWireError, encodeWebSocketFrameBatch } from "./websocket.js";
+import {
+  FEATURE_PAYLOAD_ZSTD,
+  decodeWireError,
+  decodeWebSocketFrameBatch,
+  encodeWebSocketFrameBatch,
+} from "./websocket.js";
 
 type FrameFixture = { name: string; frame_hex: string };
 type ArtifactCorpus = {
@@ -22,15 +28,16 @@ type ArtifactCorpus = {
 type ArtifactFrameValidator = {
   __testValidateWireFrameBatchCorpus(frame: Uint8Array, negotiatedFeatures: string): void;
   __testWireFrameCorpusFeatures(): string;
+  __testValidateSqliteSyncFrameCorpus(frame: Uint8Array): void;
 };
 
 type WasmArtifactFrameValidator = ArtifactFrameValidator & {
   WasmDb: { prototype: { wireFeatures?: () => number } };
 };
 
-// The source fixtures freeze the exact Rust-produced v1 bytes. This test then
-// sends every complete Hello/message frame through both freshly generated artifacts,
-// not a JavaScript mirror of the Rust frame/payload/compression decoder.
+// Control-frame fixtures still use the shared v6 carrier. SQLite semantics use
+// their own exact decoder; retired Groove frames must not become current input.
+// Both paths execute Rust in the freshly sealed generated artifacts.
 describe("wire frame artifact corpus", () => {
   it("decodes every exact structured v1 error and rejects planted field drift", () => {
     const corpus = artifactCorpus();
@@ -58,20 +65,14 @@ describe("wire frame artifact corpus", () => {
   });
 
   it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
-    "executes every complete v1 frame and rejects malformed input through NAPI and WASM",
+    "executes current SQLite messages and shared control frames while refusing retired and malformed input through NAPI and WASM",
     async () => {
       const corpus = artifactCorpus();
       expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v6");
-      const accepted = [
-        ...[...rustHelloFixtures(), ...corpus.error_frames].map((frame) => ({
-          name: frame.name,
-          batch: encodeWebSocketFrameBatch([hexToBytes(frame.frame_hex)]),
-        })),
-        ...rustMessageFixtures().map((fixture) => ({
-          name: fixture.name,
-          batch: hexToBytes(fixture.batch_hex),
-        })),
-      ];
+      const accepted = [...rustHelloFixtures(), ...corpus.error_frames].map((frame) => ({
+        name: frame.name,
+        batch: encodeWebSocketFrameBatch([hexToBytes(frame.frame_hex)]),
+      }));
       const [napi, wasm] = await Promise.all([
         // This is a deliberately test-only export (`skip_typescript` in
         // napi-rs), so production declarations must not advertise it.
@@ -100,6 +101,38 @@ describe("wire frame artifact corpus", () => {
             () => artifact.__testValidateWireFrameBatchCorpus(frame.batch, negotiatedFeatures),
             frame.name,
           ).not.toThrow();
+        }
+        // Retain every old complete semantic case as an explicit incompatibility
+        // check, at both its retired decoder and the actual SQLite boundary.
+        for (const retired of rustMessageFixtures()) {
+          const batch = hexToBytes(retired.batch_hex);
+          expect(
+            () => artifact.__testValidateWireFrameBatchCorpus(batch, negotiatedFeatures),
+            retired.name,
+          ).toThrow();
+          for (const frame of decodeWebSocketFrameBatch(batch)) {
+            expect(
+              () => artifact.__testValidateSqliteSyncFrameCorpus(frame),
+              retired.name,
+            ).toThrow();
+          }
+        }
+        for (const fixture of sqliteMessageFixtures()) {
+          const frame = hexToBytes(fixture.frame_hex);
+          expect(
+            () => artifact.__testValidateSqliteSyncFrameCorpus(frame),
+            fixture.name,
+          ).not.toThrow();
+          for (const invalid of [
+            new Uint8Array([...frame, 0]),
+            frame.slice(0, -1),
+            new Uint8Array([frame[0]! | 0x80, 0, ...frame.slice(1)]),
+          ]) {
+            expect(
+              () => artifact.__testValidateSqliteSyncFrameCorpus(invalid),
+              fixture.name,
+            ).toThrow();
+          }
         }
         for (const rejection of corpus.rejections) {
           expect(
@@ -144,4 +177,48 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
+}
+
+function sqliteMessageFixtures(): Array<{ name: string; variant: string; frame_hex: string }> {
+  const corpus = readJson("sqlite_sync_artifact_corpus_v1.json") as {
+    role: string;
+    version: number;
+    variants: string[];
+    sources: Record<string, string>;
+    base_messages: Array<{ name: string; variant: string; frame_hex: string }>;
+    existing_messages: Array<{ name: string; variant: string; source: string; pointer: string }>;
+  };
+  expect(corpus.role).toBe("jazz.sqlite.sync-artifact-corpus.v1");
+  expect(corpus.version).toBe(1);
+  const sources = new Map<string, unknown>();
+  for (const [name, sha256] of Object.entries(corpus.sources)) {
+    const bytes = readFileSync(
+      new URL(`../../../../../crates/jazz/fixtures/${name}`, import.meta.url),
+    );
+    expect(createHash("sha256").update(bytes).digest("hex"), name).toBe(sha256);
+    sources.set(name, JSON.parse(bytes.toString("utf8")));
+  }
+  const fixtures = [
+    ...corpus.base_messages,
+    ...corpus.existing_messages.map((item) => {
+      let value: unknown = sources.get(item.source);
+      for (const part of item.pointer.slice(1).split("/")) {
+        value = (value as Record<string, unknown>)[part];
+      }
+      expect(typeof value, item.name).toBe("string");
+      return { name: item.name, variant: item.variant, frame_hex: value as string };
+    }),
+  ];
+  expect(new Set(fixtures.map((item) => item.name)).size).toBe(fixtures.length);
+  expect([...new Set(fixtures.map((item) => item.variant))].sort()).toEqual(
+    [...corpus.variants].sort(),
+  );
+  expect(corpus.variants).toHaveLength(41);
+  for (const item of fixtures) {
+    expect(item.frame_hex).toMatch(/^(?:[0-9a-f]{2})+$/);
+    expect(Number.parseInt(item.frame_hex.slice(0, 2), 16), item.name).toBe(
+      corpus.variants.indexOf(item.variant),
+    );
+  }
+  return fixtures;
 }

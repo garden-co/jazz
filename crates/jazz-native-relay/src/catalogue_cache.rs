@@ -1,9 +1,7 @@
 use super::*;
-use jazz::groove::storage::{OrderedKvStorage, StorageCodecProfile, StorageFactory};
+use rusqlite::{Connection, OptionalExtension};
 
-const FAMILY: &str = "catalogue";
-const KEY: &[u8] = b"authenticated-capture-v1";
-const MAGIC: &[u8] = b"JNC\x01";
+const MAGIC: &[u8] = b"JNC\x02";
 
 type CatalogueObservation =
     Pin<Box<dyn Future<Output = Result<jazz::db::AuthenticatedCatalogueState, jazz::db::Error>>>>;
@@ -43,26 +41,54 @@ impl CatalogueCache {
             pending_ready: false,
             observation: None,
         };
+        let _lock = cache.lock()?;
         let storage = cache.open()?;
-        let bytes =
-            block_on(storage.get(FAMILY.into(), KEY.to_vec())).map_err(RelayError::Storage)?;
-        block_on(storage.close()).map_err(RelayError::Storage)?;
+        let bytes = storage
+            .query_row(
+                "SELECT capture FROM _jazz_native_catalogue_v2 WHERE slot=1",
+                [],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        drop(storage);
         if let Some(bytes) = bytes {
             cache.capture = Some(cache.decode(&bytes)?.to_vec());
         }
         Ok(cache)
     }
 
-    fn open(&self) -> Result<BoxedStorage, RelayError> {
-        let profile = StorageCodecProfile::groove_epoch_1()
-            .with_additional_codecs(["jazz.native-authenticated-catalogue-cache.v1"])
-            .map_err(RelayError::Storage)?;
-        block_on(SqliteStorageFactory::default().open(
-            self.path.clone(),
-            vec![FAMILY.into()],
-            profile,
-        ))
-        .map_err(RelayError::Storage)
+    fn open(&self) -> Result<Connection, RelayError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(RelayError::Storage)?;
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(&self.path)
+            && !meta.file_type().is_file()
+        {
+            return Err(invalid("catalogue cache must be a regular file"));
+        }
+        let mut conn = Connection::open(&self.path).map_err(sql_error)?;
+        conn.execute_batch("PRAGMA synchronous=FULL")
+            .map_err(sql_error)?;
+        let tx = conn.transaction().map_err(sql_error)?;
+        let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_jazz_native_catalogue_v2')",[],|r|r.get(0)).map_err(sql_error)?;
+        if !exists {
+            let occupied: bool = tx
+                .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master)", [], |r| {
+                    r.get(0)
+                })
+                .map_err(sql_error)?;
+            if occupied {
+                return Err(RelayError::Db(jazz::db::Error::new(
+                    jazz::db::ErrorCode::UnsupportedStorageCodecs,
+                    "native catalogue cache requires jazz.sqlite.native-catalogue-cache.v2",
+                )));
+            }
+            tx.execute_batch("CREATE TABLE _jazz_native_catalogue_v2(slot INTEGER PRIMARY KEY CHECK(slot=1),capture BLOB NOT NULL)").map_err(sql_error)?;
+        }
+        tx.commit().map_err(sql_error)?;
+        engine::sync_parent(&self.path)?;
+        Ok(conn)
     }
 
     fn decode<'a>(&self, bytes: &'a [u8]) -> Result<&'a [u8], RelayError> {
@@ -89,13 +115,13 @@ impl CatalogueCache {
     /// lock, so cancelling a waiter cannot cancel or duplicate the drain.
     pub(super) fn poll_refresh(
         &mut self,
-        owner: &Rc<Db<BoxedStorage>>,
+        owner: &Rc<Db>,
         context: &mut Context<'_>,
     ) -> Poll<Result<bool, RelayError>> {
         if self.pending_capture.is_none() {
             let observation = self.observation.get_or_insert_with(|| {
                 let owner = Rc::clone(owner);
-                Box::pin(async move { owner.take_authenticated_catalogue_state().await })
+                Box::pin(async move { owner.take_authenticated_catalogue_state() })
             });
             let state = match observation.as_mut().poll(context) {
                 Poll::Pending => return Poll::Pending,
@@ -113,52 +139,77 @@ impl CatalogueCache {
         if let Some(capture) = self.pending_capture.as_deref() {
             // On error the exact drained capture stays owned here for retry;
             // neither the pump nor a waiter can report durable readiness.
-            if let Err(error) = self.persist(capture) {
-                return Poll::Ready(Err(error));
-            }
-            self.capture = self.pending_capture.take();
+            let merged = match self.persist(capture) {
+                Ok(merged) => merged,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
+            self.pending_capture = None;
+            self.capture = Some(merged);
         }
         Poll::Ready(Ok(self.pending_ready))
     }
 
-    fn persist(&self, capture: &[u8]) -> Result<(), RelayError> {
-        if self.capture.as_deref() == Some(capture) {
-            return Ok(());
+    fn lock(&self) -> Result<std::fs::File, RelayError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(RelayError::Storage)?;
         }
-        let length =
-            u32::try_from(capture.len()).map_err(|_| invalid("catalogue capture too large"))?;
-        // A stable inode coordinates account owner threads and host processes.
-        // Never unlink it: replacing a lockfile would split ownership.
+        let path = self.path.with_extension("lock");
+        if let Ok(meta) = std::fs::symlink_metadata(&path)
+            && !meta.file_type().is_file()
+        {
+            return Err(invalid("catalogue lock must be a regular file"));
+        }
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(self.path.with_extension("lock"))
-            .map_err(|error| invalid(&format!("open catalogue lock: {error}")))?;
-        lock.lock()
-            .map_err(|error| invalid(&format!("lock catalogue cache: {error}")))?;
+            .open(path)
+            .map_err(RelayError::Storage)?;
+        lock.lock().map_err(RelayError::Storage)?;
+        Ok(lock)
+    }
+
+    fn persist(&self, capture: &[u8]) -> Result<Vec<u8>, RelayError> {
+        // A stable inode coordinates account owner threads and host processes.
+        // Never unlink it: replacing a lockfile would split ownership.
+        let _lock = self.lock()?;
         let storage = self.open()?;
-        let previous =
-            block_on(storage.get(FAMILY.into(), KEY.to_vec())).map_err(RelayError::Storage)?;
-        if let Some(previous) = previous {
-            let previous = self.decode(&previous)?;
-            jazz::db::validate_catalogue_capture_replacement(previous, capture)
-                .map_err(RelayError::Db)?;
-        }
+        let previous = storage
+            .query_row(
+                "SELECT capture FROM _jazz_native_catalogue_v2 WHERE slot=1",
+                [],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let capture = if let Some(previous) = previous {
+            jazz::db::merge_catalogue_captures(self.decode(&previous)?, capture)
+                .map_err(RelayError::Db)?
+        } else {
+            capture.to_vec()
+        };
+        let length =
+            u32::try_from(capture.len()).map_err(|_| invalid("catalogue capture too large"))?;
         let mut envelope = Vec::with_capacity(MAGIC.len() + self.scope.len() + 4 + capture.len());
         envelope.extend_from_slice(MAGIC);
         envelope.extend_from_slice(&self.scope);
         envelope.extend_from_slice(&length.to_be_bytes());
-        envelope.extend_from_slice(capture);
-        block_on(storage.set(FAMILY.into(), KEY.to_vec(), envelope))
-            .map_err(RelayError::Storage)?;
-        block_on(storage.flush_write_boundary()).map_err(RelayError::Storage)?;
-        block_on(storage.close()).map_err(RelayError::Storage)?;
-        Ok(())
+        envelope.extend_from_slice(&capture);
+        storage.execute("INSERT INTO _jazz_native_catalogue_v2 VALUES(1,?1) ON CONFLICT(slot) DO UPDATE SET capture=excluded.capture",[envelope]).map_err(sql_error)?;
+        storage.close().map_err(|(_, e)| sql_error(e))?;
+        engine::sync_parent(&self.path)?;
+        Ok(capture)
     }
 }
 
 fn invalid(message: &str) -> RelayError {
     RelayError::ForegroundCommand(message.to_owned())
+}
+
+fn sql_error(error: rusqlite::Error) -> RelayError {
+    RelayError::Db(jazz::db::Error::new(
+        jazz::db::ErrorCode::Storage,
+        error.to_string(),
+    ))
 }

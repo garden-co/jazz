@@ -351,6 +351,8 @@ fn a_streamed_upload_reaches_other_replicas() {
 #[test]
 fn reads_overtake_uploads_held_by_the_ingress_limit() {
     let server = open(0, AuthorSubject::SYSTEM);
+    server.set_authority();
+    server.initialize_authority_catalogue().unwrap();
     server.set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
         incoming_bytes_per_window: LARGE as u64,
         window_ms: 60_000,

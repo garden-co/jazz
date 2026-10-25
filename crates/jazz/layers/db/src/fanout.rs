@@ -557,6 +557,10 @@ impl Inner {
             Ok(())
         }
         joins(&mut structural, &query.joins, &stored)?;
+        if query.relation.is_some() {
+            // Each arm can reach these tables independently of the root policy.
+            structural.extend(compiled.tables.iter().cloned());
+        }
         fn arrays(
             out: &mut BTreeSet<String>,
             list: &[crate::query::ArraySubquery],
@@ -1011,6 +1015,7 @@ impl Inner {
                 row_uuid: *id,
                 joined: Vec::new(),
                 version: None,
+                union_arm: None,
                 index: *index,
             })
             .collect();
@@ -1027,6 +1032,7 @@ impl Inner {
                     row_uuid: row.id,
                     joined: Vec::new(),
                     version: None,
+                    union_arm: None,
                     index,
                 })
             }));
@@ -1197,6 +1203,7 @@ impl Inner {
                             row_uuid: row.id,
                             joined: row.joined.to_vec(),
                             version: row.version,
+                            union_arm: row.union_arm().map(str::to_owned),
                             index,
                         })
                         .collect();
@@ -1320,7 +1327,8 @@ impl Group {
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
-    !is_history_table(&query.table)
+    query.relation.is_none()
+        && !is_history_table(&query.table)
         && query.offset == 0
         && query.aggregate.is_none()
         && query.joins.is_empty()
@@ -1397,7 +1405,12 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 /// What identifies a result row across runs: its id, plus its seq for a
 /// history read, whose versions share their row's id, and a flat join's
 /// joined rows (the occurrence).
-type RowKey = (RowUuid, u64, Arc<[crate::values::JoinedRow]>);
+type RowKey = (
+    RowUuid,
+    u64,
+    Arc<[crate::values::JoinedRow]>,
+    Option<Arc<str>>,
+);
 
 fn row_key(row: &CurrentRow) -> RowKey {
     let version = if is_history_table(&row.table) {
@@ -1405,7 +1418,7 @@ fn row_key(row: &CurrentRow) -> RowKey {
     } else {
         0
     };
-    (row.id, version, row.joined.clone())
+    (row.id, version, row.joined.clone(), row.union_arm.clone())
 }
 
 /// The keyed diff of two results, or `None` when nothing changed.
@@ -1457,6 +1470,7 @@ pub(super) fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<Subscr
             row_uuid: row.id,
             joined: row.joined.to_vec(),
             version: row.version,
+            union_arm: row.union_arm().map(str::to_owned),
             index,
         })
         .collect();

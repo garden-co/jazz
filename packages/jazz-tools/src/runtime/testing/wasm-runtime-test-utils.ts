@@ -129,6 +129,8 @@ export async function createWasmRuntime(
     appId?: string;
     env?: string;
     peerId?: string;
+    /** Standalone authority by default; upstream clients must use false. */
+    historyComplete?: boolean;
   },
 ): Promise<TestRuntime> {
   const wasmModule = await loadWasmModuleForTest();
@@ -141,7 +143,7 @@ export async function createWasmRuntime(
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
     testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
-    true,
+    opts?.historyComplete ?? true,
   );
   onTestFinished(async () => {
     await freeRuntimeSafely(runtime);

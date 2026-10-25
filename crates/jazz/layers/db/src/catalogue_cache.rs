@@ -92,18 +92,58 @@ pub fn validate_catalogue_capture_replacement(previous: &[u8], next: &[u8]) -> R
             .binary_search_by_key(&old.schema.id, |s| s.schema.id)
             .map_err(|_| invalid("catalogue cache replacement omits accepted descriptor"))?;
         let new = &next.schemas[index];
-        if old.identities != new.identities
-            || !old
-                .schema
-                .schema
-                .has_same_lineage_structure(&new.schema.schema)
-        {
-            return Err(invalid(
-                "catalogue cache replacement rebinds accepted identities",
-            ));
-        }
+        compatible_descriptor(&old, new)?;
     }
     Ok(())
+}
+
+fn compatible_descriptor(old: &CatalogueSchemaV1, new: &CatalogueSchemaV1) -> Result<(), Error> {
+    if old.identities != new.identities
+        || !old
+            .schema
+            .schema
+            .has_same_lineage_structure(&new.schema.schema)
+    {
+        return Err(invalid(
+            "catalogue cache replacement rebinds accepted identities",
+        ));
+    }
+    Ok(())
+}
+
+/// Combine two already-authenticated captures in the same exact host scope.
+/// Owners may have received different descriptor subsets or publish out of
+/// order. Keep their union and the newer comparable head; shared identities
+/// must agree. This neither authenticates input nor grants fresh coverage.
+/// The host must run this against the current stored capture inside its atomic
+/// publication operation, never against a separately loaded stale copy.
+/// The result uses the existing canonical catalogue-capture.v1 encoding.
+pub fn merge_catalogue_captures(previous: &[u8], next: &[u8]) -> Result<Vec<u8>, Error> {
+    let previous = CaptureV1::decode(previous)?;
+    let next = CaptureV1::decode(next)?;
+    let (older, newer) = if follows(&previous.head, &next.head).is_ok() {
+        (previous, next)
+    } else {
+        follows(&next.head, &previous.head)?;
+        (next, previous)
+    };
+    let mut records = older
+        .schemas
+        .into_iter()
+        .map(|record| (record.schema.id, record))
+        .collect::<BTreeMap<_, _>>();
+    for record in newer.schemas {
+        if let Some(previous) = records.get(&record.schema.id) {
+            compatible_descriptor(previous, &record)?;
+        }
+        records.insert(record.schema.id, record);
+    }
+    let merged = CaptureV1 {
+        head: newer.head,
+        schemas: records.into_values().collect(),
+    };
+    merged.validate()?;
+    merged.encode()
 }
 
 /// One atomic observation. Readiness qualifies this handle's opened schema;

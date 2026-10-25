@@ -271,6 +271,174 @@ fn online_begin_requirement_refuses_late_evidence() {
     assert!(block_on(alice.commit_serializable_handle(tx)).is_err());
 }
 
+/// Alice records an initialization absence at begin, then Bob changes existing
+/// content. Later hydration must keep that first read's cut, so local accepted
+/// history agrees with ordinary reads and the stale transaction cannot commit.
+#[test]
+fn initialization_absence_pins_subsequent_transaction_reads() {
+    let server = open(3, true);
+    server.initialize_authority_catalogue().unwrap();
+    let note = insert(&server, "notes", "before");
+    let alice = open(1, false);
+    connect(&alice, &server);
+    drive(&[&alice, &server], alice.cover_catalogue("notes", None)).unwrap();
+    fetch(&alice, &[&alice, &server], Query::from("notes"));
+    let tx = begin(&alice);
+    alice
+        .prepare_initialization_insert(tx, "refs", jazz::ids::RowUuid::from_bytes([9; 16]))
+        .unwrap();
+    block_on(server.update("notes", note.row_uuid(), cells("after"), Default::default())).unwrap();
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let read = drive(
+        &[&alice, &server],
+        alice.serializable_tx_ref(tx).all_prepared(&query),
+    )
+    .unwrap();
+    assert_eq!(read[0].cell_at(0), Some(Value::String("before".into())));
+    let accepted = block_on(paired(&alice, tx, "notes", true, true, false)).unwrap();
+    assert_eq!(texts(&accepted), ["before"]);
+    let error = match block_on(alice.commit_serializable_handle(tx)) {
+        Err(error) => error,
+        Ok(receipt) => drive(
+            &[&alice, &server],
+            alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
+        )
+        .unwrap_err(),
+    };
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+}
+
+/// Alice has observed a server coordinate when she opens her transaction.
+/// Bob's later edit must not advance its first ordinary read past public begin.
+#[test]
+fn known_begin_coordinate_pins_the_first_ordinary_read() {
+    let server = open(3, true);
+    let note = insert(&server, "notes", "before");
+    let alice = open(1, false);
+    connect(&alice, &server);
+    fetch(&alice, &[&alice, &server], Query::from("notes").limit(0));
+    let tx = begin(&alice);
+    block_on(server.update("notes", note.row_uuid(), cells("after"), Default::default())).unwrap();
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let read = drive(
+        &[&alice, &server],
+        alice.serializable_tx_ref(tx).all_prepared(&query),
+    )
+    .unwrap();
+    assert_eq!(read[0].cell_at(0), Some(Value::String("before".into())));
+    let accepted = drive(
+        &[&alice, &server],
+        alice
+            .all_settled_at_authority_begin(query, options(false, false), tx, None)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(texts(&accepted), ["before"]);
+    alice.abandon_transaction_handle(tx).unwrap();
+}
+
+/// Alice knows the authority coordinate but has never read Bob's note. Online
+/// history may hydrate that older image; Bob's later write and newly enrolled
+/// reference stay outside the cut. Her offline observation remains unchanged.
+#[test]
+fn authority_begin_hydrates_cold_history_without_advancing_local_observation() {
+    for change in ["unchanged", "updated", "inserted"] {
+        let server = open(3, true);
+        let note = insert(&server, "notes", "before");
+        let alice = open(1, false);
+        connect(&alice, &server);
+        fetch(&alice, &[&alice, &server], Query::from("notes").limit(0));
+        let tx = begin(&alice);
+        let observed_tx = begin(&alice);
+        if change == "updated" {
+            block_on(server.update("notes", note.row_uuid(), cells("after"), Default::default()))
+                .unwrap();
+        }
+        if change == "inserted" {
+            insert(&server, "refs", "late recipient");
+        }
+        let read = drive(
+            &[&alice, &server],
+            alice
+                .all_settled_at_authority_begin(
+                    alice.prepare_query(&Query::from("notes")).unwrap(),
+                    options(false, false),
+                    tx,
+                    None,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(texts(&read), ["before"]);
+        assert_eq!(read.settlements[0].1.0, note.mergeable_tx_id());
+        let late = drive(
+            &[&alice, &server],
+            alice
+                .all_settled_at_authority_begin(
+                    alice.prepare_query(&Query::from("refs")).unwrap(),
+                    options(false, false),
+                    tx,
+                    None,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(late.rows.is_empty());
+        assert!(
+            block_on(paired(&alice, observed_tx, "notes", true, true, false))
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        alice.abandon_transaction_handle(observed_tx).unwrap();
+        let accepted = match block_on(alice.commit_serializable_handle(tx)) {
+            Err(error) => Err(error),
+            Ok(receipt) => drive(
+                &[&alice, &server],
+                alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
+            ),
+        };
+        if change == "unchanged" {
+            accepted.unwrap();
+        } else {
+            assert_eq!(accepted.unwrap_err().code, ErrorCode::TransactionConflict);
+        }
+    }
+}
+
+/// Alice's authority-at-begin request cannot rewind an earlier ordinary read,
+/// or use a local-only read to claim remote completeness.
+#[test]
+fn authority_begin_refuses_mixed_cuts_and_local_only_coverage() {
+    let server = open(3, true);
+    insert(&server, "notes", "before");
+    let alice = open(1, false);
+    connect(&alice, &server);
+    let tx = begin(&alice);
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    drive(
+        &[&alice, &server],
+        alice.serializable_tx_ref(tx).all_prepared(&query),
+    )
+    .unwrap();
+    let error = drive(
+        &[&alice, &server],
+        alice
+            .all_settled_at_authority_begin(query.clone(), options(false, false), tx, None)
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotObserved);
+    assert!(block_on(alice.commit_serializable_handle(tx)).is_err());
+    let local = begin(&alice);
+    assert!(
+        alice
+            .all_settled_at_authority_begin(query, options(true, false), local, None)
+            .is_err()
+    );
+    assert!(block_on(alice.commit_serializable_handle(local)).is_err());
+}
+
 /// Alice starts both reads together. The second waits for the first to pin a
 /// cut, then reads Bob's older reference even after he updates it meanwhile.
 #[test]

@@ -1458,10 +1458,10 @@ fn marked_and_unmarked_large_comparisons_share_accepted_parent_evidence() {
     assert_eq!(rows(&f.bob).len(), 2);
 }
 
-/// Array-backed reverse inheritance cannot silently use scalar equality or
-/// scan unrelated arrays in a candidate proof. Alice gets an exact refusal.
+/// Alice's accepted array-backed owner supplies inherited UPDATE evidence.
+/// The same serializable candidate now succeeds through indexed membership.
 #[test]
-fn array_inherited_sources_remain_explicitly_unsupported() {
+fn array_inherited_sources_use_accepted_indexed_membership() {
     let reverse = PolicyExpr::InheritsReferencing {
         operation: jazz::tools::Operation::Update,
         source_table: "owners".into(),
@@ -1498,12 +1498,8 @@ fn array_inherited_sources_remain_explicitly_unsupported() {
     .unwrap();
     let tx = f.commit(&[(1, cells(1, false, true, "room"))], true);
     f.connect();
-    let error = f.settle(tx).unwrap_err();
-    assert!(
-        error.message.contains("array-reference inheritance"),
-        "{error}"
-    );
-    assert!(rows(&f.bob).is_empty());
+    f.settle(tx).unwrap();
+    assert_eq!(rows(&f.bob), vec![(row(1), "room".into())]);
 }
 
 /// An accepted row's INSERT policy cannot launder newly created evidence
@@ -1721,4 +1717,336 @@ fn candidate_checks_keep_the_accepted_catalogue_identity_provider() {
         );
         assert_eq!(rows(&bob).len(), if matching { 2 } else { 0 });
     }
+}
+
+fn array_candidate_schema() -> jazz::schema::JazzSchema {
+    common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("nodes")
+                    .fk_column("parent", "nodes")
+                    .column("scope", ColumnType::Text)
+                    .column("seed", ColumnType::Boolean)
+                    .column("allowed", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::or(vec![
+                                PolicyExpr::InheritsReferencing {
+                                    operation: jazz::tools::Operation::Update,
+                                    source_table: "owners".into(),
+                                    via_column: "parents".into(),
+                                    max_depth: None,
+                                },
+                                marker_only(),
+                            ])),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("owners")
+                    .array_fk_column("parents", "nodes")
+                    .column("owner", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(
+                                Some(PolicyExpr::eq_session(
+                                    "owner",
+                                    vec!["user".into(), "identity".into(), "subject".into()],
+                                )),
+                                PolicyExpr::True,
+                            ),
+                    ),
+            )
+            .build(),
+    )
+}
+fn array_owner(parents: &[u128]) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "parents".into(),
+            Value::Array(parents.iter().map(|n| Value::Uuid(row(*n).0)).collect()),
+        ),
+        ("owner".into(), Value::String("alice".into())),
+    ])
+}
+
+/// Alice cannot use a newly inserted array grant as accepted inherited
+/// evidence. Bob rolls back both rows; accepting the grant separately allows
+/// the same dependent write, including duplicate array membership.
+#[test]
+fn newly_created_array_grants_do_not_unlock_their_own_unit() {
+    let f = fixture_schema(array_candidate_schema());
+    let tx = named_commit(
+        &f.alice,
+        &[
+            ("owners", 2, array_owner(&[1, 1])),
+            ("nodes", 1, cells(1, false, true, "room")),
+        ],
+    );
+    f.connect();
+    assert!(f.settle(tx).is_err());
+    assert!(rows(&f.bob).is_empty());
+    assert_eq!(table_count(&f.bob, "owners"), 0);
+    let grant = named_commit(&f.alice, &[("owners", 2, array_owner(&[1, 1]))]);
+    f.settle(grant).unwrap();
+    let child = named_commit(&f.alice, &[("nodes", 1, cells(1, false, true, "room"))]);
+    f.settle(child).unwrap();
+    assert_eq!(rows(&f.bob), vec![(row(1), "room".into())]);
+}
+
+/// Alice revokes an accepted array grant in the same unit as a dependent write.
+/// Bob checks both accepted and final images, rejecting the whole unit in either
+/// operation order. The rolled-back index must still authorize a later write.
+#[test]
+fn array_revocation_revalidates_the_final_unit_and_rolls_back_membership() {
+    for revoke_first in [false, true] {
+        let f = fixture_schema(array_candidate_schema());
+        let grant = named_commit(&f.alice, &[("owners", 2, array_owner(&[1]))]);
+        f.connect();
+        f.settle(grant).unwrap();
+        let mut writes = vec![
+            ("nodes", 1, cells(1, false, true, "room")),
+            ("owners", 2, array_owner(&[])),
+        ];
+        if revoke_first {
+            writes.reverse();
+        }
+        let tx = named_commit(&f.alice, &writes);
+        assert!(f.settle(tx).is_err());
+        assert!(rows(&f.bob).is_empty());
+        assert_eq!(table_count(&f.bob, "owners"), 1);
+        let next = named_commit(&f.alice, &[("nodes", 1, cells(1, false, true, "room"))]);
+        f.settle(next).unwrap();
+        assert_eq!(rows(&f.bob), vec![(row(1), "room".into())]);
+    }
+}
+
+/// Alice's ordinary EXISTS graph uses independently grounded surviving writes.
+/// Bob accepts reverse staging and seeded cycles for either transaction kind.
+#[test]
+fn ordinary_exists_grounds_reverse_chains_and_seeded_cycles() {
+    for serializable in [false, true] {
+        for values in [
+            vec![
+                (1, cells(2, false, true, "room")),
+                (2, cells(3, false, true, "room")),
+                (3, cells(3, true, true, "room")),
+            ],
+            vec![
+                (1, cells(2, false, true, "room")),
+                (2, cells(1, true, true, "room")),
+            ],
+        ] {
+            let f = Fixture::new(insert(parent(false)));
+            let tx = f.commit(&values, serializable);
+            f.connect();
+            f.settle(tx).unwrap();
+            assert_eq!(rows(&f.bob).len(), values.len());
+        }
+    }
+}
+
+/// Mallory cannot bootstrap ordinary permission from herself, an unseeded cycle,
+/// an unauthorised seed or a parent with a different correlated scope.
+#[test]
+fn ordinary_exists_refuses_ungrounded_and_wrong_scope_writes() {
+    for serializable in [false, true] {
+        for values in [
+            vec![(1, cells(1, false, true, "room"))],
+            vec![
+                (1, cells(2, false, true, "room")),
+                (2, cells(1, false, true, "room")),
+            ],
+            vec![
+                (1, cells(2, false, true, "room")),
+                (2, cells(2, true, false, "room")),
+            ],
+            vec![
+                (1, cells(2, false, true, "first")),
+                (2, cells(2, true, true, "second")),
+            ],
+        ] {
+            let f = Fixture::new(insert(parent(false)));
+            let tx = f.commit(&values, serializable);
+            f.connect();
+            assert!(f.settle(tx).unwrap_err().is_authorization_denied());
+            assert!(rows(&f.bob).is_empty());
+            assert!(rows(&f.alice).is_empty());
+        }
+    }
+}
+
+/// Alice's newly created-and-deleted parent cannot authorise her child, while an
+/// already accepted parent remains evidence when deleted in that same unit.
+#[test]
+fn ordinary_exists_distinguishes_deleted_new_and_accepted_evidence() {
+    for accepted in [false, true] {
+        let f = Fixture::new(insert(parent(false)));
+        f.connect();
+        if accepted {
+            let tx = f.commit(&[(2, cells(2, true, true, "room"))], false);
+            f.settle(tx).unwrap();
+        }
+        let tx = OpenTransactionId::new();
+        block_on(f.alice.begin_mergeable(tx)).unwrap();
+        let staged = f.alice.mergeable_tx_ref(tx);
+        if !accepted {
+            block_on(staged.upsert(
+                "nodes",
+                row(2),
+                cells(2, true, true, "room"),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+        block_on(staged.upsert(
+            "nodes",
+            row(1),
+            cells(2, false, true, "room"),
+            Default::default(),
+        ))
+        .unwrap();
+        block_on(staged.delete("nodes", row(2), Default::default())).unwrap();
+        let receipt = block_on(f.alice.commit_mergeable_handle(tx)).unwrap();
+        let settled = f.settle(receipt.0);
+        if accepted {
+            settled.unwrap();
+            assert_eq!(rows(&f.bob), vec![(row(1), "room".into())]);
+        } else {
+            assert!(settled.unwrap_err().is_authorization_denied());
+            assert!(rows(&f.bob).is_empty());
+        }
+    }
+}
+
+/// Bob evaluates Alice's ordinary child against the final surviving parent
+/// update, so a same-unit scope revocation cannot be hidden by staging order.
+#[test]
+fn ordinary_exists_revalidates_updated_evidence_in_both_orders() {
+    for child_first in [false, true] {
+        let f = Fixture::new(insert(parent(false)));
+        f.connect();
+        let tx = f.commit(&[(2, cells(2, true, true, "room"))], false);
+        f.settle(tx).unwrap();
+        let mut values = vec![
+            (1, cells(2, false, true, "room")),
+            (2, cells(2, true, true, "revoked")),
+        ];
+        if !child_first {
+            values.reverse();
+        }
+        let tx = f.commit(&values, false);
+        assert!(f.settle(tx).unwrap_err().is_authorization_denied());
+        assert_eq!(rows(&f.bob), vec![(row(2), "room".into())]);
+    }
+}
+
+/// Alice's callback collects ordinary proofs until commit. An explicit error or
+/// a cancelled callback discards its rows and proofs; Bob's next unit can run.
+#[test]
+fn ordinary_callback_failure_and_cancellation_leave_no_rows_or_pending_proofs() {
+    for cancel in [false, true] {
+        let db = open(schema(insert(parent(false))), 2, true);
+        if cancel {
+            let mut transaction = Box::pin(db.transaction(async |tx| {
+                tx.upsert(
+                    "nodes",
+                    row(1),
+                    cells(1, true, true, "cancelled"),
+                    Default::default(),
+                )
+                .await?;
+                std::future::pending::<()>().await;
+                Ok(())
+            }));
+            assert!(
+                transaction
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            drop(transaction);
+        } else {
+            let result: Result<((), _), _> = block_on(db.transaction(async |tx| {
+                tx.upsert(
+                    "nodes",
+                    row(1),
+                    cells(1, true, true, "aborted"),
+                    Default::default(),
+                )
+                .await?;
+                Err(Error::new(
+                    jazz::db::ErrorCode::WriteRejected,
+                    "application abort",
+                ))
+            }));
+            assert!(result.is_err());
+        }
+        assert!(rows(&db).is_empty());
+        block_on(db.transaction(async |tx| {
+            tx.upsert(
+                "nodes",
+                row(2),
+                cells(3, false, true, "room"),
+                Default::default(),
+            )
+            .await?;
+            tx.upsert(
+                "nodes",
+                row(3),
+                cells(3, true, true, "room"),
+                Default::default(),
+            )
+            .await?;
+            Ok(())
+        }))
+        .unwrap();
+        assert_eq!(
+            rows(&db),
+            vec![(row(2), "room".into()), (row(3), "room".into())]
+        );
+    }
+}
+
+/// Bob's callback cannot authorise Alice's child using a parent it creates and
+/// then deletes. The rejected whole unit must leave the authority unchanged.
+#[test]
+fn ordinary_callback_rejects_a_deleted_new_parent_atomically() {
+    let db = open(schema(insert(parent(false))), 2, true);
+    let result = block_on(db.transaction(async |_tx| {
+        db.upsert(
+            "nodes",
+            row(2),
+            cells(2, true, true, "room"),
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Session(author("bob")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        db.upsert(
+            "nodes",
+            row(1),
+            cells(2, false, true, "room"),
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Session(author("bob")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        db.delete(
+            "nodes",
+            row(2),
+            jazz::db::DeleteOptions {
+                identity: jazz::db::WriteIdentity::Session(author("bob")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
+    }));
+    assert!(result.unwrap_err().is_authorization_denied());
+    assert!(rows(&db).is_empty());
 }

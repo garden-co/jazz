@@ -759,7 +759,9 @@ describe("internal read tiers", () => {
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
     const query = '{"relation_ir":{"table":"todos"}}';
     const internal = client.subscribeInternal(query, () => {}, { observeAcceptedEvidence: true });
-    expect(JSON.parse(runtime.createSubscription.mock.calls[0]?.[3])).toEqual({
+    const internalOptions = runtime.createSubscription.mock.calls[0]?.[3];
+    if (typeof internalOptions !== "string") throw new Error("Expected encoded internal options");
+    expect(JSON.parse(internalOptions)).toEqual({
       observe_accepted_evidence: true,
     });
     client.unsubscribe(internal);

@@ -1063,6 +1063,8 @@ pub struct CurrentRow {
     pub(crate) joined: Arc<[JoinedRow]>,
     /// A flat join's root version when the root is a history source.
     pub(crate) version: Option<SourceVersion>,
+    /// A retained UNION leaf at root source position zero.
+    pub(crate) union_arm: Option<Arc<str>>,
 }
 
 /// A history version's transaction identity, `(tx, node)` as its
@@ -1077,6 +1079,16 @@ pub fn occurrence_key(
     version: Option<SourceVersion>,
     joined: &[JoinedRow],
 ) -> jazz_types::object::ResultKey {
+    occurrence_key_with_union_arm(root, version, joined, None)
+}
+
+/// The existing result-key v2 encoding, including a UNION leaf discriminator.
+pub fn occurrence_key_with_union_arm(
+    root: RowUuid,
+    version: Option<SourceVersion>,
+    joined: &[JoinedRow],
+    union_arm: Option<&str>,
+) -> jazz_types::object::ResultKey {
     use jazz_types::object::{ObjectId, OutputOccurrenceId, ResultKey, SourceOccurrenceId};
     let source = |row: RowUuid, version: Option<SourceVersion>| {
         let id = ObjectId::from_uuid(row.0);
@@ -1085,7 +1097,7 @@ pub fn occurrence_key(
             None => SourceOccurrenceId::current(id),
         }
     };
-    if joined.is_empty() && version.is_none() {
+    if joined.is_empty() && version.is_none() && union_arm.is_none() {
         return ResultKey::from_occurrence(OutputOccurrenceId::single_source(ObjectId::from_uuid(
             root.0,
         )));
@@ -1096,9 +1108,9 @@ pub fn occurrence_key(
             joined
                 .iter()
                 .map(|joined| source(joined.row, joined.version)),
-            [],
+            union_arm.map(|label| (0, label.to_owned())),
         )
-        .expect("an occurrence without union arms is valid"),
+        .expect("a compiled occurrence has a validated union label"),
     )
 }
 
@@ -1111,6 +1123,11 @@ pub struct JoinedRow {
 }
 
 impl CurrentRow {
+    /// The UNION leaf label; nested labels use the relation path encoding.
+    pub fn union_arm(&self) -> Option<&str> {
+        self.union_arm.as_deref()
+    }
+
     pub fn row_uuid(&self) -> RowUuid {
         self.id
     }

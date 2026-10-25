@@ -321,6 +321,16 @@ pub enum WireKind {
         own: Vec<(u64, [u8; 16], u64)>,
         content: Vec<Vec<[u8; 32]>>,
     },
+    /// jazz.sqlite.serializable-union-observed.v1: the same origin and read
+    /// layout, with semantic union occurrences included in content evidence.
+    /// Union rows use serializable-union-read-content.v1; ordinary rows keep
+    /// serializable-read-content.v1. Required even for an empty union read.
+    SerializableUnionObservedV1 {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<(u64, [u8; 16], u64)>,
+        content: Vec<Vec<[u8; 32]>>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3507,16 +3517,29 @@ impl Db {
             Some(WriteIdentity::Session(author) | WriteIdentity::Attribution(author)) => {
                 Some(author)
             }
-            _ => ops.iter().find_map(StagedOp::author).or_else(|| {
-                (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
-            }),
+            _ => ops
+                .iter()
+                .find_map(StagedOp::author)
+                .or_else(|| Some(inner.stamp_author())),
         };
-        let session_claims = author
-            .filter(|_| {
-                matches!(identity, Some(WriteIdentity::Session(_)))
-                    || ops.iter().any(StagedOp::is_session)
-            })
-            .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
+        let explicit_session = matches!(identity, Some(WriteIdentity::Session(_)))
+            || ops.iter().any(StagedOp::is_session);
+        let session_claims = if explicit_session {
+            author.map(|author| inner.claims.get(&author).cloned().unwrap_or_default())
+        } else if matches!(identity, None | Some(WriteIdentity::Database))
+            && !ops
+                .iter()
+                .any(|op| matches!(op.identity(), Some(WriteIdentity::Attribution(_))))
+            && inner.identity.author != AuthorSubject::SYSTEM
+        {
+            // An ordinary node's own write must remain a session write even
+            // over a backend-authenticated socket. Local session metadata is
+            // not an upstream credential. Normal session links use their
+            // admitted claims; trusted links receive no vouched claims here.
+            Some(BTreeMap::new())
+        } else {
+            None
+        };
         let rows = if inner.scope_isolated_owner || inner.non_durable {
             inner.owner_input_coordinates(&ops)?
         } else {
@@ -3562,7 +3585,14 @@ impl Db {
                     .collect::<Result<Vec<_>, _>>()?;
                 // Every read carries content evidence. A write-only batch has
                 // no observed content and keeps the existing origin encoding.
-                if !reads.is_empty() {
+                if reads.iter().any(|read| read.query.relation.is_some()) {
+                    WireKind::SerializableUnionObservedV1 {
+                        snapshot,
+                        reads,
+                        own: origins,
+                        content,
+                    }
+                } else if !reads.is_empty() {
                     WireKind::SerializableObservedV1 {
                         snapshot,
                         reads,
@@ -3635,6 +3665,11 @@ impl Db {
     /// filtered after the gather, multi-hop includes) would see a partial
     /// replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
+        if query.relation.is_some() {
+            return Err(crate::values::unsupported(
+                "remote union reads and subscriptions (union-arm coverage)",
+            ));
+        }
         let query = &*remote_query(query);
         let other_tables = !query.joins.iter().all(join_followable)
             || !query.reachable.iter().all(|via| gather_shaped(query, via))
@@ -7140,6 +7175,12 @@ impl Db {
                 reads,
                 own,
                 ..
+            }
+            | WireKind::SerializableUnionObservedV1 {
+                snapshot,
+                reads,
+                own,
+                ..
             } => {
                 let mut positions = BTreeSet::new();
                 let mut origins = BTreeSet::new();
@@ -7165,8 +7206,20 @@ impl Db {
             }
         };
         if let Some((snapshot, reads, own)) = serializable {
+            if reads.iter().any(|read| read.query.relation.is_some())
+                && !matches!(&kind, WireKind::SerializableUnionObservedV1 { .. })
+            {
+                return Err((
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "union read requires serializable-union-observed-v1 evidence",
+                    ),
+                    Vec::new(),
+                ));
+            }
             let content = match &kind {
-                WireKind::SerializableObservedV1 { content, .. } => {
+                WireKind::SerializableObservedV1 { content, .. }
+                | WireKind::SerializableUnionObservedV1 { content, .. } => {
                     if content.len() != reads.len()
                         || content
                             .iter()
@@ -7276,11 +7329,14 @@ impl Db {
                 WireKind::Serializable { .. }
                     | WireKind::SerializableOriginsV1 { .. }
                     | WireKind::SerializableObservedV1 { .. }
+                    | WireKind::SerializableUnionObservedV1 { .. }
             );
-            let applied = inner.candidate_unit(&unit, seq, serializable, false, |inner| {
-                ops.iter()
-                    .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
-            });
+            let applied = inner
+                .candidate_unit(&unit, seq, serializable, false, |inner| {
+                    ops.iter()
+                        .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
+                })
+                .and_then(|()| inner.record_writer_order(origin.0, origin.1, mark));
             if let Err(error) = applied {
                 inner
                     .rollback_savepoint("upload")
@@ -7413,7 +7469,14 @@ fn readable(
     }
     let schema = inner.owner.clone();
     let table = owned_table(&schema, table)?;
-    inner.check(table, row, key, author, Operation::Select)
+    inner.check(
+        table,
+        row,
+        key,
+        author,
+        Operation::Select,
+        "read policy denied the row",
+    )
 }
 
 /// The current schema's table stored as `stored`.
@@ -8059,8 +8122,37 @@ impl Db {
         inner.seq = inner.seq.max(FOREGROUND_BASE);
     }
 
+    /// Distinct maintained upstream queries and their attachment references.
+    /// These are the actual sync registrations, including a foreground's
+    /// temporary one-shot stream, rather than the local fanout group count.
+    #[cfg(any(test, feature = "testing"))]
     pub fn query_coverage_attachment_counts_for_test(&self) -> (usize, usize) {
-        unimplemented!("coverage attachments are not modelled on SQLite")
+        let inner = self.inner.borrow();
+        inner.client.as_ref().map_or((0, 0), |client| {
+            (
+                client.remote.len(),
+                client.remote.values().map(|remote| remote.refs).sum(),
+            )
+        })
+    }
+
+    /// Request the actual installed scheduler from a host lifecycle test.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn schedule_tick_for_test(&self, urgency: TickUrgency) {
+        let scheduler = self.inner.borrow().scheduler.clone();
+        if let Some(scheduler) = scheduler {
+            scheduler.schedule_tick(urgency);
+        }
+    }
+
+    /// Inspect the actual authority availability used by remote read admission.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn remote_link_hint_for_test(&self) -> Option<RemoteLinkHint> {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map(|client| client.hint.get().hint)
     }
 
     pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {

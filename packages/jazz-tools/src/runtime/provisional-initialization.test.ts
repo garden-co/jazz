@@ -12,6 +12,7 @@ const schema = resolveSchemaSource(app);
 async function client() {
   const runtime = await createNapiNativeRuntimeAdapter(schema, allowAll(app), {
     peerId: crypto.randomUUID(),
+    historyComplete: false,
   });
   return JazzClient.connectWithRuntime(runtime, {
     appId: "initialization-test",

@@ -2,13 +2,23 @@
 
 This fixture was produced by npm's distributed `jazz-tools` and `jazz-napi`
 `2.0.0-alpha.54` packages, without rebuilding either package or importing
-workspace Jazz code. The production NAPI persistent API uses RocksDB; it does
+workspace Jazz code. Their production NAPI persistent API used RocksDB and did
 not expose SQLite. The existing source-produced SQLite corpus remains separate.
 This small release receipt pins two historical text versions in the DAG
-history layout. Current code (linear row history,
-`jazz.history-version-current.v4` and `groove.durable-index.v2`) refuses it at
-open with the typed `UnsupportedStorageCodecs` error and leaves every record
-unchanged (`published_alpha54_native_corpus_is_refused_with_the_typed_codec_error`).
+history layout. Current SQLite bindings refuse the root before opening an engine
+file or decoding RocksDB records. The error keeps the stable
+`unsupported_storage_codecs` code and names `jazz.sqlite.native-root.v1` as the
+required format; it does not report the removed engine's codec lists. The SDK
+reconstructs `UnsupportedStorageCodecsError` with that format and the native error
+as its cause. `packages/jazz-tools/src/runtime/native-error-code.test.ts` checks
+both boundaries and verifies that every original physical file stays unchanged.
+Admission may create its process lock, but no SQLite database or owner metadata.
+
+The archive was restored byte-for-byte from the parent of `a852b86825` after
+the SQLite replacement deleted it. Its provenance file is unchanged. This retains an immutable
+refusal fixture; it adds no RocksDB reader, old codec implementation or migration.
+The archive checksum below is unchanged. The package manifests and reproduction
+instructions describe the historical producer, not today's runtime.
 
 `published-alpha54-provenance.json` records tarball URLs and SHA-256 checksums,
 the Linux native binary manifest, target, and fixture archive checksum. The
