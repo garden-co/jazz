@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ids::AuthorSubject;
+use crate::ids::{AuthorSubject, RowUuid};
 use crate::options::Error;
 use crate::query::{
     ArraySubquery, ArraySubqueryRequirement, JoinTarget, Operand, OrderDirection, Predicate, Query,
@@ -1362,6 +1362,9 @@ impl<'a> Ctx<'a> {
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(child, alias, session)?);
         }
+        if self.members_only {
+            wheres.push(self.listed(child, alias));
+        }
         let (order, ranked_order) = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
             .iter()
@@ -1399,6 +1402,28 @@ impl<'a> Ctx<'a> {
             union: false,
             preps: self.preps,
         })
+    }
+
+    /// One cell of row `id` of `table`, read through the same view and cut
+    /// as the rows it came from: a relation's parent value. The SQL, its
+    /// params and the cell's type.
+    pub fn compile_cell(
+        mut self,
+        table: &str,
+        column: &str,
+        id: RowUuid,
+    ) -> Result<(String, Vec<Sql>, ValueType), Error> {
+        let table = self.table(table)?;
+        let column = table
+            .column(column)
+            .ok_or_else(|| unsupported("unknown correlation column"))?;
+        let source = self.source(table)?;
+        let id = self.bind(Sql::Blob(id.0.as_bytes().to_vec()));
+        let sql = format!(
+            "SELECT t.{} FROM {source} AS t WHERE t.id = {id}",
+            quote(&column.stored)
+        );
+        Ok((sql, self.params, column.ty.clone()))
     }
 
     /// A junction traversal from the row of `table` at `alias`: some live

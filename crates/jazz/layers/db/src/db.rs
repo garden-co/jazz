@@ -1287,7 +1287,8 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().nest_relations(prepared, None, roots)
+        self.inner()
+            .nest_relations(prepared, None, &ReadSpec::default(), roots)
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
@@ -1310,12 +1311,14 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
-        let roots = inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)?;
+        let read = ReadSpec::of(&opts, &inner)?;
+        let roots = inner.run(prepared, None, &read)?;
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
             tree.push(inner.node(
                 prepared,
                 None,
+                &read,
                 &prepared.query.table,
                 &prepared.query.array_subqueries,
                 row,
@@ -2322,6 +2325,7 @@ impl Inner {
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
+        read: &ReadSpec,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
         if prepared.query.array_subqueries.is_empty() {
@@ -2333,6 +2337,7 @@ impl Inner {
                 self.node(
                     prepared,
                     identity,
+                    read,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -2357,6 +2362,7 @@ impl Inner {
                 let node = self.node(
                     prepared,
                     identity,
+                    read,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -2367,30 +2373,51 @@ impl Inner {
         Ok(out)
     }
 
+    /// A row with its array relations, read as the row was: through the
+    /// read's view and cut, settled-only and members-only as it is.
     fn node(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
+        read: &ReadSpec,
         table: &str,
         arrays: &[crate::query::ArraySubquery],
         row: CurrentRow,
     ) -> Result<ResultNode, Error> {
         let mut relations = BTreeMap::new();
         for array in arrays {
+            let (policy, claims) = self.read_sessions(prepared, identity);
+            let ctx = || {
+                Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
+                    .with_view(read.view.clone())
+                    .with_cut(read.cut.clone())
+                    .with_settled_only(read.settled_only)
+                    .with_members_only(read.members_only)
+            };
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
-                self.cell(table, row.id, &array.outer_column)?
+                let (sql, params, ty) = ctx().compile_cell(table, &array.outer_column, row.id)?;
+                let cell: Option<Sql> = self
+                    .conn
+                    .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                    .optional()
+                    .map_err(storage)?;
+                match cell {
+                    Some(cell) => {
+                        from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None))
+                    }
+                    None => Value::Nullable(None),
+                }
             };
-            let (policy, claims) = self.read_sessions(prepared, identity);
-            let compiled = Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
-                .compile_children(array, &parent)?;
+            let compiled = ctx().compile_children(array, &parent)?;
             let children = self.execute(&compiled, &array.table)?;
             let mut nodes = Vec::with_capacity(children.len());
             for child in children {
                 nodes.push(self.node(
                     prepared,
                     identity,
+                    read,
                     &array.table,
                     &array.nested_arrays,
                     child,
@@ -2399,24 +2426,6 @@ impl Inner {
             relations.insert(array.column_name.clone(), ResultRelation::Array(nodes));
         }
         Ok(ResultNode { row, relations })
-    }
-
-    fn cell(&self, table: &str, row: RowUuid, column: &str) -> Result<Value, Error> {
-        let table = self.schema.table(table)?;
-        let column = table
-            .column(column)
-            .ok_or_else(|| unsupported("unknown correlation column"))?;
-        let ty = column.ty.clone();
-        let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1",
-            quote(&column.stored),
-            quote(&table.stored)
-        );
-        let cell: Sql = self
-            .conn
-            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| r.get(0))
-            .map_err(storage)?;
-        Ok(from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None)))
     }
 
     // ---- write primitives ---------------------------------------------
@@ -5076,16 +5085,13 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
-            let roots = inner.run(
-                prepared,
-                identity,
-                &ReadSpec {
-                    include_deleted,
-                    cut,
-                    ..ReadSpec::default()
-                },
-            )?;
-            inner.nest_relations(prepared, identity, roots)
+            let read = ReadSpec {
+                include_deleted,
+                cut,
+                ..ReadSpec::default()
+            };
+            let roots = inner.run(prepared, identity, &read)?;
+            inner.nest_relations(prepared, identity, &read, roots)
         })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)

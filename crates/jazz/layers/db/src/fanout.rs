@@ -319,7 +319,7 @@ impl Inner {
         // A replica missing chunks the result needs opens it once they arrive.
         let (rows, awaiting) = match self
             .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, rows))
+            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
         {
             Ok(rows) => (rows, false),
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
@@ -1097,7 +1097,7 @@ impl Inner {
     /// A group's rows, with array relations nested in their cells.
     fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
         let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, rows)
+        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
     }
 
     fn reset_group(&self, group: &mut Group) {

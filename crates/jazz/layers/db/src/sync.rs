@@ -6193,9 +6193,10 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner)
-                    .and_then(|spec| inner.run(&prepared, identity, &spec))
-                    .and_then(|roots| inner.nest_relations(&prepared, identity, roots))
+                ReadSpec::of(&opts, &inner).and_then(|spec| {
+                    let roots = inner.run(&prepared, identity, &spec)?;
+                    inner.nest_relations(&prepared, identity, &spec, roots)
+                })
             };
             match read {
                 Err(error) if crate::large::is_missing(&error) && self.awaiting_chunks() => {
