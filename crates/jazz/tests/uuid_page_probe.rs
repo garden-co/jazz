@@ -11,7 +11,7 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-mod common;
+use crate::common;
 
 use common::{compile_schema, read_and_allow_all_writes, session_eq};
 

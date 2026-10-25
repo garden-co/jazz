@@ -178,6 +178,8 @@ pub struct RemovedRow {
     pub joined: Vec<crate::values::JoinedRow>,
     /// A flat join's root version ([`CurrentRow::root_version`]).
     pub version: Option<crate::values::SourceVersion>,
+    /// A union read's arm ([`CurrentRow::union_arm`]).
+    pub union_arm: Option<Arc<str>>,
     pub index: usize,
 }
 
@@ -397,6 +399,8 @@ struct Inner {
     fan: fanout::Fanout,
     /// Rows written since the last dispatch: (table, id, branch key).
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
+    /// The write checks of the unit being applied, run at its end.
+    deferred: RefCell<Option<Vec<DeferredCheck>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
@@ -677,7 +681,8 @@ fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error
 
 /// A relation facade query (hopTo, gather, match), as clients send it: the
 /// ordinary query it stands for, the way Jazz's validation normalizes it.
-/// Unions and projections that rename or narrow the output are not
+/// A union stays a relation query ([`union_plan`] reads its arms when it
+/// compiles). Projections that rename or narrow the output are not
 /// supported yet. `None` when the query is not a relation query.
 fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, Error> {
     use crate::query::{RelationProjectExpr, RelationRowIdRef};
@@ -685,16 +690,6 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
         return Ok(None);
     };
     let not_yet = |what: &str| crate::values::unsupported(what.to_owned());
-    if crate::query::relation_union_parts(&relation.rel).is_some() {
-        return Err(not_yet("union relation queries"));
-    }
-    let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
-    let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
-    if resolved.table != query.table {
-        return Err(crate::values::query_error(
-            "relation query output table does not match its Query envelope",
-        ));
-    }
     let has_ordinary_clauses = !query.filters.is_empty()
         || !query.joins.is_empty()
         || query.flat_join.is_some()
@@ -709,6 +704,19 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
     if has_ordinary_clauses {
         return Err(crate::values::query_error(
             "relation query cannot be combined with ordinary query clauses",
+        ));
+    }
+    if union_plan(query, schema)?.is_some() {
+        if query.select.is_some() || !query.array_subqueries.is_empty() {
+            return Err(not_yet("selections or relations on union queries"));
+        }
+        return Ok(Some(query.clone()));
+    }
+    let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
+    let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
+    if resolved.table != query.table {
+        return Err(crate::values::query_error(
+            "relation query output table does not match its Query envelope",
         ));
     }
     if let Some(columns) =
@@ -748,6 +756,116 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
     resolved.select = query.select.clone();
     resolved.relation = None;
     Ok(Some(resolved))
+}
+
+/// A public `UNION ALL`: each arm, by label, as the ordinary query it
+/// stands for, and the order and window over the whole union. Every arm
+/// reads the output table under its own read policy, so an arm never
+/// widens access; a row matched by several arms is one result row per
+/// arm.
+pub(crate) struct UnionPlan {
+    pub arms: Vec<(String, Query)>,
+    pub order_by: Vec<crate::query::OrderBy>,
+    pub offset: usize,
+    pub limit: Option<usize>,
+}
+
+/// The union a relation query stands for, or `None` when it is not one.
+pub(crate) fn union_plan(query: &Query, schema: &Schema) -> Result<Option<UnionPlan>, Error> {
+    let Some(parts) = query
+        .relation
+        .as_ref()
+        .and_then(|relation| crate::query::relation_union_parts(&relation.rel))
+    else {
+        return Ok(None);
+    };
+    let invalid = |message: &str| crate::values::query_error(message.to_owned());
+    if parts.inputs.is_empty() {
+        return Err(invalid("union requires at least one input"));
+    }
+    let mut labels = BTreeSet::new();
+    let mut arms = Vec::with_capacity(parts.inputs.len());
+    for arm in parts.inputs {
+        if arm.label.is_empty()
+            || arm.label.len() > 4096
+            || arm.label.contains('\0')
+            || !labels.insert(arm.label.clone())
+        {
+            return Err(invalid(
+                "union arm labels must be 1..=4096 bytes, NUL-free, and unique",
+            ));
+        }
+        if crate::query::relation_union_parts(&arm.input).is_some() {
+            return Err(crate::values::unsupported("unions nested in union arms"));
+        }
+        let mut envelope = Query::from(query.table.as_str());
+        envelope.relation = Some(crate::query::RelationQuery { rel: arm.input });
+        let resolved = normalize_relation(&envelope, schema)?.expect("a relation query");
+        arms.push((arm.label, resolved));
+    }
+    let mut order_by = Vec::new();
+    for term in parts.order_by.unwrap_or_default() {
+        if term
+            .column
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope != query.table)
+        {
+            return Err(invalid(
+                "union order_by must be scoped to the union output table",
+            ));
+        }
+        order_by.push(crate::query::OrderBy {
+            column: term.column.column,
+            direction: term.direction,
+        });
+    }
+    Ok(Some(UnionPlan {
+        arms,
+        order_by,
+        offset: parts.offset.unwrap_or(0),
+        limit: parts.limit,
+    }))
+}
+
+/// A union read with its window widened to start at its first row (limit
+/// plus offset), as [`crate::db::sync::remote_query`] does for an ordinary
+/// window: a replica holds the whole prefix and applies the offset itself.
+/// `None` when `query` is not a union with an offset.
+pub(crate) fn union_prefix(query: &Query) -> Option<Query> {
+    use crate::query::RelationExpr;
+    let parts = crate::query::relation_union_parts(&query.relation.as_ref()?.rel)?;
+    let offset = parts.offset.filter(|offset| *offset > 0)?;
+    let mut rel = RelationExpr::Union {
+        inputs: parts.inputs,
+    };
+    if let Some(terms) = parts.order_by {
+        rel = RelationExpr::OrderBy {
+            input: Box::new(rel),
+            terms,
+        };
+    }
+    if let Some(limit) = parts.limit {
+        rel = RelationExpr::Limit {
+            input: Box::new(rel),
+            limit: limit.saturating_add(offset),
+        };
+    }
+    let mut prefix = query.clone();
+    prefix.relation = Some(crate::query::RelationQuery { rel });
+    Some(prefix)
+}
+
+/// Whether a read is a window: a limit or offset, of the query or of the
+/// union it stands for.
+pub(crate) fn is_windowed(query: &Query) -> bool {
+    query.limit.is_some()
+        || query.offset > 0
+        || query
+            .relation
+            .as_ref()
+            .and_then(|relation| crate::query::relation_union_parts(&relation.rel))
+            .is_some_and(|parts| parts.limit.is_some() || parts.offset.is_some_and(|o| o > 0))
 }
 
 /// The reason a policy rejects a write, leading its message (the code
@@ -935,6 +1053,7 @@ impl Db {
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
+                deferred: RefCell::new(None),
                 tx: None,
                 publications: Vec::new(),
                 client: None,
@@ -1236,7 +1355,7 @@ impl Db {
         // server stopped listing leaves it, though the copy stays readable.
         read.members_only |= remote_read;
         if remote_read {
-            Self::remote_shape(&prepared.query)?;
+            self.remote_shape(&prepared.query)?;
         }
         // A non-durable foreground tells its relay how far the read
         // reaches, as its fetches do; to an authority it is always remote.
@@ -2074,6 +2193,8 @@ impl Inner {
         // A replica missing chunks reads on past the first blocked cell, so
         // one round trip asks for every row's missing nodes.
         let mut blocked = false;
+        // A union's arm labels, shared by their rows.
+        let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
                 let key = match row.get_ref(0).map_err(storage)? {
@@ -2100,7 +2221,11 @@ impl Inner {
                     crate::ids::NodeUuid(uuid::Uuid::from_slice(node).map_err(|_| corrupt())?),
                 )))
             };
-            let root_version = if flat { version(3)? } else { None };
+            let root_version = if compiled.versioned {
+                version(3)?
+            } else {
+                None
+            };
             let joined = (0..compiled.joined)
                 .map(|i| {
                     let id: Vec<u8> = row.get(4 + 2 * i).map_err(storage)?;
@@ -2112,7 +2237,24 @@ impl Inner {
                     })
                 })
                 .collect::<Result<Arc<[_]>, Error>>()?;
-            let first = if flat { 4 + 2 * compiled.joined } else { 3 };
+            let union_arm = if compiled.union {
+                let label: String = row.get(3).map_err(storage)?;
+                Some(match arms.iter().find(|arm| ***arm == *label) {
+                    Some(arm) => arm.clone(),
+                    None => {
+                        let arm: Arc<str> = Arc::from(label);
+                        arms.push(arm.clone());
+                        arm
+                    }
+                })
+            } else {
+                None
+            };
+            let first = if flat {
+                4 + 2 * compiled.joined
+            } else {
+                3 + usize::from(compiled.versioned) + usize::from(compiled.union)
+            };
             let cells = compiled
                 .projection
                 .iter()
@@ -2140,6 +2282,7 @@ impl Inner {
                 types: types.clone(),
                 joined,
                 version: root_version,
+                union_arm,
             });
         }
         if blocked {
@@ -2532,6 +2675,153 @@ impl Inner {
         })
     }
 
+    /// Check a write's own policy as SPEC 7 has it: on committed state
+    /// overlaid with the unit's grounded rows. Inside a unit
+    /// ([`Inner::defer_checks`]) the check waits for the unit's end;
+    /// alone, nothing else is grounded and it runs now.
+    fn write_check(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        check: WriteCheck,
+        seq: u64,
+    ) -> Result<(), Error> {
+        let deferred = DeferredCheck {
+            table: table.name.clone(),
+            row,
+            key: key.to_vec(),
+            author,
+            check,
+        };
+        if let Some(pending) = self.deferred.borrow_mut().as_mut() {
+            // A row's first write decides which policy its unit's end state
+            // must pass.
+            if !pending
+                .iter()
+                .any(|p| p.table == deferred.table && p.row == row && p.key == deferred.key)
+            {
+                pending.push(deferred);
+            }
+            return Ok(());
+        }
+        self.ground(vec![deferred], seq)
+    }
+
+    /// Start a unit: write checks wait for [`Inner::finish_checks`].
+    pub(crate) fn defer_checks(&self) {
+        *self.deferred.borrow_mut() = Some(Vec::new());
+    }
+
+    /// Drop a unit's pending checks (it rolled back).
+    pub(crate) fn abandon_checks(&self) {
+        *self.deferred.borrow_mut() = None;
+    }
+
+    /// End a unit written at `seq`: ground its writes (SPEC 7). The first
+    /// round checks every write on committed state alone; a write that
+    /// passes is grounded, and from the next round on its row shows its
+    /// end state to the others. A write that never passes rejects the
+    /// unit. A row the unit leaves deleted has no end state to check.
+    pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
+        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        self.ground(pending, seq)
+    }
+
+    fn ground(&self, mut pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
+        let schema = self.schema.clone();
+        let mut live = Vec::with_capacity(pending.len());
+        for check in pending.drain(..) {
+            let table = schema.table(&check.table)?;
+            if !self.is_deleted_version(table, check.row, &check.key)? {
+                live.push(check);
+            }
+        }
+        let mut pending = live;
+        let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
+        loop {
+            let cut = Cut {
+                seq: seq.saturating_sub(1),
+                own: seq,
+                extra: Vec::new(),
+                grounded: Some(Arc::new(grounded.clone())),
+            };
+            let mut passed = Vec::new();
+            let mut failed = Vec::new();
+            for check in pending {
+                let table = schema.table(&check.table)?;
+                let session = self.session(check.author);
+                let holds =
+                    self.holds_at(table, check.row, &check.key, Some(cut.clone()), |ctx| {
+                        match check.check {
+                            WriteCheck::Insert => {
+                                ctx.operation_policy(table, Operation::Insert, "a", &session)
+                            }
+                            WriteCheck::Restore => {
+                                ctx.operation_policy(table, Operation::Update, "a", &session)
+                            }
+                            // Without a WITH CHECK, the new row must pass
+                            // USING, as in Postgres.
+                            WriteCheck::WithCheck { .. } => {
+                                let update = &table.policies.update;
+                                let clause = update.with_check.as_ref().or(update.using.as_ref());
+                                ctx.policy_clause(clause, table, "a", &session)
+                            }
+                        }
+                    })?;
+                if holds {
+                    passed.push(check);
+                } else {
+                    failed.push(check);
+                }
+            }
+            if failed.is_empty() {
+                return Ok(());
+            }
+            if passed.is_empty() {
+                let check = &failed[0];
+                return Err(match check.check {
+                    WriteCheck::Insert => denied(format_args!(
+                        "INSERT policy denied the new row in `{}`",
+                        check.table
+                    )),
+                    WriteCheck::WithCheck { upsert } => denied(format_args!(
+                        "{} policy (WITH CHECK) denied the new row",
+                        if upsert { "UPSERT" } else { "UPDATE" }
+                    )),
+                    WriteCheck::Restore => denied("RESTORE policy denied the restored row"),
+                });
+            }
+            for check in passed {
+                let stored = schema.table(&check.table)?.stored.clone();
+                grounded
+                    .entry(stored)
+                    .or_default()
+                    .insert(*check.row.0.as_bytes());
+            }
+            pending = failed;
+        }
+    }
+
+    /// Whether `row`'s current version on branch `key` is a tombstone.
+    fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
+        let sql = format!(
+            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2",
+            quote(&table.stored)
+        );
+        let deleted: Option<i64> = self
+            .conn
+            .cached_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(deleted.is_none_or(|d| d != 0))
+    }
+
     fn check_clause(
         &self,
         table: &Table,
@@ -2922,21 +3212,6 @@ impl Inner {
         Ok(cells)
     }
 
-    /// Whether `row` on branch `key` has a superseded committed image.
-    fn has_history(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
-        let sql = format!(
-            "SELECT EXISTS (SELECT 1 FROM {} WHERE id = ?1 AND _b = ?2)",
-            quote(&format!("{}__h", table.stored))
-        );
-        self.conn
-            .cached_row(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
-                |r| r.get(0),
-            )
-            .map_err(storage)
-    }
-
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
@@ -3132,24 +3407,16 @@ impl Inner {
         self.changed
             .borrow_mut()
             .push((table.stored.clone(), row, key.clone()));
-        if let Some(author) = self.checked(who)
-            && !self.check(table, row, &key, author, Operation::Insert)?
-        {
-            return Err(denied(format_args!(
-                "INSERT policy denied the new row in `{table_name}`"
-            )));
+        if let Some(author) = self.checked(who) {
+            self.write_check(table, row, &key, author, WriteCheck::Insert, seq)?;
         }
         Ok(WriteHandle { row, seq })
     }
 
-    /// Read-for-write: a hidden row is indistinguishable from an absent one,
-    /// and omitted cells must not be merged blind.
-    /// The session a write's policies (read access to its target, USING,
-    /// WITH CHECK, INSERT, DELETE) are checked as here: a trusted
-    /// session's, at the authority. A replica leaves them to the authority
-    /// on upload, which rejects the write: it may lack rows those policies
-    /// read (hidden from it), and a backend acting for a session holds
-    /// rows that session cannot read.
+    /// The session a write's operation policies (USING, WITH CHECK,
+    /// INSERT, DELETE) are checked as here: a trusted session's, at the
+    /// authority. A replica leaves them to the authority on upload: it may
+    /// lack rows those policies read (hidden from it).
     fn checked(&self, who: Who) -> Option<AuthorSubject> {
         match who {
             Who::Session(author) if self.client.is_none() => Some(author),
@@ -3157,6 +3424,11 @@ impl Inner {
         }
     }
 
+    /// Read-for-write (SPEC 7, INV-RLS-20): a session may update only a
+    /// row it may read, and omitted cells must not be merged blind. A
+    /// replica acting for a session (a backend's request) refuses an update
+    /// of a row hidden from it at once; an upsert there leaves the existing
+    /// target to the authority, which rejects it on upload.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -3165,12 +3437,25 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        if let Some(author) = self.checked(*who)
+        let reader = match *who {
+            Who::Session(author) if verb == "UPDATE" => Some(author),
+            who => self.checked(who),
+        };
+        if let Some(author) = reader
             && !self.check(table, row, key, author, Operation::Select)?
         {
-            return Err(denied(format_args!(
-                "read policy denied {verb}: the target requires read permission"
-            )));
+            let detail = format!(
+                "read policy denied {verb} on table {}: the operation requires read \
+                 permission on the target row",
+                table.name
+            );
+            // A replica refuses it locally, as main does; an authority
+            // reports it as its policy rejection.
+            return Err(if self.client.is_some() {
+                rejected(detail)
+            } else {
+                denied(detail)
+            });
         }
         if let Some(author) = self.checked(*who)
             && !self.check_clause(
@@ -3279,25 +3564,18 @@ impl Inner {
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
         };
-        // The new row is checked against the other rows as they were
-        // before this transaction, as a policy's subqueries see the
-        // statement's snapshot: a same-table EXISTS compares the new row
-        // with the old one, not with itself. Without a WITH CHECK, the new
-        // row must pass USING, as in Postgres.
-        let update = &table.policies.update;
-        let with_check = update.with_check.as_ref().or(update.using.as_ref());
-        if let Some(author) = self.checked(who)
-            && !{
-                let session = self.session(author);
-                let before = Some(Cut::at(seq.saturating_sub(1)));
-                self.holds_at(table, row, &key, before, |ctx| {
-                    ctx.policy_clause(with_check, table, "a", &session)
-                })?
-            }
-        {
-            return Err(denied(format_args!(
-                "{verb} policy (WITH CHECK) denied the new row"
-            )));
+        // The new row is checked on the evidence SPEC 7 gives a WITH CHECK
+        // ([`Inner::write_check`]): a same-table EXISTS compares the new row
+        // with the old one, not with itself.
+        if let Some(author) = self.checked(who) {
+            self.write_check(
+                table,
+                row,
+                &key,
+                author,
+                WriteCheck::WithCheck { upsert },
+                seq,
+            )?;
         }
         Ok(WriteHandle { row, seq })
     }
@@ -3336,17 +3614,9 @@ impl Inner {
     ) -> Result<WriteHandle, Error> {
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
-        let check = |inner: &Self, key: &[u8], fresh: bool| -> Result<(), Error> {
-            // Deleting a row this same commit inserted needs no read
-            // permission: nothing persisted is revealed.
-            if let Some(author) = inner.checked(who)
-                && !fresh
-                && !inner.check(table, row, key, author, Operation::Select)?
-            {
-                return Err(denied(
-                    "read policy denied DELETE: the target requires read permission",
-                ));
-            }
+        // A delete by row id reads no user data (SPEC 7): its DELETE policy
+        // alone decides, so a write-only principal may delete.
+        let check = |inner: &Self, key: &[u8]| -> Result<(), Error> {
             if let Some(author) = inner.checked(who)
                 && !inner.check(table, row, key, author, Operation::Delete)?
             {
@@ -3358,10 +3628,9 @@ impl Inner {
             Located::Row {
                 key,
                 deleted: false,
-                seq: current,
+                ..
             } => {
-                let fresh = current == seq && !self.has_history(table, row, &key)?;
-                check(self, &key, fresh)?;
+                check(self, &key)?;
                 self.snapshot(table, row, &key, seq)?;
                 self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true), false)?;
             }
@@ -3373,7 +3642,7 @@ impl Inner {
                 head_cells,
                 at,
             } => {
-                check(self, &from, false)?;
+                check(self, &from)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true), false)?;
             }
@@ -3442,13 +3711,30 @@ impl Inner {
             content.is_some(),
         )?;
         // A restore writes an existing row back: the UPDATE policy decides.
-        if let Some(author) = self.checked(who)
-            && !self.check(table, row, &key, author, Operation::Update)?
-        {
-            return Err(denied("RESTORE policy denied the restored row"));
+        if let Some(author) = self.checked(who) {
+            self.write_check(table, row, &key, author, WriteCheck::Restore, seq)?;
         }
         Ok(WriteHandle { row, seq })
     }
+}
+
+/// A write's own policy check, deferred to the end of its unit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteCheck {
+    /// The INSERT policy on the new row.
+    Insert,
+    /// The UPDATE (or UPSERT) WITH CHECK on the new row.
+    WithCheck { upsert: bool },
+    /// The UPDATE policy on a restored row.
+    Restore,
+}
+
+struct DeferredCheck {
+    table: String,
+    row: RowUuid,
+    key: Vec<u8>,
+    author: AuthorSubject,
+    check: WriteCheck,
 }
 
 /// Which branch a write addresses.
@@ -4423,8 +4709,12 @@ impl Db {
                 .execute_batch("SAVEPOINT commit_batch")
                 .map_err(storage)?;
             let mark = inner.changed.borrow().len();
-            let applied = inner.apply_with_edits(ops, &batch.edits, ops.len(), seq);
+            inner.defer_checks();
+            let applied = inner
+                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
+                .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
+                inner.abandon_checks();
                 inner
                     .conn
                     .execute_batch("ROLLBACK TO commit_batch; RELEASE commit_batch")
@@ -4437,7 +4727,7 @@ impl Db {
                 .execute_batch("RELEASE commit_batch")
                 .map_err(storage)?;
             let prior = inner.seq;
-            if !ops.is_empty() {
+            if !ops.is_empty() || kind.validates_reads() {
                 inner.seq = seq;
             }
             (seq, prior, mark)
@@ -4734,7 +5024,7 @@ impl TxRef<'_> {
             && self.db.is_client()
         {
             let at = pinned.then_some(snapshot);
-            Db::remote_shape(&prepared.query)?;
+            self.db.remote_shape(&prepared.query)?;
             let through = self
                 .db
                 .fetch(prepared, at, include_deleted, ReadTier::Remote, None, None)

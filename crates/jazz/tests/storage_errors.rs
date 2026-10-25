@@ -6,7 +6,7 @@
 //! send. The errors are injected by hiding one of the store's own tables
 //! through a second connection. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

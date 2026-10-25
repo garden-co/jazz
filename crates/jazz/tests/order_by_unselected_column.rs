@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use jazz::block_on;
 use jazz::db::CurrentRow;

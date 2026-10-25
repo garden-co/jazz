@@ -1,9 +1,9 @@
 //! Relation facade queries on SQLite: a client's hopTo, gather or match read
 //! arrives as relation IR ending in a full-row projection, and is read as
 //! the ordinary query it stands for. Projections that rename or narrow the
-//! output, and unions, are refused as not supported yet.
+//! output are refused as not supported yet. Unions: `union_queries.rs`.
 
-mod common;
+use crate::common;
 use common::compile_schema;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -11,7 +11,7 @@ use jazz::query::{Query, RelationQuery};
 use jazz::records::Value as CoreValue;
 use jazz::tools::public_schema::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationProjectColumn,
-    RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
 use jazz::tools::{
     ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
@@ -108,7 +108,7 @@ fn a_full_row_relation_projection_reads_as_its_ordinary_query() {
 }
 
 #[test]
-fn narrowing_projections_and_unions_are_not_supported_yet() {
+fn narrowing_projections_are_not_supported_yet() {
     let db = open();
     let narrowed = db
         .prepare_query(&relation_query(done_todos(&["id", "title"])))
@@ -117,13 +117,4 @@ fn narrowing_projections_and_unions_are_not_supported_yet() {
         narrowed.to_string().contains("not supported yet"),
         "{narrowed}"
     );
-    let union = db
-        .prepare_query(&relation_query(RelationExpr::Union {
-            inputs: vec![RelationUnionArm {
-                label: "done".to_owned(),
-                input: done_todos(&["id", "title", "done"]),
-            }],
-        }))
-        .expect_err("a union is refused");
-    assert!(union.to_string().contains("not supported yet"), "{union}");
 }

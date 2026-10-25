@@ -3,7 +3,7 @@
 //! not. Reads of a snapshot are answered from the replica's own store, and a
 //! write under a frozen base reaches the authority as a frozen view.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

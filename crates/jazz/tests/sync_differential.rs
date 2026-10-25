@@ -7,7 +7,7 @@
 //! every client's pending writes must have a fate. Not ported from Jazz:
 //! this pins the prototype's sync layer (src/sync.rs).
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

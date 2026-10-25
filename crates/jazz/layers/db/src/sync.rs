@@ -663,6 +663,13 @@ pub(crate) enum Kind {
     },
 }
 
+impl Kind {
+    /// Whether the authority must see the commit even with no writes.
+    pub(crate) fn validates_reads(&self) -> bool {
+        matches!(self, Kind::Serializable { reads, .. } if !reads.is_empty())
+    }
+}
+
 struct Pending {
     tx: u64,
     ops: Vec<StagedOp>,
@@ -1093,6 +1100,9 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
 /// an aggregate its input rows (its filters and traversals, every column,
 /// no window), which the client aggregates as it would local rows.
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
+    if let Some(prefix) = crate::db::union_prefix(query) {
+        return std::borrow::Cow::Owned(prefix);
+    }
     // A window past an offset is only right over the rows before it too:
     // the replica holds the whole prefix and applies the offset itself.
     if query.aggregate.is_none() && query.offset > 0 {
@@ -1401,6 +1411,14 @@ impl Inner {
         // History reads take no relationships.
         if is_history_table(&query.table) {
             return Ok(Vec::new());
+        }
+        // A union's rows are read through every arm: each arm's support.
+        if let Some(plan) = crate::db::union_plan(query, &self.schema)? {
+            let mut support = Vec::new();
+            for (_, arm) in &plan.arms {
+                support.extend(self.support_of(arm)?);
+            }
+            return Ok(support);
         }
         let table = self.schema.table(&query.table)?;
         let mut support = Vec::new();
@@ -2949,7 +2967,9 @@ impl Db {
             inner.capture.extend(ops);
             return Ok(());
         }
-        if ops.is_empty() || seq != inner.seq {
+        // A read-only serializable commit still goes up: the authority
+        // validates its reads.
+        if (ops.is_empty() && !kind.validates_reads()) || seq != inner.seq {
             return Ok(());
         }
         // The writer the authority stamps: an explicit identity, or the
@@ -3074,7 +3094,14 @@ impl Db {
     /// (uncorrelated traversals or ones through a referenced row, gathers
     /// filtered after the gather, multi-hop includes) would see a partial
     /// replica, so they are refused explicitly.
-    pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
+    pub(crate) fn remote_shape(&self, query: &Query) -> Result<(), Error> {
+        let schema = self.inner().schema.clone();
+        if let Some(plan) = crate::db::union_plan(query, &schema)? {
+            return plan
+                .arms
+                .iter()
+                .try_for_each(|(_, arm)| self.remote_shape(arm));
+        }
         let query = &*remote_query(query);
         let other_tables = !query.joins.iter().all(join_followable)
             || !query.reachable.iter().all(|via| gather_shaped(query, via))
@@ -4794,7 +4821,7 @@ impl Db {
             } => {
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
-                let windowed = query.limit.is_some() || query.offset > 0;
+                let windowed = crate::db::is_windowed(&query);
                 // A relay serves what its upstream lists, settled once the
                 // upstream answers: its own store may be cold. A relay
                 // whose upstream cannot answer yet (its link is down, or
@@ -5454,10 +5481,14 @@ impl Db {
                 .execute_batch("SAVEPOINT upload")
                 .map_err(|e| (storage(e), Vec::new()))?;
             let mark = inner.changed.borrow().len();
+            // The unit's write checks run at its end, grounded (SPEC 7).
+            inner.defer_checks();
             let applied = ops
                 .iter()
-                .try_for_each(|op| inner.apply_as(op, who, seq).map(drop));
+                .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
+                .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
+                inner.abandon_checks();
                 inner
                     .conn
                     .execute_batch("ROLLBACK TO upload; RELEASE upload")
@@ -5766,7 +5797,7 @@ impl Db {
                 _ => None,
             };
             if let Some(deadline) = wait {
-                Self::remote_shape(&prepared.query)?;
+                self.remote_shape(&prepared.query)?;
                 // A read that must be covered by the server fails once
                 // the caller's budget is spent or the server cannot serve
                 // its schema version; others fall back to local.

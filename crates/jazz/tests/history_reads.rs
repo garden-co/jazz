@@ -5,7 +5,7 @@
 //! select one branch's versions, and schema views read old versions through
 //! their lens. Ported from #4166's Groove history relations.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

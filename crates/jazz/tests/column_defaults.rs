@@ -1,7 +1,7 @@
 // Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};

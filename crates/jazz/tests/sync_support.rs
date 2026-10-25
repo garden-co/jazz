@@ -4,7 +4,7 @@
 //! that read further still are refused with "not supported yet". Not
 //! ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
