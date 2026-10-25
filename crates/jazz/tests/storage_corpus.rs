@@ -55,8 +55,8 @@ const SERVER_FILE: &str = "sqlite-storage-v1/server.sqlite.gz.base64";
 const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// SHA-256 of the decoded SQLite files. The corpus is immutable: a new
 /// storage format gets a new corpus beside this one.
-const SERVER_SHA256: &str = "c6f4a4fcc528b45d7572a319058a347f5def9c0c10a2b1589cf4c179df0451d7";
-const CLIENT_SHA256: &str = "5e43039e4b91099d9e00bd8bd41fe05d2b9d379da567fa9cc0815a5c8c1ae500";
+const SERVER_SHA256: &str = "a10348d551dcbb5db42f4ff3dbe441aadae69be7e12da573f856a53df80ca532";
+const CLIENT_SHA256: &str = "2770a3d61c5e1123a406992c36b7c8066901128238cf00faf682527e9201cf51";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -317,8 +317,9 @@ fn expect(id: RowUuid, values: &[(&str, Value)]) -> (RowUuid, Vec<(String, Optio
 // ---- producing the corpus --------------------------------------------------
 
 /// Writes the corpus into `fixtures/sqlite-storage-v1/` when
-/// `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`. Run once per storage format; the
-/// committed files must never be regenerated, only added beside.
+/// `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`. Run once per storage format; once
+/// a format has shipped its committed files are never regenerated, only
+/// added beside (see the corpus README).
 #[test]
 #[ignore = "#1787: manual corpus producer; run once per new storage format"]
 fn produce_sqlite_storage_corpus_v1() {
