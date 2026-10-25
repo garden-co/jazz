@@ -941,11 +941,13 @@ pub(crate) struct Session {
     /// Pushed chunk bytes admitted in the current staging-policy window,
     /// and when it started (the ingress rate limit).
     ingress: (Instant, usize),
-    /// Inbound messages held back by the rate limit, in order.
+    /// Inbound messages held back by the rate limit, or reads waiting for
+    /// large-value chunks from this relay's upstream, in order.
     backlog: VecDeque<SyncMessage>,
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
-    /// Fetches whose upstream answer arrived: served from this store.
+    /// Fetches whose upstream answer arrived, or that this relay already
+    /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
@@ -3362,15 +3364,29 @@ impl Db {
     /// connected to an upstream that may answer, with requests outstanding
     /// (sent, or recorded by a read for the next send). A non-durable
     /// foreground's relay answers from its store whatever its own path to
-    /// the server.
+    /// the server. Chunks the upstream answered missing are not waited for
+    /// again.
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
         inner.client.as_ref().is_some_and(|client| {
+            let unavailable = |request: &ChunkRequest| client.unavailable.contains(request);
             client.transport.is_some()
                 && (may_wait(client.hint.get()) || inner.non_durable)
-                && !(client.requested.is_empty()
-                    && client.wanted.is_empty()
-                    && !inner.chunks.has_demand())
+                && (!client.requested.is_empty()
+                    || client.wanted.iter().any(|request| !unavailable(request))
+                    || inner.chunks.has_demand_beyond(unavailable))
+        })
+    }
+
+    /// Whether a read recorded chunk requests that only the next send
+    /// carries upstream: a host that ticks when asked should tick.
+    pub fn owes_chunk_requests(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.client.as_ref().is_some_and(|client| {
+            client.transport.is_some()
+                && inner.chunks.has_demand_beyond(|request| {
+                    client.requested.contains(request) || client.unavailable.contains(request)
+                })
         })
     }
 
@@ -4215,8 +4231,22 @@ impl Db {
                     SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
                     _ => None,
                 };
+                let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
                 match (self.serve(index, message), read) {
                     (Ok(()), _) => {}
+                    // A relay's read whose large values it is still fetching
+                    // from its upstream is served again once they arrive,
+                    // from its store: the upstream is not asked again.
+                    (Err(error), Some(id))
+                        if crate::large::is_missing(&error)
+                            && fetch.is_some()
+                            && self.awaiting_chunks() =>
+                    {
+                        self.inner.borrow_mut().sessions[index]
+                            .fetched_upstream
+                            .insert(id);
+                        held.push_back(fetch.expect("a fetch"));
+                    }
                     (Err(error), Some(id)) => {
                         self.inner.borrow_mut().sessions[index]
                             .outbox
@@ -4990,7 +5020,7 @@ impl Db {
                         .is_some_and(|client| may_wait(client.hint.get()));
                     (
                         upstream && !answered && tier == ReadTier::Remote,
-                        upstream && tier == ReadTier::LocalFirst,
+                        upstream && !answered && tier == ReadTier::LocalFirst,
                     )
                 };
                 if refresh {
@@ -5495,6 +5525,10 @@ impl Db {
             .is_some_and(|client| std::mem::take(&mut client.relay_ready));
         if ready {
             self.server_tick()?;
+            // Chunks a relayed read found missing go upstream now.
+            if self.owes_chunk_requests() {
+                self.client_send()?;
+            }
         }
         Ok(())
     }
