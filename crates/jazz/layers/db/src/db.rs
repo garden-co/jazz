@@ -373,11 +373,14 @@ struct Inner {
     schema: Rc<Schema>,
     /// The owner's current schema.
     owner: Rc<Schema>,
+    /// `owner.jazz.version_id()`, which hashes the whole schema.
+    pub(crate) owner_version: crate::ids::SchemaVersionId,
     /// The stored tables: the union of every admitted schema, keyed and
     /// named by stored names.
     physical: Schema,
-    /// Admitted structural schemas, by version, and registered views.
-    admitted: Vec<JazzSchema>,
+    /// Admitted structural schemas with their version ids (hashing a
+    /// whole schema is too slow to repeat per session per tick).
+    admitted: Vec<(crate::ids::SchemaVersionId, JazzSchema)>,
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
@@ -1045,9 +1048,10 @@ impl Db {
                 staging: LargeValueStagingPolicy::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
+                owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
-                admitted: vec![config.schema.clone()],
+                admitted: vec![(config.schema.version_id(), config.schema.clone())],
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
@@ -1850,7 +1854,7 @@ impl Db {
             let admitted: Vec<Schema> = inner
                 .admitted
                 .iter()
-                .map(|admitted| inner.named(admitted))
+                .map(|(_, admitted)| inner.named(admitted))
                 .collect();
             for table in target.tables.values_mut() {
                 let stored = inner.physical.tables.get(&table.stored);
@@ -1886,14 +1890,15 @@ impl Db {
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &target)?;
             if make_current {
+                inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
             }
             if !inner
                 .admitted
                 .iter()
-                .any(|admitted| admitted.version_id() == version)
+                .any(|(admitted, _)| *admitted == version)
             {
-                inner.admitted.push(schema);
+                inner.admitted.push((version, schema));
             }
         }
         let mut inner = self.inner();
@@ -4153,7 +4158,7 @@ impl Db {
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
-            if let Some(admitted) = inner.admitted.iter().find(|a| a.version_id() == version) {
+            if let Some((_, admitted)) = inner.admitted.iter().find(|(id, _)| *id == version) {
                 if !same_tables(admitted, &schema, |l, r| {
                     l.read_policy == r.read_policy && l.write_policies == r.write_policies
                 }) {
@@ -4175,7 +4180,7 @@ impl Db {
                 if inner.names.get(&version).is_none() {
                     check_direct_lens(&inner.owner.jazz, &schema)?;
                 }
-                inner.admitted.push(schema.clone());
+                inner.admitted.push((version, schema.clone()));
             }
             let base = inner.owner.names();
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;

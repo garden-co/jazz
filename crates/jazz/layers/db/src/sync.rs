@@ -3014,7 +3014,7 @@ impl Db {
                     | SyncMessage::ChunkRequests { .. }
             )
         });
-        let version = *inner.owner.jazz.version_id().as_bytes();
+        let version = *inner.owner_version.as_bytes();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
         // Reading the held rows can fail, and connecting cannot: the send
@@ -4231,11 +4231,7 @@ impl Inner {
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
         self.sessions[index].version.is_some_and(|version| {
-            version != self.owner.jazz.version_id()
-                && !self
-                    .admitted
-                    .iter()
-                    .any(|admitted| admitted.version_id() == version)
+            version != self.owner_version && !self.admitted.iter().any(|(id, _)| *id == version)
         })
     }
 
@@ -4258,12 +4254,10 @@ impl Inner {
     /// Admitted `version` under its stored names, governed by the current
     /// schema's policies.
     pub(crate) fn governed(&self, version: crate::ids::SchemaVersionId) -> Option<Rc<Schema>> {
-        let jazz = if version == self.owner.jazz.version_id() {
+        let jazz = if version == self.owner_version {
             &self.owner.jazz
         } else {
-            self.admitted
-                .iter()
-                .find(|admitted| admitted.version_id() == version)?
+            &self.admitted.iter().find(|(id, _)| *id == version)?.1
         };
         Some(Rc::new(
             self.named(jazz).with_policies_of(self.owner.clone()),

@@ -349,7 +349,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// The row at `alias` is one the server still lists for this replica.
-    fn listed(&mut self, table: &Table, alias: &str) -> String {
+    pub(super) fn listed(&mut self, table: &Table, alias: &str) -> String {
         let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
         format!(
             "NOT EXISTS (SELECT 1 FROM _jazz_revoked AS r WHERE r.t = {stored} \
@@ -1949,6 +1949,13 @@ impl<'a> Ctx<'a> {
                     ))
                 })?;
                 let target = self.table(target_name)?;
+                if let Some(chain) = recursive_base(table, target, *operation, via_column) {
+                    // Distance n is checked with depth - n left, so the
+                    // hop below the first stops at its own bound.
+                    let bound = depth.min(chain.depth.map_or(usize::MAX, |d| d.saturating_add(1)));
+                    return self
+                        .ancestor_closure(target, alias, via_column, &chain, bound, session);
+                }
                 let p = self.alias("p");
                 let inner = match target.policy(*operation) {
                     None => "0".to_owned(),
@@ -1992,6 +1999,50 @@ impl<'a> Ctx<'a> {
                 )
             }
         })
+    }
+
+    /// A row's ancestors through its own reference `via`, up to `bound`
+    /// hops (each taken from an alive row meeting the chain's guards), any
+    /// of which (alive) meets one of its base disjuncts: a parent chain's
+    /// policy as one `WITH RECURSIVE` closure, not one nested EXISTS per
+    /// level (Durable Object SQLite caps expression depth at 100). The
+    /// caller checked the first hop's guards. `UNION` dedupes, so a cycle
+    /// terminates.
+    fn ancestor_closure(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        via: &str,
+        chain: &ParentChain<'_>,
+        bound: usize,
+        session: &Session,
+    ) -> Result<String, Error> {
+        let c = self.alias("anc");
+        let p = self.alias("p");
+        let a = self.alias("a");
+        let seed = column_sql(table, alias, via)?;
+        let parent = column_sql(table, &p, via)?;
+        let steps = self.source(table)?;
+        let mut step = vec![format!("{p}._del = 0"), format!("{c}.d < {bound}")];
+        for guard in &chain.guards {
+            step.push(self.policy_expr(guard, table, &p, None, session, 0)?);
+        }
+        let cte = format!(
+            "{c}(id, d) AS (SELECT {seed}, 1 UNION SELECT {parent}, {c}.d + 1 FROM {steps} AS {p} \
+             JOIN {c} ON {p}.id = {c}.id WHERE {})",
+            and(&step)
+        );
+        let base = chain
+            .base
+            .iter()
+            .map(|part| self.policy_expr(part, table, &a, None, session, 0))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!(
+            "EXISTS (WITH RECURSIVE {cte} SELECT 1 FROM {} AS {a} JOIN {c} ON {a}.id = {c}.id \
+             WHERE {a}._del = 0 AND {})",
+            self.source(table)?,
+            or(&base)
+        ))
     }
 
     // ---- relation IR ----------------------------------------------------
@@ -3392,5 +3443,81 @@ mod tests {
         ] {
             assert_eq!(plain_exists(sql), None, "{sql}");
         }
+    }
+}
+
+/// `target`'s `operation` policy split as a parent chain: when `table`
+/// inherits from its own rows through the scalar reference `via` and that
+/// policy is `base OR (guards AND INHERITS(operation, via))`, the other
+/// disjuncts, the guards a row meets to take the hop, and the hop's own
+/// depth bound. None when any of them inherits further: that case unrolls
+/// level by level.
+fn recursive_base<'p>(
+    table: &Table,
+    target: &'p Table,
+    operation: Operation,
+    via: &str,
+) -> Option<ParentChain<'p>> {
+    let array = |ty: &ValueType| match ty {
+        ValueType::Nullable(inner) => matches!(**inner, ValueType::Array(_)),
+        ty => matches!(ty, ValueType::Array(_)),
+    };
+    if target.stored != table.stored || target.column(via).is_none_or(|c| array(&c.ty)) {
+        return None;
+    }
+    let PolicyExpr::Or(parts) = target.policy(operation)? else {
+        return None;
+    };
+    let is_hop = |part: &PolicyExpr| {
+        matches!(part, PolicyExpr::Inherits { operation: op, via_column, .. }
+            if *op == operation && via_column == via)
+    };
+    let hop = |part: &'p PolicyExpr| -> Option<(Option<usize>, Vec<&'p PolicyExpr>)> {
+        let conds: Vec<&PolicyExpr> = match part {
+            PolicyExpr::And(conds) => conds.iter().collect(),
+            part => vec![part],
+        };
+        let mut hops = conds.iter().filter(|c| is_hop(c));
+        let Some(PolicyExpr::Inherits { max_depth, .. }) = hops.next() else {
+            return None;
+        };
+        if hops.next().is_some() {
+            return None;
+        }
+        let guards = conds.into_iter().filter(|c| !is_hop(c)).collect();
+        Some((*max_depth, guards))
+    };
+    let mut hops = parts.iter().filter_map(|part| hop(part).map(|h| (part, h)));
+    let (hop_part, (depth, guards)) = hops.next()?;
+    if hops.next().is_some() {
+        return None;
+    }
+    let base: Vec<&PolicyExpr> = parts
+        .iter()
+        .filter(|part| !std::ptr::eq(*part, hop_part))
+        .collect();
+    base.iter()
+        .chain(&guards)
+        .all(|part| !inherits(part))
+        .then_some(ParentChain {
+            base,
+            guards,
+            depth,
+        })
+}
+
+struct ParentChain<'p> {
+    base: Vec<&'p PolicyExpr>,
+    guards: Vec<&'p PolicyExpr>,
+    depth: Option<usize>,
+}
+
+fn inherits(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Inherits { .. } | PolicyExpr::InheritsReferencing { .. } => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
+        PolicyExpr::Not(inner) => inherits(inner),
+        PolicyExpr::Exists { condition, .. } => inherits(condition),
+        _ => false,
     }
 }

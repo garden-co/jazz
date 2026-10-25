@@ -339,6 +339,69 @@ fn a_streamed_upload_reaches_other_replicas() {
     );
 }
 
+/// A streamed value small enough to be stored inline still reaches the
+/// server as an ordinary row.
+#[test]
+fn a_small_streamed_upload_reaches_the_server() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let _a = connect(&server, &alice, user(1));
+    block_on(alice.insert_streaming_value_with_id(
+        "docs",
+        row(1),
+        BTreeMap::from([("body".to_owned(), Value::String("upload".into()))]),
+        "blob",
+        std::io::Cursor::new(vec![1, 2, 3, 4, 5, 6]),
+    ))
+    .unwrap();
+    pump(&server, &[&alice]);
+    assert_eq!(
+        local_cell(&server, "docs", 1, "blob").unwrap(),
+        Some(Value::Bytes(vec![1, 2, 3, 4, 5, 6]))
+    );
+}
+
+/// A trusted backend streams a value for a session it acts for, chunk by
+/// chunk as the bindings do: the row reaches the server.
+#[test]
+fn a_backends_streamed_upload_for_a_session_reaches_the_server() {
+    for blob in [
+        vec![1, 2, 3, 4, 5, 6],
+        (0..LARGE).map(|n| (n % 251) as u8).collect(),
+    ] {
+        let server = open(0, AuthorSubject::SYSTEM);
+        let backend = open(1, AuthorSubject::SYSTEM);
+        let _link = connect(&server, &backend, AuthorSubject::SYSTEM);
+        let cells = BTreeMap::from([("body".to_owned(), Value::String("upload".into()))]);
+        let mut upload = backend
+            .begin_streaming_value_upload("docs", &cells, "blob")
+            .unwrap();
+        for chunk in blob.chunks(64 * 1024) {
+            block_on(backend.push_streaming_value_upload(&mut upload, chunk)).unwrap();
+        }
+        block_on(backend.finish_streaming_value_upload(
+            upload,
+            jazz::db::StreamingMutationKind::Insert,
+            "docs",
+            row(1),
+            cells,
+            "blob",
+            jazz::db::WriteIdentity::Session(user(5)),
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+        pump(&server, &[&backend]);
+        assert_eq!(
+            local_cell(&server, "docs", 1, "blob").unwrap(),
+            Some(Value::Bytes(blob.clone())),
+            "{} bytes",
+            blob.len()
+        );
+    }
+}
+
 /// A client uploading past the server's ingress limit can still read: its
 /// held-back pushes and commit wait for a later window, but a subscription it
 /// opens after them is served now.

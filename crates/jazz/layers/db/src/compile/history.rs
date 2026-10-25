@@ -37,7 +37,7 @@ impl Ctx<'_> {
             || !query.array_subqueries.is_empty()
             || !query.reachable.is_empty()
         {
-            return Err(unsupported("joins or relationships in history queries"));
+            return Err(history_unsupported("joins or relationships"));
         }
         if let Some(aggregate) = &query.aggregate {
             let metadata = |column: &str| {
@@ -51,14 +51,11 @@ impl Ctx<'_> {
                     .iter()
                     .any(|output| output.column.as_deref().is_some_and(metadata));
             if reads_metadata {
-                return Err(query_error(
-                    "unsupported relation query: Reading aggregates over history metadata is \
-                     not supported in history queries yet",
-                ));
+                return Err(history_unsupported("aggregates over history metadata"));
             }
         }
         let Some(bound) = query.filters.iter().find_map(bounding_id) else {
-            return Err(unsupported(
+            return Err(history_unsupported(
                 "history without an id equality or IN constraint",
             ));
         };
@@ -68,14 +65,16 @@ impl Ctx<'_> {
             })
         };
         if query.filters.iter().any(names_transaction) {
-            return Err(unsupported("$transactionId predicates in history queries"));
+            return Err(history_unsupported(
+                "user-provided $transactionId predicates",
+            ));
         }
         if query
             .order_by
             .iter()
             .any(|order| order.column == TRANSACTION_ID_COLUMN)
         {
-            return Err(unsupported("ordering history by $transactionId"));
+            return Err(history_unsupported("ordering by $transactionId"));
         }
         let (source, versions) =
             self.history_source(source, HistoryBound::Filter(bound), include_deleted)?;
@@ -138,12 +137,10 @@ impl Ctx<'_> {
         include_deleted: bool,
     ) -> Result<(String, Table), Error> {
         if self.cut.is_some() {
-            return Err(unsupported("history reads at a snapshot"));
+            return Err(history_unsupported("history at a snapshot"));
         }
         if self.view.as_ref().is_some_and(|view| view.base.is_some()) {
-            return Err(unsupported(
-                "history reads through a branch view with a base",
-            ));
+            return Err(history_unsupported("history with a branch base"));
         }
         let table = self.table(source)?;
         let versions = versions_table(table);
@@ -176,6 +173,11 @@ impl Ctx<'_> {
         }
         if let Some(session) = self.policy {
             gate.push(self.read_policy(table, "a", session)?);
+        }
+        // A synced read follows the server: once it stops listing the
+        // current row, the row's versions leave the result too.
+        if self.members_only {
+            gate.push(self.listed(table, "a"));
         }
         keep.push(format!(
             "EXISTS (SELECT 1 FROM {name} AS a WHERE {})",
@@ -284,4 +286,11 @@ pub(super) fn bounding_id(predicate: &Predicate) -> Option<&Predicate> {
         }
         _ => None,
     }
+}
+
+/// Main's wording for a history shape it does not read yet.
+fn history_unsupported(pattern: &str) -> Error {
+    query_error(format!(
+        "unsupported relation query: Reading {pattern} is not supported in history queries yet"
+    ))
 }
