@@ -212,9 +212,8 @@ fn sync_correctness_smoke() {
                 expected_ui.insert(deleted, format!("delete-base-{}", step - 2));
             }
             3 => {
-                // A serializable read-modify-write of one of the UI's rows.
-                // Relays do not forward serializable commits yet: the fate
-                // is an explicit rejection, never a silent mergeable write.
+                // A serializable read-modify-write of one of the UI's rows,
+                // validated at the authority through both relays.
                 let target = *expected_ui.keys().next().expect("a row");
                 let tx = sim.drive(ui_db.serializable_tx()).expect("begin");
                 let prepared = ui_db
@@ -230,11 +229,9 @@ fn sync_correctness_smoke() {
                 ))
                 .expect("stage");
                 let receipt = sim.drive(tx.commit()).expect("commit");
-                let error = sim
-                    .drive(ui_db.wait_for_transaction(receipt.0, DurabilityTier::Global))
-                    .expect_err("a serializable commit through a relay is refused");
-                assert_eq!(error.code, ErrorCode::WriteRejected, "{error}");
-                assert!(error.message.contains("not supported yet"), "{error}");
+                sim.drive(ui_db.wait_for_transaction(receipt.0, DurabilityTier::Global))
+                    .expect("a serializable commit through relays is accepted");
+                expected_ui.insert(target, format!("serializable-{step}"));
             }
             _ => {
                 let target = row(0x20, 1 + rng.usize(12) as u64);
