@@ -772,6 +772,7 @@ impl Error {
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
+        crate::format::admit(&conn)?;
         Self::open_on(config, conn, None)
     }
 
@@ -784,6 +785,11 @@ impl Db {
         path: &std::path::Path,
         options: FileOptions,
     ) -> Result<Self, Error> {
+        // SQLite cannot open a directory; one the Groove engine wrote gets
+        // the typed refusal.
+        if path.is_dir() {
+            crate::format::refuse_groove_store(path)?;
+        }
         let flags = rusqlite::OpenFlags::default();
         let conn = match options.vfs {
             None => Connection::open_with_flags(path, flags),
@@ -810,6 +816,9 @@ impl Db {
             conn.execute_batch(&format!("PRAGMA page_size = {page_size}"))
                 .map_err(storage)?;
         }
+        // Before the journal mode, which rewrites the header: a refused file
+        // is left as it was.
+        crate::format::admit(&conn)?;
         // `journal_mode` answers with a row, so it is queried, not batched.
         let mode: String = conn
             .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
@@ -1868,6 +1877,13 @@ impl MergeableTx<'_> {
         prepared: &PreparedQuery,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db.read(prepared)
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Before `conn` closes, so it closes last and checkpoints the WAL.
+        self.chunks.close_reader();
     }
 }
 

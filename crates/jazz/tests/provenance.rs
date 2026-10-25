@@ -418,3 +418,28 @@ fn author_provenance_carries_the_account() {
     );
     assert_eq!(db.interned_authors_for_test(), 2);
 }
+
+/// A live query filtered by a provenance part (`$createdBy...`) sees the
+/// rows written after it opened: a provenance filter is not a key a changed
+/// row can be looked up by, so it must not narrow which commits wake it.
+#[test]
+fn a_subscription_filtered_by_its_author_sees_new_rows() {
+    let db = db();
+    let (_, subject) = user(1).principal_parts();
+    let mine = db
+        .prepare_query(&Query::from("notes").filter(eq(
+            col("$createdBy.identity.subject"),
+            lit(Value::String(subject)),
+        )))
+        .unwrap();
+    let mut stream = block_on(db.subscribe(&mine, ReadOpts::default())).unwrap();
+    block_on(db.insert("notes", body("mine"), as_user(1, row(1)))).unwrap();
+    block_on(db.insert("notes", body("theirs"), as_user(2, row(2)))).unwrap();
+    let mut seen = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Delta { added, .. } = event {
+            seen.extend(added.iter().map(|row| row.row_uuid()));
+        }
+    }
+    assert_eq!(seen, [row(1)]);
+}

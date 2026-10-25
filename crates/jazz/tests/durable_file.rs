@@ -486,3 +486,36 @@ fn memory_stays_bounded_by_the_page_cache() {
     );
     assert!(file > 16 << 20, "the data really is on disk");
 }
+
+/// Closing a store checkpoints its WAL into the file and removes it, also
+/// after the store read large-value chunks back through its read-only
+/// connection (here: chunks a replica fetched from the server).
+#[test]
+fn closing_a_store_that_read_large_values_back_checkpoints_its_wal() {
+    let path = scratch("large-close");
+    let server = block_on(Db::open_history_complete(config(0xef))).unwrap();
+    block_on(server.insert(
+        "items",
+        BTreeMap::from([
+            ("label".to_owned(), Value::String("x".repeat(300 * 1024))),
+            ("n".to_owned(), Value::I64(1)),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    {
+        let client = open_file(&path, 4);
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        let query = client.prepare_query(&Query::from("items")).unwrap();
+        let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        for _ in 0..5 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(count(&client), 1);
+    }
+    let wal = PathBuf::from(format!("{}-wal", path.display()));
+    assert!(!wal.exists(), "the closed store left its WAL behind");
+}

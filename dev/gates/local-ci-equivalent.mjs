@@ -50,24 +50,21 @@ export const ciPartitionJobs = Object.freeze({
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 
-// Build with dev/t's exact selection (`--no-default-features`). Jazz's empty
-// `default` feature still sets `--cfg feature="default"`, so omitting the flag
-// compiles a second, otherwise identical lib-test unit after storage-compat's
-// dev/t corpus build in the same job.
-const m3DifferentialCommand = command(
-  "bounded maintained-vs-one-shot differential oracle",
-  "bash",
-  [
-    "-lc",
-    String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+// Build with dev/t's exact selection (`--no-default-features`, the same
+// features): the oracle's integration test then links the `jazz` library
+// storage-compat's dev/t receipts just built in the same job, instead of a
+// second, otherwise identical build of it.
+const differentialCommand = command("bounded maintained-vs-one-shot differential oracle", "bash", [
+  "-lc",
+  String.raw`set -euo pipefail
+test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     try {
       const message = JSON.parse(line);
-      if (message.reason === "compiler-artifact" && message.target.name === "jazz_node" && message.executable)
+      if (message.reason === "compiler-artifact" && message.target.name === "maintained_differential" && message.executable)
         executable = message.executable;
     } catch {}
   });
@@ -80,10 +77,9 @@ test -x "$test_binary"
 timeout 60s env \
   JAZZ_SEED=11 \
   JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 \
-  JAZZ_DIFFERENTIAL_STEP_COUNT=3 \
-  "$test_binary" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored`,
-  ],
-);
+  JAZZ_DIFFERENTIAL_STEP_COUNT=60 \
+  "$test_binary" maintained_one_shot_differential_oracle --exact --ignored`,
+]);
 
 /**
  * CI partitions are the source of truth for both CI and `--ci-equivalent`.
@@ -188,7 +184,7 @@ export const ciPartitions = Object.freeze({
       "dev/gates/test/nextest-partitions.test.mjs",
     ]),
   ]),
-  "rust-differential": Object.freeze([m3DifferentialCommand]),
+  "rust-differential": Object.freeze([differentialCommand]),
   typescript: Object.freeze([
     command("native correctness-artifact producer", "node", [
       "dev/gates/ensure-correctness-artifacts.mjs",

@@ -182,7 +182,9 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
     };
     let db = Db::open_at(config, Path::new(&spec.path), options)
         .await
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        // Keeps the stable code, so a refused store's
+        // `unsupported_storage_codecs` reaches JavaScript.
+        .map_err(|error| crate::core_error_to_js(&error))?;
     Ok((db, store))
 }
 

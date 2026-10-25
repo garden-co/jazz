@@ -41,10 +41,21 @@ describe("UnsupportedStorageCodecsError", () => {
     });
   });
 
-  it("leaves other errors and refusals without codec lists unchanged", () => {
+  it("leaves other errors unchanged", () => {
     const other = coded("other", "storage");
-    const withoutLists = coded("refused", "unsupported_storage_codecs");
     expect(asUnsupportedStorageCodecsError(other)).toBe(other);
-    expect(asUnsupportedStorageCodecsError(withoutLists)).toBe(withoutLists);
+  });
+
+  it("rebuilds a refusal without codec lists with empty lists", () => {
+    const withoutLists = coded("refused", "unsupported_storage_codecs");
+    const rebuilt = asUnsupportedStorageCodecsError(withoutLists);
+
+    expect(rebuilt).toBeInstanceOf(UnsupportedStorageCodecsError);
+    expect(rebuilt).toMatchObject({
+      code: "unsupported_storage_codecs",
+      missing: [],
+      unknown: [],
+      cause: withoutLists,
+    });
   });
 });
