@@ -147,7 +147,7 @@ fn the_authority_advises_each_action_under_the_sessions_policies() {
     connect(&alice_db, &server, alice);
     connect(&bob_db, &server, bob);
 
-    use PermissionAdvice::{Allowed, Denied, Unknown};
+    use PermissionAdvice::{Allowed, Denied};
     let insert = |owner| PermissionAdviceAction::Insert {
         table: "notes".to_owned(),
         cells: note(owner, "new"),
@@ -173,13 +173,14 @@ fn the_authority_advises_each_action_under_the_sessions_policies() {
     assert_eq!(ask(&bob_db, &server, read()), Denied);
     assert_eq!(ask(&bob_db, &server, update()), Denied);
     assert_eq!(ask(&bob_db, &server, delete()), Denied);
-    // An insert policy that may correlate on the row's own id cannot be
-    // decided before the row has one.
+    // An insert policy that reads other rows is decided for a fresh row:
+    // alice owns a note, bob none.
     let pinned = PermissionAdviceAction::Insert {
         table: "pinned".to_owned(),
         cells: BTreeMap::from([("title".to_owned(), Value::String("p".to_owned()))]),
     };
-    assert_eq!(ask(&alice_db, &server, pinned), Unknown);
+    assert_eq!(ask(&alice_db, &server, pinned.clone()), Allowed);
+    assert_eq!(ask(&bob_db, &server, pinned), Denied);
 
     // Advice never writes.
     assert_eq!(count(&server, "notes"), 1);

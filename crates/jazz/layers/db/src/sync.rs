@@ -3353,30 +3353,17 @@ impl Db {
                     Err(_) => PermissionAdvice::Unknown,
                 };
             }
-            PermissionAdviceAction::Insert { table, cells } => {
-                let owner = self.inner.borrow().owner.clone();
-                // The candidate has no id yet: a policy that looks at it
-                // cannot be decided.
-                match owner.table(&table) {
-                    Ok(schema) => {
-                        if schema
-                            .policy(crate::tools::Operation::Insert)
-                            .is_some_and(depends_on_row_id)
-                        {
-                            return PermissionAdvice::Unknown;
-                        }
-                    }
-                    Err(_) => return PermissionAdvice::Unknown,
-                }
-                StagedOp::Insert(
-                    table,
-                    cells,
-                    InsertOptions {
-                        row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
-                        ..Default::default()
-                    },
-                )
-            }
+            // The candidate gets a fresh id, as the insert it previews will:
+            // no other row can reference it yet, so the dry run decides what
+            // the authority would.
+            PermissionAdviceAction::Insert { table, cells } => StagedOp::Insert(
+                table,
+                cells,
+                InsertOptions {
+                    row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                    ..Default::default()
+                },
+            ),
             PermissionAdviceAction::Update { table, row, patch } => {
                 StagedOp::Update(table, row, patch, Default::default())
             }
@@ -5428,32 +5415,6 @@ fn commit_who(
         }
         (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
         (None, _) => Ok(Who::Local),
-    }
-}
-
-/// Whether a policy can look at the row's own id (subqueries count: they
-/// may correlate on it).
-fn depends_on_row_id(policy: &PolicyExpr) -> bool {
-    match policy {
-        PolicyExpr::Cmp { column, .. }
-        | PolicyExpr::IsNull { column }
-        | PolicyExpr::IsNotNull { column }
-        | PolicyExpr::Contains { column, .. }
-        | PolicyExpr::In { column, .. }
-        | PolicyExpr::InList { column, .. } => column == "id",
-        PolicyExpr::Inherits { via_column, .. } => via_column == "id",
-        PolicyExpr::InheritsReferencing { .. }
-        | PolicyExpr::Exists { .. }
-        | PolicyExpr::ExistsRel { .. } => true,
-        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().any(depends_on_row_id),
-        PolicyExpr::Not(item) => depends_on_row_id(item),
-        PolicyExpr::SessionCmp { .. }
-        | PolicyExpr::SessionIsNull { .. }
-        | PolicyExpr::SessionIsNotNull { .. }
-        | PolicyExpr::SessionContains { .. }
-        | PolicyExpr::SessionInList { .. }
-        | PolicyExpr::True
-        | PolicyExpr::False => false,
     }
 }
 
