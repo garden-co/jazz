@@ -19,6 +19,14 @@ The existing `jazz.sqlite.native-relay-carrier.v1` sample for
 emits the shortest spelling, so existing correctly encoded traffic is unchanged.
 No stored bytes, enum tags, authority decisions or catalogue identities change.
 
+Direct WASM negotiated-session admission also checks the exact protocol version
+and whether every accepted feature is present in this artifact's own advertised
+mask before creating a link. Previously it ignored both values, although the SDK
+Hello parser and NAPI already checked them. Unsupported values now produce a
+`protocol` error; zero optional features and supported subsets remain valid.
+Endpoint tuples still confer no identity or permission authority. Protocol
+version 6, existing feature bits and Hello bytes are unchanged.
+
 The public NAPI/WASM regression exercises single and batch rejection through
 sealed generated artifacts. A server regression checks that a malformed message
 closes its session before a following catalogue request and leaves another
