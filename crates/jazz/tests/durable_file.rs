@@ -519,3 +519,159 @@ fn closing_a_store_that_read_large_values_back_checkpoints_its_wal() {
     let wal = PathBuf::from(format!("{}-wal", path.display()));
     assert!(!wal.exists(), "the closed store left its WAL behind");
 }
+
+/// A replica that wrote a large value and synced it reads it back offline
+/// after a restart: its own chunks stay in its file once the server's
+/// version replaces the optimistic one.
+#[test]
+fn a_replica_reads_its_own_synced_large_value_offline_after_a_restart() {
+    let path = scratch("large-own");
+    let server = block_on(Db::open_history_complete(config(0xed))).unwrap();
+    let label = "y".repeat(300 * 1024);
+    {
+        let client = open_file(&path, 5);
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        let query = client.prepare_query(&Query::from("items")).unwrap();
+        let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        let handle = block_on(client.insert(
+            "items",
+            BTreeMap::from([
+                ("label".to_owned(), Value::String(label.clone())),
+                ("n".to_owned(), Value::I64(1)),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        drive(
+            &[&client, &server, &client],
+            client.wait_for_transaction(handle.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        let update = block_on(client.update(
+            "items",
+            row(1),
+            BTreeMap::from([("n".to_owned(), Value::I64(2))]),
+            Default::default(),
+        ))
+        .unwrap();
+        drive(
+            &[&client, &server, &client],
+            client.wait_for_transaction(update.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        for _ in 0..5 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+    }
+    let client = open_file(&path, 5);
+    let query = client.prepare_query(&Query::from("items")).unwrap();
+    let rows = block_on(client.all(&query, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .cells()
+            .find(|(name, _)| *name == "label")
+            .and_then(|(_, v)| v.cloned()),
+        Some(Value::String(label)),
+        "the replica's own large value is readable offline"
+    );
+}
+
+/// A durable relay (a browser's worker) keeps the large value a client
+/// below it wrote, so it reads the value offline after a restart.
+#[test]
+fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart() {
+    let path = scratch("large-relay");
+    let server = block_on(Db::open_history_complete(config(0xec))).unwrap();
+    let label = "z".repeat(300 * 1024);
+    {
+        let relay = open_file(&path, 6);
+        let (relay_side, server_side) = duplex();
+        let _upstream = block_on(relay.connect_upstream(relay_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        let client = block_on(Db::open(config(7))).unwrap();
+        let (client_side, relay_down) = duplex();
+        let _relay_link = block_on(client.connect_upstream(client_side));
+        relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM);
+        let query = client.prepare_query(&Query::from("items")).unwrap();
+        let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        let handle = block_on(client.insert(
+            "items",
+            BTreeMap::from([
+                ("label".to_owned(), Value::String(label.clone())),
+                ("n".to_owned(), Value::I64(1)),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        drive(
+            &[&client, &relay, &server, &relay, &client],
+            client.wait_for_transaction(handle.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        for _ in 0..5 {
+            block_on(client.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+    }
+    let relay = open_file(&path, 6);
+    let query = relay.prepare_query(&Query::from("items")).unwrap();
+    let rows = block_on(relay.all(&query, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .cells()
+            .find(|(name, _)| *name == "label")
+            .and_then(|(_, v)| v.cloned()),
+        Some(Value::String(label.clone())),
+        "the relay holds the large value its client wrote"
+    );
+
+    // A reloaded tab: a fresh non-durable foreground over the relay, still
+    // offline (and disconnected from the server, as the app asked). Its one-shot read gets the row from the relay and waits for
+    // the value's chunks instead of failing on them.
+    let tab = block_on(Db::open(config(8))).unwrap();
+    tab.set_non_durable_client();
+    let (tab_side, relay_down) = duplex();
+    let _tab_link = block_on(tab.connect_upstream(tab_side));
+    relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM);
+    // The app disconnected from the server; the worker still answers.
+    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
+    let read = postcard::to_allocvec(&Query::from("items")).unwrap();
+    let result = drive(
+        &[&tab, &relay, &tab],
+        tab.all_serialized_query(
+            &read,
+            ReadOpts::default(),
+            None,
+            None,
+            None,
+            false,
+            || false,
+            |_| {},
+        ),
+    )
+    .unwrap();
+    let jazz::db::SerializedReadResult::Rows(rows) = result else {
+        panic!("a flat read answers rows");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .cells()
+            .find(|(name, _)| *name == "label")
+            .and_then(|(_, v)| v.cloned()),
+        Some(Value::String(label)),
+        "the tab reads the large value through its relay"
+    );
+}

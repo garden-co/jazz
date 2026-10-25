@@ -486,6 +486,13 @@ impl Chunks {
         self.state.lock().expect("chunk cache").budget.is_none()
     }
 
+    /// Whether a read recorded chunks to request, beyond those `settled`
+    /// accounts for, that the next send has not taken yet.
+    pub(crate) fn has_demand_beyond(&self, settled: impl Fn(&ChunkRequest) -> bool) -> bool {
+        let state = self.state.lock().expect("chunk cache");
+        state.demand.iter().any(|request| !settled(request))
+    }
+
     /// The chunks statements needed since the last call.
     pub(crate) fn take_demand(&self) -> BTreeSet<ChunkRequest> {
         std::mem::take(&mut self.state.lock().expect("chunk cache").demand)

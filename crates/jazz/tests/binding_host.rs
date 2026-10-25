@@ -4,8 +4,10 @@
 
 use crate::common;
 
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::pin;
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
@@ -700,6 +702,88 @@ fn a_tab_reads_and_writes_through_its_worker_to_the_server() {
     let rows = jazz::binding_codec::decode_rows(&drive(&links, read).unwrap()).unwrap();
     assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 2);
     assert_eq!(opening_rows(&links, &tab), 2);
+}
+
+/// The host as a browser runs it: a binding ticks only when it asks
+/// (receiving frames asks), never on a timer.
+fn drive_on_demand<T>(links: &[(&Link, &Link)], future: impl Future<Output = T>) -> T {
+    let mut bindings: Vec<(&Binding, Rc<Cell<bool>>)> = Vec::new();
+    for link in links.iter().flat_map(|(client, server)| [client, server]) {
+        let binding = link.binding();
+        if bindings
+            .iter()
+            .any(|(seen, _)| Rc::ptr_eq(&seen.db, &binding.db))
+        {
+            continue;
+        }
+        let asked = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&asked);
+        *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
+        bindings.push((binding, asked));
+    }
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..50 {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        for (client, server) in links {
+            // An empty delivery is no delivery.
+            let up = client.take_outbound();
+            if !up.is_empty() {
+                server.receive(up);
+            }
+            let down = server.take_outbound();
+            if !down.is_empty() {
+                client.receive(down);
+            }
+        }
+        for (binding, asked) in &bindings {
+            if asked.replace(false) {
+                block_on(binding.tick()).unwrap();
+            }
+        }
+    }
+    panic!("did not complete");
+}
+
+#[test]
+fn a_tab_read_asks_for_the_tick_that_fetches_its_large_values() {
+    // A reloaded tab holds nothing: its read gets the row from the worker
+    // and then the value's chunks, which only a tick sends for. Nothing else
+    // is in flight to tick it.
+    let worker = open(0xd0);
+    let large = "q".repeat(300 * 1024);
+    worker.insert("notes", &title(&large), &none()).unwrap();
+    let (tab, up, down) = tab_over(&worker, open(0xd1));
+    let links = [(&up, &down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let read = tab.all(query, &none(), None, None, None).unwrap();
+    let rows = jazz::binding_codec::decode_rows(&drive_on_demand(&links, read).unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 1);
+    assert_eq!(titles(&tab), [large]);
+}
+
+#[test]
+fn a_tab_reads_a_large_value_its_worker_relays_from_the_server() {
+    // The worker holds the row once the server answers, and fetches its
+    // chunks before it serves the tab's read.
+    let server = authority();
+    let large = "r".repeat(300 * 1024);
+    server.insert("notes", &title(&large), &none()).unwrap();
+    let worker = open(0xd2);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd3));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let read = tab
+        .all(query, &json!({ "tier": "remote" }), None, None, None)
+        .unwrap();
+    let rows = jazz::binding_codec::decode_rows(&drive_on_demand(&links, read).unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 1);
+    assert_eq!(titles(&tab), [large]);
 }
 
 #[test]

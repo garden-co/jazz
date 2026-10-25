@@ -106,23 +106,31 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only execution of a frozen v5 frame batch through the
-/// generated NAPI artifact. This reaches the production Rust frame, feature,
-/// compression, and semantic-payload decoders; it is not a host wire API.
+/// Test-only: read one pinned wire corpus batch through the generated NAPI
+/// artifact, as `reader` (`"server-opening"`, `"server"` or `"client"`)
+/// would, with the production frame and sync message decoders. Not a host
+/// wire API.
 #[napi(js_name = "__testValidateWireFrameBatchCorpus", skip_typescript)]
 pub fn test_validate_wire_frame_batch_corpus(
-    frame: Buffer,
+    batch: Buffer,
+    reader: String,
     negotiated_features: String,
 ) -> Result<()> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| napi::Error::from_reason("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::decode_websocket_frame_batch(&frame)
-        .map_err(|error| error.to_string())
-        .and_then(|frames| {
-            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
-        })
+    let reader = corpus_reader(&reader).map_err(napi::Error::from_reason)?;
+    jazz::db::validate_frame_batch_for_corpus(&batch, reader, negotiated_features)
         .map_err(napi::Error::from_reason)
+}
+
+fn corpus_reader(name: &str) -> std::result::Result<jazz::db::CorpusReader, String> {
+    match name {
+        "server-opening" => Ok(jazz::db::CorpusReader::ServerOpening),
+        "server" => Ok(jazz::db::CorpusReader::Server),
+        "client" => Ok(jazz::db::CorpusReader::Client),
+        other => Err(format!("unknown wire corpus reader {other:?}")),
+    }
 }
 
 /// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].

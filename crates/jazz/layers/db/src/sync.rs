@@ -223,6 +223,64 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     }
 }
 
+/// Which end of a connection reads a frame batch, at which point, for
+/// [`validate_frame_batch_for_corpus`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CorpusReader {
+    /// The server's first batch: exactly one `Hello`.
+    ServerOpening,
+    /// The server after the `Hello`: every frame is a sync message.
+    Server,
+    /// A client: each frame is a `Hello` (tag 0), an `Error` (tag 1) or a
+    /// sync message, as its websocket reads them. No server-sent message
+    /// has tag 0 or 1.
+    Client,
+}
+
+/// Test-only: decode one websocket frame batch the way `reader` does, with
+/// the production decoders, negotiating a `Hello` against
+/// `negotiated_features`. NAPI and WASM expose it so the pinned wire corpus
+/// (`crates/jazz/fixtures/sqlite_sync_wire_v1.json`) runs through each
+/// shipped artifact. Not a host API.
+#[doc(hidden)]
+pub fn validate_frame_batch_for_corpus(
+    batch: &[u8],
+    reader: CorpusReader,
+    negotiated_features: crate::wire::WireFeatures,
+) -> Result<(), String> {
+    use crate::wire::{
+        WireFrame, decode_frame, decode_hello_frame, decode_websocket_frame_batch, negotiate_wire,
+    };
+    let hello = |frame: &[u8]| {
+        decode_hello_frame(frame)
+            .and_then(|hello| negotiate_wire(&hello, negotiated_features))
+            .map(drop)
+            .map_err(|error| format!("hello rejected: {}", error.message))
+    };
+    let message = |frame: &[u8]| {
+        postcard::from_bytes::<SyncMessage>(frame)
+            .map(drop)
+            .map_err(|error| format!("malformed sync message: {error}"))
+    };
+    let frames = decode_websocket_frame_batch(batch)
+        .map_err(|error| format!("malformed websocket frame batch: {error}"))?;
+    match reader {
+        CorpusReader::ServerOpening => match frames.as_slice() {
+            [frame] => hello(frame),
+            _ => Err("the opening batch must be exactly one Hello".to_owned()),
+        },
+        CorpusReader::Server => frames.iter().try_for_each(|frame| message(frame)),
+        CorpusReader::Client => frames.iter().try_for_each(|frame| match frame.first() {
+            Some(0) => hello(frame),
+            Some(1) => match decode_frame(frame) {
+                Ok(WireFrame::Error(_)) => Ok(()),
+                _ => Err("malformed WireFrame::Error".to_owned()),
+            },
+            _ => message(frame),
+        }),
+    }
+}
+
 /// One stored SQL cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Cell {
@@ -965,11 +1023,13 @@ pub(crate) struct Session {
     /// Pushed chunk bytes admitted in the current staging-policy window,
     /// and when it started (the ingress rate limit).
     ingress: (Instant, usize),
-    /// Inbound messages held back by the rate limit, in order.
+    /// Inbound messages held back by the rate limit, or reads waiting for
+    /// large-value chunks from this relay's upstream, in order.
     backlog: VecDeque<SyncMessage>,
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
-    /// Fetches whose upstream answer arrived: served from this store.
+    /// Fetches whose upstream answer arrived, or that this relay already
+    /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
@@ -3403,13 +3463,32 @@ impl Db {
     }
 
     /// Whether chunks this replica requested may still arrive: it is
-    /// connected to an upstream that may answer, with requests outstanding.
+    /// connected to an upstream that may answer, with requests outstanding
+    /// (sent, or recorded by a read for the next send). A non-durable
+    /// foreground's relay answers from its store whatever its own path to
+    /// the server. Chunks the upstream answered missing are not waited for
+    /// again.
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
         inner.client.as_ref().is_some_and(|client| {
+            let unavailable = |request: &ChunkRequest| client.unavailable.contains(request);
             client.transport.is_some()
-                && may_wait(client.hint.get())
-                && !(client.requested.is_empty() && client.wanted.is_empty())
+                && (may_wait(client.hint.get()) || inner.non_durable)
+                && (!client.requested.is_empty()
+                    || client.wanted.iter().any(|request| !unavailable(request))
+                    || inner.chunks.has_demand_beyond(unavailable))
+        })
+    }
+
+    /// Whether a read recorded chunk requests that only the next send
+    /// carries upstream: a host that ticks when asked should tick.
+    pub fn owes_chunk_requests(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.client.as_ref().is_some_and(|client| {
+            client.transport.is_some()
+                && inner.chunks.has_demand_beyond(|request| {
+                    client.requested.contains(request) || client.unavailable.contains(request)
+                })
         })
     }
 
@@ -4254,8 +4333,22 @@ impl Db {
                     SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
                     _ => None,
                 };
+                let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
                 match (self.serve(index, message), read) {
                     (Ok(()), _) => {}
+                    // A relay's read whose large values it is still fetching
+                    // from its upstream is served again once they arrive,
+                    // from its store: the upstream is not asked again.
+                    (Err(error), Some(id))
+                        if crate::large::is_missing(&error)
+                            && fetch.is_some()
+                            && self.awaiting_chunks() =>
+                    {
+                        self.inner.borrow_mut().sessions[index]
+                            .fetched_upstream
+                            .insert(id);
+                        held.push_back(fetch.expect("a fetch"));
+                    }
                     (Err(error), Some(id)) => {
                         self.inner.borrow_mut().sessions[index]
                             .outbox
@@ -5029,7 +5122,7 @@ impl Db {
                         .is_some_and(|client| may_wait(client.hint.get()));
                     (
                         upstream && !answered && tier == ReadTier::Remote,
-                        upstream && tier == ReadTier::LocalFirst,
+                        upstream && !answered && tier == ReadTier::LocalFirst,
                     )
                 };
                 if refresh {
@@ -5538,6 +5631,10 @@ impl Db {
             .is_some_and(|client| std::mem::take(&mut client.relay_ready));
         if ready {
             self.server_tick()?;
+            // Chunks a relayed read found missing go upstream now.
+            if self.owes_chunk_requests() {
+                self.client_send()?;
+            }
         }
         Ok(())
     }
@@ -5803,9 +5900,24 @@ impl Db {
             first_load: FirstLoad::Deliver,
             ..opts
         };
-        let inner = self.inner();
-        let roots = inner.run(&prepared, identity, &ReadSpec::of(&opts, &inner)?)?;
-        Ok(result(inner.nest_relations(&prepared, identity, roots)?))
+        // A row whose large values are still being fetched answers once
+        // their chunks arrive, while the upstream that will send them is
+        // connected (a reloaded tab's rows come from its relay first).
+        poll_fn(|_| {
+            let read = {
+                let inner = self.inner();
+                ReadSpec::of(&opts, &inner)
+                    .and_then(|spec| inner.run(&prepared, identity, &spec))
+                    .and_then(|roots| inner.nest_relations(&prepared, identity, roots))
+            };
+            match read {
+                Err(error) if crate::large::is_missing(&error) && self.awaiting_chunks() => {
+                    Poll::Pending
+                }
+                read => Poll::Ready(read.map(result)),
+            }
+        })
+        .await
     }
 }
 

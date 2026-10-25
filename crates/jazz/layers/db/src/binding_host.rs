@@ -1298,19 +1298,29 @@ impl Binding {
             });
             first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
         };
+        let hooks = Rc::clone(&self.hooks);
         Ok(Box::pin(self.parked(async move {
-            let result = db
-                .all_serialized_query(
-                    &query,
-                    opts,
-                    open_tx,
-                    admission,
-                    author,
-                    require_coverage,
-                    expired,
-                    |_| {},
-                )
-                .await?;
+            let mut read = std::pin::pin!(db.all_serialized_query(
+                &query,
+                opts,
+                open_tx,
+                admission,
+                author,
+                require_coverage,
+                expired,
+                |_| {},
+            ));
+            // A row whose large values are missing records their chunks for
+            // the next send; ask for the tick that sends it, or the read
+            // waits on unrelated sync traffic.
+            let result = std::future::poll_fn(|context| {
+                let poll = read.as_mut().poll(context);
+                if poll.is_pending() && db.owes_chunk_requests() {
+                    hooks.schedule_tick();
+                }
+                poll
+            })
+            .await?;
             Ok(match result {
                 SerializedReadResult::Rows(rows) => crate::binding_codec::encode_rows(&rows),
                 SerializedReadResult::Relation(snapshot) => {
