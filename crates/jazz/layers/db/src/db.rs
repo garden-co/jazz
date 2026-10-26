@@ -4669,6 +4669,23 @@ impl Db {
         // own writes still unsettled at the snapshot, whose landing seqs
         // only the authority can place).
         if self.is_client() {
+            // A row a later local commit wrote (one not unsettled at begin)
+            // changed since the snapshot: the authority gets that commit
+            // first, so it would refuse this one too.
+            {
+                let inner = self.inner();
+                for (schema, op) in &batch.ops {
+                    if let Some(row) = op.row()
+                        && inner
+                            .newest_seq(schema.stored_table(op.table())?, row)?
+                            .is_some_and(|seq| seq >= LOCAL_BASE && !own.contains(&seq))
+                    {
+                        return Err(conflict(
+                            "row visible parent changed since transaction write was staged",
+                        ));
+                    }
+                }
+            }
             if own.is_empty() {
                 let inner = self.inner();
                 for (schema, op) in &batch.ops {

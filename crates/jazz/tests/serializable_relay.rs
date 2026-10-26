@@ -542,3 +542,29 @@ fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
         1
     );
 }
+
+#[test]
+fn a_tabs_later_commit_conflicts_with_its_open_transaction_over_the_same_row() {
+    let net = Net::with_worker_hint(1, RemoteLinkHint::NoServer);
+    let tab = net.tab(0);
+    // The seat is still unsettled when both transactions begin.
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let seat = block_on(tab.insert("seats", cells, Default::default()))
+        .unwrap()
+        .row_uuid();
+    let (alice, bob) = (OpenTransactionId::new(), OpenTransactionId::new());
+    block_on(tab.begin_serializable(alice)).unwrap();
+    block_on(tab.begin_serializable(bob)).unwrap();
+    for (open, name) in [(alice, "alice"), (bob, "bob")] {
+        net.drive(tab.serializable_tx_ref(open).update(
+            "seats",
+            seat,
+            holder(name),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    net.drive(tab.commit_serializable_handle(alice)).unwrap();
+    assert_conflict(net.drive(tab.commit_serializable_handle(bob)).map(drop));
+}
