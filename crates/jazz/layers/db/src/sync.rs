@@ -1285,17 +1285,18 @@ fn snapshot_unavailable(why: &str) -> Error {
 }
 
 /// Whether a reachability traversal is a gather the replica can evaluate
-/// from the result and its edges ([`Support::Reach`]): seeded by rows of
-/// the root table that are themselves in the result (no filter after the
-/// gather), reaching root rows by id.
+/// from the result and its edges ([`Support::Reach`]), reaching root rows
+/// by id: seeded by root rows themselves, or by rows that reference root
+/// rows (a hop), which ship as [`Support::Array`] children of what they
+/// reference. Filters after the gather apply on the replica
+/// ([`remote_query`]).
 fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
     via.seed.as_ref().is_some_and(|seed| {
-        seed.table == query.table && seed.user_column.is_none() && seed.team_column == "id"
+        seed.user_column.is_none() && (seed.team_column != "id" || seed.table == query.table)
     }) && via.access_table == query.table
         && via.access_row_column == "id"
         && via.access_team_column == "id"
         && via.access_filters.is_empty()
-        && query.filters.is_empty()
 }
 
 /// What a remote read of `query` subscribes to: the query itself, or for
@@ -1304,6 +1305,20 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
     if let Some(prefix) = crate::db::union_prefix(query) {
         return std::borrow::Cow::Owned(prefix);
+    }
+    // A gather's closure runs through rows its later filters (or window)
+    // leave out: the replica holds the whole closure and narrows it itself.
+    if !query.reachable.is_empty()
+        && (!query.filters.is_empty() || query.limit.is_some() || query.offset > 0)
+    {
+        let mut closure = query.clone();
+        closure.filters.clear();
+        closure.aggregate = None;
+        closure.select = None;
+        closure.order_by.clear();
+        closure.limit = None;
+        closure.offset = 0;
+        return std::borrow::Cow::Owned(closure);
     }
     // A window past an offset is only right over the rows before it too:
     // the replica holds the whole prefix and applies the offset itself.
@@ -1638,6 +1653,18 @@ impl Inner {
         support.extend(self.join_support(table, &query.joins)?);
         support.extend(self.inherited_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
         for via in &query.reachable {
+            // Seed rows that reference the rows the walk starts from.
+            if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
+                let seeds = self.schema.table(&seed.table)?;
+                support.push(Support::Array {
+                    table: seeds.stored.clone(),
+                    inner: seeds.stored_name(&seed.team_column).to_owned(),
+                    outer: "id".to_owned(),
+                    outer_array: false,
+                    inner_array: crate::compile::is_array(seeds, &seed.team_column),
+                    nested: Vec::new(),
+                });
+            }
             let edges = self.schema.table(&via.edge_table)?;
             support.push(Support::Reach {
                 frontier: table.stored_name(&via.access_team_column).to_owned(),
@@ -3419,11 +3446,11 @@ impl Db {
 
     /// Remote reads ship the query's rows plus its supporting rows (single
     /// hop includes, array subqueries, junction traversals, gathers), and
-    /// an aggregate's input rows ([`remote_query`]); the client evaluates
-    /// locally. Other shapes that read further tables
-    /// (uncorrelated traversals or ones through a referenced row, gathers
-    /// filtered after the gather, multi-hop includes) would see a partial
-    /// replica, so they are refused explicitly.
+    /// an aggregate's input rows or a gather's whole closure
+    /// ([`remote_query`]); the client evaluates locally. Other shapes that
+    /// read further tables (uncorrelated traversals or ones through a
+    /// referenced row, gathers seeded by a claim, multi-hop includes) would
+    /// see a partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(&self, query: &Query) -> Result<(), Error> {
         let schema = self.inner().schema.clone();
         if let Some(plan) = crate::db::union_plan(query, &schema)? {
@@ -3442,7 +3469,7 @@ impl Db {
                 .any(|include| include.path.contains('.'));
         if other_tables {
             return Err(crate::values::unsupported(format!(
-                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers or multi-hop includes)",
+                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, claim-seeded gathers or multi-hop includes)",
                 query.table
             )));
         }
