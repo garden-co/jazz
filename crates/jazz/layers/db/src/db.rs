@@ -1919,6 +1919,19 @@ impl Db {
     }
 }
 
+/// Whether a policy reads rows besides the one it decides on.
+fn policy_reads_other_rows(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsRel { .. }
+        | PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. } => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(policy_reads_other_rows),
+        PolicyExpr::Not(inner) => policy_reads_other_rows(inner),
+        _ => false,
+    }
+}
+
 fn delta(
     reset: bool,
     added: Vec<SubscriptionOutputRow>,
@@ -3461,7 +3474,10 @@ impl Inner {
     /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
     /// only a row it may read, and omitted cells must not be merged blind.
     /// A replica acting for a session (a backend's request) refuses either
-    /// at once when it holds the row hidden from that session.
+    /// at once when it holds the row hidden from that session and the read
+    /// policy is decided by the row alone. A policy that reads other rows
+    /// is the authority's to decide, as on upload: the replica may lack the
+    /// rows that grant access, and the write's waits report the refusal.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -3470,7 +3486,12 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
+        let conclusive = self.client.is_none()
+            || !table
+                .policy(Operation::Select)
+                .is_some_and(policy_reads_other_rows);
         if let Who::Session(author) = *who
+            && conclusive
             && !self.check(table, row, key, author, Operation::Select)?
         {
             let detail = format!(
