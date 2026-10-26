@@ -921,7 +921,7 @@ type RelayedFate = (usize, u64, Vec<(String, RowUuid, Vec<u8>)>);
 /// A session's `Fetch` a relay asked its upstream for.
 /// A relayed read's upstream answer: its query, binding, whether it read
 /// deleted rows, and the rows it listed.
-type RelayedAnswer = (Query, BTreeMap<String, Value>, bool, Vec<[u8; 16]>);
+type RelayedAnswer = (Query, BTreeMap<String, Value>, bool, Vec<[u8; 16]>, u64);
 
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
@@ -3159,6 +3159,7 @@ impl Db {
         binding: BTreeMap<String, Value>,
         include_deleted: bool,
         listed: &[[u8; 16]],
+        through: u64,
     ) -> Result<(), Error> {
         // A history read lists versions and a flat join tuples, not the
         // rows a replica caches.
@@ -3180,10 +3181,13 @@ impl Db {
             request_claims: None,
             schema: self.view.clone(),
         };
+        // The answer lists the result as of `through`: rows that arrived
+        // after it (later in the same batch) are not its to judge.
         let read = ReadSpec {
             members_only: true,
             settled_only: true,
             include_deleted,
+            cut: Some(crate::compile::Cut::at(through)),
             ..ReadSpec::default()
         };
         let inner = self.inner.borrow();
@@ -3207,7 +3211,9 @@ impl Db {
             for &row in &stale {
                 let id = row.0.as_bytes().to_vec();
                 for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
-                    inner.unlist(&table, row, &image.key)?;
+                    if image.seq <= through {
+                        inner.unlist(&table, row, &image.key)?;
+                    }
                 }
             }
             previous = stale;
@@ -3650,6 +3656,7 @@ impl Db {
                 prepared.binding.clone(),
                 include_deleted,
                 &listed,
+                through,
             )?;
         }
         Ok(Some(through))
@@ -4050,6 +4057,7 @@ impl Db {
                                 remote.include_deleted,
                                 Some(ids),
                                 resumed,
+                                through,
                             ));
                         }
                     }
@@ -4187,9 +4195,9 @@ impl Db {
         // their listing (INV-SYNC-14), as rows a commit took away do.
         // Nothing to reconcile after a resume: the client declared what it
         // holds (`Hold`), so the server ships what is missing or stale.
-        for (query, binding, include_deleted, listed, resumed) in answered_remotes {
+        for (query, binding, include_deleted, listed, resumed, through) in answered_remotes {
             if let (Some(listed), false) = (listed, resumed) {
-                self.unlist_unanswered(query, binding, include_deleted, &listed)?;
+                self.unlist_unanswered(query, binding, include_deleted, &listed, through)?;
             }
         }
         let mut inner = self.inner.borrow_mut();
@@ -4413,7 +4421,7 @@ impl Inner {
                     code: error.code,
                     message: error.message,
                 }),
-                Some(Ok((_, listed))) => {
+                Some(Ok((through, listed))) => {
                     if let SyncMessage::Fetch {
                         query,
                         binding,
@@ -4422,7 +4430,13 @@ impl Inner {
                         ..
                     } = &fetch.ask
                     {
-                        answers.push((query.clone(), binding.clone(), *include_deleted, listed));
+                        answers.push((
+                            query.clone(),
+                            binding.clone(),
+                            *include_deleted,
+                            listed,
+                            through,
+                        ));
                     }
                     ready.push((*id, fetch.message));
                 }
@@ -4632,8 +4646,8 @@ impl Db {
             let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
             // The upstream's answers list their results' rows: cached rows
             // they left out are not served as the reader's (INV-SYNC-14).
-            for (query, binding, include_deleted, listed) in answers {
-                self.unlist_unanswered(query, binding, include_deleted, &listed)?;
+            for (query, binding, include_deleted, listed, through) in answers {
+                self.unlist_unanswered(query, binding, include_deleted, &listed, through)?;
             }
             for message in relayed.into_iter().rev() {
                 inbound.push_front(message);
