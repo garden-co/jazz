@@ -18,7 +18,9 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnType, Operation, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+};
 
 use common::{
     allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
@@ -435,4 +437,100 @@ fn a_remote_read_through_an_edge_after_losing_access_leaves_the_row_out() {
     block_on(server.delete("memberships", id(2, 1), Default::default())).unwrap();
     pump_all();
     assert_eq!(remote(), Vec::<RowUuid>::new());
+}
+
+fn inherited_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("rooms")
+                    .column("name", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(exists(
+                        "memberships",
+                        vec![outer_eq("room", "id"), session_eq("member", &ME)],
+                    ))),
+            )
+            .table(
+                TableSchemaBuilder::new("memberships")
+                    .fk_column("room", "rooms")
+                    .column("member", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("room", "rooms")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "room".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .build(),
+    )
+}
+
+#[test]
+fn a_replica_holds_the_parent_its_rows_inherit_read_access_from() {
+    let open = |node: u8, author: AuthorSubject| {
+        let config = DbConfig::new(
+            inherited_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        );
+        if node == 0 {
+            block_on(Db::open_history_complete(config))
+        } else {
+            block_on(Db::open(config))
+        }
+        .unwrap()
+    };
+    let server = open(0, AuthorSubject::SYSTEM);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    let me = Value::String(alice().principal_parts().1);
+    seed(
+        "rooms",
+        id(1, 1),
+        cells(&[("name", Value::String("room".into()))]),
+    );
+    seed(
+        "memberships",
+        id(2, 1),
+        cells(&[("room", Value::Uuid(id(1, 1).0)), ("member", me)]),
+    );
+    seed(
+        "messages",
+        id(3, 1),
+        cells(&[
+            ("room", Value::Uuid(id(1, 1).0)),
+            ("body", Value::String("m".into())),
+        ]),
+    );
+    let client = open(1, alice());
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local(&client, "messages"), [id(3, 1)]);
+    assert_eq!(
+        local(&client, "rooms"),
+        [id(1, 1)],
+        "the room her messages inherit read access from ships with them"
+    );
+
+    block_on(server.delete("memberships", id(2, 1), Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        local(&client, "rooms"),
+        [id(1, 1)],
+        "the room she can no longer read stays readable locally (INV-SYNC-14)"
+    );
 }

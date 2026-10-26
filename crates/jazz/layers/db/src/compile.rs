@@ -21,7 +21,7 @@ use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported}
 mod history;
 
 /// Inherits chains with no explicit bound unroll this deep.
-const DEFAULT_INHERITS_DEPTH: usize = 10;
+pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
 const FIXPOINT_GUARD: usize = 1_000;
 

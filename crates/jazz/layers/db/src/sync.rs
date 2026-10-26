@@ -1626,6 +1626,7 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
+        support.extend(self.inherited_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
         for via in &query.reachable {
             let edges = self.schema.table(&via.edge_table)?;
             support.push(Support::Reach {
@@ -1655,6 +1656,57 @@ impl Inner {
                 outer_array: crate::compile::is_array(parent, &array.outer_column),
                 inner_array: crate::compile::is_array(child, &array.inner_column),
                 nested: self.array_support(child, &array.nested_arrays)?,
+            });
+        }
+        Ok(support)
+    }
+
+    /// The parents whose read permission rows of `table` inherit, `depth`
+    /// hops up: a replica holds the row its read rests on, as it would
+    /// had it read that row itself.
+    fn inherited_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+    ) -> Result<Vec<Support>, Error> {
+        use crate::tools::{Operation, PolicyExpr};
+        fn hops<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, Option<usize>)>) {
+            match policy {
+                PolicyExpr::Inherits {
+                    operation: Operation::Select,
+                    via_column,
+                    max_depth,
+                } => out.push((via_column, *max_depth)),
+                PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+                    parts.iter().for_each(|part| hops(part, out))
+                }
+                _ => {}
+            }
+        }
+        let mut support = Vec::new();
+        if depth == 0 {
+            return Ok(support);
+        }
+        let mut via = Vec::new();
+        if let Some(policy) = table.policy(Operation::Select) {
+            hops(policy, &mut via);
+        }
+        for (column, max_depth) in via {
+            let Some(target) = table.references.get(column) else {
+                continue;
+            };
+            let parent = self.schema.table(target)?;
+            let depth = max_depth.map_or(depth, |bound| bound.min(depth));
+            if depth == 0 {
+                continue;
+            }
+            support.push(Support::Array {
+                table: parent.stored.clone(),
+                inner: "id".to_owned(),
+                outer: table.stored_name(column).to_owned(),
+                outer_array: crate::compile::is_array(table, column),
+                inner_array: false,
+                nested: self.inherited_support(parent, depth - 1)?,
             });
         }
         Ok(support)
