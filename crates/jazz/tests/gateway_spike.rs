@@ -145,6 +145,77 @@ struct Conn {
     /// Subscriptions and reads fanned out to several shards.
     multi: HashMap<u64, Multi>,
     multi_fetches: HashMap<u64, Multi>,
+    /// Cross-shard commits in flight, by the client's tx, and the advice
+    /// ids the gateway asked for them.
+    cross: HashMap<u64, Cross>,
+    advice: HashMap<u64, u64>,
+    next_advice: u64,
+    cross_committed: usize,
+    cross_aborted: usize,
+    /// Test fault: stop after the commit point (the decider's part and
+    /// tx record), as an instance that dies there would.
+    crash_after_commit_point: bool,
+}
+
+/// A commit across partitions: admission (permission advice for every
+/// write on its shard), then the commit point (the decider's part plus a
+/// tx record naming every other part, in one commit on the decider), then
+/// the other parts as ordinary commits. Every step after the commit point
+/// is an idempotent resend, so any instance (or a sweeper) can finish it.
+struct Cross {
+    node: [u8; 16],
+    author: Option<String>,
+    session: Option<BTreeMap<String, Value>>,
+    parts: BTreeMap<usize, Vec<jazz::db::WireOp>>,
+    decider: usize,
+    advice_pending: HashSet<u64>,
+    denied: bool,
+    phase: CrossPhase,
+    /// Participants whose part is applied.
+    applied: HashSet<usize>,
+    decider_through: u64,
+}
+
+#[derive(PartialEq, Debug)]
+enum CrossPhase {
+    Admission,
+    CommitPoint,
+    Parts,
+}
+
+/// The tx record the decider stores with its part: the other parts and
+/// who wrote them, so any instance can resend them.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TxRecord {
+    node: [u8; 16],
+    tx: u64,
+    author: Option<String>,
+    identity: String,
+    session: Option<BTreeMap<String, Value>>,
+    parts: Vec<(usize, Vec<jazz::db::WireOp>)>,
+}
+
+fn advise_action(op: &jazz::db::WireOp) -> Option<jazz::protocol::PermissionAdviceAction> {
+    use jazz::db::WireOp::*;
+    use jazz::protocol::PermissionAdviceAction as A;
+    Some(match op {
+        Insert { table, cells, .. } | Upsert { table, cells, .. } => A::Insert {
+            table: table.clone(),
+            cells: cells.clone(),
+        },
+        Update {
+            table, row, cells, ..
+        } => A::Update {
+            table: table.clone(),
+            row: RowUuid::from_bytes(*row),
+            patch: cells.clone(),
+        },
+        Delete { table, row, .. } => A::Delete {
+            table: table.clone(),
+            row: RowUuid::from_bytes(*row),
+        },
+        _ => return None,
+    })
 }
 
 /// A query fanned out to several shards: each shard's latest answer, and
@@ -351,6 +422,12 @@ impl Gateway {
             txs: HashMap::new(),
             multi: HashMap::new(),
             multi_fetches: HashMap::new(),
+            cross: HashMap::new(),
+            advice: HashMap::new(),
+            next_advice: 1 << 60,
+            cross_committed: 0,
+            cross_aborted: 0,
+            crash_after_commit_point: false,
         });
     }
 
@@ -618,21 +695,74 @@ fn route_up(
                 .iter()
                 .map(|op| shard_of_tag(tag_of(op_row(op)), shards))
                 .collect();
-            if touched.len() != 1 {
-                stats
-                    .refused
-                    .push(format!("commit {tx} touches {} shards", touched.len()));
-                let _ = conn.client.send(SyncMessage::Fate {
+            if touched.len() > 1 {
+                if !matches!(kind, WireKind::Mergeable) || std::env::var("GATEWAY_NO_CROSS").is_ok()
+                {
+                    stats
+                        .refused
+                        .push(format!("commit {tx} touches {} shards", touched.len()));
+                    let _ = conn.client.send(SyncMessage::Fate {
+                        tx,
+                        through: 0,
+                        result: Err(jazz::db::WireError::Rejected(
+                            "a serializable transaction across partitions is not supported by this gateway yet"
+                                .into(),
+                        )),
+                        held: Vec::new(),
+                        global: true,
+                    });
+                    return Vec::new();
+                }
+                // A resend of a cross commit already in flight changes nothing.
+                if conn.cross.contains_key(&tx) {
+                    return Vec::new();
+                }
+                let mut parts: BTreeMap<usize, Vec<jazz::db::WireOp>> = BTreeMap::new();
+                for op in ops {
+                    parts
+                        .entry(shard_of_tag(tag_of(op_row(&op)), shards))
+                        .or_default()
+                        .push(op);
+                }
+                let decider =
+                    shard_of_tag(tag_of(op_row(&parts.values().next().unwrap()[0])), shards);
+                let mut asks = Vec::new();
+                let mut pending = HashSet::new();
+                for (&s, ops) in &parts {
+                    for op in ops {
+                        if let Some(action) = advise_action(op) {
+                            let id = conn.next_advice;
+                            conn.next_advice += 1;
+                            conn.advice.insert(id, tx);
+                            pending.insert(id);
+                            asks.push((
+                                s,
+                                SyncMessage::Advise {
+                                    id,
+                                    action,
+                                    author: author.clone(),
+                                    session: session.clone(),
+                                },
+                            ));
+                        }
+                    }
+                }
+                conn.cross.insert(
                     tx,
-                    through: 0,
-                    result: Err(jazz::db::WireError::Rejected(
-                        "a transaction across partitions is not supported by this gateway yet"
-                            .into(),
-                    )),
-                    held: Vec::new(),
-                    global: true,
-                });
-                return Vec::new();
+                    Cross {
+                        node,
+                        author,
+                        session,
+                        parts,
+                        decider,
+                        advice_pending: pending,
+                        denied: false,
+                        phase: CrossPhase::Admission,
+                        applied: HashSet::new(),
+                        decider_through: 0,
+                    },
+                );
+                return asks;
             }
             let shard = *touched.iter().next().unwrap();
             conn.txs.insert(tx, shard);
@@ -675,6 +805,68 @@ fn route_up(
                 .push(format!("not routed: {}", variant(&other)));
             Vec::new()
         }
+    }
+}
+
+/// The commit point: the decider's part plus the tx record, one commit.
+fn commit_point(identity: AuthorSubject, tx: u64, cross: &Cross) -> SyncMessage {
+    let record = TxRecord {
+        node: cross.node,
+        tx,
+        author: cross.author.clone(),
+        identity: identity.canonical().to_owned(),
+        session: cross.session.clone(),
+        parts: cross
+            .parts
+            .iter()
+            .filter(|(s, _)| **s != cross.decider)
+            .map(|(s, ops)| (*s, ops.clone()))
+            .collect(),
+    };
+    let mut ops = cross.parts[&cross.decider].clone();
+    let decider_tag = tag_of(op_row(&ops[0]));
+    let target = match &ops[0] {
+        jazz::db::WireOp::Insert { target, .. }
+        | jazz::db::WireOp::Update { target, .. }
+        | jazz::db::WireOp::Upsert { target, .. }
+        | jazz::db::WireOp::Delete { target, .. }
+        | jazz::db::WireOp::Restore { target, .. } => target.clone(),
+        jazz::db::WireOp::Move { .. } => panic!("a move in a cross-partition commit"),
+    };
+    let mut id = row(decider_tag, 0).0.into_bytes();
+    id[8..].copy_from_slice(&tx.to_be_bytes());
+    id[4..6].copy_from_slice(&cross.node[..2]);
+    ops.push(jazz::db::WireOp::Insert {
+        table: "tx_records".into(),
+        row: id,
+        cells: cells(&[
+            (
+                "record",
+                Value::String(serde_json::to_string(&record).unwrap()),
+            ),
+            ("state", text("committed")),
+        ]),
+        target,
+        at: None,
+    });
+    part_commit(cross.node, tx, ops, &cross.author, &cross.session)
+}
+
+fn part_commit(
+    node: [u8; 16],
+    tx: u64,
+    ops: Vec<jazz::db::WireOp>,
+    author: &Option<String>,
+    session: &Option<BTreeMap<String, Value>>,
+) -> SyncMessage {
+    SyncMessage::Commit {
+        node,
+        tx,
+        kind: WireKind::Mergeable,
+        ops,
+        author: author.clone(),
+        session: session.clone(),
+        expect: Vec::new(),
     }
 }
 
@@ -768,6 +960,93 @@ fn merge_down(
                 }
                 None => Vec::new(),
             }
+        }
+        SyncMessage::Advice { id, advice } if conn.advice.contains_key(&id) => {
+            let tx = conn.advice.remove(&id).unwrap();
+            if let Some(cross) = conn.cross.get_mut(&tx) {
+                cross.advice_pending.remove(&id);
+                cross.denied |= !matches!(advice, jazz::protocol::PermissionAdvice::Allowed);
+                if cross.advice_pending.is_empty() && cross.phase == CrossPhase::Admission {
+                    if cross.denied {
+                        // Refused at admission: nothing was written anywhere.
+                        conn.cross.remove(&tx);
+                        conn.cross_aborted += 1;
+                        return vec![SyncMessage::Fate {
+                            tx,
+                            through: 0,
+                            result: Err(jazz::db::WireError::Rejected(
+                                "a write of this cross-partition transaction is not allowed".into(),
+                            )),
+                            held: Vec::new(),
+                            global: true,
+                        }];
+                    }
+                    cross.phase = CrossPhase::CommitPoint;
+                    up.push((cross.decider, commit_point(conn.identity, tx, cross)));
+                }
+            }
+            Vec::new()
+        }
+        SyncMessage::Fate {
+            tx,
+            through,
+            ref result,
+            ..
+        } if conn.cross.contains_key(&tx) => {
+            let cross = conn.cross.get_mut(&tx).unwrap();
+            match (&cross.phase, result) {
+                (CrossPhase::CommitPoint, Ok(())) if shard == cross.decider => {
+                    cross.decider_through = through;
+                    cross.applied.insert(shard);
+                    cross.phase = CrossPhase::Parts;
+                    if !conn.crash_after_commit_point {
+                        for (&s, ops) in &cross.parts {
+                            if s != cross.decider {
+                                up.push((
+                                    s,
+                                    part_commit(
+                                        cross.node,
+                                        tx,
+                                        ops.clone(),
+                                        &cross.author,
+                                        &cross.session,
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+                (CrossPhase::CommitPoint, Err(_)) => {
+                    // The decider refused its part: nothing committed.
+                    conn.cross.remove(&tx);
+                    conn.cross_aborted += 1;
+                    return vec![message];
+                }
+                (CrossPhase::Parts, Ok(())) => {
+                    cross.applied.insert(shard);
+                }
+                (CrossPhase::Parts, Err(error)) => {
+                    // After the commit point a part must apply; a refusal
+                    // here is the gap admission leaves (policy changed in
+                    // between). Reported, not retried.
+                    panic!("part on shard {shard} of committed tx {tx} refused: {error:?}");
+                }
+                _ => {}
+            }
+            let cross = conn.cross.get(&tx).unwrap();
+            if cross.applied.len() == cross.parts.len() {
+                let through = cross.decider_through;
+                conn.cross.remove(&tx);
+                conn.cross_committed += 1;
+                return vec![SyncMessage::Fate {
+                    tx,
+                    through,
+                    result: Ok(()),
+                    held: Vec::new(),
+                    global: true,
+                }];
+            }
+            Vec::new()
         }
         SyncMessage::Refused { id, .. }
             if conn.multi.contains_key(&id) || conn.multi_fetches.contains_key(&id) =>
@@ -877,6 +1156,13 @@ fn schema() -> JazzSchema {
                     .column("member", ColumnType::Text)
                     .index_only(["member"])
                     .policies(read_and_allow_all_writes(session_eq("member", &me))),
+            )
+            // The sharding layer's tx records (a system table in a product).
+            .table(
+                TableSchemaBuilder::new("tx_records")
+                    .column("record", ColumnType::Text)
+                    .column("state", ColumnType::Text)
+                    .policies(common::allow_all_policies()),
             )
             .table(
                 TableSchemaBuilder::new("messages")
@@ -1125,12 +1411,18 @@ fn shards_enforce_read_policies_for_the_session() {
     assert_eq!(bodies(&w.clients[bob].0, ROOM_C), vec!["secret"]);
 }
 
-#[test]
-fn a_cross_partition_commit_is_refused_whole() {
-    let mut w = World::new();
-    w.room(ROOM_A, &[1]);
-    w.room(ROOM_B, &[1]);
-    let alice = w.client(1);
+fn messages_on(w: &World, shard: usize) -> usize {
+    let p = w.shards[shard]
+        .prepare_query(&Query::from("messages"))
+        .unwrap();
+    block_on(w.shards[shard].all(&p, ReadOpts::default()))
+        .unwrap()
+        .len()
+}
+
+/// Alice writes one message in room A (shard 0) and one in room B (shard
+/// 1) in one mergeable transaction.
+fn cross_write(w: &World, alice: usize) {
     let db = &w.clients[alice].0;
     let tx = jazz::tools::OpenTransactionId::new();
     block_on(db.begin_mergeable(tx)).unwrap();
@@ -1139,7 +1431,7 @@ fn a_cross_partition_commit_is_refused_whole() {
             "messages",
             cells(&[
                 ("room", Value::Uuid(row(tag, 0).0)),
-                ("body", text("both")),
+                ("body", text(&format!("both {n}"))),
                 ("sent_at", Value::I64(n)),
             ]),
             InsertOptions {
@@ -1150,22 +1442,115 @@ fn a_cross_partition_commit_is_refused_whole() {
         .unwrap();
     }
     block_on(db.commit_mergeable_handle(tx)).unwrap();
+}
+
+#[test]
+fn a_cross_partition_commit_lands_whole() {
+    let mut w = World::new();
+    w.room(ROOM_A, &[1, 2]);
+    w.room(ROOM_B, &[1, 2]);
+    let alice = w.client(1);
+    let bob = w.client(2);
+    for tag in [ROOM_A, ROOM_B] {
+        let db = &w.clients[bob].0;
+        let prepared = db.prepare_query(&room_messages(tag)).unwrap();
+        std::mem::forget(block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap());
+    }
     w.pump();
-    let total: usize = w
-        .shards
-        .iter()
-        .map(|s| {
-            let p = s.prepare_query(&Query::from("messages")).unwrap();
-            block_on(s.all(&p, ReadOpts::default())).unwrap().len()
-        })
-        .sum();
-    assert_eq!(total, 0);
-    assert_eq!(
-        w.gateway.stats.refused.len(),
-        1,
-        "{:?}",
-        w.gateway.stats.refused
-    );
+    cross_write(&w, alice);
+    w.pump();
+    assert_eq!((messages_on(&w, 0), messages_on(&w, 1)), (1, 1));
+    assert_eq!(bodies(&w.clients[bob].0, ROOM_A), vec!["both 1"]);
+    assert_eq!(bodies(&w.clients[bob].0, ROOM_B), vec!["both 2"]);
+    assert_eq!(w.gateway.conns[alice].cross_committed, 1);
+    assert!(w.gateway.conns[alice].cross.is_empty());
+}
+
+/// Finish every committed cross-partition transaction the decider's tx
+/// records name: resend each other part as its writer (idempotent on the
+/// participant), then mark the record done. Any gateway instance can run
+/// this; it needs no memory of the instance that started the commit.
+fn sweep(shards: &[Db], decider: usize) -> usize {
+    let records = shards[decider]
+        .prepare_query(&Query::from("tx_records"))
+        .unwrap();
+    let mut resent = 0;
+    for r in block_on(shards[decider].all(&records, ReadOpts::default())).unwrap() {
+        let cell = |name: &str| match r
+            .cells()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, v)| v.cloned())
+        {
+            Some(Value::String(s)) => s,
+            _ => String::new(),
+        };
+        if cell("state") != "committed" {
+            continue;
+        }
+        let record: TxRecord = serde_json::from_str(&cell("record")).unwrap();
+        let identity = AuthorSubject::from_canonical(&record.identity).unwrap();
+        for (shard, ops) in record.parts {
+            let (mut ours, theirs, _socket) = socket();
+            let subscriber = shards[shard].accept_subscriber_with_claims(
+                theirs,
+                identity,
+                record.session.clone(),
+            );
+            ours.send(part_commit(
+                record.node,
+                record.tx,
+                ops,
+                &record.author,
+                &record.session,
+            ))
+            .unwrap();
+            let mut fate = None;
+            for _ in 0..4 {
+                block_on(shards[shard].tick()).unwrap();
+                while let Some(m) = ours.try_recv() {
+                    if let SyncMessage::Fate { result, .. } = m {
+                        fate = Some(result);
+                    }
+                }
+            }
+            assert!(matches!(fate, Some(Ok(()))), "{fate:?}");
+            shards[shard].disconnect_subscriber(subscriber);
+            resent += 1;
+        }
+        block_on(shards[decider].update(
+            "tx_records",
+            r.row_uuid(),
+            cells(&[("state", text("done"))]),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    resent
+}
+
+#[test]
+fn a_gateway_dying_after_the_commit_point_leaves_nothing_half_done() {
+    let mut w = World::new();
+    w.room(ROOM_A, &[1, 2]);
+    w.room(ROOM_B, &[1, 2]);
+    let alice = w.client(1);
+    w.pump();
+    w.gateway.conns[alice].crash_after_commit_point = true;
+    cross_write(&w, alice);
+    w.pump();
+    // The commit point happened (decider's part and record), the other
+    // part did not.
+    assert_eq!((messages_on(&w, 0), messages_on(&w, 1)), (1, 0));
+    let old = std::mem::replace(&mut w.gateway, Gateway::new(w.shards.clone()));
+    old.shutdown();
+    // A sweeper finishes it, and alice's reconnect resends the commit; both
+    // land exactly once.
+    assert_eq!(sweep(&w.shards, 0), 1);
+    w.connect(alice);
+    w.pump();
+    assert_eq!((messages_on(&w, 0), messages_on(&w, 1)), (1, 1));
+    // A second sweep finds nothing left to do.
+    assert_eq!(sweep(&w.shards, 0), 0);
 }
 
 #[test]
