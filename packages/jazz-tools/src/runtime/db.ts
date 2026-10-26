@@ -2290,10 +2290,12 @@ export class Db {
   }
 
   protected markUnauthenticated(reason: AuthFailureReason): void {
-    this.authStateStore.markUnauthenticated(reason);
-    // A self-minted local-first token can always be reminted, so expiry is
-    // recoverable: renew and let the auth update reconnect.
-    if (reason === "expired" && this.localFirstRefreshOwned) this.renewExpiredLocalFirstToken();
+    try {
+      this.authStateStore.markUnauthenticated(reason);
+    } finally {
+      // Observer failures must not skip renewal of an owned local-first token.
+      if (reason === "expired" && this.localFirstRefreshOwned) this.renewExpiredLocalFirstToken();
+    }
   }
 
   private renewExpiredLocalFirstToken(): void {
