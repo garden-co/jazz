@@ -1540,15 +1540,12 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   return createTransactionWriteResult(transaction, resolvedValue, txId, resultClient());
 }
 
-// Module-private construction capabilities keep admission off the public API.
-const createTransactionWithAdmission = Symbol("createTransactionWithAdmission");
-const createTransaction = Symbol("createTransaction");
-
 /**
  * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
-  static [createTransactionWithAdmission]<TKind extends TransactionKind>(
+  /** @internal Install the prerequisite before binding the owner. */
+  static createWithAdmission<TKind extends TransactionKind>(
     kind: TKind,
     resolveClient: (schema: WasmSchema) => JazzClient,
     context: DbAccessContext | null,
@@ -2058,7 +2055,7 @@ export function beginDbTransactionAfter(
   db: Db,
   prepare: TransactionAdmission,
 ): Transaction<"serializable"> {
-  return db[createTransaction]("serializable", prepare);
+  return db.createTransaction("serializable", prepare);
 }
 
 /**
@@ -3080,7 +3077,8 @@ export class Db {
     return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
-  [createTransaction]<TKind extends TransactionKind>(
+  /** @internal Shared construction path; admission remains owned by the transaction. */
+  createTransaction<TKind extends TransactionKind>(
     kind: TKind,
     prerequisite?: TransactionAdmission,
   ): Transaction<TKind> {
@@ -3093,7 +3091,7 @@ export class Db {
         "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
-    return Transaction[createTransactionWithAdmission](
+    return Transaction.createWithAdmission(
       kind,
       (schema) => this.getClient(schema),
       context,
@@ -3133,7 +3131,7 @@ export class Db {
    * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
   beginTransaction(): Transaction<"mergeable"> {
-    return this[createTransaction]("mergeable");
+    return this.createTransaction("mergeable");
   }
 
   /**
@@ -3144,7 +3142,7 @@ export class Db {
    * Prefer using {@link Db.serializableTransaction} when an explicit commit is not required.
    */
   beginSerializableTransaction(): Transaction<"serializable"> {
-    return this[createTransaction]("serializable");
+    return this.createTransaction("serializable");
   }
 
   /**
