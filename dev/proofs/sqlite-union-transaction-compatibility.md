@@ -10,8 +10,12 @@ All arms use the ordinary snapshot, staged-prefix and permission compiler.
 
 This supports local serializable union reads on an authority and `LocalOnly`
 reads on a replica. Replica commits use normal upload, conflict and settlement
-paths. Remote union hydration remains explicitly unsupported: its per-query
-occurrence coverage is a separate requirement.
+paths. Paired accepted UNION reads can now hydrate cold pages using qualified
+occurrence coverage. They retain the original query and this same content
+evidence for commit validation. Their supported scopes and staged-write limits
+are described in the [occurrence coverage contract](sqlite-union-answer-compatibility.md).
+Remote hydration through the ordinary serializable transaction-read API remains
+unsupported.
 
 ## Named encodings
 

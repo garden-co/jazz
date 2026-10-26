@@ -144,6 +144,14 @@ impl Group {
         &self.prepared.query
     }
 
+    pub(super) fn includes_deleted(&self) -> bool {
+        self.read.include_deleted
+    }
+
+    pub(super) fn union_cut(&self) -> Option<u64> {
+        self.read.union_live.as_ref().and_then(|live| live.cut())
+    }
+
     fn live(&self) -> bool {
         self.members.iter().any(|m| m.queue.strong_count() > 0)
     }
@@ -354,13 +362,25 @@ impl Inner {
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
+        if let Some(live) = &read.union_live {
+            live.tables
+                .borrow_mut()
+                .extend(compiled.tables.iter().cloned());
+        }
         let key = GroupKey {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
                 .then(|| format!("{identity:?}")),
-            relations: format!("{:?}", prepared.query.array_subqueries),
+            relations: format!(
+                "{:?}{:?}{:?}",
+                prepared.query.array_subqueries,
+                read.scoped_live.then_some(&prepared.request_claims),
+                read.union_live
+                    .as_ref()
+                    .map(|live| (Rc::as_ptr(live) as usize, read.union_preview))
+            ),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -402,14 +422,19 @@ impl Inner {
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, rows))
-        {
-            Ok(rows) => (rows, false),
-            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-            Err(error) => return Err(error),
+        let initial = if read.union_live.is_some() {
+            self.run(prepared, identity, &read)
+        } else {
+            self.execute(&compiled, &prepared.query.table)
         };
+        let (rows, awaiting) =
+            match initial.and_then(|rows| self.nest_relations(prepared, identity, rows)) {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
+                    (Vec::new(), true)
+                }
+                Err(error) => return Err(error),
+            };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let root = prepared
             .schema
@@ -449,6 +474,9 @@ impl Inner {
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
+        if let Some(live) = &handle.borrow().read.union_live {
+            live.groups.borrow_mut().push(weak.clone());
+        }
         self.fan.groups.insert(gid, handle);
         Ok((queue, weak))
     }
@@ -553,7 +581,7 @@ impl Inner {
             Ok(())
         }
         joins(&mut structural, &query.joins, &stored)?;
-        if query.relation.is_some() {
+        if crate::db::relation::is_union(query) {
             // Each arm can reach these tables independently of the root policy.
             structural.extend(compiled.tables.iter().cloned());
         }
@@ -1180,7 +1208,9 @@ impl Inner {
 
     fn reset_group(&self, group: &mut Group) {
         match self.group_rows(group) {
-            Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
+            Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
+                group.awaiting = true
+            }
             Ok(rows) => {
                 group.awaiting = false;
                 // Rows that left the result go out as removals before the
@@ -1236,7 +1266,7 @@ impl Inner {
         }
         let rows = match self.group_rows(group) {
             Ok(rows) => rows,
-            Err(error) if crate::large::is_missing(&error) => {
+            Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
                 group.awaiting = true;
                 return;
             }
@@ -1260,6 +1290,51 @@ impl Inner {
         group.rows = rows;
         group.keys.clear();
         self.read_keys(group);
+    }
+
+    /// An upload recorded after row notifications changes preview settlement.
+    pub(super) fn refresh_union_pending(&self, tables: &BTreeSet<String>) {
+        // UNION watches include every physical input table. The existing
+        // table index keeps a new upload from visiting unrelated groups.
+        let groups = tables
+            .iter()
+            .filter_map(|table| self.fan.tables.get(table))
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for id in groups {
+            let Some(group) = self.fan.groups.get(&id) else {
+                continue;
+            };
+            let mut group = group.borrow_mut();
+            if group.read.union_live.is_some() {
+                self.refresh_group(&mut group, None);
+            }
+        }
+    }
+
+    /// Coverage can change without row writes, including an empty answer.
+    /// Receipt-only changes wake just the attached groups.
+    pub(super) fn refresh_union_coverage(&self, slots: &[Rc<sync::UnionLive>]) {
+        for live in slots {
+            live.groups
+                .borrow_mut()
+                .retain(|group| group.strong_count() > 0);
+            let groups = live
+                .groups
+                .borrow()
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            for group in groups {
+                let mut group = group.borrow_mut();
+                if group.opened {
+                    self.refresh_group(&mut group, None);
+                } else {
+                    self.reset_group(&mut group);
+                }
+            }
+        }
     }
 
     /// Reads the sort keys of a re-checkable group whose order is not
@@ -1323,7 +1398,7 @@ impl Group {
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
-    query.relation.is_none()
+    !crate::db::relation::is_union(query)
         && !is_history_table(&query.table)
         && query.offset == 0
         && query.aggregate.is_none()
@@ -1342,6 +1417,11 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
 
 /// Whether every order column of a query is among its shown columns.
 fn order_projected(query: &Query, compiled: &Compiled) -> bool {
+    // A shown alias may have the name of a different source sort column.
+    // Read physical sort keys through the existing bounded lookup instead.
+    if query.relation.is_some() {
+        return query.order_by.iter().all(|key| key.column == "id");
+    }
     query.order_by.iter().all(|key| {
         key.column == "id"
             || compiled

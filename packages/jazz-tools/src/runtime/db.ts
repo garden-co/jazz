@@ -1,3 +1,4 @@
+import { checkTransactionSettlements } from "./transaction-settlements.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -3108,7 +3109,11 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         propagation,
         snapshotAtBegin,
       );
-      checkTransactionSettlements(rows, settlements);
+      checkTransactionSettlements(
+        rows,
+        settlements,
+        normalizeBuiltQuery(JSON.parse(query._build())).union !== undefined,
+      );
       return { rows, settlements };
     })();
     this.pendingReads.add(reading);
@@ -3183,23 +3188,6 @@ export type E2eeTransactionScope = Pick<
 >;
 
 type SettledRows<T> = { rows: T[]; settlements: RowSettlement[] };
-
-function checkTransactionSettlements(rows: { id: string }[], settlements: RowSettlement[]): void {
-  const ids = new Set(rows.map((row) => row.id));
-  if (
-    ids.size !== rows.length ||
-    settlements.length !== ids.size ||
-    settlements.some(
-      (entry) =>
-        !ids.delete(entry.rowId) ||
-        typeof entry.transactionId !== "string" ||
-        typeof entry.position !== "string" ||
-        !/^[0-9]+$/.test(entry.position) ||
-        BigInt(entry.position) > 18446744073709551615n,
-    )
-  )
-    throw new Error("Incomplete E2EE authority settlement metadata");
-}
 
 type TransactionRowDecoder = (
   table: string,
@@ -3619,7 +3607,11 @@ function preparedTransactionScope(
         binding,
         transactionHistoryQueries(io, propagation, snapshotAtBegin),
       );
-      checkTransactionSettlements(rows, settlements);
+      checkTransactionSettlements(
+        rows,
+        settlements,
+        normalizeBuiltQuery(JSON.parse(query._build())).union !== undefined,
+      );
       return { rows, settlements };
     },
   };
@@ -4296,7 +4288,11 @@ export class Db {
             binding,
             local,
           );
-          checkTransactionSettlements(snapshot.rows, snapshot.settlements);
+          checkTransactionSettlements(
+            snapshot.rows,
+            snapshot.settlements,
+            normalizeBuiltQuery(JSON.parse(query._build())).union !== undefined,
+          );
           return snapshot;
         }),
       );

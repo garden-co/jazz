@@ -40,13 +40,24 @@ mod inheritance;
 mod reachability;
 #[path = "sync/readable_policy.rs"]
 mod readable_policy;
+#[path = "sync/scoped_live.rs"]
+mod scoped_live;
 #[path = "sync/scoped_queries.rs"]
 mod scoped_queries;
 #[path = "sync/scoped_reads.rs"]
 mod scoped_reads;
 use scoped_reads::ScopedEvidence;
 pub use scoped_reads::ScopedReadRowV1;
-type FetchAnswer = (u64, Vec<[u8; 16]>, Option<Vec<ScopedReadRowV1>>);
+#[path = "sync/unions.rs"]
+mod unions;
+pub use unions::UnionOccurrenceV1;
+pub(super) use unions::{UnionLive, waiting as union_waiting};
+type FetchAnswer = (
+    u64,
+    Vec<[u8; 16]>,
+    Option<Vec<ScopedReadRowV1>>,
+    Option<Vec<UnionOccurrenceV1>>,
+);
 
 use crate::schema::history::{history_source_table, is_history_table};
 use crate::values::query_error;
@@ -82,7 +93,8 @@ pub(crate) const OWNER_DDL: &str = owner::DDL;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 pub use crate::wire::TransportError;
 pub(crate) use owner::{
-    check_open_schema as check_owner_open_schema, stored_subject as stored_owner_subject,
+    check_open_schema as check_owner_open_schema, handoff_account_owner,
+    stored_subject as stored_owner_subject,
 };
 
 /// Wall-clock Unix ms.
@@ -329,6 +341,8 @@ pub enum WireKind {
     /// layout, with semantic union occurrences included in content evidence.
     /// Union rows use serializable-union-read-content.v1; ordinary rows keep
     /// serializable-read-content.v1. Required even for an empty union read.
+    /// Retained non-UNION aliases also use this kind and the plain-row content
+    /// role; their existing Query AST and named cells retain the projection.
     SerializableUnionObservedV1 {
         snapshot: u64,
         reads: Vec<WireRead>,
@@ -720,6 +734,24 @@ pub enum SyncMessage {
         since: Option<u64>,
         include_deleted: bool,
     },
+    /// Tag 41, jazz.sqlite.sync.union-answer.v1. An ordinary fetch's exact
+    /// ordered semantic occurrences, after every UNION and arm window.
+    UnionAnswerV1 {
+        id: u64,
+        through: u64,
+        occurrences: Vec<UnionOccurrenceV1>,
+    },
+    /// Tag 42, jazz.sqlite.sync.scoped-union-subscribe.v1. Only a trusted
+    /// backend can maintain this immutable request scope. Every update carries
+    /// occurrence coverage, permission evidence and matching Global settlement.
+    ScopedUnionSubscribeV1 {
+        id: u64,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        author: String,
+        claims: BTreeMap<String, Value>,
+        include_deleted: bool,
+    },
 }
 
 fn subscription_message(
@@ -729,8 +761,18 @@ fn subscription_message(
     binding: BTreeMap<String, Value>,
     since: Option<u64>,
     include_deleted: bool,
+    scope: RemoteScope,
 ) -> SyncMessage {
-    if readable_policy {
+    if let Some((author, claims)) = scope {
+        SyncMessage::ScopedUnionSubscribeV1 {
+            id,
+            query,
+            binding,
+            author: author.canonical().to_owned(),
+            claims,
+            include_deleted,
+        }
+    } else if readable_policy {
         SyncMessage::SubscribeReadablePolicyV1 {
             id,
             query,
@@ -800,6 +842,7 @@ struct Pending {
 /// One remote attachment: a client query the server maintains.
 pub(crate) struct Remote {
     id: u64,
+    scope: RemoteScope,
     refs: usize,
     query: Query,
     binding: BTreeMap<String, Value>,
@@ -814,6 +857,7 @@ pub(crate) struct Remote {
     /// Resubscribed with `since`: on its opening, fetch result rows the
     /// replica lacks (rows that became visible without changing).
     resumed: bool,
+    union: Option<Rc<UnionLive>>,
 }
 
 /// What a client knows about its path to the server.
@@ -873,6 +917,8 @@ pub(crate) struct Client {
     scoped_answers: HashSet<u64>,
     overlay_answers: HashSet<u64>,
     accepted_answers: HashSet<u64>,
+    union_answers: HashSet<u64>,
+    qualified_union_receipts: HashMap<u64, (u64, Vec<UnionOccurrenceV1>)>,
     catalogue_answers:
         HashMap<u64, Option<Result<(CatalogueHeadV1, crate::ids::SchemaVersionId), Error>>>,
     /// Permission preflights asked for; `None` until answered.
@@ -887,6 +933,22 @@ pub(crate) struct Client {
     unavailable: BTreeSet<ChunkRequest>,
     /// Chunks arrived this tick: results waiting for them run again.
     arrived: bool,
+}
+
+pub(crate) type RemoteScope = Option<(AuthorSubject, BTreeMap<String, Value>)>;
+
+// Runtime-only attachment identity. Unscoped keys retain their previous form.
+fn scoped_remote_key(
+    query: &Query,
+    binding: &BTreeMap<String, Value>,
+    include_deleted: bool,
+    scope: &RemoteScope,
+) -> String {
+    let key = remote_key(query, binding, include_deleted);
+    match scope {
+        Some(scope) => format!("scoped:{key}{scope:?}"),
+        None => key,
+    }
 }
 
 fn remote_key(query: &Query, binding: &BTreeMap<String, Value>, include_deleted: bool) -> String {
@@ -962,6 +1024,12 @@ pub(crate) enum SettledBy {
     /// The relay can answer from its cache immediately, but global settlement
     /// still requires the upstream authority's answer.
     Relay(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
+    Union {
+        answered: Rc<StdCell<bool>>,
+        global: Rc<StdCell<bool>>,
+        live: Rc<UnionLive>,
+        relay: bool,
+    },
 }
 
 impl SettledBy {
@@ -970,6 +1038,12 @@ impl SettledBy {
             SettledBy::Always(_) | SettledBy::Relay(..) => true,
             SettledBy::Never => false,
             SettledBy::Remote(answered, _) => answered.get(),
+            SettledBy::Union {
+                answered,
+                live,
+                relay,
+                ..
+            } => *relay || (answered.get() && !live.optimistic.get()),
         }
     }
 
@@ -981,6 +1055,12 @@ impl SettledBy {
             SettledBy::Remote(answered, global) | SettledBy::Relay(answered, global) => {
                 answered.get() && global.get()
             }
+            SettledBy::Union {
+                answered,
+                global,
+                live,
+                ..
+            } => answered.get() && global.get() && !live.optimistic.get(),
         };
         if global {
             DurabilityTier::Global
@@ -993,7 +1073,7 @@ impl SettledBy {
 // ---- server state ---------------------------------------------------------
 
 /// An upstream subscription's identity: query, binding, include_deleted.
-type RemoteRead = (Query, BTreeMap<String, Value>, bool);
+type RemoteRead = (Query, BTreeMap<String, Value>, bool, RemoteScope);
 
 /// A downstream request keeps its own upstream ID and immutable prepared scope.
 struct ForwardedFetch {
@@ -1007,6 +1087,8 @@ struct ForwardedFetch {
     accepted: bool,
     scoped_evidence: bool,
     overlay: bool,
+    /// Uses the upstream connection's admitted identity, with no delegation.
+    ordinary: bool,
     // Retain the timer so missing content cannot leave a relay request open forever.
     deadline: Option<Rc<Instant>>,
 }
@@ -1056,6 +1138,7 @@ pub(crate) struct Session {
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     readable_policy: BTreeMap<u64, PreparedQuery>,
     query_support: BTreeMap<u64, PreparedQuery>,
+    scoped_unions: BTreeMap<u64, PreparedQuery>,
     /// The replica's coherence watches: `(table, column, value)` for every
     /// row shipped (`id`), include target and array correlation. A commit
     /// that writes a matching row ships its image (or an eviction).
@@ -1117,6 +1200,7 @@ impl Session {
             support: BTreeMap::new(),
             readable_policy: BTreeMap::new(),
             query_support: BTreeMap::new(),
+            scoped_unions: BTreeMap::new(),
             watch: HashSet::new(),
             resume: BTreeMap::new(),
             held: BTreeMap::new(),
@@ -1245,24 +1329,28 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
 /// an aggregate its input rows (its filters and traversals, every column,
 /// no window), which the client aggregates as it would local rows.
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
+    if crate::db::relation::is_union(query) {
+        return std::borrow::Cow::Borrowed(query);
+    }
+    let mut input = crate::db::relation::input(query);
     // A window past an offset is only right over the rows before it too:
     // the replica holds the whole prefix and applies the offset itself.
     if query.aggregate.is_none() && query.offset > 0 {
-        let mut prefix = query.clone();
+        let prefix = input.to_mut();
         prefix.limit = query.limit.map(|limit| limit + query.offset);
         prefix.offset = 0;
-        return std::borrow::Cow::Owned(prefix);
+        return input;
     }
     if query.aggregate.is_none() {
-        return std::borrow::Cow::Borrowed(query);
+        return input;
     }
-    let mut input = query.clone();
-    input.aggregate = None;
-    input.select = None;
-    input.order_by.clear();
-    input.limit = None;
-    input.offset = 0;
-    std::borrow::Cow::Owned(input)
+    let aggregate = input.to_mut();
+    aggregate.aggregate = None;
+    aggregate.select = None;
+    aggregate.order_by.clear();
+    aggregate.limit = None;
+    aggregate.offset = 0;
+    input
 }
 
 /// Whether a junction traversal's witnesses can ship as [`Support::Array`]
@@ -3239,6 +3327,8 @@ impl Client {
         self.scoped_answers.remove(&id);
         self.overlay_answers.remove(&id);
         self.accepted_answers.remove(&id);
+        self.union_answers.remove(&id);
+        self.qualified_union_receipts.remove(&id);
         self.catalogue_answers.remove(&id);
         self.outbox.retain(|message| {
             !matches!(message,
@@ -3289,6 +3379,8 @@ impl Client {
             scoped_answers: HashSet::new(),
             overlay_answers: HashSet::new(),
             accepted_answers: HashSet::new(),
+            union_answers: HashSet::new(),
+            qualified_union_receipts: HashMap::new(),
             catalogue_answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
@@ -3313,6 +3405,7 @@ impl Db {
         client.transport = Some(transport);
         client.owner_ready = None;
         client.owner_inbound.clear();
+        client.qualified_union_receipts.clear();
         let mut link = client.hint.get();
         link.detached = false;
         if !link.reported {
@@ -3326,6 +3419,9 @@ impl Db {
             .remote
             .values_mut()
             .map(|r| {
+                if let Some(live) = &r.union {
+                    live.retire_pending();
+                }
                 r.resumed = r.through.is_some();
                 subscription_message(
                     readable_policy,
@@ -3334,6 +3430,7 @@ impl Db {
                     r.binding.clone(),
                     r.through,
                     r.include_deleted,
+                    r.scope.clone(),
                 )
             })
             .collect();
@@ -3353,6 +3450,7 @@ impl Db {
                 m,
                 SyncMessage::Subscribe { .. }
                     | SyncMessage::SubscribeReadablePolicyV1 { .. }
+                    | SyncMessage::ScopedUnionSubscribeV1 { .. }
                     | SyncMessage::Hold { .. }
                     | SyncMessage::Schema { .. }
                     | SyncMessage::OwnerProjectionV1 { .. }
@@ -3654,6 +3752,7 @@ impl Db {
                 )
                 .map_err(storage)?;
         }
+        let pending_tables = rows.iter().map(|(table, ..)| table.clone()).collect();
         let client = inner.client.as_mut().expect("client");
         client.shadow.extend(shadows);
         client.unsent.push(commit);
@@ -3666,6 +3765,9 @@ impl Db {
             ops,
             rows,
         });
+        // Standalone writes notify before their upload is recorded. Refresh
+        // only affected UNION groups once the pending status is available.
+        inner.refresh_union_pending(&pending_tables);
         Ok(())
     }
 
@@ -3677,12 +3779,17 @@ impl Db {
     /// filtered after the gather, multi-hop includes) would see a partial
     /// replica, so they are refused explicitly.
     pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
-        if query.relation.is_some() {
+        if crate::db::relation::is_union(query) {
             return Err(crate::values::unsupported(
                 "remote union reads and subscriptions (union-arm coverage)",
             ));
         }
         let query = &*remote_query(query);
+        if query.relation.is_some() {
+            return Err(crate::values::query_error(
+                "invalid retained relation projection",
+            ));
+        }
         let other_tables = !query.joins.iter().all(join_followable)
             || query
                 .reachable
@@ -3707,6 +3814,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
+        scope: RemoteScope,
     ) -> Option<(
         Rc<StdCell<bool>>,
         Rc<RefCell<Option<Error>>>,
@@ -3716,7 +3824,7 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let readable_policy = inner.scope_isolated_owner;
         let client = inner.client.as_mut()?;
-        let key = remote_key(&query, &prepared.binding, include_deleted);
+        let key = scoped_remote_key(&query, &prepared.binding, include_deleted, &scope);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             // A new attachment is a new read. Its authority wait cannot reuse
@@ -3732,6 +3840,9 @@ impl Db {
             *remote.refused.borrow_mut() = None;
             remote.through = None;
             remote.resumed = false;
+            if let Some(live) = &remote.union {
+                live.retire_pending();
+            }
             client.remote_ids.remove(&previous);
             client.remote_ids.insert(id, key);
             client
@@ -3744,6 +3855,7 @@ impl Db {
                 prepared.binding.clone(),
                 None,
                 include_deleted,
+                scope.clone(),
             ));
             return Some((
                 remote.answered.clone(),
@@ -3763,11 +3875,13 @@ impl Db {
             prepared.binding.clone(),
             None,
             include_deleted,
+            scope.clone(),
         ));
         client.remote.insert(
             key.clone(),
             Remote {
                 id,
+                scope: scope.clone(),
                 refs: 1,
                 query: query.into_owned(),
                 binding: prepared.binding.clone(),
@@ -3777,6 +3891,8 @@ impl Db {
                 global: global.clone(),
                 through: None,
                 resumed: false,
+                union: crate::db::relation::is_union(&prepared.query)
+                    .then(|| Rc::new(UnionLive::new(scope.is_some()))),
             },
         );
         client.remote_ids.insert(id, key);
@@ -3788,10 +3904,11 @@ impl Db {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
+        scope: &RemoteScope,
     ) {
         self.inner
             .borrow_mut()
-            .release_remote(query, binding, include_deleted);
+            .release_remote(query, binding, include_deleted, scope);
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -3807,11 +3924,12 @@ impl Inner {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
+        scope: &RemoteScope,
     ) {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = remote_key(&remote_query(query), binding, include_deleted);
+        let key = scoped_remote_key(&remote_query(query), binding, include_deleted, scope);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -3852,7 +3970,7 @@ impl Db {
     ) -> Result<Option<u64>, Error> {
         self.fetch_answer(prepared, at, include_deleted, deadline, None, false)
             .await
-            .map(|answer| answer.map(|(through, _, _)| through))
+            .map(|answer| answer.map(|(through, _, _, _)| through))
     }
 
     /// Strict transaction reads wait while offline before issuing a request.
@@ -3916,6 +4034,9 @@ impl Db {
             let id = client.next_id;
             client.next_id += 1;
             client.answers.insert(id, None);
+            if crate::db::relation::is_union(&prepared.query) {
+                client.union_answers.insert(id);
+            }
             if scope.is_some() {
                 client.scoped_answers.insert(id);
             }
@@ -4364,21 +4485,17 @@ impl Db {
         };
         // A receipt cannot outlive a rolled-back batch of its evidence rows.
         // Stage only this tick's answers, without copying unrelated requests.
-        for (id, answer) in applied? {
-            if let Some(slot) = self
-                .inner
-                .borrow_mut()
-                .client
-                .as_mut()
-                .expect("client")
-                .answers
-                .get_mut(&id)
-            {
-                *slot = Some(answer);
-            }
-        }
+        let (answers, union_updates) = applied?;
+        let union_changed = self.inner.borrow_mut().apply_union_coverage(union_updates);
+        self.inner
+            .borrow_mut()
+            .client
+            .as_mut()
+            .expect("client")
+            .publish_fetch_answers(answers);
         self.inner().refresh_authenticated_views()?;
         self.notify()?;
+        self.inner().refresh_union_coverage(&union_changed);
         let arrived = {
             let mut inner = self.inner.borrow_mut();
             let client = inner.client.as_mut().expect("client");
@@ -4394,15 +4511,24 @@ impl Db {
         self.client_send()
     }
 
-    fn client_apply(&self) -> Result<Vec<(u64, Result<FetchAnswer, Error>)>, Error> {
+    fn client_apply(
+        &self,
+    ) -> Result<
+        (
+            Vec<(u64, Result<FetchAnswer, Error>)>,
+            Vec<unions::LiveUpdate>,
+        ),
+        Error,
+    > {
         let mut answers = Vec::new();
+        let mut union_updates = Vec::new();
         let mut rebase = false;
         let mut answered_remotes = Vec::new();
         let mut shadow_changed = false;
         {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
-                return Ok(answers);
+                return Ok((answers, union_updates));
             };
             let mut inbound = Vec::new();
             if let Some(transport) = client.transport.as_mut() {
@@ -4555,10 +4681,15 @@ impl Db {
                         global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
-                        if global && through >= LOCAL_BASE {
+                        let union = client
+                            .remote_ids
+                            .get(&id)
+                            .and_then(|key| client.remote.get(key))
+                            .is_some_and(|remote| remote.union.is_some());
+                        if (global || union) && through >= LOCAL_BASE {
                             return Err(Error::new(
                                 ErrorCode::Protocol,
-                                "global read settlement carries an optimistic sequence",
+                                "read settlement carries an optimistic sequence",
                             ));
                         }
                         client.known = client.known.max(through);
@@ -4566,6 +4697,14 @@ impl Db {
                             continue;
                         };
                         let remote = client.remote.get_mut(&key).expect("remote");
+                        if remote.union.is_some() {
+                            union_updates.push(unions::LiveUpdate::Settled {
+                                id,
+                                through,
+                                global,
+                            });
+                            continue;
+                        }
                         remote.answered.set(true);
                         remote.global.set(global);
                         remote.through = Some(through);
@@ -4669,6 +4808,35 @@ impl Db {
                         rows,
                         mut evidence,
                     } => {
+                        let live_scope = inner
+                            .client
+                            .as_ref()
+                            .and_then(|client| {
+                                client
+                                    .remote_ids
+                                    .get(&id)
+                                    .and_then(|key| client.remote.get(key))
+                            })
+                            .map(|remote| remote.scope.is_some());
+                        if let Some(scoped) = live_scope {
+                            if !scoped || accepted_evidence {
+                                return Err(Error::new(
+                                    ErrorCode::Protocol,
+                                    "scoped evidence answered a different live request kind",
+                                ));
+                            }
+                            scoped_reads::validate_evidence(through, &evidence)?;
+                            for row in &mut evidence {
+                                row.table = inner.owner.stored_table(&row.table)?.to_owned();
+                            }
+                            union_updates.push(unions::LiveUpdate::Evidence {
+                                id,
+                                through,
+                                rows,
+                                evidence,
+                            });
+                            continue;
+                        }
                         if !inner
                             .client
                             .as_ref()
@@ -4694,7 +4862,7 @@ impl Db {
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
-                        answers.push((id, Ok((through, rows, Some(evidence)))));
+                        answers.push((id, Ok((through, rows, Some(evidence), None))));
                     }
                     SyncMessage::AcceptedOverlayCheckedV1 { id, through } => {
                         let client = inner.client.as_mut().expect("client");
@@ -4707,7 +4875,7 @@ impl Db {
                                 "accepted overlay response answered a different request kind or invalid cut",
                             ));
                         }
-                        answers.push((id, Ok((through, Vec::new(), None))));
+                        answers.push((id, Ok((through, Vec::new(), None, None))));
                     }
                     SyncMessage::AcceptedAnswerV1 { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
@@ -4722,12 +4890,22 @@ impl Db {
                         {
                             client.known = client.known.max(through);
                             if client.answers.contains_key(&id) {
-                                answers.push((id, Ok((through, rows, None))));
+                                answers.push((id, Ok((through, rows, None, None))));
                             }
                         }
                     }
                     SyncMessage::Answer { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
+                        if client.union_answers.contains(&id) {
+                            answers.push((
+                                id,
+                                Err(Error::new(
+                                    ErrorCode::NotObserved,
+                                    "ordinary row IDs cannot cover a UNION read",
+                                )),
+                            ));
+                            continue;
+                        }
                         if client.accepted_answers.contains(&id)
                             || client.overlay_answers.contains(&id)
                         {
@@ -4744,8 +4922,50 @@ impl Db {
                         }
                         client.known = client.known.max(through);
                         if client.answers.contains_key(&id) {
-                            answers.push((id, Ok((through, rows, None))));
+                            answers.push((id, Ok((through, rows, None, None))));
                         }
+                    }
+                    SyncMessage::UnionAnswerV1 {
+                        id,
+                        through,
+                        occurrences,
+                    } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if client
+                            .remote_ids
+                            .get(&id)
+                            .and_then(|key| client.remote.get(key))
+                            .is_some_and(|remote| remote.union.is_some())
+                        {
+                            union_updates.push(unions::LiveUpdate::Receipt {
+                                id,
+                                through,
+                                occurrences,
+                            });
+                            continue;
+                        }
+                        if !client.answers.contains_key(&id) {
+                            continue;
+                        }
+                        if !client.union_answers.contains(&id)
+                            || client.overlay_answers.contains(&id)
+                            || through >= LOCAL_BASE
+                        {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "UNION answer has a different request kind or invalid cut",
+                            ));
+                        }
+                        if !client.scoped_answers.contains(&id)
+                            && !client.accepted_answers.contains(&id)
+                        {
+                            client.known = client.known.max(through);
+                        }
+                        let rows = occurrences
+                            .iter()
+                            .map(|occurrence| occurrence.row)
+                            .collect();
+                        answers.push((id, Ok((through, rows, None, Some(occurrences)))));
                     }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
@@ -4868,11 +5088,11 @@ impl Db {
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
         if known == client.persisted_known {
-            return Ok(answers);
+            return Ok((answers, union_updates));
         }
         client.persisted_known = known;
         inner.persist_meta("known", known)?;
-        Ok(answers)
+        Ok((answers, union_updates))
     }
 
     fn client_send(&self) -> Result<(), Error> {
@@ -5127,8 +5347,8 @@ impl Inner {
     }
 
     fn release_session_reads(&mut self, released: ReleasedReads) {
-        for (query, binding, include_deleted) in released.subscriptions {
-            self.release_remote(&query, &binding, include_deleted);
+        for (query, binding, include_deleted, scope) in released.subscriptions {
+            self.release_remote(&query, &binding, include_deleted, &scope);
         }
         if let Some(client) = self.client.as_mut() {
             for id in released.fetches {
@@ -5359,6 +5579,7 @@ impl Db {
                 let read = match &message {
                     SyncMessage::Subscribe { id, .. }
                     | SyncMessage::SubscribeReadablePolicyV1 { id, .. }
+                    | SyncMessage::ScopedUnionSubscribeV1 { id, .. }
                     | SyncMessage::Fetch { id, .. }
                     | SyncMessage::ScopedFetchV1 { id, .. }
                     | SyncMessage::AcceptedFetchV1 { id, .. }
@@ -5426,6 +5647,7 @@ impl Db {
             .collect();
         let mut written_values: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
         let dropped = inner.fan.dropped.clone();
+        let mut scoped_updates = Vec::new();
         for index in 0..sessions {
             if !inner.sessions[index].open {
                 continue;
@@ -5479,8 +5701,8 @@ impl Db {
                 let refused = inner.sessions[index]
                     .relayed
                     .iter()
-                    .filter_map(|(id, (query, binding, deleted))| {
-                        let key = remote_key(query, binding, *deleted);
+                    .filter_map(|(id, (query, binding, deleted, scope))| {
+                        let key = scoped_remote_key(query, binding, *deleted, scope);
                         let error = inner
                             .client
                             .as_ref()?
@@ -5557,6 +5779,77 @@ impl Db {
                     let global = events.iter().any(|event| {
                     matches!(event, SubscriptionEvent::Delta { settled: true, tier, .. } if *tier == DurabilityTier::Global)
                 });
+                    let union = group
+                        .upgrade()
+                        .is_some_and(|group| crate::db::relation::is_union(group.borrow().query()));
+                    // A UNION receipt describes the group's current rows. A
+                    // later local preview must not inherit global settlement
+                    // from an earlier event drained in the same batch.
+                    let (answered, global) = if union {
+                        events
+                            .iter()
+                            .rev()
+                            .find_map(|event| match event {
+                                SubscriptionEvent::Delta { settled, tier, .. } => {
+                                    Some((*settled, *settled && *tier == DurabilityTier::Global))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or((false, false))
+                    } else {
+                        (answered, global)
+                    };
+                    let coverage_through = if union && global {
+                        group
+                            .upgrade()
+                            .and_then(|group| group.borrow().union_cut())
+                            .unwrap_or(through)
+                    } else {
+                        through
+                    };
+                    if let Some(prepared) = inner.sessions[index].scoped_unions.get(&id).cloned() {
+                        if !answered || !global {
+                            continue;
+                        }
+                        let Some(group) = group.upgrade() else {
+                            continue;
+                        };
+                        let group = group.borrow();
+                        let roots = group.rows.iter().map(|row| *row.id.as_bytes()).collect();
+                        let scope = prepared.request_claims.clone().expect("scoped live query");
+                        let (prepared, evidence) = if inner.client.is_some() {
+                            let Some((cut, occurrences, evidence)) = inner
+                                .live_union(
+                                    &prepared,
+                                    group.includes_deleted(),
+                                    &Some(scope.clone()),
+                                )
+                                .and_then(|live| live.scoped_coverage())
+                            else {
+                                continue;
+                            };
+                            if cut != coverage_through {
+                                continue;
+                            }
+                            (
+                                unions::exact(&prepared, &occurrences)?,
+                                ScopedEvidence::Supplied(evidence),
+                            )
+                        } else {
+                            (prepared, ScopedEvidence::Collect)
+                        };
+                        scoped_updates.push(scoped_live::Update {
+                            index,
+                            id,
+                            prepared,
+                            identity: scope.0,
+                            through: coverage_through,
+                            include_deleted: group.includes_deleted(),
+                            roots,
+                            evidence,
+                        });
+                        continue;
+                    }
                     let first = images.len();
                     let since = inner.sessions[index].resume.remove(&id);
                     let support = inner.sessions[index]
@@ -5612,7 +5905,8 @@ impl Db {
                             // holding (`Hold` watched it and re-ships it if stale).
                             // A row's seq alone cannot say so: it may have entered
                             // the result while away, through a policy or filter.
-                            let unchanged = since.is_some()
+                            let unchanged = !union
+                                && since.is_some()
                                 && history.is_none()
                                 && watch.contains(&wk((
                                     table.clone(),
@@ -5639,8 +5933,16 @@ impl Db {
                             } else if !cache.contains_key(&key) {
                                 let id = row.id.0.as_bytes().to_vec();
                                 let seq = row.seq as i64;
-                                let found =
+                                let mut found =
                                     inner.images_where(&table, false, ID_AT_SEQ, &[&id, &seq])?;
+                                if union && found.is_empty() {
+                                    found = inner.images_where(
+                                        &table,
+                                        true,
+                                        ID_AT_SEQ,
+                                        &[&id, &seq],
+                                    )?;
+                                }
                                 cache.insert(key.clone(), found);
                             }
                             if unchanged {
@@ -5702,17 +6004,26 @@ impl Db {
                             .upgrade()
                             .map(|group| group.borrow().rows.clone())
                             .unwrap_or_default();
-                        let inputs = inner
-                            .inheritance_inputs(&prepared, policy, &roots, &ReadSpec::default())
-                            .and_then(|mut inputs| {
-                                inputs.extend(inner.reachability_inputs(
-                                    &prepared,
-                                    policy,
-                                    &roots.iter().map(|row| row.id).collect::<Vec<_>>(),
-                                    &ReadSpec::default(),
-                                )?);
-                                Ok(inputs)
-                            });
+                        let inputs = if union {
+                            inner.union_inputs(
+                                &prepared,
+                                policy,
+                                &roots,
+                                if global { coverage_through } else { inner.seq },
+                            )
+                        } else {
+                            inner
+                                .inheritance_inputs(&prepared, policy, &roots, &ReadSpec::default())
+                                .and_then(|mut inputs| {
+                                    inputs.extend(inner.reachability_inputs(
+                                        &prepared,
+                                        policy,
+                                        &roots.iter().map(|row| row.id).collect::<Vec<_>>(),
+                                        &ReadSpec::default(),
+                                    )?);
+                                    Ok(inputs)
+                                })
+                        };
                         match inputs {
                             Ok(inputs) => {
                                 for image in inputs {
@@ -5763,18 +6074,33 @@ impl Db {
                     }
                     // The opening and every window delta list the result's
                     // rows, so the client can drop stale cached ones.
-                    let window = list.then(|| group.upgrade()).flatten().map(|group| {
-                        group
-                            .borrow()
-                            .rows
-                            .iter()
-                            .map(|row| *row.id.0.as_bytes())
-                            .collect()
-                    });
+                    let window = (list && !union)
+                        .then(|| group.upgrade())
+                        .flatten()
+                        .map(|group| {
+                            group
+                                .borrow()
+                                .rows
+                                .iter()
+                                .map(|row| *row.id.0.as_bytes())
+                                .collect()
+                        });
                     if answered {
+                        if union {
+                            let occurrences = group
+                                .upgrade()
+                                .map(|group| unions::occurrences(&group.borrow().rows))
+                                .transpose()?
+                                .unwrap_or_default();
+                            settled.push(SyncMessage::UnionAnswerV1 {
+                                id,
+                                through: coverage_through,
+                                occurrences,
+                            });
+                        }
                         settled.push(SyncMessage::Settled {
                             id,
-                            through,
+                            through: coverage_through,
                             window,
                             global,
                         });
@@ -5943,7 +6269,8 @@ impl Db {
             }
             send_result?;
         }
-        Ok(())
+        drop(inner);
+        self.send_scoped_union_updates(scoped_updates)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5962,6 +6289,11 @@ impl Db {
     ) -> Result<(), Error> {
         let mut inner = self.inner();
         // A history read ships versions of its source table.
+        let union = crate::db::relation::is_union(&prepared.query);
+        if union {
+            Self::remote_fetch_shape(&prepared.query)?;
+            inner.check_union_shape(prepared)?;
+        }
         let history = history_source_table(&query.table);
         let table = inner
             .schema
@@ -6046,13 +6378,11 @@ impl Db {
                 }
                 let through = at.unwrap_or(inner.seq);
                 let mut budget = scoped_reads::MAX_EVIDENCE;
-                images.extend(inner.scoped_query_images(
-                    prepared,
-                    policy,
-                    &images,
-                    through,
-                    &mut budget,
-                )?);
+                images.extend(if union {
+                    inner.union_inputs_with_budget(prepared, policy, &rows, through, &mut budget)?
+                } else {
+                    inner.scoped_query_images(prepared, policy, &images, through, &mut budget)?
+                });
                 let evidence = inner.permission_evidence_with_budget(
                     prepared,
                     policy,
@@ -6076,9 +6406,17 @@ impl Db {
         let roots = rows.iter().map(|row| row.id).collect::<Vec<_>>();
         let mut reachability_inputs = inner.reachability_inputs(prepared, policy, &roots, &read)?;
         reachability_inputs.extend(inner.inheritance_inputs(prepared, policy, &rows, &read)?);
+        if union && scoped_evidence.is_none() {
+            reachability_inputs.extend(inner.union_inputs(
+                prepared,
+                policy,
+                &rows,
+                at.unwrap_or(inner.seq),
+            )?);
+        }
         // Scoped evidence already contains the exact query and policy inputs.
         // Re-following them against the current cache would mix cuts and claims.
-        let support = if scoped_evidence.is_some() {
+        let support = if scoped_evidence.is_some() || union {
             Vec::new()
         } else {
             inner.support_of(query)?
@@ -6170,21 +6508,41 @@ impl Db {
             session.outbox.push(SyncMessage::Rows { images });
         }
         session.outbox.extend(owner_inputs);
+        let occurrences = union.then(|| unions::occurrences(&rows)).transpose()?;
         let rows = rows.iter().map(|r| *r.id.0.as_bytes()).collect();
-        session
-            .outbox
-            .push(if let Some(evidence) = scoped_evidence {
-                evidence_answer(accepted, id, through, rows, evidence)
-            } else if accepted {
-                SyncMessage::AcceptedAnswerV1 { id, through, rows }
-            } else {
-                SyncMessage::Answer { id, through, rows }
+        if let Some(occurrences) = occurrences {
+            session.outbox.push(SyncMessage::UnionAnswerV1 {
+                id,
+                through,
+                occurrences,
             });
+            // Scoped coverage needs both semantic occurrences and the exact
+            // permission closure at the same cut. Neither frame alone answers it.
+            if let Some(evidence) = scoped_evidence {
+                session
+                    .outbox
+                    .push(evidence_answer(accepted, id, through, rows, evidence));
+            } else if accepted {
+                session
+                    .outbox
+                    .push(SyncMessage::AcceptedAnswerV1 { id, through, rows });
+            }
+        } else {
+            session
+                .outbox
+                .push(if let Some(evidence) = scoped_evidence {
+                    evidence_answer(accepted, id, through, rows, evidence)
+                } else if accepted {
+                    SyncMessage::AcceptedAnswerV1 { id, through, rows }
+                } else {
+                    SyncMessage::Answer { id, through, rows }
+                });
+        }
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn forward_scoped_fetch(
+    fn forward_fetch(
         &self,
         index: usize,
         id: u64,
@@ -6195,32 +6553,32 @@ impl Db {
         accepted: bool,
         scoped_evidence: bool,
         overlay_ops: Option<Vec<WireOp>>,
+        ordinary: bool,
     ) -> Result<(), Error> {
-        let deadline = self
-            .read_deadline(accepted.then(|| Instant::now() + std::time::Duration::from_secs(15)));
+        let deadline = self.read_deadline(
+            (accepted || ordinary).then(|| Instant::now() + std::time::Duration::from_secs(15)),
+        );
         let mut inner = self.inner();
         let owner = inner.owner.clone();
         let downstream_version = inner.sessions[index].version;
         if downstream_version.is_some_and(|version| version != owner.jazz.version_id()) {
-            return Err(unsupported(
-                "scoped relay reads across different schema versions",
-            ));
+            return Err(unsupported("relay reads across different schema versions"));
         }
         if inner.sessions[index].forwarded.contains_key(&id)
             || inner.sessions[index].forwarded_catalogue.contains_key(&id)
         {
-            return Err(query_error("duplicate pending scoped relay request ID"));
+            return Err(query_error("duplicate pending relay request ID"));
         }
         let client = inner.client.as_mut().expect("relay");
         if client.transport.is_none() || !may_wait(client.hint.get()) {
             return Err(Error::new(
                 ErrorCode::NotObserved,
-                "scoped relay read has no available authority",
+                "relay read has no available authority",
             ));
         }
         if client.upstream_schema != Some(owner.jazz.version_id()) {
             return Err(unsupported(
-                "scoped relay reads after a schema change without upstream reconnect",
+                "relay reads after a schema change without upstream reconnect",
             ));
         }
         let upstream = client.next_id;
@@ -6229,16 +6587,29 @@ impl Db {
         let claims = prepared
             .request_claims
             .as_ref()
-            .expect("scoped claims")
+            .expect("forwarded immutable claims")
             .1
             .clone();
         client.answers.insert(upstream, None);
-        client.scoped_answers.insert(upstream);
+        if overlay_ops.is_none() && crate::db::relation::is_union(&prepared.query) {
+            client.union_answers.insert(upstream);
+        }
+        if !ordinary {
+            client.scoped_answers.insert(upstream);
+        }
         if accepted {
             client.accepted_answers.insert(upstream);
         }
         let overlay = overlay_ops.is_some();
-        let message = if let Some(ops) = overlay_ops {
+        let message = if ordinary {
+            SyncMessage::Fetch {
+                id: upstream,
+                query: prepared.query.clone(),
+                binding: prepared.binding.clone(),
+                at,
+                include_deleted,
+            }
+        } else if let Some(ops) = overlay_ops {
             client.overlay_answers.insert(upstream);
             SyncMessage::AcceptedOverlayCheckV1 {
                 id: upstream,
@@ -6283,6 +6654,7 @@ impl Db {
                 accepted,
                 scoped_evidence,
                 overlay,
+                ordinary,
                 deadline,
             },
         );
@@ -6298,21 +6670,28 @@ impl Db {
             for index in 0..inner.sessions.len() {
                 let mut completed = Vec::new();
                 for (&id, request) in &inner.sessions[index].forwarded {
+                    // A private owner's first catalogue can replace deny-by-
+                    // default policies while this ordinary read waits. Its
+                    // physical schema must stay identical; the reply still
+                    // rechecks the authenticated governor and exact roots.
+                    let same_owner = Rc::ptr_eq(&request.owner, &inner.owner)
+                        || (request.ordinary
+                            && inner.scope_isolated_owner
+                            && request.owner.jazz.without_permissions()
+                                == inner.owner.jazz.without_permissions()
+                            && request.owner.names().tables == inner.owner.names().tables);
                     let error = if request
                         .deadline
                         .as_ref()
                         .is_some_and(|at| Instant::now() >= **at)
                     {
-                        Some(Error::new(
-                            ErrorCode::NotObserved,
-                            "accepted relay read timed out",
-                        ))
-                    } else if !Rc::ptr_eq(&request.owner, &inner.owner)
+                        Some(Error::new(ErrorCode::NotObserved, "relay read timed out"))
+                    } else if !same_owner
                         || request.downstream_version != inner.sessions[index].version
                     {
                         Some(Error::new(
                             ErrorCode::NotObserved,
-                            "scoped relay read interrupted by a schema change",
+                            "relay read interrupted by a schema change",
                         ))
                     } else if inner
                         .client
@@ -6321,7 +6700,7 @@ impl Db {
                     {
                         Some(Error::new(
                             ErrorCode::NotObserved,
-                            "scoped relay read interrupted by an upstream reconnect",
+                            "relay read interrupted by an upstream reconnect",
                         ))
                     } else {
                         None
@@ -6338,7 +6717,7 @@ impl Db {
                                     || {
                                         Err(Error::new(
                                             ErrorCode::NotObserved,
-                                            "scoped relay read has no available authority",
+                                            "relay read has no available authority",
                                         ))
                                     },
                                 )
@@ -6346,14 +6725,25 @@ impl Db {
                     });
                     if let Some(answer) = answer {
                         if !request.overlay
-                            && (request.accepted
+                            && (request.ordinary
+                                || request.accepted
                                 || request.scoped_evidence
-                                || matches!(&answer, Ok((_, _, Some(_)))))
-                            && let Ok((through, rows, evidence)) = &answer
+                                || matches!(&answer, Ok((_, _, Some(_), _))))
+                            && let Ok((through, rows, evidence, union)) = &answer
                         {
                             // Rows can precede their chunks. Keep the request alive while
                             // normal chunk demand hydrates this exact authority result.
-                            let mut exact = scoped_result_query(&request.prepared, rows.clone());
+                            let mut exact = match exact_fetch_query(
+                                &request.prepared,
+                                rows.clone(),
+                                union.as_deref(),
+                            ) {
+                                Ok(exact) => exact,
+                                Err(error) => {
+                                    completed.push((id, Err(error)));
+                                    continue;
+                                }
+                            };
                             exact.authority_policies = match inner
                                 .needs_authority_policies(&exact, Some(request.identity))
                             {
@@ -6384,6 +6774,12 @@ impl Db {
                             } else {
                                 inner.run(&exact, Some(request.identity), &read)
                             };
+                            let evaluated = evaluated.and_then(|rows| {
+                                if let Some(occurrences) = union {
+                                    unions::check(&rows, occurrences)?;
+                                }
+                                Ok(rows)
+                            });
                             if let Err(error) = evaluated {
                                 if crate::large::is_missing(&error) {
                                     continue;
@@ -6409,19 +6805,33 @@ impl Db {
             ready
         };
         for (index, id, request, answer) in ready {
-            let result = answer.and_then(|(through, rows, evidence)| {
+            let result = answer.and_then(|(through, rows, evidence, union)| {
                 if request.overlay {
                     self.inner().sessions[index]
                         .outbox
                         .push(SyncMessage::AcceptedOverlayCheckedV1 { id, through });
                     return Ok(());
                 }
-                let expected = (request.accepted || request.scoped_evidence || evidence.is_some())
-                    .then_some(rows.clone());
-                let mut exact = scoped_result_query(&request.prepared, rows);
+                let expected = (request.ordinary
+                    || request.accepted
+                    || request.scoped_evidence
+                    || evidence.is_some())
+                .then_some(rows.clone());
+                let mut exact = exact_fetch_query(&request.prepared, rows, union.as_deref())?;
                 exact.authority_policies = self
                     .inner()
                     .needs_authority_policies(&exact, Some(request.identity))?;
+                // Forwarding may request scoped proof upstream even when the
+                // downstream SYSTEM read was unscoped. Keep its original reply
+                // contract; it does not need permission witnesses to materialize.
+                let evidence = if request.accepted
+                    && !request.scoped_evidence
+                    && request.identity == AuthorSubject::SYSTEM
+                {
+                    None
+                } else {
+                    evidence
+                };
                 self.session_db(index).serve_fetch(
                     index,
                     id,
@@ -6457,13 +6867,30 @@ impl Db {
     }
 
     fn serve(&self, index: usize, message: SyncMessage) -> Result<(), Error> {
-        let (identity, claims) = {
+        let (identity, claims, upstream_claims) = {
             let inner = self.inner.borrow();
             let session = &inner.sessions[index];
-            (session.identity, session.claims.clone())
+            // Capture the node's own scope before installing this downstream
+            // session's claims. Same identity does not imply the same token.
+            let upstream_claims = (inner.client.is_some()
+                && matches!(
+                    &message,
+                    SyncMessage::Fetch { .. }
+                        | SyncMessage::Subscribe { .. }
+                        | SyncMessage::SubscribeReadablePolicyV1 { .. }
+                        | SyncMessage::ScopedUnionSubscribeV1 { .. }
+                ))
+            .then(|| {
+                inner
+                    .claims
+                    .get(&inner.identity.author)
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            (session.identity, session.claims.clone(), upstream_claims)
         };
         let Some(claims) = claims.filter(|_| identity != AuthorSubject::SYSTEM) else {
-            return self.serve_as(index, message, None);
+            return self.serve_as(index, message, None, upstream_claims);
         };
         // The session's claims stand for its identity's while it is served.
         let previous = self
@@ -6471,7 +6898,7 @@ impl Db {
             .borrow_mut()
             .claims
             .insert(identity, claims.clone());
-        let result = self.serve_as(index, message, Some(claims));
+        let result = self.serve_as(index, message, Some(claims), upstream_claims);
         let mut inner = self.inner.borrow_mut();
         match previous {
             Some(previous) => inner.claims.insert(identity, previous),
@@ -6485,6 +6912,7 @@ impl Db {
         index: usize,
         message: SyncMessage,
         claims: Option<BTreeMap<String, Value>>,
+        upstream_claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
         let connection_identity = self.inner.borrow().sessions[index].identity;
         if let SyncMessage::AcceptedOverlayCheckV1 {
@@ -6517,7 +6945,7 @@ impl Db {
             db.check_accepted_query(&prepared)?;
             accepted_overlay::validate_ops(ops)?;
             if self.is_client() {
-                return db.forward_scoped_fetch(
+                return db.forward_fetch(
                     index,
                     *id,
                     prepared,
@@ -6527,6 +6955,7 @@ impl Db {
                     true,
                     false,
                     Some(ops.clone()),
+                    false,
                 );
             }
             db.validate_accepted_overlay(&prepared, author, *through, *include_deleted, ops)?;
@@ -6585,6 +7014,34 @@ impl Db {
                     identity,
                     claims,
                     scoped,
+                )
+            }
+            SyncMessage::ScopedUnionSubscribeV1 {
+                id,
+                query,
+                binding,
+                author,
+                claims,
+                include_deleted,
+            } => {
+                if connection_identity != AuthorSubject::SYSTEM {
+                    return Err(rejected(
+                        "scoped live UNION subscriptions require a trusted backend connection",
+                    ));
+                }
+                let author = AuthorSubject::from_canonical(&author)
+                    .map_err(|e| query_error(e.to_string()))?;
+                (
+                    SyncMessage::Subscribe {
+                        id,
+                        query,
+                        binding,
+                        since: None,
+                        include_deleted,
+                    },
+                    author,
+                    Some(claims),
+                    true,
                 )
             }
             SyncMessage::ScopedFetchV1 {
@@ -6755,6 +7212,45 @@ impl Db {
                     }
                 }
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
+                let union = crate::db::relation::is_union(&prepared.query);
+                if scoped {
+                    if !union {
+                        return Err(unsupported(
+                            "scoped live subscription requests without a UNION",
+                        ));
+                    }
+                    db.check_scoped_fetch(&prepared)?;
+                    if self.is_client() && db.inner().identity.author != AuthorSubject::SYSTEM {
+                        return Err(rejected(
+                            "scoped live UNION relays require a trusted SYSTEM upstream",
+                        ));
+                    }
+                }
+                let scope =
+                    scoped.then(|| prepared.request_claims.clone().expect("bound live scope"));
+                if union {
+                    Self::remote_fetch_shape(&prepared.query)?;
+                    db.inner().check_union_shape(&prepared)?;
+                    if self.is_client() && !scoped {
+                        let inner = db.inner();
+                        let upstream_identity = inner.identity.author;
+                        let request_claims = prepared
+                            .request_claims
+                            .as_ref()
+                            .map(|(_, claims)| claims.clone())
+                            .unwrap_or_else(|| {
+                                inner.claims.get(&identity).cloned().unwrap_or_default()
+                            });
+                        if identity != upstream_identity
+                            || (identity != AuthorSubject::SYSTEM
+                                && upstream_claims.as_ref() != Some(&request_claims))
+                        {
+                            return Err(rejected(
+                                "live UNION relay scope differs from its upstream admission",
+                            ));
+                        }
+                    }
+                }
                 db.inner().check_reachability_shape(&prepared)?;
                 db.inner().check_inheritance_shape(&prepared)?;
                 if readable_policy {
@@ -6763,22 +7259,32 @@ impl Db {
                 let windowed = query.limit.is_some() || query.offset > 0;
                 // A relay serves what its upstream lists, settled once the
                 // upstream answers: its own store may be cold.
-                let relayed = db.attach_remote(&prepared, include_deleted);
+                let relayed = db.attach_remote(&prepared, include_deleted, scope.clone());
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
+                let union_live = inner.live_union(&prepared, include_deleted, &scope);
                 let subscribed = inner.subscribe_member(
                     &prepared,
                     policy,
                     ReadSpec {
+                        union_live: union_live.clone(),
+                        union_preview: !scoped,
+                        scoped_live: scoped,
                         include_deleted,
                         members_only: relayed.is_some(),
                         ..ReadSpec::default()
                     },
                     match &relayed {
-                        Some((answered, _, global)) => {
-                            SettledBy::Relay(answered.clone(), global.clone())
-                        }
+                        Some((answered, _, global)) => match &union_live {
+                            Some(live) => SettledBy::Union {
+                                answered: answered.clone(),
+                                global: global.clone(),
+                                live: live.clone(),
+                                relay: true,
+                            },
+                            None => SettledBy::Relay(answered.clone(), global.clone()),
+                        },
                         None => SettledBy::Always(authority),
                     },
                 );
@@ -6789,6 +7295,7 @@ impl Db {
                                 prepared.query.clone(),
                                 prepared.binding.clone(),
                                 include_deleted,
+                                scope.clone(),
                             );
                             inner.sessions[index].relayed.insert(id, read);
                         }
@@ -6796,11 +7303,17 @@ impl Db {
                             &prepared.query,
                             &prepared.binding,
                             include_deleted,
+                            &scope,
                         ),
                     }
                 }
                 let (queue, group) = subscribed?;
-                if reachability::needed(&query) || !query.inherits.is_empty() {
+                if scoped {
+                    inner.sessions[index]
+                        .scoped_unions
+                        .insert(id, prepared.clone());
+                }
+                if union || reachability::needed(&query) || !query.inherits.is_empty() {
                     if let Some(group) = group.upgrade() {
                         group.borrow_mut().observe_support_inputs(&queue);
                     }
@@ -6891,10 +7404,11 @@ impl Db {
                 inner.sessions[index].support.remove(&id);
                 inner.sessions[index].readable_policy.remove(&id);
                 inner.sessions[index].query_support.remove(&id);
-                if let Some((query, binding, include_deleted)) =
+                inner.sessions[index].scoped_unions.remove(&id);
+                if let Some((query, binding, include_deleted, scope)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
-                    inner.release_remote(&query, &binding, include_deleted);
+                    inner.release_remote(&query, &binding, include_deleted, &scope);
                 }
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
@@ -6959,17 +7473,32 @@ impl Db {
                 include_deleted,
             } => {
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
+                let upstream_identity = db.inner().identity.author;
+                let ordinary = !scoped
+                    && !accepted
+                    && (upstream_identity != AuthorSubject::SYSTEM
+                        || identity == AuthorSubject::SYSTEM);
+                let forward = self.is_client()
+                    && (scoped
+                        || accepted
+                        || db.inner().client.as_ref().is_some_and(|client| {
+                            client.transport.is_some() && may_wait(client.hint.get())
+                        }));
+                let delegated = scoped || (forward && !ordinary && !accepted);
                 let scoped_evidence = if accepted {
                     db.check_accepted_query(&prepared)?;
                     scoped
                         && connection_identity == AuthorSubject::SYSTEM
                         && db.check_scoped_fetch(&prepared)?
-                } else if scoped {
+                } else if delegated {
                     db.check_scoped_fetch(&prepared)?
                 } else {
                     false
                 };
-                if (scoped || accepted) && self.is_client() {
+                // Ordinary fetches also recover offline owner inputs. They
+                // retain their cache contract without a live upstream; a
+                // request already forwarded never falls back after disconnect.
+                if forward {
                     let claims = prepared
                         .request_claims
                         .as_ref()
@@ -6982,7 +7511,23 @@ impl Db {
                                 .unwrap_or_default()
                         });
                     let prepared = prepared.with_identity_claims(identity, claims);
-                    db.forward_scoped_fetch(
+                    if ordinary {
+                        if identity != upstream_identity {
+                            return Err(rejected(
+                                "ordinary relay read identity differs from its upstream identity",
+                            ));
+                        }
+                        if identity != AuthorSubject::SYSTEM
+                            && prepared.request_claims.as_ref().map(|(_, claims)| claims)
+                                != upstream_claims.as_ref()
+                        {
+                            return Err(rejected(
+                                "ordinary relay read claims differ from its upstream claims",
+                            ));
+                        }
+                        Self::remote_fetch_shape(&prepared.query)?;
+                    }
+                    db.forward_fetch(
                         index,
                         id,
                         prepared,
@@ -6992,6 +7537,7 @@ impl Db {
                         accepted,
                         scoped_evidence,
                         None,
+                        ordinary,
                     )?;
                 } else {
                     if accepted {
@@ -7288,7 +7834,7 @@ impl Db {
                 return Err((
                     Error::new(
                         ErrorCode::Protocol,
-                        "union read requires serializable-union-observed-v1 evidence",
+                        "retained relation read requires serializable-union-observed-v1 evidence",
                     ),
                     Vec::new(),
                 ));
@@ -7346,8 +7892,10 @@ impl Db {
                 }
             }
             for (index, read) in reads.iter().enumerate() {
+                let normalized = normalize_relation(&read.query, &inner.schema)
+                    .map_err(|error| (error, Vec::new()))?;
                 let prepared = PreparedQuery {
-                    query: read.query.clone(),
+                    query: normalized.unwrap_or_else(|| read.query.clone()),
                     binding: read.binding.clone(),
                     shape: Shape([0; 16]),
                     binding_id: Binding([0; 16]),
@@ -7569,6 +8117,7 @@ fn overtakes_writes(message: &SyncMessage) -> bool {
         message,
         SyncMessage::Subscribe { .. }
             | SyncMessage::SubscribeReadablePolicyV1 { .. }
+            | SyncMessage::ScopedUnionSubscribeV1 { .. }
             | SyncMessage::Unsubscribe { .. }
             | SyncMessage::Fetch { .. }
             | SyncMessage::ScopedFetchV1 { .. }
@@ -7720,6 +8269,21 @@ fn scoped_result_query(prepared: &PreparedQuery, rows: Vec<[u8; 16]>) -> Prepare
     exact
 }
 
+fn exact_fetch_query(
+    prepared: &PreparedQuery,
+    rows: Vec<[u8; 16]>,
+    union: Option<&[UnionOccurrenceV1]>,
+) -> Result<PreparedQuery, Error> {
+    match (crate::db::relation::is_union(&prepared.query), union) {
+        (true, Some(occurrences)) => unions::exact(prepared, occurrences),
+        (false, None) => Ok(scoped_result_query(prepared, rows)),
+        _ => Err(Error::new(
+            ErrorCode::Protocol,
+            "fetch coverage does not match its query kind",
+        )),
+    }
+}
+
 fn row_local_policy(policy: &PolicyExpr) -> bool {
     match policy {
         PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().all(row_local_policy),
@@ -7742,8 +8306,19 @@ fn row_local_policy(policy: &PolicyExpr) -> bool {
 }
 
 impl Db {
-    fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<bool, Error> {
+    pub(super) fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<bool, Error> {
         let query = &prepared.query;
+        if crate::db::relation::is_union(query) {
+            Self::remote_fetch_shape(query)?;
+            for (_, query) in unions::leaves(query)? {
+                let mut leaf = prepared.clone();
+                leaf.query = self.prepare_query(&query)?.query;
+                self.check_scoped_fetch(&leaf)?;
+            }
+            // Even row-local arms carry one qualified reply: this prevents
+            // ordinary UNION coverage being substituted for a scoped response.
+            return Ok(true);
+        }
         if history_source_table(&query.table).is_some()
             || query.flat_join.is_some()
             || !query.policy_branches.is_empty()
@@ -7752,7 +8327,6 @@ impl Db {
             || !query.includes.is_empty()
             || !query.array_subqueries.is_empty()
             || query.aggregate.is_some()
-            || query.relation.is_some()
         {
             return Err(unsupported(
                 "scoped remote reads of relations, aggregates or history",
@@ -7938,7 +8512,12 @@ impl Db {
                 .await?;
             return Ok(result(rows));
         }
-        if self.inner().non_durable
+        if (self.inner().non_durable
+            || (crate::db::relation::is_union(&prepared.query)
+                && opts.tier == ReadTier::LocalFirst
+                && wait.is_some()
+                && prepared.request_claims.is_none()
+                && author.is_none_or(|id| id == self.inner().identity.author)))
             && self.is_client()
             && opts.tier != ReadTier::LocalOnly
             && !frozen
@@ -8026,14 +8605,14 @@ impl Db {
                         false,
                     )
                     .await?;
-                if let Some((through, rows, evidence)) = answer {
+                if let Some((through, rows, evidence, union)) = answer {
                     let scoped_evidence = scoped_evidence
                         || evidence.is_some()
                         || self.check_scoped_fetch(&prepared)?;
                     let expected = rows.clone();
                     // Only these authority-approved roots, at this cut, belong
                     // to this request. Other cached or pending rows do not.
-                    let mut exact = scoped_result_query(&prepared, rows);
+                    let mut exact = exact_fetch_query(&prepared, rows, union.as_deref())?;
                     // This query may have been prepared before the authority's
                     // policy descriptor arrived with its answer. Recheck simple
                     // row-local policies under that authenticated governor too.
@@ -8076,6 +8655,9 @@ impl Db {
                             "scoped permission evidence does not reproduce the authority result",
                         ));
                     }
+                    if let Some(occurrences) = union {
+                        unions::check(&rows, &occurrences)?;
+                    }
                     return Ok(result(rows));
                 }
                 if opts.tier == ReadTier::Remote {
@@ -8087,7 +8669,7 @@ impl Db {
                 // A local-first deadline may return the locally permitted
                 // cache; it never promotes it to an authoritative answer.
             } else {
-                Self::remote_shape(&prepared.query)?;
+                Self::remote_fetch_shape(&prepared.query)?;
                 let answer = self
                     .fetch_answer(
                         &prepared,
@@ -8099,8 +8681,27 @@ impl Db {
                     )
                     .await?;
                 if opts.tier == ReadTier::Remote
-                    && let Some((_, rows, _)) = answer
+                    && let Some((through, rows, _, union)) = answer
                 {
+                    if let Some(occurrences) = union {
+                        let mut exact = unions::exact(&prepared, &occurrences)?;
+                        let identity = author.unwrap_or(self.inner().identity.author);
+                        exact.authority_policies = self
+                            .inner()
+                            .needs_authority_policies(&exact, Some(identity))?;
+                        let read = ReadSpec {
+                            cut: Some(Cut::at(through)),
+                            include_deleted: opts.read_view.include_deleted,
+                            ..ReadSpec::default()
+                        };
+                        let rows = self
+                            .hydrate_one_shot(wait, || {
+                                self.inner().run(&exact, Some(identity), &read)
+                            })
+                            .await?;
+                        unions::check(&rows, &occurrences)?;
+                        return Ok(result(rows));
+                    }
                     // The answer names this read's roots, including an empty
                     // result. Own cached writes need not have been subscribed
                     // or fetched before, so asynchronous revocations alone do

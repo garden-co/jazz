@@ -1072,10 +1072,30 @@ impl<'a> Ctx<'a> {
         query: &Query,
         include_deleted: bool,
     ) -> Result<Compiled, Error> {
-        if query.relation.is_some() {
+        if crate::db::relation::is_union(query) {
             return self.compile_union(query, include_deleted);
         }
-        if let Some(column) = deletion_column(query) {
+        let retained = crate::db::relation::columns(query)?.map(|mut columns| {
+            columns.retain(|column| column.source != "id" || column.alias != "id");
+            columns
+        });
+        if retained.is_some()
+            && (query.select.is_some()
+                || !query.array_subqueries.is_empty()
+                || query.aggregate.is_some())
+        {
+            return Err(unsupported(
+                "presentation over a retained relation projection",
+            ));
+        }
+        if let Some(column) = deletion_column(query).or_else(|| {
+            retained.as_ref().and_then(|columns| {
+                columns
+                    .iter()
+                    .find(|column| crate::values::is_deletion(&column.source))
+                    .map(|column| column.source.clone())
+            })
+        }) {
             if !include_deleted {
                 return Err(query_error(format!(
                     "Reading {column} requires includeDeleted"
@@ -1101,13 +1121,33 @@ impl<'a> Ctx<'a> {
         if query.flat_join.is_some() {
             return self.compile_flat_join(query);
         }
-        if !query.policy_branches.is_empty() || query.relation.is_some() {
-            return Err(unsupported(
-                "this query form (policy branches, relation) on SQLite",
-            ));
+        if !query.policy_branches.is_empty() {
+            return Err(unsupported("this query form (policy branches) on SQLite"));
         }
         let table = self.table(&query.table)?;
-        let projection = projection(table, query.select.as_deref())?;
+        let projection = match &retained {
+            None => projection(table, query.select.as_deref())?,
+            Some(columns) => columns
+                .iter()
+                .map(|column| {
+                    let ty = if column.source == "id" {
+                        ValueType::Uuid
+                    } else {
+                        table
+                            .column(&column.source)
+                            .ok_or_else(|| {
+                                query_error(format!(
+                                    "unknown column `{}.{}`",
+                                    table.name, column.source
+                                ))
+                            })?
+                            .ty
+                            .clone()
+                    };
+                    Ok((column.alias.clone(), ty))
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
+        };
         let alias = "t";
         let mut wheres = Vec::new();
         if !include_deleted {
@@ -1190,7 +1230,15 @@ impl<'a> Ctx<'a> {
         let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
         let columns = projection
             .iter()
-            .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .enumerate()
+            .map(|(index, (name, _))| match &retained {
+                Some(columns) => Ok(format!(
+                    ", {} AS {}",
+                    column_sql(table, alias, &columns[index].source)?,
+                    quote(name)
+                )),
+                None => Ok(format!(", {}", column_sql(table, alias, name)?)),
+            })
             .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
@@ -1666,6 +1714,9 @@ impl<'a> Ctx<'a> {
         let target = self.table(&join.table)?;
         let j = self.alias("j");
         let mut conds = vec![format!("{j}._del = 0")];
+        if self.members_only {
+            conds.push(self.listed(target, &j));
+        }
         if let Some(session) = self.policy {
             conds.push(self.read_policy(target, &j, session)?);
         }
@@ -1691,6 +1742,9 @@ impl<'a> Ctx<'a> {
                                 column_sql(table, alias, &lookup.row_id_source_column)?
                             ),
                         ];
+                        if self.members_only {
+                            found.push(self.listed(referenced, &l));
+                        }
                         if let Some(session) = self.policy {
                             found.push(self.read_policy(referenced, &l, session)?);
                         }
@@ -3559,6 +3613,18 @@ impl Ctx<'_> {
         alias: &str,
         order: &[crate::query::OrderBy],
     ) -> Result<(String, Option<String>), Error> {
+        self.order_projected_sql(table, alias, order, &BTreeMap::new())
+    }
+
+    /// A compound relation exposes output names, while chunk ranking still
+    /// probes the physical source column that supplied those values.
+    fn order_projected_sql(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        order: &[crate::query::OrderBy],
+        sources: &BTreeMap<String, String>,
+    ) -> Result<(String, Option<String>), Error> {
         let mut keys = Vec::new();
         let mut ranked = Vec::new();
         let mut any_large = false;
@@ -3573,7 +3639,19 @@ impl Ctx<'_> {
                     key.column
                 )));
             }
-            match self.column_term(table, alias, &key.column)? {
+            let mut term = self.column_term(
+                table,
+                alias,
+                sources.get(&key.column).unwrap_or(&key.column),
+            )?;
+            if sources.contains_key(&key.column) {
+                let cell = format!("{alias}.{}", quote(table.stored_name(&key.column)));
+                match &mut term {
+                    Term::Large(column) => column.cell = cell,
+                    _ => term = Term::Sql(cell),
+                }
+            }
+            match term {
                 Term::Large(column) => {
                     any_large = true;
                     let sql = crate::large::key_sql(&column.cell);

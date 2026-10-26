@@ -88,18 +88,33 @@ those physical pages are not a second application codec.
 Opening takes an exclusive lock on a stable `.owner.lock` inode. It validates the
 marker before opening the core database. An occupied SQLite file without this
 marker is refused with `unsupported_storage_codecs`. Scope, node and author
-mismatches are refused. An admitted owner cannot reopen in generic mode. A
+mismatches are refused.
+An admitted owner cannot reopen in generic mode. A
 closed generic root can be promoted by trusted admission for its exact scope,
 node and author, using the protocol below. A private account session recovers the stored
 node before opening, since its initial candidate node is fresh on every session.
-That preliminary read checks the exact scope and author; opening checks all the
-fields again under the lock. An explicit host identity does not get silently
+Account-host routing may recognise a linked login in the base file to select a
+separate login store. The selected file's preliminary read checks its exact scope
+and author. Opening checks all the fields again under the lock. An explicit host identity does not get silently
 replaced.
 
 SQLite uses FULL synchronous writes, and the parent directory is synced after
 file creation. The core database owns its WAL and durability receipts. The lock
 inode is retained after close so another process cannot split ownership by
 replacing it.
+
+### Private account handoff
+
+The native account-session route retains a separate store for each linked login
+under the same account lock. The first login keeps the existing account file;
+other logins use pinned sibling filenames. Each pending journal remains bound to
+its original login and resumes only under that login. Generic private-scope
+admission cannot select this account-host route.
+
+The [native login storage proof](sqlite-native-account-login-storage.md) names
+the filename encoding, pins its bytes and explains selection, locking and
+compatibility. The direct core and Node account-owner APIs retain their separate
+[drained handoff contract](sqlite-private-owner-handoff-compatibility.md).
 
 ### Closed generic linked-identity handoff
 

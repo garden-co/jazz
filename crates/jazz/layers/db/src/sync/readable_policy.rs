@@ -118,12 +118,13 @@ impl Inner {
         self.sessions[index].support.remove(&id);
         self.sessions[index].readable_policy.remove(&id);
         self.sessions[index].query_support.remove(&id);
+        self.sessions[index].scoped_unions.remove(&id);
         self.sessions[index].resume.remove(&id);
         if self.sessions[index].subs.remove(&id).is_some() {
             self.fan.dropped.set(self.fan.dropped.get() + 1);
         }
-        if let Some((query, binding, deleted)) = self.sessions[index].relayed.remove(&id) {
-            self.release_remote(&query, &binding, deleted);
+        if let Some((query, binding, deleted, scope)) = self.sessions[index].relayed.remove(&id) {
+            self.release_remote(&query, &binding, deleted, &scope);
         }
         self.sessions[index].outbox.push(SyncMessage::Refused {
             id,

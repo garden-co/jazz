@@ -375,12 +375,37 @@ pub(super) fn open_cached_db(
     identity: CoreDbIdentity,
     cached: Option<&[u8]>,
 ) -> napi::Result<CoreDb> {
+    open_cached_db_inner(schema, storage, config, identity, cached, None)
+}
+
+pub(super) fn open_cached_account_owner_db(
+    schema: JazzSchema,
+    storage: NativeStorage,
+    config: CoreOpenDbConfig,
+    identity: CoreDbIdentity,
+    cached: Option<&[u8]>,
+    admission: &account_owner::AdmittedAccountOwner,
+) -> napi::Result<CoreDb> {
+    open_cached_db_inner(schema, storage, config, identity, cached, Some(admission))
+}
+
+fn open_cached_db_inner(
+    schema: JazzSchema,
+    storage: NativeStorage,
+    config: CoreOpenDbConfig,
+    identity: CoreDbIdentity,
+    cached: Option<&[u8]>,
+    admission: Option<&account_owner::AdmittedAccountOwner>,
+) -> napi::Result<CoreDb> {
     if cached.is_some() && config.history_complete {
         return Err(napi::Error::from_reason(
             "cached catalogue cannot establish history completeness",
         ));
     }
-    let db = open_core_db(schema, storage, config, identity, false)?;
+    let db = match admission {
+        Some(admission) => CoreDb::open_account_owner(schema, storage, config, identity, admission),
+        None => open_core_db(schema, storage, config, identity, false),
+    }?;
     if let Some(cached) = cached {
         // SAFETY: the host owns and validates this app/environment cache.
         unsafe { db.install_cached_catalogue(cached) }.map_err(napi_error)?;

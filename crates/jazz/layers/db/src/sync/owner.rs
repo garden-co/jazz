@@ -44,6 +44,57 @@ pub(crate) fn stored_subject(conn: &Connection) -> Result<Option<AuthorSubject>,
         .transpose()
 }
 
+/// jazz.sqlite.private-owner-handoff.v1 changes only the admitted subject in
+/// owner-scope.v1. The host holds exclusive ownership and authenticates the
+/// stable account scope; this function supplies the durable no-pending fence.
+pub(crate) fn handoff_account_owner(
+    conn: &Connection,
+    previous: AuthorSubject,
+    next: AuthorSubject,
+) -> Result<(), Error> {
+    if !matches!(previous, AuthorSubject::Authenticated(_))
+        || !matches!(next, AuthorSubject::Authenticated(_))
+        || previous.account_id().is_none()
+        || previous.account_id() != next.account_id()
+    {
+        return Err(Error::new(
+            ErrorCode::Storage,
+            "private owner handoff requires linked authenticated account identities",
+        ));
+    }
+    let tx = conn.unchecked_transaction().map_err(storage)?;
+    // Every probe uses an existing primary key or partial pending index. The
+    // check includes owner publications and initialization recovery evidence;
+    // it never reattributes, discards or scans settled application history.
+    let pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _jazz_pending LIMIT 1) OR \
+         EXISTS(SELECT 1 FROM _jazz_relay_upload_v1 WHERE pending=1 LIMIT 1) OR \
+         EXISTS(SELECT 1 FROM _jazz_shadow LIMIT 1) OR \
+         EXISTS(SELECT 1 FROM _jazz_owner_input_rows_v1 WHERE pending=1 AND writes=1 LIMIT 1) OR \
+         EXISTS(SELECT 1 FROM _jazz_local_commits_v1 WHERE initialization=1 AND pending=1 LIMIT 1) OR \
+         EXISTS(SELECT 1 FROM _jazz_owner_initialization_v1 WHERE state=1 LIMIT 1)",
+        [], |row| row.get(0),
+    ).map_err(storage)?;
+    if pending {
+        return Err(unsupported(
+            "switching a private owner's login while original uploads are pending",
+        ));
+    }
+    let changed = tx
+        .execute(
+            "UPDATE _jazz_owner_scope_v1 SET subject=?1 WHERE singleton=1 AND subject=?2",
+            [next.canonical(), previous.canonical()],
+        )
+        .map_err(storage)?;
+    if changed != 1 {
+        return Err(Error::new(
+            ErrorCode::Storage,
+            "private owner changed during handoff",
+        ));
+    }
+    tx.commit().map_err(storage)
+}
+
 /// A reopen must refuse an incompatible schema before Names or physical DDL
 /// can mutate the file. The scope row exists only after the journals exist.
 pub(crate) fn check_open_schema(
@@ -73,10 +124,20 @@ pub(crate) fn check_open_schema(
 }
 
 impl Inner {
-    /// Only the host-admitted owner's own identity can recover pending previews
-    /// before it has an authority catalogue. Accepted images never qualify.
+    /// Only the admitted owner's identity can recover pending previews before
+    /// an authority catalogue exists. A foreground must have acknowledged that
+    /// same subject and schema with its private owner. Accepted images never
+    /// qualify for the compiler's pending-input predicate.
     pub(in crate::db) fn owner_previews(&self, subject: Option<AuthorSubject>) -> bool {
-        self.scope_isolated_owner && subject == Some(self.identity.author)
+        subject == Some(self.identity.author)
+            && (self.scope_isolated_owner
+                || (self.non_durable
+                    && self.client.as_ref().is_some_and(|client| {
+                        client.owner_projection_bound
+                            && client.owner_node.is_some()
+                            && client.owner_ready == Some(self.owner.jazz.version_id())
+                            && client.upstream_schema == client.owner_ready
+                    })))
     }
 
     pub(super) fn owner_pending_preview(

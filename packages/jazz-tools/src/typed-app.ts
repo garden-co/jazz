@@ -983,6 +983,10 @@ type BuiltRelation = {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  select?: string[];
+  orderBy?: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
   gather?: BuiltGather;
   union?: {
     inputs: BuiltUnionArm[];
@@ -1026,6 +1030,16 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.table ? { table: relation.table } : {}),
     ...(relation.conditions ? { conditions: relation.conditions.map(cloneBuiltCondition) } : {}),
     ...(relation.hops ? { hops: [...relation.hops] } : {}),
+    ...(relation.select ? { select: [...relation.select] } : {}),
+    ...(relation.orderBy
+      ? {
+          orderBy: relation.orderBy.map(
+            ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+          ),
+        }
+      : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
     ...(relation.gather ? { gather: cloneBuiltGather(relation.gather) } : {}),
     ...(relation.union
       ? {
@@ -1429,14 +1443,33 @@ export class TypedTableQueryBuilder<
   }
 
   _serializeRelation(): BuiltRelation {
+    if (Object.keys(this._includes).length > 0 || this._requireIncludes || this._includeDeleted) {
+      throw new Error("UNION and gather seeds do not support includes or deleted-row output.");
+    }
+    if (this._partialSelect || (this._select && !Array.isArray(this._select))) {
+      throw new Error("UNION and gather seeds do not support partial large-value selections.");
+    }
+    const output = {
+      ...(this._select ? { select: [...this._select] } : {}),
+      ...(this._orderBys.length
+        ? {
+            orderBy: this._orderBys.map(
+              ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+            ),
+          }
+        : {}),
+      ...(this._limitVal !== undefined ? { limit: this._limitVal } : {}),
+      ...(this._offsetVal !== undefined ? { offset: this._offsetVal } : {}),
+    };
     if (this._unionVal) {
-      return cloneBuiltRelation(this._unionVal);
+      return { ...cloneBuiltRelation(this._unionVal), ...output };
     }
     return {
       table: this._table,
       conditions: this._conditions.map(cloneBuiltCondition),
       hops: [...this._hops],
       ...(this._gatherVal ? { gather: cloneBuiltGather(this._gatherVal) } : {}),
+      ...output,
     };
   }
 }
@@ -1578,20 +1611,20 @@ export type App<TSchema extends SchemaLike> = Simplify<
         TableWhereFromMeta<SchemaMeta<TTable, TSchema>>
       >;
     };
-    union<TTable extends TableName<TSchema>>(
-      relations: readonly RelationSeedQuery<TTable>[],
+    union<const TInputs extends readonly RelationSeedQuery<TableName<TSchema>>[]>(
+      relations: TInputs,
     ): TypedTableQueryBuilder<
-      SchemaMeta<TTable, TSchema>,
+      SchemaMeta<TInputs[number]["_table"], TSchema>,
       {},
-      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      keyof RowOf<TInputs[number]>,
       false
     >;
-    union<TTable extends TableName<TSchema>>(
-      relations: Readonly<Record<string, RelationSeedQuery<TTable>>>,
+    union<const TInputs extends Readonly<Record<string, RelationSeedQuery<TableName<TSchema>>>>>(
+      relations: TInputs,
     ): TypedTableQueryBuilder<
-      SchemaMeta<TTable, TSchema>,
+      SchemaMeta<TInputs[keyof TInputs]["_table"], TSchema>,
       {},
-      DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
+      keyof RowOf<TInputs[keyof TInputs]>,
       false
     >;
     wasmSchema: WasmSchema;
@@ -2153,12 +2186,21 @@ function derivedUnionArmLabel(relation: BuiltRelation): string {
 }
 
 function canonicalUnionRelation(relation: BuiltRelation): string {
+  // jazz.sdk.union-arm-output.v1 extends only seeds with output modifiers.
+  // Existing unmodified seeds retain their exact canonical bytes and labels.
+  const output = {
+    ...(relation.select ? { select: relation.select } : {}),
+    ...(relation.orderBy ? { orderBy: relation.orderBy } : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
+  };
   const normalized = {
     ...(relation.table ? { table: relation.table } : {}),
     conditions: [...(relation.conditions ?? [])]
       .map((condition) => canonicalJson(condition))
       .sort(),
     hops: relation.hops ?? [],
+    ...(Object.keys(output).length ? { output_v1: output } : {}),
     ...(relation.gather ? { gather: relation.gather } : {}),
     ...(relation.union
       ? {

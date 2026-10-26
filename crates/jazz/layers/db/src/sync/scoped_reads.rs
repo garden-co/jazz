@@ -202,31 +202,40 @@ impl Inner {
         Ok(rows)
     }
 
-    pub(in crate::db) fn run_scoped_snapshot(
+    pub(in crate::db) fn run_qualified_snapshot(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         include_deleted: bool,
-        snapshot: &ScopedReadSnapshot,
+        snapshot: &QualifiedReadSnapshot,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut exact = prepared.clone();
-        exact.query.filters.push(crate::query::in_list(
-            crate::query::col("id"),
-            snapshot
-                .roots
-                .iter()
-                .map(|id| crate::query::lit(Value::Uuid(RowUuid::from_bytes(*id).0))),
-        ));
-        self.run_scoped_evidence(
-            &exact,
-            identity,
-            &ReadSpec {
-                cut: Some(Cut::at(snapshot.through)),
-                include_deleted,
-                ..ReadSpec::default()
-            },
-            &snapshot.evidence,
-        )
+        let exact = if let Some(occurrences) = &snapshot.union {
+            unions::exact(prepared, occurrences)?
+        } else {
+            // Non-UNION paired reads hydrate a prefix and retain its window.
+            let mut exact = prepared.clone();
+            exact.query.filters.push(crate::query::in_list(
+                crate::query::col("id"),
+                snapshot
+                    .roots
+                    .iter()
+                    .map(|id| crate::query::lit(Value::Uuid(RowUuid::from_bytes(*id).0))),
+            ));
+            exact
+        };
+        let read = ReadSpec {
+            cut: Some(Cut::at(snapshot.through)),
+            include_deleted,
+            ..ReadSpec::default()
+        };
+        let rows = match &snapshot.evidence {
+            Some(evidence) => self.run_scoped_evidence(&exact, identity, &read, evidence)?,
+            None => self.run(&exact, identity, &read)?,
+        };
+        if let Some(occurrences) = &snapshot.union {
+            unions::check(&rows, occurrences)?;
+        }
+        Ok(rows)
     }
 
     pub(super) fn run_scoped_evidence(

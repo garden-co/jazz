@@ -1,4 +1,6 @@
 //! SQLite relay behaviour through the native host's public command boundary.
+#[path = "sqlite_relay/account_handoff.rs"]
+mod account_handoff;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, SyncMessage, Transport, TransportError, block_on,
 };

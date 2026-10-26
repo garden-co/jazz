@@ -298,7 +298,7 @@ impl Db {
                 )));
             }
             match client.answers.get_mut(&id).and_then(Option::take) {
-                Some(Ok((cut, _, _))) if cut == through => Poll::Ready(Ok(())),
+                Some(Ok((cut, _, _, _))) if cut == through => Poll::Ready(Ok(())),
                 Some(Ok(_)) => Poll::Ready(Err(Error::new(
                     ErrorCode::Protocol,
                     "accepted overlay response has a different cut",

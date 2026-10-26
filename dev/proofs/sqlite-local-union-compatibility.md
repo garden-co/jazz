@@ -1,13 +1,13 @@
 # SQLite local UNION ALL reads
 
-SQLite evaluates full-row relation unions on the storage owner. Each leaf uses
+SQLite evaluates relation unions on the storage owner. Each leaf uses
 the ordinary query compiler with the same schema view, read identity, policy,
 accepted cut and large-value preprocessing. SQLite combines the leaves with
 `UNION ALL`; it applies each arm's own window before the outer order and window.
 No application-side table scan or row materialisation is used to merge arms.
-The supported leaves have the same output table and full identity projection.
-Nested unions retain their own windows. Renaming or narrowing projections,
-history sources and nested array output remain explicit unsupported shapes.
+The supported leaves have the same output table and matching output names and
+types, including narrowed or renamed projections. Nested unions retain their own
+windows. History sources and nested array output remain unsupported.
 
 A row appearing in two arms remains two occurrences. Current rows and removed
 rows carry the declared leaf label in memory. Nested labels use the existing
@@ -45,12 +45,16 @@ migration or alternate decoder is needed.
 
 ## Coverage boundary
 
-Remote union reads and subscriptions are explicitly refused. Hydrating only a
-union's final page cannot establish the inputs needed to reproduce arm-local
-windows on a partial replica. Local-only reads can evaluate the admitted local
-cache; they make no authority-coverage claim. Local serializable union reads record the complete query and compare both row
-versions and semantic occurrence content at commit. Replica reads that require
-remote union hydration still report the coverage error.
+Remote one-shot reads and ordinary subscriptions use the exact occurrence
+receipts described in [the remote coverage note](sqlite-union-answer-compatibility.md).
+They do not reconstruct arm-local windows from missing page predecessors.
+Local-only reads evaluate the admitted local cache without an authority-coverage
+claim. Local serializable union reads record the complete query and compare both
+row versions and semantic occurrence content at commit. Paired accepted UNION
+reads also retain that original query while using qualified occurrence coverage
+for cold pages; their supported scopes and staged-write limits are described in
+the remote coverage note. Online hydration through the ordinary serializable
+transaction-read API remains unsupported.
 
 For example, `done=false UNION title=alpha ORDER BY title LIMIT 2` returns alpha
 twice when alpha matches both arms. Changing alpha to `done=true` removes only

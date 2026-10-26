@@ -145,6 +145,27 @@ impl NativeDb {
         identity: CoreDbIdentity,
         trusted_backend: bool,
     ) -> napi::Result<Self> {
+        Self::open_inner(schema, storage, config, identity, trusted_backend, None)
+    }
+
+    pub(super) fn open_account_owner(
+        schema: JazzSchema,
+        storage: NativeStorage,
+        config: CoreOpenDbConfig,
+        identity: CoreDbIdentity,
+        admission: &account_owner::AdmittedAccountOwner,
+    ) -> napi::Result<Self> {
+        Self::open_inner(schema, storage, config, identity, false, Some(admission))
+    }
+
+    fn open_inner(
+        schema: JazzSchema,
+        storage: NativeStorage,
+        config: CoreOpenDbConfig,
+        identity: CoreDbIdentity,
+        trusted_backend: bool,
+        admission: Option<&account_owner::AdmittedAccountOwner>,
+    ) -> napi::Result<Self> {
         let mut db_config = jazz::db::DbConfig::new(schema, identity);
         if let Some(seed) = config.row_id_seed {
             db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
@@ -154,18 +175,25 @@ impl NativeDb {
                 core_block_on(jazz::db::Db::open(db_config)).map_err(napi_error)?,
                 None,
             ),
-            NativeStorage::File { path, lock } => (
-                core_block_on(jazz::db::Db::open_at(
-                    db_config,
-                    &path,
-                    jazz::db::FileOptions {
-                        synchronous_full: true,
-                        ..Default::default()
-                    },
-                ))
-                .map_err(napi_error)?,
-                Some(lock),
-            ),
+            NativeStorage::File { path, lock } => {
+                let options = jazz::db::FileOptions {
+                    synchronous_full: true,
+                    ..Default::default()
+                };
+                let db = if admission.is_some() {
+                    // SAFETY: only account_owner can create the admission,
+                    // after checking the host-selected stable account root.
+                    // `lock` stays held through marker completion and runtime
+                    // retirement; ordinary opens cannot select this route.
+                    core_block_on(unsafe {
+                        jazz::db::Db::open_at_as_account_owner(db_config, &path, options)
+                    })
+                } else {
+                    core_block_on(jazz::db::Db::open_at(db_config, &path, options))
+                }
+                .map_err(napi_error)?;
+                (db, Some(lock))
+            }
         };
         if config.history_complete {
             db.set_authority();

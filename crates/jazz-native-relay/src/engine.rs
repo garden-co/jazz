@@ -7,6 +7,8 @@ use std::fs::{File, OpenOptions};
 pub(super) struct ClientRelayScope {
     owner: String,
     author: jazz::ids::AuthorSubject,
+    pub(super) account_host: bool,
+    pub(super) account_root: Option<PathBuf>,
 }
 impl ClientRelayScope {
     /// Caller has authenticated the exact host-owned storage scope.
@@ -14,14 +16,63 @@ impl ClientRelayScope {
         owner: String,
         author: jazz::ids::AuthorSubject,
     ) -> Self {
-        Self { owner, author }
+        Self {
+            owner,
+            author,
+            account_host: false,
+            account_root: None,
+        }
     }
+
+    /// Caller resolved the native account-session capability, including its
+    /// registry, app, environment and account-derived durable root.
+    pub(super) unsafe fn from_admitted_account_owner(
+        owner: String,
+        author: jazz::ids::AuthorSubject,
+        account_root: PathBuf,
+    ) -> Self {
+        Self {
+            owner,
+            author,
+            account_host: true,
+            account_root: Some(account_root),
+        }
+    }
+}
+
+/// Account admission permits a different login in the same stable namespace.
+/// Canonical scope bytes must bind both the old and new exact login; matching
+/// account IDs alone never admits a generic private-scope caller.
+fn linked_account_scope_matches(
+    stored_scope: &str,
+    stored_author: &str,
+    scope: &RelayScope,
+    author: jazz::ids::AuthorSubject,
+) -> bool {
+    let Ok(previous) = jazz::ids::AuthorSubject::from_canonical(stored_author) else {
+        return false;
+    };
+    if !matches!(previous, jazz::ids::AuthorSubject::Authenticated(_))
+        || !matches!(author, jazz::ids::AuthorSubject::Authenticated(_))
+        || previous.account_id().is_none()
+        || previous.account_id() != author.account_id()
+        || scope.auth_scope.as_deref() != Some(author.canonical())
+    {
+        return false;
+    }
+    let previous_scope = RelayScope {
+        app_namespace: scope.app_namespace.clone(),
+        storage_namespace: scope.storage_namespace.clone(),
+        auth_scope: Some(previous.canonical().to_owned()),
+    };
+    previous_scope.ledger_owner_encoding() == stored_scope
 }
 
 pub(super) struct RelayDb {
     pub(super) binding: jazz::binding_host::Binding,
     identity: DbIdentity,
     _lock: Option<File>,
+    _account_lock: Option<File>,
     reports: RefCell<BTreeMap<TransactionId, jazz::binding_host::Write>>,
     pub(super) mutation_errors: Rc<RefCell<Vec<serde_json::Value>>>,
 }
@@ -127,6 +178,7 @@ impl RelayDb {
             binding: jazz::binding_host::Binding::new(core, identity, false),
             identity,
             _lock: None,
+            _account_lock: None,
             reports: RefCell::default(),
             mutation_errors: Rc::default(),
         })
@@ -140,6 +192,14 @@ impl RelayDb {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(storage)?;
         }
+        // Every login in an account shares the old account-root lock inode.
+        // A separate login store also keeps its own file lock, so neither an
+        // old account-root opener nor an exact generic file opener overlaps it.
+        let account_root = admitted.and_then(|scope| scope.account_root.as_ref());
+        let account_lock = account_root
+            .filter(|root| *root != path)
+            .map(|root| lock_file(&root.with_extension("owner.lock")))
+            .transpose()?;
         let lock_path = path.with_extension("owner.lock");
         for file in [path, &lock_path] {
             if let Ok(meta) = std::fs::symlink_metadata(file)
@@ -148,15 +208,12 @@ impl RelayDb {
                 return Err(unsupported());
             }
         }
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .map_err(storage)?;
-        lock.try_lock()
-            .map_err(|_| RelayError::StorageAlreadyOwned)?;
+        let lock = lock_file(&lock_path)?;
+        if let Some(root) = account_root
+            && select_account_storage(root, &config.scope, config.identity)? != *path
+        {
+            return Err(RelayError::ScopeConfigurationMismatch);
+        }
         let owner = admitted.map(|scope| scope.owner.as_str());
         if admitted.is_some_and(|scope| scope.author != config.identity.author) {
             return Err(RelayError::ScopeConfigurationMismatch);
@@ -239,14 +296,19 @@ impl RelayDb {
         tx.commit().map_err(storage)?;
         drop(conn);
         sync_parent(path)?;
-        let core = block_on(jazz::db::Db::open_at(
-            DbConfig::new(config.schema.clone(), config.identity),
-            path,
-            FileOptions {
-                synchronous_full: true,
-                ..Default::default()
-            },
-        ))
+        let db_config = DbConfig::new(config.schema.clone(), config.identity);
+        let options = FileOptions {
+            synchronous_full: true,
+            ..Default::default()
+        };
+        let core = if admitted.is_some_and(|scope| scope.account_host) {
+            // SAFETY: the private account-session route authenticates the
+            // stable root. This exclusive lock outlives both marker updates
+            // and every runtime handle; generic admissions lack this flag.
+            block_on(unsafe { jazz::db::Db::open_at_as_account_owner(db_config, path, options) })
+        } else {
+            block_on(jazz::db::Db::open_at(db_config, path, options))
+        }
         .map_err(RelayError::Db)?;
         if let Some(bytes) = cached {
             // SAFETY: the cache is read in this exact admitted host scope.
@@ -290,6 +352,7 @@ impl RelayDb {
             binding: jazz::binding_host::Binding::new(core, config.identity, false),
             identity: config.identity,
             _lock: Some(lock),
+            _account_lock: account_lock,
             reports: RefCell::default(),
             mutation_errors: Rc::default(),
         })
@@ -542,12 +605,27 @@ pub(super) fn restore_private_node(
     path: &std::path::Path,
     scope: &RelayScope,
     identity: DbIdentity,
+    account_host: bool,
 ) -> Result<DbIdentity, RelayError> {
+    Ok(read_private_node(path, scope, identity, account_host)?
+        .map(|stored| DbIdentity {
+            node: stored.node,
+            ..identity
+        })
+        .unwrap_or(identity))
+}
+
+fn read_private_node(
+    path: &std::path::Path,
+    scope: &RelayScope,
+    identity: DbIdentity,
+    account_host: bool,
+) -> Result<Option<DbIdentity>, RelayError> {
     match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(identity),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage(error)),
         Ok(meta) if !meta.file_type().is_file() => return Err(unsupported()),
-        Ok(meta) if meta.len() == 0 => return Ok(identity),
+        Ok(meta) if meta.len() == 0 => return Ok(None),
         Ok(_) => {}
     }
     scope.validate()?;
@@ -576,17 +654,93 @@ pub(super) fn restore_private_node(
         return Err(unsupported());
     }
     let expected = scope.ledger_owner_encoding();
-    if stored_scope != expected
-        || owner.as_deref() != Some(expected.as_str())
-        || author != identity.author.canonical()
+    let linked = account_host
+        && owner.as_deref() == Some(stored_scope.as_str())
+        && linked_account_scope_matches(&stored_scope, &author, scope, identity.author);
+    if !linked
+        && (stored_scope != expected
+            || owner.as_deref() != Some(expected.as_str())
+            || author != identity.author.canonical())
     {
         return Err(RelayError::ScopeConfigurationMismatch);
     }
     let node = node.try_into().map_err(|_| unsupported())?;
-    Ok(DbIdentity {
+    Ok(Some(DbIdentity {
         node: jazz::ids::NodeUuid::from_bytes(node),
-        author: identity.author,
-    })
+        author: jazz::ids::AuthorSubject::from_canonical(&author).map_err(storage)?,
+    }))
+}
+
+/// jazz.native.account-login-root.v1: a login-specific sibling of the existing
+/// account root, with an explicit domain and BE-u32 UTF-8 field lengths. The
+/// root basename is the unchanged account-root-v1 digest, never an OS path.
+fn login_storage_path(
+    root: &std::path::Path,
+    author: jazz::ids::AuthorSubject,
+) -> Result<PathBuf, RelayError> {
+    let stem = root
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(unsupported)?;
+    if stem.len() != 64
+        || !stem
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(unsupported());
+    }
+    let mut bytes = b"jazz-native-account-login-root-v1\0".to_vec();
+    for field in [stem, author.canonical()] {
+        let length = u32::try_from(field.len()).map_err(storage)?;
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(field.as_bytes());
+    }
+    Ok(root.with_file_name(format!(
+        "{stem}.login-{}.sqlite",
+        blake3::hash(&bytes).to_hex()
+    )))
+}
+
+/// Select only this login's existing store. The first login retains the old
+/// account file; another login gets its own journal, without copying, relabelling
+/// or exposing the previous login's pending projection. No directory scan.
+pub(super) fn select_account_storage(
+    root: &std::path::Path,
+    scope: &RelayScope,
+    identity: DbIdentity,
+) -> Result<PathBuf, RelayError> {
+    let login = login_storage_path(root, identity.author)?;
+    match std::fs::symlink_metadata(&login) {
+        Ok(_) => {
+            read_private_node(&login, scope, identity, false)?;
+            return Ok(login);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(storage(error)),
+    }
+    match read_private_node(root, scope, identity, true)? {
+        None => Ok(root.to_path_buf()),
+        Some(previous) if previous.author == identity.author => Ok(root.to_path_buf()),
+        Some(_) => Ok(login),
+    }
+}
+
+fn lock_file(path: &std::path::Path) -> Result<File, RelayError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => return Err(unsupported()),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(storage(error)),
+        _ => {}
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(storage)?;
+    file.try_lock()
+        .map_err(|_| RelayError::StorageAlreadyOwned)?;
+    Ok(file)
 }
 
 pub(super) fn sync_parent(path: &std::path::Path) -> Result<(), RelayError> {

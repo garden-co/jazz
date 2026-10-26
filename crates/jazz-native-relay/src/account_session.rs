@@ -7,6 +7,8 @@ use jazz::ids::AuthorSubject;
 pub(super) struct AccountSessionOwner {
     pub runtime_token: u64,
     pub app_id: String,
+    pub account_root: PathBuf,
+    pub credential_present: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -18,6 +20,7 @@ struct AccountSessionRequest {
     account_id: jazz::account_registry::AccountId,
     issuer: String,
     subject: String,
+    #[serde(default)]
     jwt: String,
     server_url: Option<String>,
     #[serde(default)]
@@ -103,10 +106,19 @@ impl AccountSessionRequest {
             }
             self.server_url = Some(transport.to_string());
         }
-        let projected = jazz::tools::unverified_jwt_scope_subject(&self.jwt)
-            .ok_or(JazzNativeRelayStatus::LifecycleFailure)?;
-        if projected != (self.issuer.clone(), self.subject.clone()) {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        if self.jwt.is_empty() {
+            // The platform retains an enrolled external identity, never its
+            // credential or provider claims. This opens only its local store;
+            // a socket cannot start until that exact identity is refreshed.
+            if !self.claims.is_empty() || self.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+                return Err(JazzNativeRelayStatus::LifecycleFailure);
+            }
+        } else {
+            let projected = jazz::tools::unverified_jwt_scope_subject(&self.jwt)
+                .ok_or(JazzNativeRelayStatus::LifecycleFailure)?;
+            if projected != (self.issuer.clone(), self.subject.clone()) {
+                return Err(JazzNativeRelayStatus::LifecycleFailure);
+            }
         }
         let author = if self.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
             let claimed = serde_json::to_string(&[
@@ -190,7 +202,9 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
         let request = serde_json::from_slice::<AccountSessionRequest>(request)
             .map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
         let app_id = request.app_id.clone();
+        let credential_present = !request.jwt.is_empty();
         let pending = request.prepare(root)?;
+        let account_root = PathBuf::from(&pending.sqlite_path);
         let mut host = lease.lock()?;
         if host
             .invalidated_runtime_tokens
@@ -205,6 +219,8 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
             AccountSessionOwner {
                 runtime_token: lease.runtime_token,
                 app_id,
+                account_root,
+                credential_present,
             },
         );
         unsafe { write_capability_out(out, capability) };
@@ -331,6 +347,10 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_refresh_account_session(
             if let Some(socket) = &mut pending.socket {
                 socket.bearer = token.to_owned();
             }
+            host.account_session_owners
+                .get_mut(&capability)
+                .expect("owned pending session")
+                .credential_present = true;
             return Ok(());
         }
         host.promote_account_scope_snapshot(capability, token, claims)
@@ -350,7 +370,8 @@ impl NativeRelayHost {
         let changed = self.admitted_scopes.iter().any(|(id, entry)| {
             entry.config.scope == scope
                 && self.account_session_owners.contains_key(id)
-                && (entry.claims != claims
+                && (!self.account_session_owners[id].credential_present
+                    || entry.claims != claims
                     || self
                         .private_socket_sessions
                         .get(id)
@@ -365,7 +386,13 @@ impl NativeRelayHost {
             .find(|relay| relay.scope == scope)
             .map(|relay| relay.relay.clone());
         if live_relay.is_none() && self.private_scope_workers.contains_key(&scope) {
-            live_relay = match self.registry.open_admitted(config) {
+            let account_root = self
+                .account_session_owners
+                .get(&capability)
+                .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                .account_root
+                .clone();
+            live_relay = match self.registry.open_account_owner(config, account_root) {
                 Ok(relay) => Some(relay),
                 Err(error) => return Err(relay_status(error)),
             };
@@ -416,6 +443,10 @@ impl NativeRelayHost {
             if let Some(socket) = self.private_socket_sessions.get_mut(&sibling) {
                 socket.bearer = token.to_owned();
             }
+            self.account_session_owners
+                .get_mut(&sibling)
+                .expect("owned admitted session")
+                .credential_present = true;
         }
         // Foregrounds remain attached to the same durable relay. Replacing only
         // its upstream socket is the same lifecycle used by disconnect/reconnect.
@@ -427,6 +458,10 @@ impl NativeRelayHost {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "account_session/retained_tests.rs"]
+mod retained_tests;
 
 #[cfg(test)]
 mod tests {

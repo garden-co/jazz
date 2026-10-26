@@ -59,6 +59,7 @@ mod accepted;
 mod candidates;
 #[path = "ordinary_unit.rs"]
 mod ordinary_unit;
+pub(crate) mod relation;
 #[path = "sync.rs"]
 pub(crate) mod sync;
 #[path = "writer_order.rs"]
@@ -72,6 +73,7 @@ use crate::values::{
 };
 pub use accepted::{AcceptedContent, AcceptedRow, BindingSettledRead};
 pub use sync::ScopedReadRowV1;
+pub use sync::UnionOccurrenceV1;
 pub use sync::{
     Cell as SyncCell, ContentWitnessRef, FirstLoad, Image, LOCAL_BASE, OwnerDurabilityBarrier,
     OwnerFrozenBaseV1, OwnerInputBaseV1, QueryAttachment, RelationSnapshot, RemoteLinkHint,
@@ -257,6 +259,12 @@ pub enum SubscriptionEvent {
 /// What a read observes: deletions and the branch view.
 #[derive(Clone, Debug, Default)]
 struct ReadSpec {
+    /// An upstream UNION's runtime occurrence coverage, shared by its members.
+    union_live: Option<Rc<sync::UnionLive>>,
+    /// Local-first readers and relays may show ordinary admitted local previews.
+    union_preview: bool,
+    /// This maintained query captures one immutable trusted backend scope.
+    scoped_live: bool,
     /// Internal support check: every inherited capability needs readable witnesses.
     readable_inheritance: bool,
     scoped_evidence: bool,
@@ -295,6 +303,9 @@ impl ReadSpec {
             }
         };
         Ok(Self {
+            union_live: None,
+            union_preview: false,
+            scoped_live: false,
             readable_inheritance: false,
             scoped_evidence: false,
             permission_cut: None,
@@ -327,14 +338,20 @@ pub struct SubscriptionStream {
     /// Why the server refused the remote read, once it has; reported once.
     refused: Option<Rc<RefCell<Option<Error>>>>,
     /// The remote attachment to release on drop.
-    remote: Option<(Rc<RefCell<Inner>>, Query, BTreeMap<String, Value>, bool)>,
+    remote: Option<(
+        Rc<RefCell<Inner>>,
+        Query,
+        BTreeMap<String, Value>,
+        bool,
+        sync::RemoteScope,
+    )>,
 }
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted);
+        if let Some((inner, query, binding, include_deleted, scope)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &scope);
         }
     }
 }
@@ -865,81 +882,7 @@ fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error
     )
 }
 
-/// A relation facade query (hopTo, gather, match), as clients send it: the
-/// ordinary query it stands for, the way Jazz's validation normalizes it.
-/// Projections that rename or narrow the output are not supported yet.
-/// Unions retain their relation tree for SQL compilation. `None` when the
-/// query is not a relation query.
-pub(super) fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, Error> {
-    use crate::query::{RelationProjectExpr, RelationRowIdRef};
-    let Some(relation) = &query.relation else {
-        return Ok(None);
-    };
-    let not_yet = |what: &str| crate::values::unsupported(what.to_owned());
-    let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
-    let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
-    if resolved.table != query.table {
-        return Err(crate::values::query_error(
-            "relation query output table does not match its Query envelope",
-        ));
-    }
-    let has_ordinary_clauses = !query.filters.is_empty()
-        || !query.joins.is_empty()
-        || query.flat_join.is_some()
-        || !query.policy_branches.is_empty()
-        || !query.reachable.is_empty()
-        || !query.inherits.is_empty()
-        || !query.includes.is_empty()
-        || !query.order_by.is_empty()
-        || query.aggregate.is_some()
-        || query.limit.is_some()
-        || query.offset != 0;
-    if has_ordinary_clauses {
-        return Err(crate::values::query_error(
-            "relation query cannot be combined with ordinary query clauses",
-        ));
-    }
-    if crate::query::relation_union_parts(&relation.rel).is_some() {
-        return Ok(None);
-    }
-    if let Some(columns) =
-        crate::query::relation_output_projection_if_present(relation).map_err(relation_error)?
-    {
-        let (scope, _) =
-            crate::query::relation_output_projection(relation).map_err(relation_error)?;
-        let table = schema.table(&resolved.table)?;
-        let mut projected = BTreeSet::new();
-        let identity = columns.iter().all(|column| {
-            let same = match &column.expr {
-                RelationProjectExpr::RowId(RelationRowIdRef::Current) => column.alias == "id",
-                RelationProjectExpr::Column(reference) => {
-                    reference.scope.as_deref() == Some(scope.as_str())
-                        && reference.column == column.alias
-                }
-                RelationProjectExpr::RowId(_) => false,
-            };
-            if same && column.alias != "id" {
-                projected.insert(column.alias.as_str());
-            }
-            same
-        });
-        let full = identity
-            && projected.len() == table.columns.len()
-            && table
-                .columns
-                .iter()
-                .all(|column| projected.contains(column.name.as_str()));
-        if !full {
-            return Err(not_yet(
-                "relation projections that rename or narrow the output columns",
-            ));
-        }
-    }
-    resolved.array_subqueries = query.array_subqueries.clone();
-    resolved.select = query.select.clone();
-    resolved.relation = None;
-    Ok(Some(resolved))
-}
+pub(super) use relation::normalize as normalize_relation;
 
 /// The reason a policy rejects a write, leading its message (the code
 /// stays `WriteRejected`): authority rejections are reported by it.
@@ -964,7 +907,7 @@ impl Error {
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
-        Self::open_on(config, conn, None)
+        Self::open_on(config, conn, None, false)
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
@@ -975,6 +918,33 @@ impl Db {
         config: DbConfig,
         path: &std::path::Path,
         options: FileOptions,
+    ) -> Result<Self, Error> {
+        Self::open_at_inner(config, path, options, false)
+    }
+
+    /// Open a private root selected by a trusted account host. A different
+    /// linked login may take over only after every earlier upload has settled.
+    /// Ordinary opens retain their exact-subject ownership requirement.
+    ///
+    /// # Safety
+    /// The host must authenticate the requested account and bind this exact
+    /// root to its app, environment, registry and account. It must hold an
+    /// exclusive root lock from retirement of all previous runtime handles
+    /// through completion of its own owner-marker update. Matching account IDs
+    /// in caller-supplied data is not authentication or storage admission.
+    pub async unsafe fn open_at_as_account_owner(
+        config: DbConfig,
+        path: &std::path::Path,
+        options: FileOptions,
+    ) -> Result<Self, Error> {
+        Self::open_at_inner(config, path, options, true)
+    }
+
+    fn open_at_inner(
+        config: DbConfig,
+        path: &std::path::Path,
+        options: FileOptions,
+        account_host: bool,
     ) -> Result<Self, Error> {
         let flags = rusqlite::OpenFlags::default();
         let conn = match options.vfs {
@@ -1014,21 +984,25 @@ impl Db {
             options.cache_kib
         ))
         .map_err(storage)?;
-        Self::open_on(config, conn, Some((path, options.vfs)))
+        Self::open_on(config, conn, Some((path, options.vfs)), account_host)
     }
 
     fn open_on(
         config: DbConfig,
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
+        account_host: bool,
     ) -> Result<Self, Error> {
         conn.execute_batch(sync::OWNER_DDL).map_err(storage)?;
         let scope_owner = sync::stored_owner_subject(&conn)?;
-        if scope_owner.is_some_and(|subject| subject != config.identity.author) {
-            return Err(Error::new(
-                ErrorCode::Storage,
-                "scope-isolated storage belongs to another subject",
-            ));
+        if let Some(previous) = scope_owner.filter(|subject| *subject != config.identity.author) {
+            if !account_host {
+                return Err(Error::new(
+                    ErrorCode::Storage,
+                    "scope-isolated storage belongs to another subject",
+                ));
+            }
+            sync::handoff_account_owner(&conn, previous, config.identity.author)?;
         }
         if scope_owner.is_some() {
             sync::check_owner_open_schema(&conn, config.schema.version_id())?;
@@ -1468,6 +1442,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
+        let mut prepared = prepared.clone();
         let mut read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
         // A frozen read is answered from the replica alone.
@@ -1475,18 +1450,75 @@ impl Db {
         // A synced subscription follows the server's results: a row the
         // server stopped listing leaves it, though the copy stays readable.
         read.members_only |= remote_read;
+        let mut scope = None;
         if remote_read {
-            Self::remote_shape(&prepared.query)?;
+            Self::remote_fetch_shape(&prepared.query)?;
+            if crate::db::relation::is_union(&prepared.query) {
+                if identity.is_some_and(|identity| identity != self.inner().identity.author)
+                    || prepared.request_claims.is_some()
+                {
+                    let author = identity
+                        .or_else(|| prepared.request_claims.as_ref().map(|scope| scope.0))
+                        .unwrap_or(self.inner().identity.author);
+                    if prepared
+                        .request_claims
+                        .as_ref()
+                        .is_some_and(|scope| scope.0 != author)
+                    {
+                        return Err(rejected(
+                            "live UNION identity differs from its request scope",
+                        ));
+                    }
+                    self.inner().require_owner_subject(author)?;
+                    let claims = prepared
+                        .request_claims
+                        .as_ref()
+                        .map(|scope| scope.1.clone())
+                        .unwrap_or_else(|| {
+                            self.inner()
+                                .claims
+                                .get(&author)
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                    prepared = prepared.with_identity_claims(author, claims.clone());
+                    self.check_scoped_fetch(&prepared)?;
+                    scope = Some((author, claims));
+                }
+                self.inner().check_union_shape(&prepared)?;
+            }
         }
+        read.scoped_live = scope.is_some();
+        let identity = scope.as_ref().map(|scope| scope.0).or(identity);
+        let prepared = &prepared;
         let remote = if remote_read {
-            self.attach_remote(prepared, read.include_deleted)
+            self.attach_remote(prepared, read.include_deleted, scope.clone())
         } else {
             None
         };
+        let union_live = remote_read
+            .then(|| {
+                self.inner()
+                    .live_union(prepared, read.include_deleted, &scope)
+            })
+            .flatten();
+        read.union_live = union_live.clone();
+        read.union_preview = opts.tier != ReadTier::Remote;
+        let identity = if union_live.is_some() {
+            Some(identity.unwrap_or(self.inner().identity.author))
+        } else {
+            identity
+        };
         let settled = match (&remote, client) {
-            (Some((answered, _, global)), _) => {
-                sync::SettledBy::Remote(answered.clone(), global.clone())
-            }
+            (Some((answered, _, global)), _) => match &union_live {
+                Some(live) => sync::SettledBy::Union {
+                    answered: answered.clone(),
+                    global: global.clone(),
+                    live: live.clone(),
+                    relay: false,
+                },
+                None => sync::SettledBy::Remote(answered.clone(), global.clone()),
+            },
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
@@ -1526,7 +1558,12 @@ impl Db {
             Ok(member) => member,
             Err(error) => {
                 if remote.is_some() {
-                    inner.release_remote(&prepared.query, &prepared.binding, include_deleted);
+                    inner.release_remote(
+                        &prepared.query,
+                        &prepared.binding,
+                        include_deleted,
+                        &scope,
+                    );
                 }
                 return Err(error);
             }
@@ -1546,6 +1583,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
+                    scope.clone(),
                 )
             }),
         };
@@ -2360,7 +2398,15 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<Vec<CurrentRow>, Error> {
-        Ok(self.run_with_deps(prepared, identity, read)?.0)
+        let mut read = read.clone();
+        if read.union_live.is_none()
+            && read.members_only
+            && !read.frozen()
+            && crate::db::relation::is_union(&prepared.query)
+        {
+            read.union_live = self.live_union(prepared, read.include_deleted, &None);
+        }
+        Ok(self.run_with_deps(prepared, identity, &read)?.0)
     }
 
     fn run_with_deps(
@@ -2369,6 +2415,9 @@ impl Inner {
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
+        if let Some(live) = &read.union_live {
+            return self.live_union_rows(prepared, identity, read, live);
+        }
         let mut compiled = self.compile(prepared, identity, read)?;
         let rows = self.execute(&compiled, &prepared.query.table)?;
         // Array relations are part of a subscription's dependencies.
@@ -4511,15 +4560,16 @@ enum BatchKind {
 /// One read of a serializable transaction: what it returned (row ids and
 /// versions) at the snapshot, re-checked at commit.
 #[derive(Clone)]
-struct ScopedReadSnapshot {
+struct QualifiedReadSnapshot {
     through: u64,
     roots: Vec<[u8; 16]>,
-    evidence: Vec<ScopedReadRowV1>,
+    evidence: Option<Vec<ScopedReadRowV1>>,
+    union: Option<Vec<UnionOccurrenceV1>>,
 }
 
 struct ReadRecord {
     prepared: PreparedQuery,
-    scoped: Option<ScopedReadSnapshot>,
+    qualified: Option<QualifiedReadSnapshot>,
     include_deleted: bool,
     rows: Vec<(RowUuid, u64)>,
     /// Publication aliases may move, or retain their number while replay changes
@@ -5094,7 +5144,7 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let current = if let Some(scoped) = &read.scoped {
+                    let current = if let Some(scoped) = &read.qualified {
                         let schema = read.prepared.schema.as_ref().unwrap_or(&inner.owner);
                         let table = schema.stored_table(&read.prepared.query.table)?;
                         for (row, seq) in &read.rows {
@@ -5111,7 +5161,7 @@ impl Db {
                         // the exact admitted snapshot here; the normal authority
                         // commit path still validates the original full query and
                         // its content against current state, including phantoms.
-                        inner.run_scoped_snapshot(
+                        inner.run_qualified_snapshot(
                             &read.prepared,
                             batch.reader(),
                             read.include_deleted,
@@ -5469,7 +5519,7 @@ impl Db {
             *pinned = true;
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
-                scoped: None,
+                qualified: None,
                 include_deleted,
                 rows,
                 content,

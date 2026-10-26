@@ -250,14 +250,17 @@ impl Inner {
 }
 
 impl Db {
-    /// Paired metadata describes one stored root per row id. Relationships and
-    /// effective branch rows need a separate content-witness tree.
+    /// Each returned occurrence describes one stored root. UNIONs retain their
+    /// semantic arm; nested output and effective branches need a witness tree.
     pub(super) fn check_accepted_query(&self, prepared: &PreparedQuery) -> Result<(), Error> {
         let q = &prepared.query;
+        if crate::db::relation::is_union(q) {
+            self.check_scoped_fetch(prepared)?;
+            return self.inner().check_union_shape(prepared);
+        }
         if crate::schema::history::is_history_table(&q.table)
             || q.aggregate.is_some()
             || q.flat_join.is_some()
-            || q.relation.is_some()
             || !q.includes.is_empty()
             || !q.joins.is_empty()
             || !q.array_subqueries.is_empty()
@@ -636,7 +639,7 @@ impl Db {
             ));
         }
         let mut expected = None;
-        let mut scoped = None;
+        let mut qualified = None;
         let mut bound_prepared = prepared.clone();
         if !local && self.is_client() {
             let scope = reader.map(|author| {
@@ -667,7 +670,7 @@ impl Db {
             .await?
             .ok_or_else(|| not_observed("authority coverage unavailable for paired read"))?;
             self.check_read_guard(id, guard)?;
-            let (through, rows, evidence) = answer;
+            let (through, rows, evidence, union) = answer;
             if authority_begin && through != begin.seq {
                 return Err(not_observed(
                     "authority answered beyond the begin coordinate",
@@ -675,12 +678,13 @@ impl Db {
             }
             bound_prepared.authority_policies =
                 self.inner().needs_authority_policies(prepared, reader)?;
-            if let Some(evidence) = evidence {
-                bound_prepared.authority_policies = true;
-                scoped = Some(ScopedReadSnapshot {
+            if evidence.is_some() || union.is_some() {
+                bound_prepared.authority_policies |= evidence.is_some();
+                qualified = Some(QualifiedReadSnapshot {
                     through,
                     roots: rows.clone(),
                     evidence,
+                    union,
                 });
             }
             let mut inner = self.inner();
@@ -698,11 +702,16 @@ impl Db {
                     ));
                 }
             }
-            // The authority answered the hydrated prefix. The original query
-            // applies its offset locally, and the read set retains that query.
+            // Ordinary rows hydrate a prefix and apply their offset locally.
+            // UNION occurrences already describe the final page. Both retain
+            // the original full query in the transaction read set.
             expected = Some(
                 rows.into_iter()
-                    .skip(prepared.query.offset)
+                    .skip(if crate::db::relation::is_union(&prepared.query) {
+                        0
+                    } else {
+                        prepared.query.offset
+                    })
                     .collect::<Vec<_>>(),
             );
         }
@@ -741,7 +750,7 @@ impl Db {
                 Cut::at(*snapshot)
             }
         };
-        let overlay_checked = if scoped.is_some() {
+        let overlay_checked = if qualified.is_some() {
             let needs_check = {
                 let inner = self.inner();
                 let dependencies = inner
@@ -796,7 +805,7 @@ impl Db {
             guard.watch(cx.waker());
             let result = (|| {
                 self.check_read_guard(id, guard)?;
-                let rows = if let Some(scoped) = &scoped {
+                let rows = if let Some(qualified) = &qualified {
                     let inner = self.inner();
                     let dependencies = inner
                         .compile(
@@ -820,7 +829,7 @@ impl Db {
                             "staged writes changed while awaiting authority overlay evidence",
                         ));
                     }
-                    inner.run_scoped_snapshot(prepared, reader, include_deleted, scoped)?
+                    inner.run_qualified_snapshot(prepared, reader, include_deleted, qualified)?
                 } else {
                     // Existing local/ordinary paired reads compare their full
                     // staged projection with the accepted snapshot.
@@ -886,7 +895,7 @@ impl Db {
                 };
                 reads.push(ReadRecord {
                     prepared: prepared.clone(),
-                    scoped: scoped.clone(),
+                    qualified: qualified.clone(),
                     include_deleted,
                     rows: versions(&rows),
                     content: read_contents(&rows)?,

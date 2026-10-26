@@ -1066,6 +1066,9 @@ impl NativeRelayHost {
         let Some(session) = self.private_socket_sessions.get(&admitted_scope).cloned() else {
             return Ok(());
         };
+        if session.bearer.is_empty() {
+            return Ok(());
+        }
         if let Some(existing) = self.private_scope_workers.get(scope) {
             // Account attachment/refresh promotes one shared snapshot before
             // opening a foreground. Legacy admissions still require exact
@@ -1107,6 +1110,9 @@ impl NativeRelayHost {
         session: PrivateRelaySocketSession,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<PrivateScopeSocketWorker, JazzNativeRelayStatus> {
+        if session.bearer.is_empty() {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
         let terminal_error = Arc::new(Mutex::new(None));
         let terminal_for_event = Arc::clone(&terminal_error);
         let connected = Arc::new(AtomicBool::new(false));
@@ -1285,7 +1291,13 @@ impl NativeRelayHost {
                 config.supported_abi = supported_abi;
                 let scope = config.scope.clone();
                 let peer_identity = config.identity.author;
-                let relay = self.registry.open_admitted(config).map_err(relay_status)?;
+                let relay = if let Some(owner) = self.account_session_owners.get(&admitted_scope) {
+                    self.registry
+                        .open_account_owner(config, owner.account_root.clone())
+                } else {
+                    self.registry.open_admitted(config)
+                }
+                .map_err(relay_status)?;
                 self.ensure_private_scope_worker(
                     admitted_scope,
                     &scope,
@@ -1476,7 +1488,13 @@ impl NativeRelayHost {
             )
         };
         let scope = config.scope.clone();
-        let relay = self.registry.open_admitted(config).map_err(relay_status)?;
+        let relay = if let Some(owner) = self.account_session_owners.get(&admitted_scope) {
+            self.registry
+                .open_account_owner(config, owner.account_root.clone())
+        } else {
+            self.registry.open_admitted(config)
+        }
+        .map_err(relay_status)?;
         self.ensure_private_scope_worker(admitted_scope, &scope, relay.clone(), author)?;
         let relay_handle = self
             .allocate()
@@ -1996,18 +2014,21 @@ impl NativeRelayHost {
             .pending_private_sessions
             .remove(&session)
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-        let runtime_owner = self.account_session_owners.remove(&session);
-        let account_snapshot = runtime_owner.as_ref().map(|_| {
-            (
-                pending.claims.clone(),
-                pending
-                    .socket
-                    .as_ref()
-                    .map(|socket| socket.bearer.clone())
-                    .unwrap_or_default(),
-            )
-        });
-        if runtime_owner.is_some() {
+        let mut runtime_owner = self.account_session_owners.remove(&session);
+        let account_snapshot = runtime_owner
+            .as_ref()
+            .filter(|owner| owner.credential_present)
+            .map(|_| {
+                (
+                    pending.claims.clone(),
+                    pending
+                        .socket
+                        .as_ref()
+                        .map(|socket| socket.bearer.clone())
+                        .unwrap_or_default(),
+                )
+            });
+        if let Some(owner) = &mut runtime_owner {
             // Reuse the durable relay identity, but do not publish a new
             // credential/claims snapshot until schema/path validation succeeds.
             let scope = RelayScope::from(pending.scope.clone());
@@ -2032,6 +2053,13 @@ impl NativeRelayHost {
                 }
                 pending.identity = existing.config.identity;
                 pending.claims = existing.claims.clone();
+                if account_snapshot.is_none() {
+                    // A retained sibling carries no new credential snapshot.
+                    // Join the live identity without erasing its token/claims.
+                    pending.socket = self.private_socket_sessions.get(capability).cloned();
+                    owner.credential_present =
+                        self.account_session_owners[capability].credential_present;
+                }
             }
         }
         // Canonicalize at this credential-free boundary before constructing a
@@ -2041,10 +2069,21 @@ impl NativeRelayHost {
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema_json =
             serde_json::to_string(&value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        if let Some(owner) = &runtime_owner {
+            pending.sqlite_path = engine::select_account_storage(
+                &owner.account_root,
+                &RelayScope::from(pending.scope.clone()),
+                pending.identity,
+            )
+            .map_err(relay_status)?
+            .to_string_lossy()
+            .into_owned();
+        }
         pending.identity = engine::restore_private_node(
             std::path::Path::new(&pending.sqlite_path),
             &RelayScope::from(pending.scope.clone()),
             pending.identity,
+            false,
         )
         .map_err(relay_status)?;
         let socket = pending.socket;
@@ -3927,6 +3966,8 @@ struct RelayInner {
     schema_version: jazz::ids::SchemaVersionId,
     identity: DbIdentity,
     scope_admitted: bool,
+    account_host: bool,
+    account_root: Option<PathBuf>,
 }
 
 struct RelayLiveness {
@@ -6546,6 +6587,12 @@ impl NativeRelay {
         client_relay_scope: Option<ClientRelayScope>,
     ) -> Result<Self, RelayError> {
         let scope_admitted = client_relay_scope.is_some();
+        let account_host = client_relay_scope
+            .as_ref()
+            .is_some_and(|scope| scope.account_host);
+        let account_root = client_relay_scope
+            .as_ref()
+            .and_then(|scope| scope.account_root.clone());
         // This is before channel/thread creation and the worker's SQLite open.
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
@@ -6670,6 +6717,8 @@ impl NativeRelay {
                 schema_version,
                 identity,
                 scope_admitted,
+                account_host,
+                account_root,
             }),
         })
     }
@@ -6830,6 +6879,25 @@ impl NativeRelayRegistry {
         self.open_with_scope(config, Some(scope))
     }
 
+    fn open_account_owner(
+        &self,
+        config: RelayOpenConfig,
+        account_root: PathBuf,
+    ) -> Result<NativeRelay, RelayError> {
+        config.validate()?;
+        // SAFETY: only the native account-session capability route calls this
+        // method. Arbitrary private-scope JSON admission still uses the exact
+        // subject route above, even if it names the same account UUID.
+        let scope = unsafe {
+            ClientRelayScope::from_admitted_account_owner(
+                config.scope.ledger_owner_encoding(),
+                config.identity.author,
+                account_root,
+            )
+        };
+        self.open_with_scope(config, Some(scope))
+    }
+
     fn open_with_scope(
         &self,
         config: RelayOpenConfig,
@@ -6845,6 +6913,14 @@ impl NativeRelayRegistry {
                 || existing.inner.schema_version != config.schema.version_id()
                 || existing.inner.identity != config.identity
                 || existing.inner.scope_admitted != client_relay_scope.is_some()
+                || existing.inner.account_host
+                    != client_relay_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.account_host)
+                || existing.inner.account_root.as_ref()
+                    != client_relay_scope
+                        .as_ref()
+                        .and_then(|scope| scope.account_root.as_ref())
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
             }

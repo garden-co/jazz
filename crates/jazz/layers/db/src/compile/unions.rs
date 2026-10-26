@@ -25,10 +25,41 @@ impl Ctx<'_> {
         if query.select.is_some() || !query.array_subqueries.is_empty() {
             return Err(unsupported("union selections or nested array output"));
         }
-        crate::query::relation_union_leaf_projections(relation)
+        let leaf_projections = crate::query::relation_union_leaf_projections(relation)
             .map_err(|e| query_error(e.to_string()))?;
         let table = self.table(&query.table)?;
-        let projection = projection(table, None)?;
+        let mut projection = None;
+        let mut arms = Vec::new();
+        // Every arm has the same output contract, which may be narrower than
+        // its source table. Compile first so the compound's CTE column list
+        // follows that contract rather than silently requiring every root cell.
+        parts.inputs.sort_by(|a, b| a.label.cmp(&b.label));
+        for arm in parts.inputs {
+            let mut input = Query::from(query.table.clone());
+            input.relation = Some(RelationQuery { rel: arm.input });
+            let normalized = crate::db::normalize_relation(&input, self.schema)?;
+            let input = normalized.as_ref().unwrap_or(&input);
+            let compiled = self.clone().compile_query(input, include_deleted)?;
+            if compiled.aggregate
+                || compiled.joined != 0
+                || projection
+                    .as_ref()
+                    .is_some_and(|projection| *projection != compiled.projection)
+            {
+                return Err(unsupported("union arms with different row projections"));
+            }
+            projection.get_or_insert_with(|| compiled.projection.clone());
+            self.params = compiled.params;
+            self.tables = compiled.tables;
+            self.preps = compiled.preps;
+            arms.push((
+                arm.label,
+                compiled.sql,
+                compiled.ranked_sql,
+                compiled.union_arms,
+            ));
+        }
+        let projection = projection.ok_or_else(|| query_error("union requires an arm"))?;
         let columns: Vec<String> = ["id", "_seq", "_del"]
             .into_iter()
             .map(str::to_owned)
@@ -53,33 +84,22 @@ impl Ctx<'_> {
         let mut any_ranked = false;
         // Slots are only SQL-local lookups. Semantic identity is always the
         // declared label, and tie order is independent of sibling declaration.
-        parts.inputs.sort_by(|a, b| a.label.cmp(&b.label));
-        for (index, arm) in parts.inputs.into_iter().enumerate() {
-            let mut input = Query::from(query.table.clone());
-            input.relation = Some(RelationQuery { rel: arm.input });
-            let normalized = crate::db::normalize_relation(&input, self.schema)?;
-            let input = normalized.as_ref().unwrap_or(&input);
-            // Every arm uses the same context: claims, policies, schema view,
-            // accepted cut and large-value preprocessing all remain in force.
-            let compiled = self.clone().compile_query(input, include_deleted)?;
-            if compiled.aggregate || compiled.joined != 0 || compiled.projection != projection {
-                return Err(unsupported("union arms with different row projections"));
-            }
-            let label = if compiled.union_arms.is_empty() {
+        for (index, (label, sql, ranked_sql, nested_arms)) in arms.into_iter().enumerate() {
+            let label = if nested_arms.is_empty() {
                 let slot = union_arms.len();
-                union_arms.push(arm.label);
+                union_arms.push(label);
                 slot.to_string()
             } else {
                 let mut cases = Vec::new();
-                for (child, label) in compiled.union_arms.iter().enumerate() {
+                for (child, nested) in nested_arms.iter().enumerate() {
                     let slot = union_arms.len();
-                    union_arms.push(compose_union_arm_path(&arm.label, label));
+                    union_arms.push(compose_union_arm_path(&label, nested));
                     cases.push(format!("WHEN {child} THEN {slot}"));
                 }
                 format!("CASE {arm_column} {} END", cases.join(" "))
             };
             let mut names = columns.clone();
-            if !compiled.union_arms.is_empty() {
+            if !nested_arms.is_empty() {
                 names.push(arm_name.clone());
             }
             let names = names
@@ -92,18 +112,15 @@ impl Ctx<'_> {
                 .map(|s| quote(s))
                 .collect::<Vec<_>>()
                 .join(", ");
-            ctes.push(format!("u{index}({names}) AS ({})", compiled.sql));
+            ctes.push(format!("u{index}({names}) AS ({sql})"));
             plain.push(format!(
                 "SELECT {output}, {label} AS {arm_column} FROM u{index}"
             ));
             ranked.push(format!(
                 "u{index}({names}) AS ({})",
-                compiled.ranked_sql.as_ref().unwrap_or(&compiled.sql)
+                ranked_sql.as_ref().unwrap_or(&sql)
             ));
-            any_ranked |= compiled.ranked_sql.is_some();
-            self.params = compiled.params;
-            self.tables = compiled.tables;
-            self.preps = compiled.preps;
+            any_ranked |= ranked_sql.is_some();
         }
         let order = parts
             .order_by
@@ -131,7 +148,39 @@ impl Ctx<'_> {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let (order, ranked_order) = self.order_sql(table, "t", &order)?;
+        let mut sources = BTreeMap::new();
+        for key in &order {
+            if key.column == "id" {
+                continue;
+            }
+            let mut projected_sources = BTreeSet::new();
+            for projection in leaf_projections.values() {
+                let column = projection
+                    .iter()
+                    .find(|column| column.alias == key.column)
+                    .ok_or_else(|| {
+                        query_error("union ordering requires a projected column in every arm")
+                    })?;
+                let source = match &column.expr {
+                    RelationProjectExpr::Column(column) => column.column.clone(),
+                    RelationProjectExpr::RowId(RelationRowIdRef::Current) => "id".into(),
+                    _ => return Err(unsupported("union ordering outside the root projection")),
+                };
+                projected_sources.insert(source);
+            }
+            let source = projected_sources.first().expect("nonempty union").clone();
+            if projected_sources.len() > 1
+                && table
+                    .column(&source)
+                    .is_some_and(crate::large::large_capable)
+            {
+                return Err(unsupported(
+                    "sorting UNION columns projected from different large-value sources",
+                ));
+            }
+            sources.insert(key.column.clone(), source);
+        }
+        let (order, ranked_order) = self.order_projected_sql(table, "t", &order, &sources)?;
         any_ranked |= ranked_order.is_some();
         let limit = self.bind(Sql::Integer(
             parts
