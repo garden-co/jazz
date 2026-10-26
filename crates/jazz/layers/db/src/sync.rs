@@ -777,10 +777,10 @@ pub enum SyncMessage {
         version: [u8; 16],
     },
     // server → client
-    /// The transactions behind the versions a history read ships, as
-    /// (seq, writer node, writer tx), sent ahead of their `Rows`: a
-    /// replica lists a history version only once it knows its
-    /// `$transactionId`.
+    /// The transactions behind shipped row versions, as (seq, writer
+    /// node, writer tx), sent ahead of their `Rows`. A replica uses these
+    /// for history's `$transactionId` and to avoid replaying an accepted
+    /// write over its own result. Only `Fate` settles a pending write.
     Origins {
         commits: Vec<(u64, [u8; 16], u64)>,
     },
@@ -4425,10 +4425,11 @@ impl Db {
             return Ok(());
         };
         let shadow = std::mem::take(&mut client.shadow);
-        let pending: Vec<(u64, Vec<StagedOp>)> = client
+        let node = client.node;
+        let pending: Vec<(u64, Vec<StagedOp>, Vec<RowKey>)> = client
             .pending
             .iter()
-            .map(|p| (p.tx, p.ops.clone()))
+            .map(|p| (p.tx, p.ops.clone(), p.rows.clone()))
             .collect();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
@@ -4444,7 +4445,22 @@ impl Db {
                 None => inner.drop_row(table, *row, key, 0)?,
             }
         }
-        for (tx, ops) in pending {
+        for (tx, ops, rows) in pending {
+            // Origins identifies accepted row versions, not the write's
+            // receipt. Once every written coordinate has an accepted image
+            // at or after this commit, replay would apply it twice. Keep
+            // the pending upload and waiters until its actual Fate arrives.
+            if let Some(Some(accepted)) = inner.settled(node, tx)?
+                && !rows.is_empty()
+                && rows.iter().all(|row| {
+                    shadow
+                        .get(row)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|image| image.seq >= accepted && image.seq < LOCAL_BASE)
+                })
+            {
+                continue;
+            }
             inner
                 .conn
                 .execute_batch("SAVEPOINT replay")
@@ -5226,11 +5242,6 @@ impl Db {
                 }
             }
             let mut out = std::mem::take(&mut inner.sessions[index].stale);
-            if !history_seqs.is_empty() {
-                out.push(SyncMessage::Origins {
-                    commits: inner.origins(&history_seqs)?,
-                });
-            }
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
@@ -5281,6 +5292,16 @@ impl Db {
                     }
                 }
             }
+            // A row can arrive in an earlier tick than its Fate. Supply
+            // its origin so the writer can avoid replaying it twice. Do
+            // this after echo suppression: held rows need only their Fate.
+            history_seqs.extend(images.iter().map(|image| image.seq));
+            if !history_seqs.is_empty() {
+                out.push(SyncMessage::Origins {
+                    commits: inner.origins(&history_seqs)?,
+                });
+            }
+            let session = &mut inner.sessions[index];
             if !images.is_empty() {
                 out.push(SyncMessage::Rows { images });
             }
@@ -5877,6 +5898,10 @@ impl Db {
                         watch_key(&Sql::Blob(image.id.to_vec())),
                     )));
                 }
+                // Fetches can also deliver an accepted version before the
+                // writer's receipt, including a current tombstone shipped
+                // alongside its earlier history.
+                seqs.extend(images.iter().map(|image| image.seq));
                 let mut origins = inner.origins(&seqs)?;
                 origins.extend(named);
                 let through = at.unwrap_or(inner.served_through());
