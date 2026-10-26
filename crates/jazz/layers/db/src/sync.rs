@@ -3117,7 +3117,7 @@ impl Db {
         // Only which rows the view holds matters: ids, not values (whose
         // large chunks may not be here yet), nor included rows.
         let mut query = remote_query(&query).into_owned();
-        query.select.get_or_insert_with(Vec::new);
+        query.select = Some(Vec::new());
         query.includes.clear();
         query.array_subqueries.clear();
         let prepared = PreparedQuery {
@@ -3138,8 +3138,13 @@ impl Db {
         let table = inner.schema.stored_table(&prepared.query.table)?.to_owned();
         let mut previous = Vec::new();
         loop {
-            let stale: Vec<RowUuid> = inner
-                .run(&prepared, None, &read)?
+            // Ordering by a value whose chunks are not here yet: the rows
+            // are reconciled by a later answer.
+            let rows = match inner.run(&prepared, None, &read) {
+                Err(error) if crate::large::is_missing(&error) => return Ok(()),
+                rows => rows?,
+            };
+            let stale: Vec<RowUuid> = rows
                 .into_iter()
                 .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
                 .map(|row| row.id)

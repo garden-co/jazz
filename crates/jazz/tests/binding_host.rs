@@ -847,6 +847,40 @@ fn a_tab_reads_a_large_value_its_worker_relays_from_the_server() {
 }
 
 #[test]
+fn a_tab_subscription_opens_with_a_large_value_its_worker_relays_from_the_server() {
+    // A fresh tab and worker: the opening delta carries the value once the
+    // worker has its chunks.
+    let server = authority();
+    let large = "s".repeat(300 * 1024);
+    server.insert("notes", &title(&large), &none()).unwrap();
+    let worker = open(0xd4);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd5));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
+    let mut stream = tab.subscribe(&query, &none(), None, None).unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let event = binding_host::event_chunk(drive(&links, tab.next_event(&mut stream))).unwrap();
+        if let EventChunk::Delta { delta, .. } = event {
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+            seen.extend(
+                added
+                    .iter()
+                    .flat_map(|batch| &batch.rows)
+                    .map(|row| row.cells["title"].clone()),
+            );
+        }
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(seen, [Value::String(large)]);
+}
+
+#[test]
 fn a_tab_sees_another_workers_tab_write_live() {
     let server = authority();
     let connect = |node: u8| {
