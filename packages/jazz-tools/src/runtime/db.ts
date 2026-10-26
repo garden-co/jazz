@@ -1540,27 +1540,25 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   return createTransactionWriteResult(transaction, resolvedValue, txId, resultClient());
 }
 
-// Installed once by Transaction so internal construction can bind its owner only
-// after recording admission, without adding a public constructor argument.
-let createTransactionWithAdmission: <TKind extends TransactionKind>(
-  kind: TKind,
-  resolveClient: (schema: WasmSchema) => JazzClient,
-  context: DbAccessContext | null,
-  ownerClient: JazzClient | undefined,
-  prerequisite: TransactionAdmission | undefined,
-) => Transaction<TKind>;
+// Module-private construction capabilities keep admission off the public API.
+const createTransactionWithAdmission = Symbol("createTransactionWithAdmission");
+const createTransaction = Symbol("createTransaction");
 
 /**
  * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
-  static {
-    createTransactionWithAdmission = (kind, resolveClient, context, ownerClient, prerequisite) => {
-      const transaction = new Transaction(kind, resolveClient, context);
-      transaction.openingPrerequisite = prerequisite;
-      if (ownerClient) transaction.bindOwnerClient(ownerClient);
-      return transaction;
-    };
+  static [createTransactionWithAdmission]<TKind extends TransactionKind>(
+    kind: TKind,
+    resolveClient: (schema: WasmSchema) => JazzClient,
+    context: DbAccessContext | null,
+    ownerClient: JazzClient | undefined,
+    prerequisite: TransactionAdmission | undefined,
+  ): Transaction<TKind> {
+    const transaction = new Transaction(kind, resolveClient, context);
+    transaction.openingPrerequisite = prerequisite;
+    if (ownerClient) transaction.bindOwnerClient(ownerClient);
+    return transaction;
   }
 
   private openingPrerequisite?: TransactionAdmission;
@@ -2056,10 +2054,12 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
 >;
 
 /** @internal The compiler opts in before staging any operations. */
-export let beginDbTransactionAfter: (
+export function beginDbTransactionAfter(
   db: Db,
   prepare: TransactionAdmission,
-) => Transaction<"serializable">;
+): Transaction<"serializable"> {
+  return db[createTransaction]("serializable", prepare);
+}
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -2089,11 +2089,6 @@ export interface ShutdownOptions {
 }
 
 export class Db {
-  static {
-    beginDbTransactionAfter = (db, prerequisite) =>
-      db.createTransaction("serializable", prerequisite);
-  }
-
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;
@@ -3083,7 +3078,7 @@ export class Db {
     return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
-  private createTransaction<TKind extends TransactionKind>(
+  [createTransaction]<TKind extends TransactionKind>(
     kind: TKind,
     prerequisite?: TransactionAdmission,
   ): Transaction<TKind> {
@@ -3096,7 +3091,7 @@ export class Db {
         "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
-    return createTransactionWithAdmission(
+    return Transaction[createTransactionWithAdmission](
       kind,
       (schema) => this.getClient(schema),
       context,
@@ -3136,7 +3131,7 @@ export class Db {
    * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
   beginTransaction(): Transaction<"mergeable"> {
-    return this.createTransaction("mergeable");
+    return this[createTransaction]("mergeable");
   }
 
   /**
@@ -3147,7 +3142,7 @@ export class Db {
    * Prefer using {@link Db.serializableTransaction} when an explicit commit is not required.
    */
   beginSerializableTransaction(): Transaction<"serializable"> {
-    return this.createTransaction("serializable");
+    return this[createTransaction]("serializable");
   }
 
   /**
