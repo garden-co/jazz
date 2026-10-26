@@ -3070,6 +3070,7 @@ impl Inner {
             }
             crate::large::admit(&self.conn, &self.chunks, large)?;
         }
+        crate::large::settle_receipts(&self.conn, &large.root.locator)?;
         self.large_cell(large)
     }
 
