@@ -353,6 +353,29 @@ describe("Db auth state", () => {
     }
   });
 
+  it("renews an expired owned token even when an auth observer throws", () => {
+    vi.useFakeTimers();
+    try {
+      const { db, runtimeClient } = makeLocalFirstDb();
+      db.ownRefresh(true);
+      const failure = new Error("observer failed");
+      const stop = db.onAuthChanged((state) => {
+        if (state.error === "expired") throw failure;
+      });
+      try {
+        expect(() => db.failAuth("expired")).toThrow(failure);
+        expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledOnce();
+        expect(jwtClaimVersion(db.getConfig().jwtToken)).toBe(1);
+        expect(db.getAuthState().error).toBeUndefined();
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("spaces out remints a skewed server keeps rejecting until a token lives to its refresh", () => {
     vi.useFakeTimers();
     try {
