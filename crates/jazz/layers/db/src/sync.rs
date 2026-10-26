@@ -919,6 +919,10 @@ pub(crate) struct Client {
 type RelayedFate = (usize, u64, Vec<(String, RowUuid, Vec<u8>)>);
 
 /// A session's `Fetch` a relay asked its upstream for.
+/// A relayed read's upstream answer: its query, binding, whether it read
+/// deleted rows, and the rows it listed.
+type RelayedAnswer = (Query, BTreeMap<String, Value>, bool, Vec<[u8; 16]>);
+
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
     upstream: u64,
@@ -4316,10 +4320,11 @@ impl Inner {
     /// Session `index`'s relayed reads that are ready to serve from this
     /// store: the upstream answered, or a first-load wait ran out or can no
     /// longer be answered. A refusal goes to the session as its own.
-    fn relayed_fetches_ready(&mut self, index: usize) -> Vec<SyncMessage> {
+    fn relayed_fetches_ready(&mut self, index: usize) -> (Vec<SyncMessage>, Vec<RelayedAnswer>) {
         let Some(client) = self.client.as_mut() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
+        let mut answers = Vec::new();
         let can_wait = may_wait(client.hint.get());
         let now = Instant::now();
         let mut ready = Vec::new();
@@ -4343,19 +4348,33 @@ impl Inner {
                     code: error.code,
                     message: error.message,
                 }),
-                _ => ready.push((*id, fetch.message)),
+                Some(Ok((_, listed))) => {
+                    if let SyncMessage::Fetch {
+                        query,
+                        binding,
+                        at: None,
+                        include_deleted,
+                        ..
+                    } = &fetch.ask
+                    {
+                        answers.push((query.clone(), binding.clone(), *include_deleted, listed));
+                    }
+                    ready.push((*id, fetch.message));
+                }
+                None => ready.push((*id, fetch.message)),
             }
         }
         client.relayed_fetches = kept;
         let session = &mut self.sessions[index];
         session.outbox.extend(refused);
-        ready
+        let ready = ready
             .into_iter()
             .map(|(id, message)| {
                 session.fetched_upstream.insert(id);
                 message
             })
-            .collect()
+            .collect();
+        (ready, answers)
     }
 
     /// The identity whose policies govern session `index`'s reads and
@@ -4545,7 +4564,12 @@ impl Db {
             self.serve_due_first_loads(index)?;
             // Relayed reads the upstream answered (or can no longer answer)
             // are served from this store first, in the order they came.
-            let relayed = self.inner.borrow_mut().relayed_fetches_ready(index);
+            let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
+            // The upstream's answers list their results' rows: cached rows
+            // they left out are not served as the reader's (INV-SYNC-14).
+            for (query, binding, include_deleted, listed) in answers {
+                self.unlist_unanswered(query, binding, include_deleted, &listed)?;
+            }
             for message in relayed.into_iter().rev() {
                 inbound.push_front(message);
             }
@@ -5537,14 +5561,15 @@ impl Db {
                     .stored_table(history.unwrap_or(&query.table))?
                     .to_owned();
                 // A strict Remote read leaves out this replica's pending
-                // versions: only the authority confirms them. One with a
-                // wait (a serializable snapshot) takes this replica's view.
+                // versions, and the cached rows its upstream no longer lists
+                // for it: only the authority confirms them. One with a wait
+                // (a serializable snapshot) takes this replica's view.
+                let strict = tier == ReadTier::Remote && wait.is_none() && inner.client.is_some();
                 let read = ReadSpec {
                     cut: at.map(Cut::at),
                     include_deleted,
-                    settled_only: tier == ReadTier::Remote
-                        && wait.is_none()
-                        && inner.client.is_some(),
+                    settled_only: strict,
+                    members_only: strict,
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;

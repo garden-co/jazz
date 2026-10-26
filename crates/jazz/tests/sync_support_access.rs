@@ -15,7 +15,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query};
+use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -360,4 +360,79 @@ fn a_remote_read_after_losing_access_leaves_out_unlisted_cached_rows() {
             [id(1, 1), id(1, 2), id(1, 3), id(1, 4)]
         );
     }
+}
+
+/// Through a relay, a `Remote` read by id after the reader lost access leaves
+/// the row out: the relay serves the upstream's answer, not its cached copy.
+#[test]
+fn a_remote_read_through_an_edge_after_losing_access_leaves_the_row_out() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let me = Value::String(alice().principal_parts().1);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "rooms",
+            id(1, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[("name", Value::String("room 1".into()))]),
+        )
+        .unwrap();
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "memberships",
+            id(2, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[("room", Value::Uuid(id(1, 1).0)), ("member", me)]),
+        )
+        .unwrap();
+    // The reader's own durable store relays for its foreground, as a
+    // browser worker does for its tabs.
+    let edge = open(5, alice());
+    let (edge_side, server_side) = duplex();
+    let _edge_upstream = block_on(edge.connect_upstream(edge_side));
+    server.accept_subscriber(server_side, alice());
+    edge.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let client = open(1, alice());
+    let (client_side, edge_client_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    edge.accept_subscriber(edge_client_side, alice());
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let pump_all = || {
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+        }
+        block_on(client.tick()).unwrap();
+    };
+    let query = Query::from("rooms").filter(eq(col("id"), lit(Value::Uuid(id(1, 1).0))));
+    let bytes = postcard::to_allocvec(&query).unwrap();
+    let remote = || {
+        let read = client.all_serialized_query(
+            &bytes,
+            ReadOpts::for_read_tier(ReadTier::Remote),
+            None,
+            None,
+            None,
+            false,
+            || false,
+            |attachment| client.detach_query(attachment),
+        );
+        let mut read = std::pin::pin!(read);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..50 {
+            if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                let jazz::db::SerializedReadResult::Rows(rows) = result.unwrap() else {
+                    panic!("the remote read answered with something other than rows");
+                };
+                return rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+            }
+            pump_all();
+        }
+        panic!("the remote read did not answer");
+    };
+    assert_eq!(remote(), [id(1, 1)]);
+    block_on(server.delete("memberships", id(2, 1), Default::default())).unwrap();
+    pump_all();
+    assert_eq!(remote(), Vec::<RowUuid>::new());
 }

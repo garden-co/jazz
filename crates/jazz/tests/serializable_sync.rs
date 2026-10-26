@@ -752,6 +752,45 @@ fn racing_inserts_of_one_id_on_one_replica_conflict() {
     );
 }
 
+/// A serializable insert of an id another commit took after the
+/// transaction's snapshot conflicts (a retry sees the row), rather than
+/// being refused for the id being taken.
+#[test]
+fn an_insert_of_an_id_taken_after_the_snapshot_conflicts() {
+    let net = Net::new(1);
+    let db = net.db(0);
+    let id = RowUuid::from_bytes([0x78; 16]);
+    let one = || Query::from("invites").filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let mut opens = Vec::new();
+    for _ in 0..2 {
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&one()).unwrap();
+        assert!(
+            net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
+                .unwrap()
+                .is_empty()
+        );
+        opens.push(open);
+    }
+    let insert = |open| {
+        net.drive(db.serializable_tx_ref(open).insert(
+            "invites",
+            code("seeded"),
+            jazz::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+    };
+    insert(opens[0]).unwrap();
+    let first = block_on(db.commit_serializable_handle(opens[0])).unwrap();
+    let error = insert(opens[1]).expect_err("the id was taken after the snapshot");
+    assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+    db.abandon_serializable_handle(opens[1]).unwrap();
+    net.settle(0, first.0).expect("the first commit settles");
+}
+
 /// Offline, a serializable transaction's `Remote` read waits for the
 /// authority rather than answering from the replica; it answers once the
 /// link is back.

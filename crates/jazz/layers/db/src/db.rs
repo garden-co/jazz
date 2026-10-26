@@ -4829,7 +4829,8 @@ impl Db {
         // A counter write's change is from what the transaction sees.
         self.in_overlay(id, None, |inner, _| inner.counter_deltas(&mut op))?;
         // Validate against the overlay now, so errors surface at the call.
-        self.in_overlay(id, Some(op.clone()), |_, _| Ok(()))?;
+        self.in_overlay(id, Some(op.clone()), |_, _| Ok(()))
+            .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner();
         let schema = inner.schema.clone();
         inner
@@ -4839,6 +4840,41 @@ impl Db {
             .ops
             .push((schema, op));
         Ok(())
+    }
+
+    /// A serializable write the store refuses for its row's state (an id
+    /// taken, a row deleted) conflicts when that state is newer than the
+    /// transaction's snapshot: at the snapshot the write was valid, and a
+    /// retry sees what moved.
+    fn serializable_write_conflict(
+        &self,
+        id: OpenTransactionId,
+        op: &StagedOp,
+        error: Error,
+    ) -> Error {
+        if !error.is_apply_time_rejection() {
+            return error;
+        }
+        let inner = self.inner();
+        let Some(Batch {
+            kind: BatchKind::Serializable { snapshot, own, .. },
+            ..
+        }) = inner.batches.get(&id)
+        else {
+            return error;
+        };
+        let (Some(row), Ok(table)) = (op.row(), inner.schema.stored_table(op.table())) else {
+            return error;
+        };
+        let moved = inner.serializable_cut(*snapshot, own).and_then(|cut| {
+            Ok(inner
+                .newest_seq(table, row)?
+                .is_some_and(|seq| !cut.sees(seq)))
+        });
+        match moved {
+            Ok(true) => conflict("a row written by the transaction changed since its snapshot"),
+            _ => error,
+        }
     }
 
     /// [`Self::stage`] a write whose large values a partial update built:

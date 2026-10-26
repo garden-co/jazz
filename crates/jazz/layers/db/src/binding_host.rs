@@ -1099,10 +1099,14 @@ impl Binding {
     /// A staged write's outcome. Like a direct write's (see
     /// [`Self::write`]), a refusal decided by the row's stored state is not
     /// the call's error: the transaction stays open and its commit is
-    /// rejected with the first such refusal.
+    /// rejected with the first such refusal. So is a serializable write's
+    /// conflict with a row that moved past its snapshot.
     fn staged(&self, id: OpenTransactionId, staged: Result<WriteHandle, Error>) -> HostResult<()> {
         match staged {
-            Err(error) if error.is_apply_time_rejection() => {
+            Err(error)
+                if error.is_apply_time_rejection()
+                    || error.code == ErrorCode::TransactionConflict =>
+            {
                 self.refused.borrow_mut().entry(id).or_insert(error);
                 Ok(())
             }
@@ -1586,6 +1590,7 @@ impl Binding {
                 head,
                 base,
             })),
+            failed: false,
         })
     }
 
@@ -1756,6 +1761,9 @@ struct StreamingState {
 /// arrives. A failed push closes the mutation.
 pub struct StreamingMutation {
     state: Option<Box<StreamingState>>,
+    /// A push failed: the upload takes no more chunks and cannot finish,
+    /// but stays for [`StreamingMutation::abort`] to release.
+    failed: bool,
 }
 
 fn closed() -> HostError {
@@ -1765,21 +1773,26 @@ fn closed() -> HostError {
 impl StreamingMutation {
     /// Upload the next chunk.
     pub fn push(&mut self, chunk: &[u8]) -> HostResult<()> {
-        let state = self.state.as_mut().ok_or_else(closed)?;
+        let state = self
+            .state
+            .as_mut()
+            .filter(|_| !self.failed)
+            .ok_or_else(closed)?;
         let pushed = block_on(
             state
                 .binding
                 .db
                 .push_streaming_value_upload(&mut state.upload, chunk),
         );
-        if pushed.is_err() {
-            self.state = None;
-        }
+        self.failed = pushed.is_err();
         Ok(pushed?)
     }
 
     /// Publish the uploaded value as the row mutation.
     pub fn finish(&mut self) -> HostResult<Write> {
+        if self.failed {
+            return Err(closed());
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let write = block_on(state.binding.db.finish_streaming_value_upload(
             state.upload,
