@@ -953,23 +953,23 @@ export class SerializableWriteResult<T> extends WriteResult<T> {
 /** @internal A prerequisite retained by the transaction until native opening. */
 export type TransactionAdmission = () => Promise<void>;
 
-/** @internal Explicit opening path; installed once, without per-client ambient state. */
-export let beginClientTransactionAfter: (
+// Module-private capability: the prerequisite path does not widen the public API.
+const openTransaction = Symbol("openTransaction");
+
+/** @internal Explicit opening path without per-client ambient state. */
+export function beginClientTransactionAfter(
   client: JazzClient,
   kind: TransactionKind,
   session: Session | undefined,
   attribution: string | undefined,
   reservedId: OpenTransactionId | undefined,
   prerequisite: TransactionAdmission | undefined,
-) => OpenTransactionId;
+): OpenTransactionId {
+  return client[openTransaction](kind, session, attribution, reservedId, prerequisite);
+}
 
 /** High-level Jazz client. */
 export class JazzClient {
-  static {
-    beginClientTransactionAfter = (client, kind, session, attribution, reservedId, prerequisite) =>
-      client.openTransaction(kind, session, attribution, reservedId, prerequisite);
-  }
-
   private readonly transactionPreparations = new Map<
     OpenTransactionId,
     { pending?: Promise<void>; committing: boolean; unopened?: boolean }
@@ -1083,10 +1083,10 @@ export class JazzClient {
     attribution?: string,
     reservedId?: OpenTransactionId,
   ): OpenTransactionId {
-    return this.openTransaction(kind, session, attribution, reservedId);
+    return this[openTransaction](kind, session, attribution, reservedId);
   }
 
-  private openTransaction(
+  [openTransaction](
     kind: TransactionKind,
     session: Session | undefined,
     attribution: string | undefined,
