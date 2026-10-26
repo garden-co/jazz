@@ -27,7 +27,8 @@ import {
   SerializableWriteResult,
   WriteResult,
   JazzClient,
-  withTransactionAdmission,
+  beginClientTransactionAfter,
+  type TransactionAdmission,
   type MutationErrorEvent,
   WriteHandle,
   createOpenTransactionId,
@@ -1539,10 +1540,31 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
   return createTransactionWriteResult(transaction, resolvedValue, txId, resultClient());
 }
 
+// Installed once by Transaction so internal construction can bind its owner only
+// after recording admission, without adding a public constructor argument.
+let createTransactionWithAdmission: <TKind extends TransactionKind>(
+  kind: TKind,
+  resolveClient: (schema: WasmSchema) => JazzClient,
+  context: DbAccessContext | null,
+  ownerClient: JazzClient | undefined,
+  prerequisite: TransactionAdmission | undefined,
+) => Transaction<TKind>;
+
 /**
  * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
+  static {
+    createTransactionWithAdmission = (kind, resolveClient, context, ownerClient, prerequisite) => {
+      const transaction = new Transaction(kind, resolveClient, context);
+      transaction.openingPrerequisite = prerequisite;
+      if (ownerClient) transaction.bindOwnerClient(ownerClient);
+      return transaction;
+    };
+  }
+
+  private openingPrerequisite?: TransactionAdmission;
+
   private readonly pendingReads = new Set<Promise<unknown>>();
   private committing = false;
 
@@ -1582,7 +1604,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const owner = getOwnerPreparation(ownerClient);
     const openTransactionId = owner?.pending
       ? createOpenTransactionId()
-      : ownerClient.beginTransaction(this.kind, session, attribution);
+      : this.openingPrerequisite
+        ? beginClientTransactionAfter(
+            ownerClient,
+            this.kind,
+            session,
+            attribution,
+            undefined,
+            this.openingPrerequisite,
+          )
+        : ownerClient.beginTransaction(this.kind, session, attribution);
     const binding: DbTransactionHandleBinding = {
       ownerClient,
       openTransactionId,
@@ -1596,11 +1627,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparation.run(() =>
         owner!.run(() => {
           if (preparation.cancelled) return;
-          const begin = () =>
-            ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
-          const prerequisite = transactionAdmission.get(this);
-          if (prerequisite) withTransactionAdmission(ownerClient, prerequisite, begin);
-          else begin();
+          if (this.openingPrerequisite)
+            beginClientTransactionAfter(
+              ownerClient,
+              this.kind,
+              session,
+              attribution,
+              openTransactionId,
+              this.openingPrerequisite,
+            );
+          else ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
           binding.begun = true;
         }),
       );
@@ -2019,20 +2055,11 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
   Transaction<TKind>
 >;
 
-const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
-
 /** @internal The compiler opts in before staging any operations. */
-export function beginDbTransactionAfter(
+export let beginDbTransactionAfter: (
   db: Db,
-  prepare: () => Promise<void>,
-): Transaction<"serializable"> {
-  transactionAdmission.set(db, prepare);
-  try {
-    return db.beginSerializableTransaction();
-  } finally {
-    transactionAdmission.delete(db);
-  }
-}
+  prepare: TransactionAdmission,
+) => Transaction<"serializable">;
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -2062,6 +2089,11 @@ export interface ShutdownOptions {
 }
 
 export class Db {
+  static {
+    beginDbTransactionAfter = (db, prerequisite) =>
+      db.createTransaction("serializable", prerequisite);
+  }
+
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;
@@ -3051,7 +3083,10 @@ export class Db {
     return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
-  private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+  private createTransaction<TKind extends TransactionKind>(
+    kind: TKind,
+    prerequisite?: TransactionAdmission,
+  ): Transaction<TKind> {
     this.assertOpen();
     notifyLocalWrite(this);
     const context = this.getAccessContext();
@@ -3061,22 +3096,12 @@ export class Db {
         "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
-    const prerequisite = transactionAdmission.get(this);
-    if (prerequisite && ownerClient) {
-      const transaction = withTransactionAdmission(
-        ownerClient,
-        prerequisite,
-        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient),
-      );
-      // Owner preparation can postpone opening beyond the synchronous admission scope.
-      transactionAdmission.set(transaction, prerequisite);
-      return transaction;
-    }
-    return new Transaction(
+    return createTransactionWithAdmission(
       kind,
       (schema) => this.getClient(schema),
       context,
       ownerClient ?? undefined,
+      prerequisite,
     );
   }
 
