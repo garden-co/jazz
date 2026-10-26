@@ -761,6 +761,34 @@ describe("Db auth state", () => {
     expect(db.getAuthState().session?.claims.version).toBe("C");
   });
 
+  it("publishes the coherent snapshot to later observers before rethrowing an observer failure", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    db.touchClient();
+    const observerError = new Error("synthetic auth observer failure");
+    const stopThrowing = db.onAuthChanged((state) => {
+      if (state.session?.claims.version === "B") throw observerError;
+    });
+    const snapshots: AuthPublicationSnapshot[] = [];
+    const stopRecording = db.onAuthChanged((state) => {
+      snapshots.push(authPublicationSnapshot(db, runtimeClient, state));
+    });
+    snapshots.length = 0;
+
+    expect(() => db.updateCookieSession(makeCookieSession("B"))).toThrow(observerError);
+    expect(snapshots).toEqual([
+      {
+        publicState: { authMode: "external", version: "B" },
+        config: { bearerVersion: undefined, cookieVersion: "B" },
+        internal: { authMode: "external", userId: "alice", version: "B" },
+        transport: { bearerVersion: undefined, cookieVersion: "B" },
+      },
+    ]);
+    db.updateCookieSession(makeCookieSession("B"));
+    expect(snapshots).toHaveLength(1);
+    stopRecording();
+    stopThrowing();
+  });
+
   it("rejects stale principals and live clears without changing the accepted snapshot", () => {
     const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
     db.touchClient();
