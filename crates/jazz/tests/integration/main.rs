@@ -135,3 +135,6 @@ mod union_queries;
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]
 mod write_check_evidence;
+
+#[path = "../relay_read_claims.rs"]
+mod relay_read_claims;
