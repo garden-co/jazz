@@ -781,3 +781,84 @@ fn a_client_restores_a_row_it_deleted_after_the_deletion_synced() {
         ["mine"]
     );
 }
+
+/// SPEC 4, INV-HIST-8: Alice edits a note offline while the server deletes
+/// it. Her edit was made over an image older than the delete, so it applies
+/// to the note's content and leaves the note deleted; the other write in her
+/// commit applies, and her own delete of the note is accepted alongside the
+/// server's. A restore reveals her edit. A write Alice makes over a deletion
+/// she already holds is still refused.
+///
+/// ```text
+/// server ──delete n1──────────────────────────► n1 deleted
+/// alice  ═offline═ tx{ n1="edited"; n2="also" }; delete n1 ──► accepted
+///                                               n1 deleted {edited}, n2 {also}
+/// server ──restore n1──► n1 {edited}
+/// ```
+#[test]
+fn an_offline_edit_of_a_row_deleted_meanwhile_applies_and_leaves_it_deleted() {
+    let mut synced = Synced::new();
+    insert(&synced.server, row(1), "first");
+    insert(&synced.server, row(2), "second");
+    let prepared = synced.alice.prepare_query(&notes()).unwrap();
+    let _subscription = block_on(synced.alice.subscribe(&prepared, deleted())).unwrap();
+    synced.pump();
+
+    synced.disconnect();
+    delete(&synced.server, row(1));
+    block_on(synced.alice.transaction(async |tx| {
+        tx.update("notes", row(1), title("edited"), Default::default())
+            .await?;
+        tx.update("notes", row(2), title("also"), Default::default())
+            .await
+    }))
+    .expect("alice commits offline");
+    delete(&synced.alice, row(1));
+    synced.connect();
+    synced.pump();
+
+    let at_server = read(&synced.server, &notes(), deleted());
+    assert_eq!(titles(&at_server), ["edited", "also"]);
+    assert!(
+        millis(&at_server[0], "$deletedAt").is_some(),
+        "n1 stays deleted"
+    );
+    assert!(millis(&at_server[1], "$deletedAt").is_none());
+    assert_eq!(
+        seen(&read(&synced.alice, &notes(), local_only(deleted()))),
+        seen(&at_server)
+    );
+
+    let refused = block_on(synced.alice.update(
+        "notes",
+        row(1),
+        title("again"),
+        Default::default(),
+    ))
+    .err()
+    .expect("alice holds the deletion");
+    assert!(
+        refused.message.contains("row already deleted"),
+        "{}",
+        refused.message
+    );
+    let refused = block_on(synced.alice.delete("notes", row(1), Default::default()))
+        .err()
+        .expect("alice holds the deletion");
+    assert!(
+        refused.message.contains("row already deleted"),
+        "{}",
+        refused.message
+    );
+
+    restore(&synced.server, row(1));
+    synced.pump();
+    assert_eq!(
+        titles(&read(
+            &synced.alice,
+            &notes().select(["title"]),
+            local_only(ReadOpts::default())
+        )),
+        ["edited", "also"]
+    );
+}

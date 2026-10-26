@@ -4500,7 +4500,9 @@ impl Db {
         }
         for (tx, ops) in pending {
             begin_savepoint(&inner.conn, "replay")?;
+            inner.merging = true;
             let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
+            inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())?;
         }
         let client = inner.client.as_mut().expect("client");
@@ -6272,10 +6274,13 @@ impl Db {
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
             inner.defer_checks();
+            // The unit was made over the sender's image (SPEC 4, INV-HIST-8).
+            inner.merging = true;
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
                 .and_then(|()| inner.finish_checks(seq));
+            inner.merging = false;
             if let Err(error) = applied {
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);

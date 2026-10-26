@@ -274,7 +274,7 @@ pub struct SubscriptionStream {
     refused: Option<Rc<RefCell<Option<Error>>>>,
     /// The remote attachment to release on drop.
     remote: Option<(
-        Rc<RefCell<Inner>>,
+        Rc<Store>,
         Query,
         BTreeMap<String, Value>,
         bool,
@@ -371,6 +371,16 @@ struct Inner {
     /// Nodes a large-value edit consolidated, stored when the edited cell
     /// is bound inside the write's transaction.
     pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
+    /// Applying writes made over an older image (an authority ingesting
+    /// an upload, a replica replaying its pending writes): an edit or a
+    /// delete of a row deleted since applies and leaves it deleted (SPEC 4,
+    /// INV-HIST-8). A fresh local write over a tombstone it can see is
+    /// refused instead.
+    merging: bool,
+    /// A transaction handle's staged writes left applied between its
+    /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
+    /// other use of the store.
+    overlay: Option<Overlay>,
     /// Descriptors this store's own edit derived for the write in flight:
     /// trusted as built, so binding them re-validates nothing.
     derived: Vec<jazz_types::large_values::LargeValueRef>,
@@ -496,7 +506,7 @@ impl Default for FileOptions {
 
 /// Jazz's `Db` over SQLite.
 pub struct Db {
-    inner: Rc<RefCell<Inner>>,
+    inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
     view: Option<Rc<Schema>>,
 }
@@ -899,6 +909,14 @@ pub(crate) fn is_windowed(query: &Query) -> bool {
 /// stays `WriteRejected`): authority rejections are reported by it.
 pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
 
+/// How far ahead of the authority's clock a session's explicit write
+/// timestamp may be (SPEC 3, INV-TX-7).
+pub const SKEW_TOLERANCE_MS: i64 = 30_000;
+
+/// The reason the authority refuses a write timestamped too far ahead,
+/// leading its message (the code stays `WriteRejected`).
+pub const CLIENT_CLOCK_TOO_FAR_AHEAD: &str = "client_clock_too_far_ahead";
+
 /// A write a policy rejects.
 fn denied(detail: impl std::fmt::Display) -> Error {
     rejected(format!("{AUTHORIZATION_DENIED}: {detail}"))
@@ -1061,10 +1079,12 @@ impl Db {
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
-            inner: Rc::new(RefCell::new(Inner {
+            inner: Rc::new(Store::new(Inner {
                 conn,
                 chunks,
                 pending_nodes: Vec::new(),
+                merging: false,
+                overlay: None,
                 derived: Vec::new(),
                 staging: LargeValueStagingPolicy::default(),
                 ingress: RefCell::new((0, 0)),
@@ -2036,6 +2056,8 @@ impl MergeableTx<'_> {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        // An abandoned handle's overlay never reaches the file.
+        self.settle_overlay();
         // Before `conn` closes, so it closes last and checkpoints the WAL.
         self.chunks.close_reader();
     }
@@ -3506,7 +3528,18 @@ impl Inner {
             Some((_, false)) => return Err(row_already_exists(row)),
             None => {}
         }
-        let (copies, dropped) = self.names.lens_cells(&schema.jazz.version_id(), table);
+        // Most stores have no lens cells; the owner's version is cached
+        // (hashing a schema per insert would dominate a large batch's replay).
+        let (copies, dropped) = if self.names.has_lens_cells() {
+            let version = if Rc::ptr_eq(&schema, &self.owner) {
+                self.owner_version
+            } else {
+                schema.jazz.version_id()
+            };
+            self.names.lens_cells(&version, table)
+        } else {
+            Default::default()
+        };
         let mut names = vec!["id".to_owned(), "_b".to_owned(), "_seq".to_owned()];
         let mut values = vec![
             Sql::Blob(row.0.as_bytes().to_vec()),
@@ -3561,6 +3594,15 @@ impl Inner {
     /// INSERT, DELETE) are checked as here: a trusted session's, at the
     /// authority. A replica leaves them to the authority on upload: it may
     /// lack rows those policies read (hidden from it).
+    /// Undo a transaction handle's overlay, if one is applied.
+    fn settle_overlay(&mut self) {
+        let Some(overlay) = self.overlay.take() else {
+            return;
+        };
+        self.changed.borrow_mut().truncate(overlay.mark);
+        end_savepoint(&self.conn, "overlay", false).expect("rolling back a transaction overlay");
+    }
+
     fn checked(&self, who: Who) -> Option<AuthorSubject> {
         match who {
             Who::Session(author) if self.client.is_none() => Some(author),
@@ -3672,19 +3714,24 @@ impl Inner {
             }
             // A deleted row's id stays reserved: only a restore revives it.
             // A delete staged earlier in this transaction is no tombstone
-            // yet, so an upsert replaces it.
+            // yet, so an upsert replaces it. A merged edit (made over an
+            // image older than the delete) applies to the row's content and
+            // leaves it deleted (SPEC 4, INV-HIST-8).
             Located::Row {
                 deleted: true,
                 seq: current,
                 ..
-            } if !upsert || current != seq => return Err(row_already_deleted(row)),
+            } if !self.merging && (!upsert || current != seq) => {
+                return Err(row_already_deleted(row));
+            }
             Located::Row {
                 key,
                 seq: current,
                 deleted,
             } => {
                 let mut cells = cells;
-                if deleted {
+                let staged_tombstone = deleted && upsert && current == seq;
+                if staged_tombstone {
                     // Every column is written, as by an insert: nothing
                     // of the deleted version carries over.
                     reinserted = true;
@@ -3705,10 +3752,11 @@ impl Inner {
                 } else {
                     self.authorize_patch(table, row, &key, &who, verb)?;
                 }
-                if cells.is_empty() && !deleted {
+                if cells.is_empty() && !staged_tombstone {
                     return Ok(WriteHandle { row, seq: current });
                 }
-                let cells = self.merged_cells(table, row, (!deleted).then_some(&key[..]), cells)?;
+                let cells =
+                    self.merged_cells(table, row, (!staged_tombstone).then_some(&key[..]), cells)?;
                 self.snapshot(table, row, &key, seq)?;
                 // An upsert over a tombstone replaces it.
                 self.set_cells(
@@ -3717,7 +3765,7 @@ impl Inner {
                     &key,
                     &cells,
                     seq,
-                    deleted.then_some(false),
+                    staged_tombstone.then_some(false),
                     true,
                 )?;
                 key
@@ -3824,6 +3872,9 @@ impl Inner {
             }
             // As for a patch: a replica leaves an unknown row to the authority.
             Located::Absent { .. } if self.client.is_some() => {}
+            // A merged delete of a deleted row changes nothing: concurrent
+            // deletes of one row all apply.
+            Located::Row { deleted: true, .. } if self.merging => {}
             Located::Row { deleted: true, .. } => return Err(row_already_deleted(row)),
             _ => {
                 return Err(rejected(format!(
@@ -4390,6 +4441,46 @@ impl Db {
 
 /// An open, owner-wide transaction batch. Writes are staged (with the schema
 /// view that staged them) and applied at commit; reads overlay them.
+/// A batch's staged writes applied in the open `overlay` savepoint.
+struct Overlay {
+    batch: OpenTransactionId,
+    /// How many of the batch's writes it holds.
+    applied: usize,
+    /// `changed` before the overlay, restored when it is undone.
+    mark: usize,
+}
+
+/// The store behind its one gate: every borrow first undoes a transaction
+/// handle's overlay, so nothing but that handle's next stage or read sees
+/// it.
+struct Store(RefCell<Inner>);
+
+impl Store {
+    fn new(inner: Inner) -> Self {
+        Self(RefCell::new(inner))
+    }
+
+    fn borrow_mut(&self) -> std::cell::RefMut<'_, Inner> {
+        let mut inner = self.0.borrow_mut();
+        inner.settle_overlay();
+        inner
+    }
+
+    fn borrow(&self) -> std::cell::Ref<'_, Inner> {
+        // A borrow already held means the overlay was undone when it was
+        // taken.
+        if let Ok(mut inner) = self.0.try_borrow_mut() {
+            inner.settle_overlay();
+        }
+        self.0.borrow()
+    }
+
+    /// The store with a handle's overlay kept for its next stage.
+    fn staging(&self) -> std::cell::RefMut<'_, Inner> {
+        self.0.borrow_mut()
+    }
+}
+
 struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
@@ -4558,13 +4649,16 @@ impl Inner {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
         };
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        if let Some(session) = self.checked(who) {
+            Self::admit_session_write(op, session, now)?;
+        }
         let (last_seq, last_at) = self.last_stamp;
         let at = if seq == last_seq {
             last_at
         } else {
-            let now = web_time::SystemTime::now()
-                .duration_since(web_time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as i64);
             now.max(last_at + 1)
         };
         self.last_stamp = (seq, at);
@@ -4578,6 +4672,26 @@ impl Inner {
         let result = self.apply_op(op, who, seq);
         self.writer = None;
         result
+    }
+
+    /// What the authority refuses of a session's write before any policy
+    /// runs (SPEC 7, INV-RLS-15; SPEC 3, INV-TX-7): every write by an
+    /// anonymous identity, and an explicit timestamp more than
+    /// [`SKEW_TOLERANCE_MS`] ahead of the authority's clock, which would
+    /// stamp provenance in the future.
+    fn admit_session_write(op: &StagedOp, session: AuthorSubject, now: i64) -> Result<(), Error> {
+        if session.is_anonymous() {
+            return Err(denied("anonymous identities cannot write"));
+        }
+        if let Some(at) = op.updated_at_ms()
+            && at as i64 > now.saturating_add(SKEW_TOLERANCE_MS)
+        {
+            return Err(rejected(format!(
+                "{CLIENT_CLOCK_TOO_FAR_AHEAD}: the write's timestamp is {}ms ahead of the authority's clock",
+                at as i64 - now
+            )));
+        }
+        Ok(())
     }
 
     fn apply_op(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
@@ -4933,21 +5047,33 @@ impl Db {
         Ok(TxReceipt(seq))
     }
 
-    /// Run `read` over the batch's staged writes (plus `extra`), then undo
-    /// them: a savepoint replay is the overlay. Serializable batches read
-    /// through the snapshot cut, which also admits their own writes.
+    /// Run `read` over the batch's staged writes (plus `extra`, checked as
+    /// its identity would be, its counter changes taken from what the
+    /// batch sees). The staged writes are replayed into a savepoint, the
+    /// overlay, which stays applied for the batch's next stage or read and
+    /// is undone before anything else uses the store ([`Store`]): staging
+    /// a batch write by write replays it once, not once per write. `extra`
+    /// joins the overlay when it applies; `read` sees it and is undone.
+    /// Serializable batches read through the snapshot cut, which also
+    /// admits their own writes.
     fn in_overlay<R>(
         &self,
         id: OpenTransactionId,
-        extra: Option<StagedOp>,
+        extra: Option<&mut StagedOp>,
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let mut inner = self.inner();
+        let mut inner = self.inner.staging();
+        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
         let batch = inner
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
-        let mut ops = batch.ops.clone();
+        let staged = batch.ops.len();
+        let live = inner
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.batch == id && overlay.applied == staged);
+        let ops = (!live).then(|| batch.ops.clone());
         let edits = LargeEdits {
             derived: batch.edits.derived.clone(),
             pending_nodes: batch.edits.pending_nodes.clone(),
@@ -4958,19 +5084,53 @@ impl Db {
                 Some(inner.serializable_cut(*snapshot, own)?)
             }
         };
-        let checked = ops.len();
-        if let Some(op) = extra {
-            ops.push((inner.schema.clone(), op));
-        }
         let own = inner.seq + 1;
-        begin_savepoint(&inner.conn, "overlay")?;
+        inner.derived.extend(edits.derived);
+        inner.pending_nodes.extend(edits.pending_nodes);
+        if let Some(ops) = ops {
+            inner.settle_overlay();
+            begin_savepoint(&inner.conn, "overlay")?;
+            let mark = inner.changed.borrow().len();
+            if let Err(error) = inner.apply_all_checking(&ops, ops.len(), own) {
+                inner.clear_derived();
+                inner.changed.borrow_mut().truncate(mark);
+                end_savepoint(&inner.conn, "overlay", false)?;
+                return Err(error);
+            }
+            inner.overlay = Some(Overlay {
+                batch: id,
+                applied: staged,
+                mark,
+            });
+        }
+        if let Err(error) = begin_savepoint(&inner.conn, "overlay_step") {
+            inner.clear_derived();
+            inner.settle_overlay();
+            return Err(error);
+        }
         let mark = inner.changed.borrow().len();
-        let result = inner
-            .apply_with_edits(&ops, &edits, checked, own)
-            .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
-        // The overlay is only read: it is always undone.
-        inner.changed.borrow_mut().truncate(mark);
-        end_savepoint(&inner.conn, "overlay", false)?;
+        let joins = extra.is_some();
+        let applied = match extra {
+            Some(op) => inner.counter_deltas(op).and_then(|()| {
+                let schema = inner.schema.clone();
+                inner.apply_all_checking(&[(schema, op.clone())], 0, own)
+            }),
+            None => Ok(()),
+        };
+        inner.clear_derived();
+        let result =
+            applied.and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
+        let keep = joins && result.is_ok();
+        if !keep {
+            inner.changed.borrow_mut().truncate(mark);
+        }
+        if let Err(error) = end_savepoint(&inner.conn, "overlay_step", keep) {
+            inner.settle_overlay();
+            return Err(error);
+        }
+        if keep && let Some(overlay) = inner.overlay.as_mut() {
+            overlay.applied += 1;
+        }
         result
     }
 
@@ -4979,13 +5139,12 @@ impl Db {
     }
 
     fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
-        // A counter write's change is from what the transaction sees.
-        self.in_overlay(id, None, |inner, _| inner.counter_deltas(&mut op))?;
-        // Validate against the overlay now, so errors surface at the call.
-        self.in_overlay(id, Some(op.clone()), |_, _| Ok(()))
+        // Validate against the overlay now, so errors surface at the call;
+        // a counter write's change is from what the transaction sees.
+        self.in_overlay(id, Some(&mut op), |_, _| Ok(()))
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
-        let mut inner = self.inner();
-        let schema = inner.schema.clone();
+        let mut inner = self.inner.staging();
+        let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
         inner
             .batches
             .get_mut(&id)
@@ -5039,7 +5198,8 @@ impl Db {
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
         let marks = {
-            let mut inner = self.inner();
+            let mut inner = self.inner.staging();
+            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -5053,7 +5213,7 @@ impl Db {
         };
         let staged = self.stage_op(id, op);
         if staged.is_err()
-            && let Some(batch) = self.inner().batches.get_mut(&id)
+            && let Some(batch) = self.inner.staging().batches.get_mut(&id)
         {
             batch.edits.derived.truncate(marks.0);
             batch.edits.pending_nodes.truncate(marks.1);
@@ -5105,7 +5265,8 @@ impl TxRef<'_> {
     ) -> Result<WriteHandle, Error> {
         let row = match opts.row_id {
             Some(row) => row,
-            None => self.db.inner().ids.next_row_id(),
+            // Drawing an id leaves the batch's overlay applied.
+            None => self.db.inner.staging().ids.next_row_id(),
         };
         opts.row_id = Some(row);
         self.db
