@@ -1403,7 +1403,6 @@ impl Db {
                     live,
                     deadline,
                     relay_view: non_durable && opts.tier != ReadTier::Remote,
-                    relay_waits: first_load_wait(opts.tier, &opts.first_load).is_some(),
                 })
             }
             _ => None,

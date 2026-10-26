@@ -778,17 +778,18 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
     assert_no_second_opening(&mut stream);
 }
 
-/// A held foreground opening is released when the host reports that the
-/// owner's server link failed, and is not opened a second time.
+/// A held foreground opening is released when the owner's server link
+/// fails (the owner and its host both see it): the owner serves its cached
+/// rows at once, and the opening is not repeated.
 ///
 /// ```text
-/// server(a..j, silent) ══ worker ══ tab (hint Live)
-/// tab: subscribe ─ (withheld) ─ hint Failed ─► empty opening
+/// server(a..j, silent) ══ worker(cache a..j) ══ tab (hint Live)
+/// tab: subscribe ─ (withheld) ─ link Failed ─► opening a..j from the owner
 /// ```
 #[test]
 fn a_held_foreground_opening_is_released_when_its_owner_link_fails() {
     let server = seeded_server();
-    let foreground = foreground_over(0x7b, worker_connected_to(0x7a, &server));
+    let foreground = foreground_over(0x7b, warm_worker(0x7a, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
@@ -796,13 +797,18 @@ fn a_held_foreground_opening_is_released_when_its_owner_link_fails() {
         assert!(stream.try_next_event().is_none());
     }
 
+    foreground
+        .worker
+        .set_remote_link_hint(RemoteLinkHint::Failed);
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
-    let (reset, rows, _) = opening(
-        stream
-            .try_next_event()
-            .expect("the failure report publishes the opening"),
+    let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
+    rows.sort();
+    assert!(reset);
+    assert_eq!(
+        rows,
+        all_rows(),
+        "the owner's cached rows, not the tab's empty store"
     );
-    assert!(reset && rows.is_empty());
     foreground.turn(None);
     foreground.turn(None);
     assert_no_second_opening(&mut stream);

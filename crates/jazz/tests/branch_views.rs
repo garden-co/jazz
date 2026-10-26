@@ -2023,10 +2023,7 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         "todos",
         row,
         jazz::db::DeleteOptions {
-            target: jazz::db::WriteTarget::BranchView {
-                head: head,
-                base: None,
-            },
+            target: jazz::db::WriteTarget::BranchView { head, base: None },
             ..Default::default()
         },
     )
@@ -3289,5 +3286,283 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
             Some(Value::String("Draft".into())),
             Some(Value::String("Inherited original".into()))
         ]
+    );
+}
+
+/// A head row deleted through a branch view (masking its inherited base
+/// row) is restored on the exact head, leaving the base untouched.
+#[test]
+fn a_head_deletion_through_a_branch_view_restores_on_the_exact_head() {
+    let (db, _) = open_db();
+    let base = selector(0xc1);
+    let head = selector(0xc2);
+    let row = RowUuid::from_bytes([0xc3; 16]);
+    let title = |text: &str| BTreeMap::from([("title".to_owned(), Value::String(text.to_owned()))]);
+    db.insert(
+        "todos",
+        title("inherited"),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let view = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: Some(BranchViewBase::Current(base.clone())),
+    };
+    db.upsert(
+        "todos",
+        row,
+        title("draft upsert"),
+        jazz::db::UpsertOptions {
+            target: view.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            target: view,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.restore(
+        "todos",
+        row,
+        Some(title("restored draft")),
+        jazz::db::RestoreOptions {
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let read = |selector: BranchSelector| {
+        block_on(db.all(&query, ReadOpts::default().branch_view(selector, None)))
+            .unwrap()
+            .iter()
+            .map(|row| row.cell("title").unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(read(head), [Value::String("restored draft".to_owned())]);
+    assert_eq!(read(base), [Value::String("inherited".to_owned())]);
+}
+
+/// The same head deletion and restore on a client connected to a server,
+/// however the writes interleave with sync: the server's answers leave the
+/// head tombstone on the replica, so the exact-head restore finds it.
+#[test]
+fn a_synced_head_deletion_through_a_branch_view_restores_on_the_exact_head() {
+    for schedule in 0..27u32 {
+        synced_head_deletion_restores(schedule);
+    }
+}
+
+fn synced_head_deletion_restores(schedule: u32) {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8, author: AuthorSubject| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let author = AuthorSubject::for_test_bytes([0x63; 16]);
+    let client = open(0x02, author);
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    let (client_side, server_side) = jazz::db::duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, author);
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    // Step `n` of the schedule: 0 no sync, 1 one exchange, 2 a full pump.
+    let sync = |step: u32| match schedule / 3u32.pow(step) % 3 {
+        0 => {}
+        1 => {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(client.tick()).unwrap();
+        }
+        _ => {
+            for _ in 0..5 {
+                block_on(client.tick()).unwrap();
+                block_on(server.tick()).unwrap();
+            }
+            block_on(client.tick()).unwrap();
+        }
+    };
+
+    let base = selector(0xd1);
+    let head = selector(0xd2);
+    let row = RowUuid::from_bytes([0xd3; 16]);
+    let title = |text: &str| BTreeMap::from([("title".to_owned(), Value::String(text.to_owned()))]);
+    let view = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: Some(BranchViewBase::Current(base.clone())),
+    };
+    client
+        .insert(
+            "todos",
+            title("inherited"),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    sync(0);
+    client
+        .upsert(
+            "todos",
+            row,
+            title("draft upsert"),
+            jazz::db::UpsertOptions {
+                target: view.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    sync(1);
+    client
+        .delete(
+            "todos",
+            row,
+            jazz::db::DeleteOptions {
+                target: view,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    sync(2);
+    client
+        .restore(
+            "todos",
+            row,
+            Some(title("restored draft")),
+            jazz::db::RestoreOptions {
+                target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+                ..Default::default()
+            },
+        )
+        .expect(&format!("schedule {schedule}"));
+}
+
+/// A Remote read through one branch view judges only that branch's cached
+/// rows: rows on other branches, which its answer does not list, stay.
+#[test]
+fn a_remote_branch_read_keeps_the_rows_of_other_branches() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8, author: AuthorSubject| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let author = AuthorSubject::for_test_bytes([0x63; 16]);
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    // A tab over its storage owner, as in a browser.
+    let worker = open(0x02, author);
+    let (worker_side, server_side) = jazz::db::duplex();
+    let _upstream = block_on(worker.connect_upstream(worker_side));
+    server.accept_subscriber(server_side, author);
+    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let client = open(0x03, author);
+    client.set_non_durable_client();
+    let (tab_side, owner_side) = jazz::db::duplex();
+    let _owner = block_on(client.connect_upstream(tab_side));
+    worker.accept_subscriber(owner_side, author);
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let tick = || {
+        block_on(client.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(client.tick()).unwrap();
+    };
+    let pump = || {
+        for _ in 0..5 {
+            tick();
+        }
+    };
+
+    let (main, draft) = (selector(0xe1), selector(0xe2));
+    for (byte, branch) in [(0xe3, &main), (0xe4, &draft)] {
+        client
+            .insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String(format!("{byte:x}")))]),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([byte; 16])),
+                    target: jazz::db::ExactWriteTarget::Branch(branch.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    pump();
+
+    // The host read path, as a binding reads.
+    let query = postcard::to_allocvec(&client.table("todos")).unwrap();
+    let read = |branch: &BranchSelector, tier: jazz::db::ReadTier| {
+        let mut opts = ReadOpts::default().branch_view(branch.clone(), None);
+        opts.tier = tier;
+        let mut read = pin!(client.all_serialized_query(&query, opts, None, None, None));
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..50 {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                return match result.unwrap() {
+                    jazz::db::SerializedReadResult::Rows(rows) => rows.len(),
+                    other => panic!("{other:?}"),
+                };
+            }
+            tick();
+        }
+        panic!("the read did not complete");
+    };
+    assert_eq!(read(&draft, jazz::db::ReadTier::Remote), 1);
+    assert_eq!(
+        read(&main, jazz::db::ReadTier::LocalOnly),
+        1,
+        "the main row stays cached"
+    );
+    assert_eq!(read(&main, jazz::db::ReadTier::Remote), 1);
+    assert_eq!(
+        read(&draft, jazz::db::ReadTier::LocalOnly),
+        1,
+        "the draft row stays cached"
     );
 }

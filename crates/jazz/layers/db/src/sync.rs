@@ -964,8 +964,16 @@ pub(crate) struct Client {
 type RelayedFate = (usize, u64, Vec<(String, RowUuid, Vec<u8>)>);
 
 /// A relayed read's upstream answer: its query, binding, whether it read
-/// deleted rows, and the rows it listed.
-type RelayedAnswer = (Query, BTreeMap<String, Value>, bool, Vec<[u8; 16]>, u64);
+/// deleted rows, its read view, the rows it listed and the seq it is
+/// complete through.
+type RelayedAnswer = (
+    Query,
+    BTreeMap<String, Value>,
+    bool,
+    ReadViewSourceSpec,
+    Vec<[u8; 16]>,
+    u64,
+);
 
 /// A session's `Fetch` a relay asked its upstream for.
 struct RelayedFetch {
@@ -1073,17 +1081,6 @@ pub(crate) fn may_wait(link: Link) -> bool {
     }
 }
 
-/// Whether a non-durable foreground's relay may still answer its local
-/// read: the link to it is attached. A relay answers from its store at
-/// once, whatever its own path to the server; a read that has it wait for
-/// its upstream first (`waits_upstream`) stops waiting once the host
-/// reports the server unreachable, and opens on what the foreground has.
-pub(crate) fn relay_may_answer(link: Link, waits_upstream: bool) -> bool {
-    let unreachable =
-        link.reported && matches!(link.hint, RemoteLinkHint::Failed | RemoteLinkHint::NoServer);
-    !link.detached && (!waits_upstream || !unreachable)
-}
-
 /// When a gated opening is released.
 pub(crate) struct Gate {
     pub(crate) answered: Rc<StdCell<bool>>,
@@ -1096,10 +1093,10 @@ pub(crate) struct Gate {
     pub(crate) deadline: Option<Instant>,
     /// A non-durable foreground's local read: its relay answers from its
     /// store whatever the relay's own path to the server, so it waits
-    /// while the link to the relay is attached (see [`relay_may_answer`]).
+    /// while the link to the relay is attached. A first load it holds
+    /// for its upstream it serves from its store once that upstream
+    /// cannot answer (see [`Db::serve_due_first_loads`]).
     pub(crate) relay_view: bool,
-    /// The relay waits for its upstream before answering (a first load).
-    pub(crate) relay_waits: bool,
 }
 
 impl Gate {
@@ -1107,7 +1104,7 @@ impl Gate {
     /// the link may still answer.
     pub(crate) fn may_still_wait(&self) -> bool {
         if self.relay_view {
-            return relay_may_answer(self.hint.get(), self.relay_waits);
+            return !self.hint.get().detached;
         }
         self.deadline
             .is_none_or(|deadline| Instant::now() < deadline)
@@ -1120,7 +1117,7 @@ impl Gate {
         }
         let link = self.hint.get();
         if self.relay_view {
-            return !relay_may_answer(link, self.relay_waits);
+            return link.detached;
         }
         match self.deadline {
             None => false,
@@ -3282,14 +3279,17 @@ impl Db {
 
     /// Evict the cached rows of a remote query's settled view that its
     /// answer, listing `listed`, left out: the server's result no longer
-    /// holds them for this reader. A row a pending write touches waits for
-    /// the server's own word on it. Each pass reads the view again, so rows
-    /// that move up into a window are checked too.
+    /// holds them for this reader. The answer judges only the rows its read
+    /// view holds: a branch view's answer, the rows on its head branch. A
+    /// row a pending write touches waits for the server's own word on it.
+    /// Each pass reads the view again, so rows that move up into a window
+    /// are checked too.
     fn evict_unanswered(
         &self,
         query: Query,
         binding: BTreeMap<String, Value>,
         include_deleted: bool,
+        view: &ReadViewSourceSpec,
         listed: &[[u8; 16]],
         through: u64,
     ) -> Result<(), Error> {
@@ -3315,18 +3315,30 @@ impl Db {
         };
         // The answer lists the result as of `through`: rows that arrived
         // after it (later in the same batch) are not its to judge.
-        let read = ReadSpec {
-            settled_only: true,
-            include_deleted,
-            cut: Some(crate::compile::Cut::at(through)),
-            ..ReadSpec::default()
+        let opts = ReadOpts {
+            read_view: crate::protocol::ReadViewSpec {
+                source: view.clone(),
+                include_deleted,
+            },
+            ..ReadOpts::default()
         };
-        let table = self
-            .inner
-            .borrow()
-            .schema
-            .stored_table(&prepared.query.table)?
-            .to_owned();
+        let mut read = ReadSpec::of(&opts, &self.inner.borrow())?;
+        // A frozen view is this store's own state, not the server's to judge.
+        if read.frozen() {
+            return Ok(());
+        }
+        read.settled_only = true;
+        read.cut = Some(crate::compile::Cut::at(through));
+        let (table, head) = {
+            let inner = self.inner.borrow();
+            let schema = inner.schema.clone();
+            let table = schema.table(&prepared.query.table)?;
+            let head = match &read.view {
+                Some(view) if !table.branch_by.is_empty() => Some(table.selector_key(&view.head)?),
+                _ => None,
+            };
+            (table.stored.clone(), head)
+        };
         let mut previous = Vec::new();
         loop {
             let inner = self.inner.borrow();
@@ -3353,7 +3365,8 @@ impl Db {
                             .shadow
                             .contains_key(&(table.clone(), row, image.key.clone()))
                     });
-                    if image.seq <= through && !shadowed {
+                    let in_view = head.as_ref().is_none_or(|head| *head == image.key);
+                    if in_view && image.seq <= through && !shadowed {
                         evict.push((row, image.key));
                     }
                 }
@@ -3723,7 +3736,7 @@ impl Db {
             let client = inner.client.as_ref().expect("client");
             let link = client.hint.get();
             if inner.non_durable && tier != ReadTier::Remote {
-                return client.transport.is_some() && relay_may_answer(link, reach.wait.is_some());
+                return client.transport.is_some();
             }
             may_wait(link) && !(live && link.hint != RemoteLinkHint::Live)
         };
@@ -3811,6 +3824,7 @@ impl Db {
                 prepared.query.clone(),
                 prepared.binding.clone(),
                 include_deleted,
+                view,
                 &listed,
                 through,
             )?;
@@ -4350,7 +4364,14 @@ impl Db {
         // holds (`Hold`), so the server ships what is missing or stale.
         for (query, binding, include_deleted, listed, resumed, through) in answered_remotes {
             if let (Some(listed), false) = (listed, resumed) {
-                self.evict_unanswered(query, binding, include_deleted, &listed, through)?;
+                self.evict_unanswered(
+                    query,
+                    binding,
+                    include_deleted,
+                    &ReadViewSourceSpec::Current,
+                    &listed,
+                    through,
+                )?;
             }
         }
         let mut inner = self.inner.borrow_mut();
@@ -4568,6 +4589,7 @@ impl Inner {
                         binding,
                         at: None,
                         include_deleted,
+                        view,
                         ..
                     } = &fetch.ask
                     {
@@ -4575,6 +4597,7 @@ impl Inner {
                             query.clone(),
                             binding.clone(),
                             *include_deleted,
+                            view.clone(),
                             listed,
                             through,
                         ));
@@ -4815,8 +4838,8 @@ impl Db {
         let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
         // The upstream's answers list their results' rows: cached rows
         // they left out are not served as the reader's (INV-SYNC-14).
-        for (query, binding, include_deleted, listed, through) in answers {
-            self.evict_unanswered(query, binding, include_deleted, &listed, through)?;
+        for (query, binding, include_deleted, view, listed, through) in answers {
+            self.evict_unanswered(query, binding, include_deleted, &view, &listed, through)?;
         }
         for message in relayed.into_iter().rev() {
             inbound.push_front(message);
@@ -5362,18 +5385,23 @@ impl Db {
 
     /// A handle that reads and writes through session `index`'s schema.
     /// Session `index`'s relayed LocalFirst subscriptions whose first-load
-    /// wait ran out before the upstream answered: from now on each is this
+    /// wait ran out, or whose upstream can no longer answer (its link
+    /// failed), before the upstream answered: from now on each is this
     /// store's result, settled at once, as when the upstream cannot answer.
     /// The upstream subscription it keeps fills the store when it answers.
     fn serve_due_first_loads(&self, index: usize) -> Result<(), Error> {
         let now = Instant::now();
         let due: Vec<(u64, FirstLoadWait)> = {
             let mut inner = self.inner.borrow_mut();
+            let unanswerable = inner
+                .client
+                .as_ref()
+                .is_none_or(|client| !may_wait(client.hint.get()));
             let session = &mut inner.sessions[index];
             let ids: Vec<u64> = session
                 .first_load
                 .iter()
-                .filter(|(_, wait)| wait.until <= now)
+                .filter(|(_, wait)| unanswerable || wait.until <= now)
                 .map(|(id, _)| *id)
                 .collect();
             ids.into_iter()
