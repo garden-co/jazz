@@ -950,22 +950,22 @@ export class SerializableWriteResult<T> extends WriteResult<T> {
   }
 }
 
-const transactionAdmission = new WeakMap<JazzClient, () => Promise<void>>();
+/** @internal A prerequisite retained by the transaction until native opening. */
+export type TransactionAdmission = () => Promise<void>;
 
-/** @internal Scope an opening prerequisite without adding a public client method. */
-export function withTransactionAdmission<T>(
+// Module-private capability: the prerequisite path does not widen the public API.
+const openTransaction = Symbol("openTransaction");
+
+/** @internal Explicit opening path without per-client ambient state. */
+export function beginClientTransactionAfter(
   client: JazzClient,
-  prepare: () => Promise<void>,
-  begin: () => T,
-): T {
-  const previous = transactionAdmission.get(client);
-  transactionAdmission.set(client, prepare);
-  try {
-    return begin();
-  } finally {
-    if (previous) transactionAdmission.set(client, previous);
-    else transactionAdmission.delete(client);
-  }
+  kind: TransactionKind,
+  session: Session | undefined,
+  attribution: string | undefined,
+  reservedId: OpenTransactionId | undefined,
+  prerequisite: TransactionAdmission | undefined,
+): OpenTransactionId {
+  return client[openTransaction](kind, session, attribution, reservedId, prerequisite);
 }
 
 /** High-level Jazz client. */
@@ -1083,8 +1083,17 @@ export class JazzClient {
     attribution?: string,
     reservedId?: OpenTransactionId,
   ): OpenTransactionId {
+    return this[openTransaction](kind, session, attribution, reservedId);
+  }
+
+  [openTransaction](
+    kind: TransactionKind,
+    session: Session | undefined,
+    attribution: string | undefined,
+    reservedId: OpenTransactionId | undefined,
+    prerequisite?: TransactionAdmission,
+  ): OpenTransactionId {
     const id = reservedId ?? createOpenTransactionId();
-    const prerequisite = transactionAdmission.get(this);
     if (prerequisite) {
       const context = this.writeContext(session, attribution);
       const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
