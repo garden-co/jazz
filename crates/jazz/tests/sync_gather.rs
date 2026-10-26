@@ -14,7 +14,10 @@ use std::collections::BTreeMap;
 use duplex_transport::duplex;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{Gather, Query, col, eq, lit};
+use jazz::query::{
+    Gather, JoinTarget, Operand, Query, ReachableSeed, ReachableVia, RecursionBound, col, eq, lit,
+    ne,
+};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -243,18 +246,190 @@ fn held(db: &Db, table: &str) -> Vec<RowUuid> {
 }
 
 #[test]
-fn a_synced_gather_with_filters_after_it_is_refused() {
+fn a_synced_gather_with_filters_after_it_filters_on_the_replica() {
     let server = open(0);
+    team(&server, 1, "team-1", None);
+    team(&server, 2, "team-2", None);
+    team(&server, 3, "team-3", None);
+    edge(&server, 1, 1, 2);
+    edge(&server, 2, 2, 3);
     let client = connect(&server);
-    let query = edges_from("team-1").filter(eq(col("name"), lit("team-2")));
+    // team-2 is filtered out, but the closure runs through it to team-3.
+    let query = edges_from("team-1").filter(ne(col("name"), lit("team-2")));
     let prepared = client.prepare_query(&query).unwrap();
-    let error = match block_on(client.subscribe(&prepared, ReadOpts::default())) {
-        Err(error) => error,
-        Ok(_) => panic!("a filtered gather must not sync silently"),
-    };
-    assert!(
-        error.message.contains("not supported yet"),
-        "{}",
-        error.message
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        names(&client, &query, ReadTier::LocalOnly),
+        ["team-1", "team-3"]
     );
+    assert_eq!(
+        names(&client, &query, ReadTier::Remote),
+        ["team-1", "team-3"]
+    );
+}
+
+fn hop_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("targets")
+                    .column("rank", ColumnType::Integer)
+                    .nullable_fk_column("next_id", "targets")
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("sources")
+                    .fk_column("target_id", "targets")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn seed(db: &Db, table: &str, row: RowUuid, cells: Vec<(&str, Value)>) {
+    db.seed_settled_mergeable_for_bootstrap(
+        table,
+        row,
+        AuthorSubject::SYSTEM,
+        cells
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect(),
+    )
+    .unwrap();
+}
+
+/// What a gather seeded through a hop lowers to (`sources.where(..)
+/// .hopTo("target").gather(..)`): the walk visits `targets`, starting from
+/// the targets the seed `sources` rows reference.
+fn targets_reached_from(source: RowUuid, max_depth: usize) -> Query {
+    let mut query = Query::from("targets");
+    query.reachable.push(ReachableVia {
+        access_table: "targets".to_owned(),
+        access_row_column: "id".to_owned(),
+        access_team_column: "id".to_owned(),
+        access_team_target: JoinTarget::RowId,
+        from: Operand::Literal(Value::Uuid(uuid::Uuid::nil())),
+        access_filters: Vec::new(),
+        edge_table: "targets".to_owned(),
+        edge_member_column: "id".to_owned(),
+        edge_parent_column: "next_id".to_owned(),
+        edge_filters: Vec::new(),
+        bound: RecursionBound::MaxDepth(max_depth),
+        seed: Some(ReachableSeed {
+            table: "sources".to_owned(),
+            user_column: None,
+            user_claim: None,
+            team_column: "target_id".to_owned(),
+            filters: vec![eq(col("id"), lit(Value::Uuid(source.0)))],
+        }),
+    });
+    query
+}
+
+fn ranks(db: &Db, query: &Query, tier: ReadTier) -> Vec<i64> {
+    let prepared = db.prepare_query(query).unwrap();
+    let opts = ReadOpts {
+        tier,
+        ..ReadOpts::default()
+    };
+    let mut ranks: Vec<i64> = block_on(db.all(&prepared, opts))
+        .unwrap()
+        .iter()
+        .filter_map(|row| {
+            row.cells().find_map(|(name, value)| match (name, value) {
+                ("rank", Some(Value::I32(n))) => Some(i64::from(*n)),
+                _ => None,
+            })
+        })
+        .collect();
+    ranks.sort();
+    ranks
+}
+
+#[test]
+fn a_synced_gather_seeded_through_a_hop_ships_its_seed_rows() {
+    let config = DbConfig::new(
+        hop_schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    );
+    let server = block_on(Db::open_history_complete(config)).unwrap();
+    let (first, second, third) = (id(1, 1), id(1, 2), id(1, 3));
+    seed(
+        &server,
+        "targets",
+        third,
+        vec![("rank", Value::I32(9)), ("next_id", Value::Nullable(None))],
+    );
+    seed(
+        &server,
+        "targets",
+        second,
+        vec![("rank", Value::I32(8)), ("next_id", Value::Uuid(third.0))],
+    );
+    seed(
+        &server,
+        "targets",
+        first,
+        vec![("rank", Value::I32(7)), ("next_id", Value::Uuid(second.0))],
+    );
+    let source = id(2, 1);
+    seed(
+        &server,
+        "sources",
+        source,
+        vec![("target_id", Value::Uuid(first.0))],
+    );
+
+    let client = block_on(Db::open(DbConfig::new(
+        hop_schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let (client_side, server_side) = duplex();
+    let _ = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+
+    let query = targets_reached_from(source, 1);
+    let filtered = targets_reached_from(source, 1).filter(eq(col("rank"), lit(8i32)));
+    let prepared = client.prepare_query(&query).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let prepared_filtered = client.prepare_query(&filtered).unwrap();
+    let _filtered = block_on(client.subscribe(&prepared_filtered, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ranks(&client, &query, ReadTier::LocalOnly), [7, 8]);
+    assert_eq!(ranks(&client, &query, ReadTier::Remote), [7, 8]);
+    assert_eq!(ranks(&client, &filtered, ReadTier::LocalOnly), [8]);
+    assert_eq!(ranks(&client, &filtered, ReadTier::Remote), [8]);
+
+    // A new seed row starts the walk from another target too.
+    let mut every = targets_reached_from(source, 1);
+    every.reachable[0].seed.as_mut().unwrap().filters.clear();
+    let prepared_every = client.prepare_query(&every).unwrap();
+    let _every = block_on(client.subscribe(&prepared_every, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ranks(&client, &every, ReadTier::LocalOnly), [7, 8]);
+    let fourth = id(1, 4);
+    seed(
+        &server,
+        "targets",
+        fourth,
+        vec![("rank", Value::I32(4)), ("next_id", Value::Nullable(None))],
+    );
+    seed(
+        &server,
+        "sources",
+        id(2, 2),
+        vec![("target_id", Value::Uuid(fourth.0))],
+    );
+    pump(&server, &client);
+    assert_eq!(ranks(&client, &every, ReadTier::LocalOnly), [4, 7, 8]);
+    assert_eq!(ranks(&client, &query, ReadTier::LocalOnly), [7, 8]);
 }

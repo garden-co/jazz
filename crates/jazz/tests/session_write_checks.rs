@@ -14,7 +14,7 @@ use duplex_transport::duplex;
 use jazz::db::WriteIdentity;
 use jazz::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, ReadTier, UpdateOptions,
-    block_on,
+    UpsertOptions, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -53,6 +53,15 @@ fn schema() -> JazzSchema {
                     ),
             )
             .table(
+                TableSchemaBuilder::new("notes")
+                    .column("data", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(exists("admins", vec![session_eq("user_id", &SUB)]))
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                    ),
+            )
+            .table(
                 TableSchemaBuilder::new("protected")
                     .column("data", ColumnType::Text)
                     .policies(
@@ -66,7 +75,7 @@ fn schema() -> JazzSchema {
             )
             .table(
                 // Only reads are declared: every write is denied.
-                TableSchemaBuilder::new("notes")
+                TableSchemaBuilder::new("drafts")
                     .column("body", ColumnType::Text)
                     .policies(TablePolicies::new().with_select(PolicyExpr::True)),
             )
@@ -170,11 +179,11 @@ fn with_check_compares_the_new_row_with_the_old_one() {
 #[test]
 fn an_operation_without_a_policy_denies_session_writes() {
     let db = open(0);
-    seed(&db, "notes", id(4, 1), &[("body", text("first"))]);
+    seed(&db, "drafts", id(4, 1), &[("body", text("first"))]);
     let alice = user(&db, 1, "alice");
     let session = WriteIdentity::Session(alice);
     let insert = block_on(db.insert(
-        "notes",
+        "drafts",
         BTreeMap::from([("body".to_owned(), text("second"))]),
         InsertOptions {
             identity: session,
@@ -185,7 +194,7 @@ fn an_operation_without_a_policy_denies_session_writes() {
     .expect("no insert policy");
     assert!(insert.is_authorization_denied(), "{}", insert.message);
     let update = block_on(db.update(
-        "notes",
+        "drafts",
         id(4, 1),
         BTreeMap::from([("body".to_owned(), text("edited"))]),
         as_session(alice),
@@ -194,7 +203,7 @@ fn an_operation_without_a_policy_denies_session_writes() {
     .expect("no update policy");
     assert!(update.is_authorization_denied(), "{}", update.message);
     let delete = block_on(db.delete(
-        "notes",
+        "drafts",
         id(4, 1),
         DeleteOptions {
             identity: session,
@@ -204,16 +213,16 @@ fn an_operation_without_a_policy_denies_session_writes() {
     .err()
     .expect("no delete policy");
     assert!(delete.is_authorization_denied(), "{}", delete.message);
-    assert_eq!(cell(&db, "notes", "body"), text("first"));
+    assert_eq!(cell(&db, "drafts", "body"), text("first"));
 
     block_on(db.update(
-        "notes",
+        "drafts",
         id(4, 1),
         BTreeMap::from([("body".to_owned(), text("edited"))]),
         UpdateOptions::default(),
     ))
     .expect("the database writes without a policy");
-    assert_eq!(cell(&db, "notes", "body"), text("edited"));
+    assert_eq!(cell(&db, "drafts", "body"), text("edited"));
 }
 
 #[test]
@@ -259,6 +268,61 @@ fn a_trusted_links_session_write_is_checked_as_that_session_at_the_authority() {
     .unwrap();
     pump();
     assert_eq!(cell(&server, "protected", "data"), text("alice"));
+}
+
+/// Read-for-write under a read policy that reads other rows: the replica
+/// may lack the rows that grant access, so it stages an upsert and the
+/// authority refuses a session that may not read the row. An update merges
+/// into the session's view of the row, so the replica refuses it at once.
+#[test]
+fn a_replica_leaves_a_relational_read_for_write_upsert_to_the_authority() {
+    let server = open(0);
+    seed(&server, "admins", id(2, 1), &[("user_id", text("alice"))]);
+    seed(&server, "notes", id(4, 1), &[("data", text("initial"))]);
+    let backend = open(1);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(backend.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let pump = || {
+        for _ in 0..4 {
+            block_on(backend.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(backend.tick()).unwrap();
+    };
+    let prepared = backend.prepare_query(&Query::from("notes")).unwrap();
+    let _stream = block_on(backend.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump();
+    assert_eq!(cell(&backend, "notes", "data"), text("initial"));
+
+    let bob = user(&backend, 2, "bob");
+    user(&server, 2, "bob");
+    let error = block_on(backend.update(
+        "notes",
+        id(4, 1),
+        BTreeMap::from([("data".to_owned(), text("bob"))]),
+        as_session(bob),
+    ))
+    .err()
+    .expect("an update of a row hidden from the session is refused at once");
+    assert!(
+        error.message.contains("read policy denied UPDATE"),
+        "{}",
+        error.message
+    );
+    block_on(backend.upsert(
+        "notes",
+        id(4, 1),
+        BTreeMap::from([("data".to_owned(), text("bob"))]),
+        UpsertOptions {
+            identity: WriteIdentity::Session(bob),
+            ..Default::default()
+        },
+    ))
+    .expect("the replica stages the session upsert");
+    pump();
+    assert_eq!(cell(&server, "notes", "data"), text("initial"));
+    assert_eq!(cell(&backend, "notes", "data"), text("initial"));
 }
 
 /// A session link cannot vouch for the sessions its runtime writes as: the

@@ -83,6 +83,8 @@ mod relation_policies;
 mod relation_queries;
 #[path = "../relation_results.rs"]
 mod relation_results;
+#[path = "../relay_policy_subscriptions.rs"]
+mod relay_policy_subscriptions;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]

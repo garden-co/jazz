@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
 use jazz::db::{
@@ -653,7 +653,12 @@ impl Foreground {
         if let Some(error) = &write.rejected {
             self.mutation_errors.borrow_mut().push(MutationErrorReport {
                 claimed: Some(Rc::clone(&claimed)),
-                event: mutation_error_event(&write.tx_id.to_string(), error, false),
+                event: mutation_error_event(
+                    &write.tx_id.to_string(),
+                    error,
+                    write.serializable,
+                    false,
+                ),
             });
             self.notify = true;
         }
@@ -810,6 +815,8 @@ pub(crate) struct RelayWorker {
     drive_error: Option<String>,
     /// The last drive stopped at its round bound with work left.
     redrive: bool,
+    /// When time-bound waits were last evaluated.
+    timed: Instant,
 }
 
 /// A binding's tick requests set `dirty`; the owner's drive ticks it.
@@ -869,6 +876,7 @@ impl RelayWorker {
             next_client: 0,
             drive_error: None,
             redrive: false,
+            timed: Instant::now(),
         })
     }
 
@@ -883,16 +891,7 @@ impl RelayWorker {
             } else if self.awaits_time() {
                 match receiver.recv_timeout(NATIVE_RELAY_POLL_INTERVAL) {
                     Ok(command) => Some(command),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        // Time-bound waits are evaluated on tick.
-                        for client in self.clients.values() {
-                            if client.awaits_time() {
-                                client.dirty.set(true);
-                            }
-                        }
-                        self.persistent_dirty.set(true);
-                        None
-                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             } else {
@@ -909,6 +908,18 @@ impl RelayWorker {
                     return;
                 }
                 None => {}
+            }
+            // Time-bound waits are evaluated on tick, at least once a poll
+            // interval: also while commands keep arriving (a foreground
+            // polling its pending reads).
+            if self.awaits_time() && self.timed.elapsed() >= NATIVE_RELAY_POLL_INTERVAL {
+                self.timed = Instant::now();
+                for client in self.clients.values() {
+                    if client.awaits_time() {
+                        client.dirty.set(true);
+                    }
+                }
+                self.persistent_dirty.set(true);
             }
             self.drive();
         }
@@ -959,10 +970,10 @@ impl RelayWorker {
         let dirty = hook(&binding);
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
-        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error| {
+        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error, serializable| {
             reports.borrow_mut().push(MutationErrorReport {
                 claimed: None,
-                event: mutation_error_event(&tx_id.to_string(), error, true),
+                event: mutation_error_event(&tx_id.to_string(), error, serializable, true),
             });
         }));
         self.persistent
@@ -1168,14 +1179,19 @@ fn operation_response(
 
 /// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
 /// the authority, if `upstream`), as NAPI reports it.
-fn mutation_error_event(tx: &str, error: &jazz::db::Error, upstream: bool) -> serde_json::Value {
+fn mutation_error_event(
+    tx: &str,
+    error: &jazz::db::Error,
+    serializable: bool,
+    upstream: bool,
+) -> serde_json::Value {
     let (code, reason) = binding_host::mutation_error_parts(error, upstream);
     serde_json::json!({
         "code": code,
         "reason": reason,
         "transaction": {
             "transactionId": tx,
-            "kind": "mergeable",
+            "kind": binding_host::transaction_kind(serializable),
             "sealed": true,
             "latestSettlement": {
                 "kind": "rejected",

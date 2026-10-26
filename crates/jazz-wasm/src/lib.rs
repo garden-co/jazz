@@ -447,8 +447,15 @@ impl WasmDbInner {
             }
         }));
         let reporter = Rc::clone(&host);
-        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error| {
-            report_later(&reporter, &tx_id.to_string(), error, true, None);
+        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error, serializable| {
+            report_later(
+                &reporter,
+                &tx_id.to_string(),
+                error,
+                serializable,
+                true,
+                None,
+            );
         }));
         Self { binding, host }
     }
@@ -475,6 +482,7 @@ impl WasmDbInner {
             &self.host,
             &write.tx_id.to_string(),
             error,
+            write.serializable,
             false,
             Some(claimed),
         );
@@ -488,11 +496,12 @@ fn report_later(
     host: &Rc<Host>,
     tx: &str,
     error: &Error,
+    serializable: bool,
     upstream: bool,
     claimed: Option<Rc<std::cell::Cell<bool>>>,
 ) {
     let host = Rc::clone(host);
-    let event = mutation_error_event(tx, error, upstream);
+    let event = mutation_error_event(tx, error, serializable, upstream);
     let report = Closure::once_into_js(move || {
         if claimed.is_some_and(|claimed| claimed.get()) {
             return;
@@ -512,7 +521,12 @@ fn report_later(
 
 /// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
 /// the authority, if `upstream`).
-fn mutation_error_event(tx: &str, error: &Error, upstream: bool) -> Result<JsValue, JsValue> {
+fn mutation_error_event(
+    tx: &str,
+    error: &Error,
+    serializable: bool,
+    upstream: bool,
+) -> Result<JsValue, JsValue> {
     let (code, reason) = binding_host::mutation_error_parts(error, upstream);
     let rejected = js_sys::Object::new();
     set_prop(&rejected, "kind", JsValue::from_str("rejected"))?;
@@ -521,7 +535,11 @@ fn mutation_error_event(tx: &str, error: &Error, upstream: bool) -> Result<JsVal
     set_prop(&rejected, "reason", JsValue::from_str(&reason))?;
     let transaction = js_sys::Object::new();
     set_prop(&transaction, "transactionId", JsValue::from_str(tx))?;
-    set_prop(&transaction, "kind", JsValue::from_str("mergeable"))?;
+    set_prop(
+        &transaction,
+        "kind",
+        JsValue::from_str(binding_host::transaction_kind(serializable)),
+    )?;
     set_prop(&transaction, "sealed", JsValue::TRUE)?;
     set_prop(&transaction, "latestSettlement", rejected.into())?;
     let event = js_sys::Object::new();

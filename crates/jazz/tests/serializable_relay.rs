@@ -542,3 +542,49 @@ fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
         1
     );
 }
+
+#[test]
+fn a_tabs_later_commit_conflicts_with_its_open_transaction_over_the_same_row() {
+    let net = Net::with_worker_hint(1, RemoteLinkHint::NoServer);
+    let tab = net.tab(0);
+    // The seat is still unsettled when both transactions begin.
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let seat = block_on(tab.insert("seats", cells, Default::default()))
+        .unwrap()
+        .row_uuid();
+    let (alice, bob) = (OpenTransactionId::new(), OpenTransactionId::new());
+    block_on(tab.begin_serializable(alice)).unwrap();
+    block_on(tab.begin_serializable(bob)).unwrap();
+    for (open, name) in [(alice, "alice"), (bob, "bob")] {
+        net.drive(tab.serializable_tx_ref(open).update(
+            "seats",
+            seat,
+            holder(name),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    net.drive(tab.commit_serializable_handle(alice)).unwrap();
+    assert_conflict(net.drive(tab.commit_serializable_handle(bob)).map(drop));
+}
+
+#[test]
+fn a_tabs_write_is_local_once_its_worker_stored_it() {
+    let mut net = Net::new(1);
+    // No fate can come back: only the worker's own store makes it local.
+    net.worker_offline();
+    let tab = net.tab(0);
+    let write = block_on(tab.insert("invites", code("offline"), Default::default())).unwrap();
+    let mut local = pin!(tab.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Local));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        local.as_mut().poll(&mut context).is_pending(),
+        "a non-durable tab's own store does not make its write local"
+    );
+    block_on(tab.tick()).unwrap();
+    assert!(local.as_mut().poll(&mut context).is_pending());
+    block_on(net.worker.tick()).unwrap();
+    block_on(tab.tick()).unwrap();
+    assert!(local.as_mut().poll(&mut context).is_ready());
+}

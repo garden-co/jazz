@@ -69,6 +69,11 @@ async function setup(label: string) {
   return { tab, direct, seat, seen };
 }
 
+// The worker refuses the commit itself once it has heard of the server's
+// change (`transaction_conflict`); before that the server does
+// (`serialization_conflict`). Either way the booking is refused.
+const CONFLICT = /\((?:transaction|serialization)_conflict\)/;
+
 async function holders(db: Db): Promise<string[]> {
   const rows = await db.all(app.seats, { tier: ReadTier.Remote });
   return rows.map((row) => row.holder).filter((holder) => holder !== "");
@@ -93,7 +98,7 @@ it("refuses a tab's blind write over a seat the server changed after its snapsho
   tx.update(app.seats, seat.id, { holder: "tab" });
   await expect(
     withTimeout(tx.commit().wait({ tier: "global" }), 15_000, "the conflict did not arrive"),
-  ).rejects.toThrow(/changed since/);
+  ).rejects.toThrow(CONFLICT);
   expect(await holders(direct)).toEqual(["direct"]);
 });
 
@@ -106,6 +111,6 @@ it("refuses a tab's booking of a seat taken after it read the seat as free", asy
   tx.update(app.seats, seat.id, { holder: "tab" });
   await expect(
     withTimeout(tx.commit().wait({ tier: "global" }), 15_000, "the conflict did not arrive"),
-  ).rejects.toThrow(/changed since/);
+  ).rejects.toThrow(CONFLICT);
   expect(await holders(direct)).toEqual(["direct"]);
 });

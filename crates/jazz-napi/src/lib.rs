@@ -569,9 +569,9 @@ impl Inner {
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
         let reporter = Rc::clone(&host);
-        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error| {
+        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error, serializable| {
             if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
-                let event = mutation_error_event(&tx_id.to_string(), error, true);
+                let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
                 callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
             }
         }));
@@ -606,7 +606,8 @@ impl Inner {
         claimed: Rc<Cell<bool>>,
     ) -> napi::Result<()> {
         let host = Rc::clone(&self.host);
-        let event = mutation_error_event(&write.tx_id.to_string(), error, false);
+        let event =
+            mutation_error_event(&write.tx_id.to_string(), error, write.serializable, false);
         let report = env.create_function_from_closure("reportMutationError", move |context| {
             if claimed.get() {
                 return Ok(());
@@ -631,14 +632,19 @@ type SetTimeout<'a> = Function<'a, FnArgs<(Function<'a, (), ()>, f64)>, Unknown<
 
 /// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
 /// the authority, if `upstream`).
-fn mutation_error_event(tx: &str, error: &CoreError, upstream: bool) -> serde_json::Value {
+fn mutation_error_event(
+    tx: &str,
+    error: &CoreError,
+    serializable: bool,
+    upstream: bool,
+) -> serde_json::Value {
     let (code, reason) = binding_host::mutation_error_parts(error, upstream);
     serde_json::json!({
         "code": code,
         "reason": reason,
         "transaction": {
             "transactionId": tx,
-            "kind": "mergeable",
+            "kind": binding_host::transaction_kind(serializable),
             "sealed": true,
             "latestSettlement": {
                 "kind": "rejected",

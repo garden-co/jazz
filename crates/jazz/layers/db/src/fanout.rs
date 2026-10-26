@@ -518,7 +518,13 @@ impl Inner {
             })
             .and_then(|(column, value)| {
                 let governing = policies.by_stored(&root.stored)?;
-                Some((governing.stored_name(&column).to_owned(), value))
+                // As for a query key: only an application column is in a
+                // changed row's image (`$createdBy.account` is not).
+                governing
+                    .columns
+                    .iter()
+                    .any(|c| c.name == column)
+                    .then(|| (governing.stored_name(&column).to_owned(), value))
             });
         let mut watches = Vec::new();
         let root_key = if structural.contains(&root.stored) {

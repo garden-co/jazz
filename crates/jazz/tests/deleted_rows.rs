@@ -722,3 +722,48 @@ fn synced_include_deleted_subscriptions_keep_deleted_rows() {
         [("first", false), ("second", true), ("third", true)]
     );
 }
+
+/// A remote read asked right after a write, before any tick sent it, goes
+/// out behind that write: the server answers with the writer's own row.
+#[test]
+fn a_remote_read_after_an_unsent_write_sees_it() {
+    let synced = Synced::new();
+    synced.pump();
+    insert(&synced.alice, row(7), "mine");
+    assert_eq!(
+        titles(&synced.alice_reads(&notes().select(["title"]), remote(ReadOpts::default()))),
+        ["mine"]
+    );
+}
+
+/// A subscription's first answer (an empty result) and a row the server
+/// committed after it arrive in one batch: the answer lists its result as of
+/// its own seq, so the later row stays listed and reaches the subscription.
+#[test]
+fn a_row_arriving_with_an_earlier_empty_answer_stays_listed() {
+    let synced = Synced::new();
+    synced.pump();
+    let prepared = synced
+        .alice
+        .prepare_query(&notes().select(["title"]))
+        .unwrap();
+    let mut subscription =
+        block_on(synced.alice.subscribe(&prepared, ReadOpts::default())).unwrap();
+    // The Subscribe goes out and the server answers it, empty.
+    block_on(synced.alice.tick()).unwrap();
+    block_on(synced.server.tick()).unwrap();
+    // A write lands before Alice reads that answer.
+    insert(&synced.server, row(5), "from bob");
+    block_on(synced.server.tick()).unwrap();
+    synced.pump();
+    assert_eq!(
+        titles(&read(
+            &synced.alice,
+            &notes().select(["title"]),
+            local_only(ReadOpts::default())
+        )),
+        ["from bob"]
+    );
+    let (added, ..) = drain(&mut subscription);
+    assert_eq!(added.len(), 1, "the subscription shows the row");
+}
