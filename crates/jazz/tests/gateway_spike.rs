@@ -142,6 +142,185 @@ struct Conn {
     subs: HashMap<u64, usize>,
     fetches: HashMap<u64, usize>,
     txs: HashMap<u64, usize>,
+    /// Subscriptions and reads fanned out to several shards.
+    multi: HashMap<u64, Multi>,
+    multi_fetches: HashMap<u64, Multi>,
+}
+
+/// A query fanned out to several shards: each shard's latest answer, and
+/// the sort keys of the rows in them, to merge into the client's result.
+struct Multi {
+    table: String,
+    order: Option<(String, bool)>,
+    limit: Option<usize>,
+    /// Per shard: (rows of its latest window or answer, through, global);
+    /// `None` until it first answered.
+    answers: BTreeMap<usize, Option<(Vec<[u8; 16]>, u64, bool)>>,
+    keys: HashMap<[u8; 16], jazz::db::SyncCell>,
+    /// A limited, ordered subscription asks each shard for its quota of
+    /// rows rather than the whole limit, and raises a shard's quota when
+    /// that shard may hold rows the merged window needs.
+    quota: BTreeMap<usize, usize>,
+    /// The client's `Subscribe`, to ask a shard again with a new quota.
+    template: Option<SyncMessage>,
+    /// Times a shard was asked again for more rows.
+    raised: usize,
+}
+
+thread_local! {
+    /// Whether fanned-out windows use quotas (off: every shard ships the
+    /// whole limit, the naive merge).
+    static QUOTAS: RefCell<bool> = const { RefCell::new(true) };
+}
+
+/// Quota per shard for `k` rows over `n` shards: the mean share plus two
+/// standard deviations (B2's adaptive quota with no history yet).
+fn initial_quota(k: usize, n: usize) -> usize {
+    if !QUOTAS.with(|q| *q.borrow()) {
+        return k;
+    }
+    let mean = k as f64 / n as f64;
+    ((mean + 2.0 * mean.sqrt()).ceil() as usize).clamp(1, k)
+}
+
+impl Multi {
+    fn new(query: &Query, shards: &[usize]) -> Self {
+        Self {
+            table: query.table.clone(),
+            order: query.order_by.first().map(|o| {
+                (
+                    o.column.clone(),
+                    matches!(o.direction, OrderDirection::Desc),
+                )
+            }),
+            limit: query.limit,
+            answers: shards.iter().map(|&s| (s, None)).collect(),
+            keys: HashMap::new(),
+            quota: BTreeMap::new(),
+            template: None,
+            raised: 0,
+        }
+    }
+
+    /// A fanned-out subscription: quotas when it is limited and ordered.
+    fn subscription(template: SyncMessage, shards: &[usize]) -> Self {
+        let SyncMessage::Subscribe { query, .. } = &template else {
+            unreachable!()
+        };
+        let mut multi = Self::new(query, shards);
+        if let (Some(k), Some(_)) = (multi.limit, &multi.order) {
+            let q = initial_quota(k, shards.len());
+            multi.quota = shards.iter().map(|&s| (s, q)).collect();
+        }
+        multi.template = Some(template);
+        multi
+    }
+
+    /// The `Subscribe` shard `shard` gets: the client's, at its quota.
+    fn ask(&self, shard: usize) -> SyncMessage {
+        let mut message = self.template.clone().unwrap();
+        if let SyncMessage::Subscribe { query, since, .. } = &mut message {
+            *since = None;
+            if let Some(q) = self.quota.get(&shard) {
+                query.limit = Some(*q);
+            }
+        }
+        message
+    }
+
+    fn sort(&self, rows: &mut [[u8; 16]]) {
+        if let Some((_, desc)) = &self.order {
+            let keys = &self.keys;
+            rows.sort_by(|a, b| {
+                let ord = cmp_cells(keys.get(a), keys.get(b)).then(a.cmp(b));
+                if *desc { ord.reverse() } else { ord }
+            });
+        }
+    }
+
+    /// Shards whose full quota window ends at or before the merged
+    /// window's last row (or whose rows the merged window runs short of):
+    /// they may hold more rows that belong in it.
+    fn short_shards(&self, merged: &[[u8; 16]]) -> Vec<usize> {
+        let Some(k) = self.limit else {
+            return Vec::new();
+        };
+        let mut short = Vec::new();
+        for (&shard, answer) in &self.answers {
+            let (Some((rows, _, _)), Some(&q)) = (answer, self.quota.get(&shard)) else {
+                continue;
+            };
+            if q >= k || rows.len() < q {
+                continue;
+            }
+            let mut own = rows.clone();
+            self.sort(&mut own);
+            let last = own.last().unwrap();
+            let needed = merged.len() < k || merged.contains(last);
+            if needed {
+                short.push(shard);
+            }
+        }
+        short
+    }
+
+    fn record(&mut self, image: &jazz::db::Image) {
+        if image.table != self.table {
+            return;
+        }
+        if let Some((column, _)) = &self.order
+            && let Some((_, cell)) = image.cells.iter().find(|(n, _)| n == column)
+        {
+            self.keys.insert(image.id, cell.clone());
+        }
+    }
+
+    /// Every shard answered: the merged rows (ordered and cut to the
+    /// limit when the query has them), the highest tagged through, and
+    /// whether every answer was global.
+    fn merged(&mut self) -> Option<(Vec<[u8; 16]>, u64, bool)> {
+        let mut rows = Vec::new();
+        let mut through = 0;
+        let mut global = true;
+        for answer in self.answers.values() {
+            let (r, t, g) = answer.as_ref()?;
+            rows.extend_from_slice(r);
+            through = through.max(*t);
+            global &= *g;
+        }
+        self.sort(&mut rows);
+        if let Some(limit) = self.limit {
+            rows.truncate(limit);
+        }
+        // Keys of rows no shard window holds any more are dropped.
+        let live: HashSet<[u8; 16]> = self
+            .answers
+            .values()
+            .flatten()
+            .flat_map(|(r, _, _)| r.iter().copied())
+            .collect();
+        self.keys.retain(|id, _| live.contains(id));
+        Some((rows, through, global))
+    }
+}
+
+fn cmp_cells(a: Option<&jazz::db::SyncCell>, b: Option<&jazz::db::SyncCell>) -> std::cmp::Ordering {
+    use jazz::db::SyncCell::*;
+    use std::cmp::Ordering;
+    let rank = |c: Option<&jazz::db::SyncCell>| match c {
+        None | Some(Null) => 0,
+        Some(Int(_)) | Some(Real(_)) => 1,
+        Some(Text(_)) => 2,
+        Some(Blob(_)) => 3,
+    };
+    match (a, b) {
+        (Some(Int(x)), Some(Int(y))) => x.cmp(y),
+        (Some(Real(x)), Some(Real(y))) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Some(Int(x)), Some(Real(y))) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Some(Real(x)), Some(Int(y))) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
+        (Some(Text(x)), Some(Text(y))) | (Some(Blob(x)), Some(Blob(y))) => x.cmp(y),
+        _ => rank(a).cmp(&rank(b)),
+    }
 }
 
 struct Gateway {
@@ -170,6 +349,8 @@ impl Gateway {
             subs: HashMap::new(),
             fetches: HashMap::new(),
             txs: HashMap::new(),
+            multi: HashMap::new(),
+            multi_fetches: HashMap::new(),
         });
     }
 
@@ -229,10 +410,21 @@ impl Gateway {
             }
             // Shards → client.
             let mut down = Vec::new();
+            let mut arrived = Vec::new();
             for (&shard, link) in conn.links.iter_mut() {
                 while let Some(message) = link.transport.try_recv() {
-                    down.push(retag_down(shard, message));
+                    arrived.push((shard, retag_down(shard, message)));
                 }
+            }
+            let mut again = Vec::new();
+            for (shard, message) in arrived {
+                down.extend(merge_down(conn, shard, message, &mut again));
+            }
+            for (shard, message) in again {
+                Self::link(&shards, &mut self.stats, conn, shard)
+                    .transport
+                    .send(message)
+                    .unwrap();
             }
             for message in down {
                 self.stats.down += 1;
@@ -300,17 +492,32 @@ fn route_up(
             wait,
         } => {
             let Some(shard) = pinned_shard(&query, &binding, shards) else {
-                stats.refused.push(format!(
-                    "subscription {id} on {} names no partition",
-                    query.table
-                ));
-                let _ = conn.client.send(SyncMessage::Refused {
+                if let Some(why) = unmergeable(&query) {
+                    stats.refused.push(format!("subscription {id}: {why}"));
+                    let _ = conn.client.send(SyncMessage::Refused {
+                        id,
+                        code: jazz::db::ErrorCode::Query,
+                        message: why,
+                    });
+                    return Vec::new();
+                }
+                // Fan out to every shard the query may reach. A multi-shard
+                // `since` is a vector the client cannot hold yet, so the
+                // shards ship the result afresh.
+                let reach = reach(&query, shards);
+                let template = SyncMessage::Subscribe {
                     id,
-                    code: jazz::db::ErrorCode::Query,
-                    message: "a query across partitions is not supported by this gateway yet"
-                        .into(),
-                });
-                return Vec::new();
+                    query,
+                    binding,
+                    since: None,
+                    include_deleted,
+                    tier,
+                    wait,
+                };
+                let multi = Multi::subscription(template, &reach);
+                let asks = reach.iter().map(|&s| (s, multi.ask(s))).collect();
+                conn.multi.insert(id, multi);
+                return asks;
             };
             conn.subs.insert(id, shard);
             let since = since.and_then(|s| {
@@ -330,10 +537,19 @@ fn route_up(
                 },
             )]
         }
-        SyncMessage::Unsubscribe { id } => match conn.subs.remove(&id) {
-            Some(shard) => vec![(shard, SyncMessage::Unsubscribe { id })],
-            None => Vec::new(),
-        },
+        SyncMessage::Unsubscribe { id } => {
+            if let Some(multi) = conn.multi.remove(&id) {
+                return multi
+                    .answers
+                    .keys()
+                    .map(|&s| (s, SyncMessage::Unsubscribe { id }))
+                    .collect();
+            }
+            match conn.subs.remove(&id) {
+                Some(shard) => vec![(shard, SyncMessage::Unsubscribe { id })],
+                None => Vec::new(),
+            }
+        }
         SyncMessage::Fetch {
             id,
             query,
@@ -344,15 +560,35 @@ fn route_up(
             wait,
         } => {
             let Some(shard) = pinned_shard(&query, &binding, shards) else {
-                stats
-                    .refused
-                    .push(format!("read {id} on {} names no partition", query.table));
-                let _ = conn.client.send(SyncMessage::Refused {
-                    id,
-                    code: jazz::db::ErrorCode::Query,
-                    message: "a read across partitions is not supported by this gateway yet".into(),
+                let why = unmergeable(&query).or_else(|| {
+                    at.map(|_| "a historical read across partitions is not supported yet".into())
                 });
-                return Vec::new();
+                if let Some(why) = why {
+                    stats.refused.push(format!("read {id}: {why}"));
+                    let _ = conn.client.send(SyncMessage::Refused {
+                        id,
+                        code: jazz::db::ErrorCode::Query,
+                        message: why,
+                    });
+                    return Vec::new();
+                }
+                let reach = reach(&query, shards);
+                conn.multi_fetches.insert(id, Multi::new(&query, &reach));
+                return reach
+                    .into_iter()
+                    .map(|s| {
+                        let message = SyncMessage::Fetch {
+                            id,
+                            query: query.clone(),
+                            binding: binding.clone(),
+                            at: None,
+                            include_deleted,
+                            tier,
+                            wait,
+                        };
+                        (s, message)
+                    })
+                    .collect();
             };
             conn.fetches.insert(id, shard);
             let at = at.map(|s| untag_seq(s).1);
@@ -439,6 +675,110 @@ fn route_up(
                 .push(format!("not routed: {}", variant(&other)));
             Vec::new()
         }
+    }
+}
+
+/// Why a query cannot be merged from per-shard answers, if it cannot.
+fn unmergeable(query: &Query) -> Option<String> {
+    if query.offset > 0 {
+        return Some(
+            "offset on a query across partitions is not supported; page by key instead".into(),
+        );
+    }
+    if query.aggregate.is_some() {
+        return Some("an aggregate across partitions is not supported yet".into());
+    }
+    if query.order_by.len() > 1 {
+        return Some(
+            "more than one sort key across partitions is not supported by this gateway yet".into(),
+        );
+    }
+    None
+}
+
+/// The shards an unpinned query may reach. Every shard, for now; a
+/// session's reach set from directories narrows it.
+fn reach(_query: &Query, shards: usize) -> Vec<usize> {
+    (0..shards).collect()
+}
+
+/// A shard's message for a fanned-out query is folded into the merged
+/// result; anything else passes through.
+fn merge_down(
+    conn: &mut Conn,
+    shard: usize,
+    message: SyncMessage,
+    up: &mut Vec<(usize, SyncMessage)>,
+) -> Vec<SyncMessage> {
+    match message {
+        SyncMessage::Rows { ref images } | SyncMessage::RowsPart { ref images } => {
+            for multi in conn
+                .multi
+                .values_mut()
+                .chain(conn.multi_fetches.values_mut())
+            {
+                for image in images {
+                    multi.record(image);
+                }
+            }
+            vec![message]
+        }
+        SyncMessage::Settled {
+            id,
+            through,
+            window,
+            global,
+        } if conn.multi.contains_key(&id) => {
+            let multi = conn.multi.get_mut(&id).unwrap();
+            // An unlimited query's Settled lists no window: its rows are
+            // whatever the shard shipped, so nothing to merge.
+            let rows = window.clone().unwrap_or_default();
+            multi.answers.insert(shard, Some((rows, through, global)));
+            match multi.merged() {
+                Some((rows, _, _)) if !multi.short_shards(&rows).is_empty() => {
+                    // Ask the short shards again for twice their quota; the
+                    // client's result waits for their answers.
+                    for s in multi.short_shards(&rows) {
+                        let k = multi.limit.unwrap();
+                        let q = multi.quota.get_mut(&s).unwrap();
+                        *q = (*q * 2).min(k);
+                        multi.answers.insert(s, None);
+                        multi.raised += 1;
+                        up.push((s, SyncMessage::Unsubscribe { id }));
+                        up.push((s, multi.ask(s)));
+                    }
+                    Vec::new()
+                }
+                Some((rows, through, global)) => vec![SyncMessage::Settled {
+                    id,
+                    through,
+                    window: window.is_some().then_some(rows),
+                    global,
+                }],
+                None => Vec::new(),
+            }
+        }
+        SyncMessage::Answer { id, through, rows } if conn.multi_fetches.contains_key(&id) => {
+            let multi = conn.multi_fetches.get_mut(&id).unwrap();
+            multi.answers.insert(shard, Some((rows, through, true)));
+            match multi.merged() {
+                Some((rows, through, _)) => {
+                    conn.multi_fetches.remove(&id);
+                    vec![SyncMessage::Answer { id, through, rows }]
+                }
+                None => Vec::new(),
+            }
+        }
+        SyncMessage::Refused { id, .. }
+            if conn.multi.contains_key(&id) || conn.multi_fetches.contains_key(&id) =>
+        {
+            // The first refusal ends the read; the other shards' answers
+            // are dropped with it.
+            conn.multi.remove(&id);
+            conn.multi_fetches.remove(&id);
+            vec![message]
+        }
+        other => vec![other],
     }
 }
 
@@ -880,19 +1220,185 @@ fn a_fresh_gateway_instance_resumes_every_client() {
     println!("after resume: {:?}", w.gateway.stats);
 }
 
+fn count(db: &Db, query: &Query) -> Vec<RowUuid> {
+    let prepared = db.prepare_query(query).unwrap();
+    block_on(db.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|r| r.row_uuid())
+        .collect()
+}
+
+fn feed(limit: usize) -> Query {
+    Query::from("messages")
+        .order_by("sent_at", OrderDirection::Desc)
+        .limit(limit)
+}
+
 #[test]
-fn an_unpinned_subscription_is_refused_not_silently_partial() {
+fn an_unpinned_subscription_reaches_every_shard() {
     let mut w = World::new();
     w.room(ROOM_A, &[1]);
+    w.room(ROOM_B, &[1]);
+    w.room(ROOM_C, &[1, 2]);
     let alice = w.client(1);
     let db = &w.clients[alice].0;
     let prepared = db.prepare_query(&Query::from("memberships")).unwrap();
     let _sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     w.pump();
+    // Her three memberships, one per shard; bob's stays on its shard.
     assert_eq!(
-        w.gateway.stats.refused.len(),
-        1,
+        count(&w.clients[alice].0, &Query::from("memberships")).len(),
+        3
+    );
+    assert!(
+        w.gateway.stats.refused.is_empty(),
         "{:?}",
         w.gateway.stats.refused
     );
+}
+
+#[test]
+fn a_feed_across_shards_is_the_global_top_k_and_stays_live() {
+    let mut w = World::new();
+    w.room(ROOM_A, &[1, 2]);
+    w.room(ROOM_B, &[1, 2]);
+    w.room(ROOM_C, &[1, 2]);
+    let alice = w.client(1);
+    let bob = w.client(2);
+    // Bob posts 30 messages round-robin over the three rooms, newest last.
+    let tags = [ROOM_A, ROOM_B, ROOM_C];
+    for n in 0..30u64 {
+        post(
+            &w.clients[bob].0,
+            tags[n as usize % 3],
+            n,
+            &format!("m{n:02}"),
+        );
+    }
+    w.pump();
+    let db = &w.clients[alice].0;
+    let prepared = db.prepare_query(&feed(5)).unwrap();
+    let mut sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let down_before = w.gateway.stats.down;
+    w.pump();
+    let top = |w: &World| -> Vec<String> {
+        let db = &w.clients[alice].0;
+        let prepared = db.prepare_query(&feed(5)).unwrap();
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .filter_map(|r| {
+                r.cells()
+                    .find(|(n, _)| *n == "body")
+                    .and_then(|(_, v)| match v {
+                        Some(Value::String(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+            })
+            .collect()
+    };
+    assert_eq!(top(&w), vec!["m29", "m28", "m27", "m26", "m25"]);
+    let held = count(&w.clients[alice].0, &Query::from("messages")).len();
+    println!(
+        "feed k=5 over 3 shards: alice holds {held} message rows; {} messages down",
+        w.gateway.stats.down - down_before
+    );
+    // Live: a new message in one room enters the window.
+    post(&w.clients[bob].0, ROOM_B, 30, "m30");
+    w.pump();
+    assert_eq!(top(&w), vec!["m30", "m29", "m28", "m27", "m26"]);
+    while sub.try_next_event().is_some() {}
+    assert!(
+        w.gateway.stats.refused.is_empty(),
+        "{:?}",
+        w.gateway.stats.refused
+    );
+}
+
+#[test]
+fn offset_across_shards_reads_the_merged_prefix() {
+    // The client asks upstream for `offset + limit` rows and skips the
+    // offset itself, so the gateway's merged top (offset + limit) is exact,
+    // at the cost of shipping the skipped rows from every shard.
+    let mut w = World::new();
+    w.room(ROOM_A, &[1, 2]);
+    w.room(ROOM_B, &[1, 2]);
+    w.room(ROOM_C, &[1, 2]);
+    let alice = w.client(1);
+    let bob = w.client(2);
+    let tags = [ROOM_A, ROOM_B, ROOM_C];
+    for n in 0..30u64 {
+        post(
+            &w.clients[bob].0,
+            tags[n as usize % 3],
+            n,
+            &format!("m{n:02}"),
+        );
+    }
+    w.pump();
+    let mut query = feed(5);
+    query.offset = 5;
+    let db = &w.clients[alice].0;
+    let prepared = db.prepare_query(&query).unwrap();
+    let _sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    w.pump();
+    let db = &w.clients[alice].0;
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let got: Vec<String> = rows
+        .iter()
+        .filter_map(|r| {
+            r.cells()
+                .find(|(n, _)| *n == "body")
+                .and_then(|(_, v)| match v {
+                    Some(Value::String(s)) => Some(s.clone()),
+                    _ => None,
+                })
+        })
+        .collect();
+    assert_eq!(got, vec!["m24", "m23", "m22", "m21", "m20"]);
+    let held = count(db, &Query::from("messages")).len();
+    println!("offset 5 limit 5 over 3 shards: alice holds {held} message rows");
+}
+
+/// Rows the reader holds and shard re-asks, for a feed of `k` over `n`
+/// shards, with and without quotas, on interleaved and skewed data.
+#[test]
+fn quotas_cut_feed_overfill() {
+    for skewed in [false, true] {
+        for quotas in [false, true] {
+            QUOTAS.with(|q| *q.borrow_mut() = quotas);
+            let mut w = World::new();
+            let tags = [ROOM_A, ROOM_B, ROOM_C];
+            for tag in tags {
+                w.room(tag, &[1, 2]);
+            }
+            let alice = w.client(1);
+            let bob = w.client(2);
+            for n in 0..300u64 {
+                // Skewed: the newest 100 messages are all in one room.
+                let room = if skewed && n >= 200 {
+                    ROOM_B
+                } else {
+                    tags[n as usize % 3]
+                };
+                post(&w.clients[bob].0, room, n, &format!("m{n:03}"));
+            }
+            w.pump();
+            let db = &w.clients[alice].0;
+            let prepared = db.prepare_query(&feed(60)).unwrap();
+            let _sub = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+            w.pump();
+            let rows = block_on(w.clients[alice].0.all(&prepared, ReadOpts::default())).unwrap();
+            assert_eq!(rows.len(), 60);
+            let held = count(&w.clients[alice].0, &Query::from("messages")).len();
+            let raised: usize = w.gateway.conns[0].multi.values().map(|m| m.raised).sum();
+            println!(
+                "feed k=60 over 3 shards, {}, quotas {}: reader holds {held} rows, {raised} re-asks",
+                if skewed { "skewed" } else { "interleaved" },
+                if quotas { "on " } else { "off" },
+            );
+        }
+    }
+    QUOTAS.with(|q| *q.borrow_mut() = true);
 }
