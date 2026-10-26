@@ -114,6 +114,10 @@ name = "geo_shard_spike"
 path = "tests/geo_shard_spike.rs"
 
 [[test]]
+name = "gateway_spike"
+path = "tests/gateway_spike.rs"
+
+[[test]]
 name = "durable_file"
 path = "tests/durable_file.rs"
 
