@@ -617,6 +617,9 @@ impl<F: Future> Future for Parked<F> {
 /// A boxed binding future.
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
 
+/// See [`Hooks::rejected`].
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>)>;
+
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
 pub struct Hooks {
@@ -624,9 +627,11 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
-    /// Told of an upload the authority refused that no wait claimed, and
-    /// whether it was a serializable transaction.
-    pub rejected: RefCell<Option<Box<dyn Fn(&TransactionId, &Error, bool)>>>,
+    /// Told of an upload the authority refused that no wait claimed yet,
+    /// whether it was a serializable transaction, and the write's claim
+    /// if it has one: a wait the caller makes before the host delivers the
+    /// report (the task that wrote it ends) still claims it.
+    pub rejected: RefCell<Option<RejectedHook>>,
     /// Each uploaded write's claim, by commit seq: a wait sets it, and a
     /// dropped receipt leaves no one to claim it.
     claims: RefCell<BTreeMap<u64, Weak<Cell<bool>>>>,
@@ -671,16 +676,14 @@ impl Hooks {
             let writer = NodeUuid::from_bytes(rejection.writer);
             let claim = (writer == node)
                 .then(|| self.claims.borrow_mut().remove(&seq))
-                .flatten();
-            if claim
-                .and_then(|claim| claim.upgrade())
-                .is_some_and(|claim| claim.get())
-            {
+                .flatten()
+                .and_then(|claim| claim.upgrade());
+            if claim.as_ref().is_some_and(|claim| claim.get()) {
                 continue;
             }
             if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, error, rejection.serializable);
+                rejected(&tx_id, error, rejection.serializable, claim);
             }
         }
     }

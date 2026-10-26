@@ -447,16 +447,17 @@ impl WasmDbInner {
             }
         }));
         let reporter = Rc::clone(&host);
-        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error, serializable| {
-            report_later(
-                &reporter,
-                &tx_id.to_string(),
-                error,
-                serializable,
-                true,
-                None,
-            );
-        }));
+        *binding.hooks.rejected.borrow_mut() =
+            Some(Box::new(move |tx_id, error, serializable, claimed| {
+                report_later(
+                    &reporter,
+                    &tx_id.to_string(),
+                    error,
+                    serializable,
+                    true,
+                    claimed,
+                );
+            }));
         Self { binding, host }
     }
 

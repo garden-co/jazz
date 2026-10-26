@@ -569,12 +569,13 @@ impl Inner {
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
         let reporter = Rc::clone(&host);
-        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error, serializable| {
-            if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
-                let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
-                callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
-            }
-        }));
+        *binding.hooks.rejected.borrow_mut() =
+            Some(Box::new(move |tx_id, error, serializable, _| {
+                if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
+                    let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
+                    callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
+                }
+            }));
         Self { binding, host }
     }
 

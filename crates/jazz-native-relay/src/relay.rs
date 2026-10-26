@@ -970,12 +970,13 @@ impl RelayWorker {
         let dirty = hook(&binding);
         let mutation_errors = Rc::new(RefCell::new(Vec::new()));
         let reports = Rc::clone(&mutation_errors);
-        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error, serializable| {
-            reports.borrow_mut().push(MutationErrorReport {
-                claimed: None,
-                event: mutation_error_event(&tx_id.to_string(), error, serializable, true),
-            });
-        }));
+        *binding.hooks.rejected.borrow_mut() =
+            Some(Box::new(move |tx_id, error, serializable, claimed| {
+                reports.borrow_mut().push(MutationErrorReport {
+                    claimed,
+                    event: mutation_error_event(&tx_id.to_string(), error, serializable, true),
+                });
+            }));
         self.persistent
             .db
             .set_identity_claims(identity.author, claims.clone());
@@ -1137,7 +1138,7 @@ impl RelayWorker {
                     .mutation_errors
                     .borrow()
                     .iter()
-                    .any(|report| report.claimed.is_none());
+                    .any(|report| report.claimed.as_ref().is_none_or(|claimed| !claimed.get()));
             }
             client.wake();
         }
