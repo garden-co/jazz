@@ -133,3 +133,30 @@ pub(crate) fn gset_union(
     keyed.dedup_by(|a, b| a.0 == b.0);
     Ok(Value::Array(keyed.into_iter().map(|(_, v)| v).collect()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two writers that both saw 2 set 7 and 5: their changes travel as
+    /// +5 and +3 and sum, in either order, rather than the last one winning.
+    /// A change that would leave the column's type is refused, not wrapped.
+    #[test]
+    fn counter_changes_from_one_base_sum_and_leaving_the_range_is_refused() {
+        let seen = Value::U8(2);
+        let first = counter_delta("n", &Value::U8(7), Some(&seen)).unwrap();
+        let second = counter_delta("n", &Value::U8(5), Some(&seen)).unwrap();
+        assert_eq!(first, Value::I64(5));
+        assert_eq!(second, Value::I64(3));
+        for (a, b) in [(&first, &second), (&second, &first)] {
+            let once = counter_apply("n", &ValueType::U8, Some(&seen), a).unwrap();
+            let both = counter_apply("n", &ValueType::U8, Some(&once), b).unwrap();
+            assert_eq!(both, Value::U8(10));
+        }
+
+        let near_top = Value::U8(251);
+        assert!(counter_apply("n", &ValueType::U8, Some(&near_top), &first).is_err());
+        let below_zero = counter_delta("n", &Value::U8(0), Some(&seen)).unwrap();
+        assert!(counter_apply("n", &ValueType::U8, Some(&Value::U8(1)), &below_zero).is_err());
+    }
+}
