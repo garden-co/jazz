@@ -1,5 +1,5 @@
 import { Cause, Data, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -203,6 +203,36 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
     expect(result.failure).toBeInstanceOf(Oops);
     expect(result.rows).toEqual([]);
   });
+
+  it.each(["mergeable", "serializable"] as const)(
+    "rolls back real %s writes when callback construction throws",
+    async (kind) => {
+      const defect = new Error("callback construction failed");
+      let rollbackCalls = () => 0;
+      const result = await run(
+        await jazzLayer(`tx-construction-${kind}`),
+        Effect.gen(function* () {
+          const jazz = yield* Jazz;
+          // Attach the schema before opening a serializable transaction.
+          yield* jazz.all(app.todos);
+          const body = (tx: import("./jazz.js").JazzTransaction): Effect.Effect<never> => {
+            const rollback = vi.spyOn(tx.transaction, "rollback");
+            rollbackCalls = () => rollback.mock.calls.length;
+            tx.transaction.insert(app.todos, { title: "discarded", done: false });
+            throw defect;
+          };
+          const program =
+            kind === "mergeable" ? jazz.transaction(body) : jazz.serializableTransaction(body);
+          const exit = yield* Effect.exit(program);
+          return { exit, rows: yield* jazz.all(app.todos) };
+        }),
+      );
+      expect(Exit.isFailure(result.exit)).toBe(true);
+      if (Exit.isFailure(result.exit)) expect(Cause.squash(result.exit.cause)).toBe(defect);
+      expect(rollbackCalls()).toBe(1);
+      expect(result.rows).toEqual([]);
+    },
+  );
 
   it("rolls a transaction back when it is interrupted", async () => {
     const rows = await run(
