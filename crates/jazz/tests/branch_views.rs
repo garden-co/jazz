@@ -3137,7 +3137,7 @@ fn a_tab_over_its_worker_edits_a_draft_frozen_at_its_capture() {
 }
 
 #[test]
-fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating() {
+fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_tab_restores_it() {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -3266,4 +3266,77 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating() {
         ]
     );
     block_on(tab.update("todos", row, title("Draft"), on(&draft, frozen))).unwrap();
+    pump();
+
+    // A reopened tab is a new, empty foreground over the same worker: the
+    // worker holds what the capture names, and reads it as of the capture.
+    let tab = open(0x72);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    let (client_side, server_side) = duplex_transport::duplex();
+    block_on(tab.connect_upstream(client_side));
+    worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
+    // As the bindings read: the store is empty, so the read asks the worker.
+    let table = postcard::to_allocvec(&tab.table("todos")).unwrap();
+    let read_of = |query: &[u8], opts: ReadOpts| {
+        let mut all = pin!(tab.all_serialized_query(
+            query,
+            opts,
+            None,
+            None,
+            None,
+            false,
+            || false,
+            |attachment| tab.detach_query(attachment),
+        ));
+        loop {
+            let mut context = Context::from_waker(Waker::noop());
+            if let Poll::Ready(rows) = all.as_mut().poll(&mut context) {
+                match rows.unwrap() {
+                    jazz::db::SerializedReadResult::Rows(rows) => break rows,
+                    other => panic!("{other:?}"),
+                }
+            }
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+        }
+    };
+    let read = |opts: ReadOpts| read_of(&table, opts);
+    let restored = Some(BranchViewBase::snapshot(main.clone(), snapshot.clone()));
+    // The first read is of one row, as an app's `one` reads it.
+    let one = Query::from("todos")
+        .filter(eq(col("id"), lit(Value::Uuid(row.0))))
+        .limit(1);
+    assert_eq!(
+        titles(read_of(
+            &postcard::to_allocvec(&one).unwrap(),
+            ReadOpts::default().branch_view(draft.clone(), restored.clone())
+        )),
+        [Some(Value::String("Draft".into()))]
+    );
+    assert_eq!(
+        titles(read(
+            ReadOpts::default().branch_view(draft.clone(), restored.clone())
+        )),
+        [
+            Some(Value::String("Draft".into())),
+            Some(Value::String("Inherited original".into()))
+        ]
+    );
+    assert_eq!(
+        titles(read(ReadOpts::default().branch_view(main.clone(), None))),
+        [
+            Some(Value::String("Changed".into())),
+            Some(Value::String("Inherited changed".into()))
+        ]
+    );
+    assert_eq!(
+        titles(read(
+            ReadOpts::default().branch_view(draft.clone(), restored.clone())
+        )),
+        [
+            Some(Value::String("Draft".into())),
+            Some(Value::String("Inherited original".into()))
+        ]
+    );
 }

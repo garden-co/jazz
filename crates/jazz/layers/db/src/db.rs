@@ -5171,6 +5171,7 @@ impl TxRef<'_> {
                     None,
                     None,
                     tier == ReadTier::Remote,
+                    &ReadViewSourceSpec::Current,
                 )
                 .await?;
             if let Some(Batch {

@@ -19,7 +19,7 @@
     {
       "variant": "Fetch",
       "reader": "server",
-      "frame_hex": "0302056e6f74657300000000000000000000000000000000000101ffffffffffffffffff01"
+      "frame_hex": "0302056e6f74657300000000000000000000000000000000000101ffffffffffffffffff0100"
     },
     {
       "variant": "Commit",

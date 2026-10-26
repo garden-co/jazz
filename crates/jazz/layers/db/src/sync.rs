@@ -648,7 +648,11 @@ pub enum SyncMessage {
     /// its store: a LocalFirst read's first load, or a Remote read that
     /// takes the relay's view when the authority cannot answer (a
     /// serializable transaction's snapshot). `None`: a LocalFirst read is
-    /// served now, a Remote one once the upstream answered.
+    /// served now, a Remote one once the upstream answered. `view`: the
+    /// branch view the read observes, so its window and versions are the
+    /// view's. A view frozen at a snapshot reference is resolved by the
+    /// receiver (a reopened tab's capture, which its worker settled), which
+    /// also sends the [`SyncMessage::Origins`] of the commits it names.
     Fetch {
         id: u64,
         query: Query,
@@ -657,6 +661,7 @@ pub enum SyncMessage {
         include_deleted: bool,
         tier: ReadTier,
         wait: Option<u64>,
+        view: ReadViewSourceSpec,
     },
     /// `author`: the provenance the writes carry when it is not the
     /// sender's own (a trusted session or an attribution), as a canonical
@@ -861,6 +866,18 @@ pub(crate) struct Remote {
     /// Resubscribed with `since`: on its opening, fetch result rows the
     /// replica lacks (rows that became visible without changing).
     resumed: bool,
+}
+
+/// The snapshot reference a read view is frozen at, if any.
+fn frozen_at(source: &ReadViewSourceSpec) -> Option<&SnapshotRef> {
+    match source {
+        ReadViewSourceSpec::BranchView {
+            base: Some(BranchViewBase::Snapshot { snapshot, .. }),
+            ..
+        }
+        | ReadViewSourceSpec::Snapshot { snapshot } => Some(snapshot),
+        _ => None,
+    }
 }
 
 /// What a client knows about its path to the server.
@@ -2421,12 +2438,23 @@ impl Inner {
                     .push((image.table.clone(), row, image.key.clone()));
             }
             Some(current) if current.seq == image.seq => {}
-            Some(current) if relay_older(current.seq, image.seq) => {}
+            Some(current) if relay_older(current.seq, image.seq) => {
+                if self.non_durable {
+                    self.put_image(image, true)?;
+                    self.changed
+                        .borrow_mut()
+                        .push((image.table.clone(), row, image.key.clone()));
+                }
+            }
             Some(current) if current.seq < image.seq || current.seq >= LOCAL_BASE => {
-                if current.seq < LOCAL_BASE {
+                // A relay's newer version: its older one stays as history.
+                let relay_newer = self.non_durable && current.seq >= LOCAL_BASE;
+                let relay_newer = relay_newer && current.seq < image.seq;
+                if current.seq < LOCAL_BASE || relay_newer {
                     self.put_image(&current, true)?;
                 }
-                self.drop_row(&image.table, row, &image.key, LOCAL_BASE)?;
+                let floor = if relay_newer { image.seq } else { LOCAL_BASE };
+                self.drop_row(&image.table, row, &image.key, floor)?;
                 self.put_image(image, false)?;
             }
             // An older version: history reads of the row change.
@@ -2935,7 +2963,11 @@ impl Inner {
         }
         // A replica reads snapshots from its own store: it must already hold
         // the authority state the reference was captured at.
-        let horizon = self.client.as_ref().map_or(self.seq, |client| client.known);
+        // One with no server is the last word on its store's seqs.
+        let horizon = match &self.client {
+            Some(client) if !client.no_server() => client.known,
+            _ => self.seq,
+        };
         if snapshot.global_base.0 > horizon {
             return Err(snapshot_unavailable(
                 "it was captured past the authority state this store has synced",
@@ -3075,6 +3107,12 @@ impl Inner {
 }
 
 impl Client {
+    /// Its host says there is no server: it is the last word on its store.
+    fn no_server(&self) -> bool {
+        let link = self.hint.get();
+        link.reported && link.hint == RemoteLinkHint::NoServer
+    }
+
     fn new(node: [u8; 16]) -> Self {
         Client {
             node,
@@ -3610,6 +3648,7 @@ impl Db {
         deadline: Option<Instant>,
         coverage: Option<&dyn Fn() -> bool>,
         strict: bool,
+        view: &ReadViewSourceSpec,
     ) -> Result<Option<u64>, Error> {
         let tier = reach.tier;
         // A non-durable foreground's relay answers a local read from its
@@ -3634,6 +3673,7 @@ impl Db {
             include_deleted,
             tier,
             wait: reach.wait,
+            view: view.clone(),
         };
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
@@ -4601,13 +4641,19 @@ impl Inner {
                     return Ok(false);
                 }
                 // A relay's older unsettled version (an as-of answer).
-                Some(old) if relay_older(old.seq, image.seq) => return Ok(false),
+                Some(old) if relay_older(old.seq, image.seq) => {
+                    if self.non_durable {
+                        self.put_image(&image, true)?;
+                    }
+                    return Ok(false);
+                }
                 // The replaced server version stays as history. A relay's
                 // unsettled version gives way to a settled one, as the
                 // relay's store moved on from it.
                 Some(old) => {
+                    let relay_newer = old.seq >= LOCAL_BASE && old.seq < image.seq;
                     let older = std::mem::replace(old, image);
-                    if older.seq < LOCAL_BASE {
+                    if older.seq < LOCAL_BASE || self.non_durable && relay_newer {
                         self.put_image(&older, true)?;
                     }
                 }
@@ -5640,6 +5686,7 @@ impl Db {
                 include_deleted,
                 tier,
                 wait,
+                view,
             } => {
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
@@ -5649,8 +5696,12 @@ impl Db {
                 // while the upstream may answer, and served once it does or
                 // the wait runs out. Any other LocalFirst read is served
                 // now, and its upstream's answer refreshes the store for
-                // the next.
-                let (relay, refresh) = {
+                // the next. A read as of a snapshot reference is this
+                // store's: the reference names commits it settled.
+                let snapshot = frozen_at(&view).cloned();
+                let (relay, refresh) = if snapshot.is_some() {
+                    (None, false)
+                } else {
                     let mut inner = self.inner.borrow_mut();
                     let answered = inner.sessions[index].fetched_upstream.remove(&id);
                     let client = inner.client.as_ref();
@@ -5676,6 +5727,7 @@ impl Db {
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
+                        view: view.clone(),
                     });
                 }
                 if let Some(strict) = relay {
@@ -5693,6 +5745,7 @@ impl Db {
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
+                        view: view.clone(),
                     };
                     client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
@@ -5709,6 +5762,7 @@ impl Db {
                             include_deleted,
                             tier,
                             wait,
+                            view,
                         },
                     });
                     return Ok(());
@@ -5726,12 +5780,39 @@ impl Db {
                 // for it: only the authority confirms them. One with a wait
                 // (a serializable snapshot) takes this replica's view.
                 let strict = tier == ReadTier::Remote && wait.is_none() && inner.client.is_some();
+                // The commits a snapshot reference names, as this store
+                // settled them: the reader resolves the reference with them.
+                let mut named = Vec::new();
+                for dot in snapshot.iter().flat_map(|snapshot| &snapshot.dots) {
+                    let (node, tx) = (*dot.node.as_bytes(), dot.time.0);
+                    if let Some(Some(seq)) = inner.settled(node, tx)? {
+                        named.push((seq, node, tx));
+                    }
+                }
+                let opts = ReadOpts {
+                    read_view: crate::protocol::ReadViewSpec {
+                        source: view,
+                        include_deleted,
+                    },
+                    ..ReadOpts::default()
+                };
+                let viewed = match ReadSpec::of(&opts, &inner) {
+                    Ok(viewed) => viewed,
+                    Err(error) => {
+                        inner.sessions[index].outbox.push(SyncMessage::Refused {
+                            id,
+                            code: error.code,
+                            message: error.message,
+                        });
+                        return Ok(());
+                    }
+                };
                 let read = ReadSpec {
-                    cut: at.map(Cut::at),
+                    cut: viewed.cut.or(at.map(Cut::at)),
                     include_deleted,
                     settled_only: strict,
                     members_only: strict,
-                    ..ReadSpec::default()
+                    view: viewed.view,
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
                 let mut images = Vec::new();
@@ -5796,7 +5877,8 @@ impl Db {
                         watch_key(&Sql::Blob(image.id.to_vec())),
                     )));
                 }
-                let origins = inner.origins(&seqs)?;
+                let mut origins = inner.origins(&seqs)?;
+                origins.extend(named);
                 let through = at.unwrap_or(inner.served_through());
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
@@ -6415,11 +6497,15 @@ impl Db {
                 .await?;
             return Ok(result(rows));
         }
-        let frozen = ReadSpec::of(&opts, &self.inner())?.frozen();
+        let frozen = frozen_at(&opts.read_view.source).is_some();
         // A non-durable foreground's store starts empty: its local view is
-        // its relay's, which it asks for at every tier.
+        // its relay's, which it asks for at every tier, a frozen one too
+        // (a reopened tab's capture names commits only its relay settled).
         let non_durable = self.inner().non_durable;
-        if self.is_client() && (opts.tier != ReadTier::LocalOnly || non_durable) && !frozen {
+        if self.is_client()
+            && (opts.tier != ReadTier::LocalOnly || non_durable)
+            && (!frozen || non_durable)
+        {
             let wait = match (opts.tier, &opts.first_load) {
                 (ReadTier::Remote, _) => Some(None),
                 _ if non_durable => Some(None),
@@ -6455,6 +6541,7 @@ impl Db {
                     deadline,
                     coverage,
                     strict,
+                    &opts.read_view.source,
                 )
                 .await?;
             }
