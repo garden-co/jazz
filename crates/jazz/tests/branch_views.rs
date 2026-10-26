@@ -2799,7 +2799,7 @@ fn widening_a_stored_enum_column_is_not_supported_yet() {
 ///
 /// base/open ──v2 head/closed──► v1 reader of head-over-base sees neither
 #[test]
-#[ignore = "not supported yet: widening a stored enum column via a TransformColumn lens (see widening_a_stored_enum_column_is_not_supported_yet)"]
+#[ignore = "#4273: widening a stored enum column via a TransformColumn lens is not supported yet"]
 fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
     let schema = todos_with_status;
     let v1 = schema(&["open"]);
