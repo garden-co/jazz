@@ -3135,3 +3135,135 @@ fn a_tab_over_its_worker_edits_a_draft_frozen_at_its_capture() {
     );
     block_on(tab.update("todos", row, title("Draft"), on(&draft, frozen))).unwrap();
 }
+
+#[test]
+fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: AuthorSubject::for_test_bytes([0x63; 16]),
+            },
+        )))
+        .unwrap()
+    };
+    let worker = open(0x70);
+    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    let tab = open(0x71);
+    tab.set_non_durable_client();
+    // As its worker's: no server to wait for.
+    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    let (client_side, server_side) = duplex_transport::duplex();
+    block_on(tab.connect_upstream(client_side));
+    worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
+    let pump = || {
+        for _ in 0..8 {
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+        }
+    };
+    let main = selector(0xe1);
+    let draft = selector(0xe2);
+    let title = |t: &str| BTreeMap::from([("title".into(), Value::String(t.into()))]);
+    let row = block_on(tab.insert(
+        "todos",
+        title("Original"),
+        jazz::db::InsertOptions {
+            target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .row_uuid();
+    let on = |head: &BranchSelector, base: Option<BranchViewBase>| jazz::db::UpdateOptions {
+        target: jazz::db::WriteTarget::BranchView {
+            head: head.clone(),
+            base,
+        },
+        ..Default::default()
+    };
+    let other = block_on(tab.insert(
+        "todos",
+        title("Inherited original"),
+        jazz::db::InsertOptions {
+            target: jazz::db::ExactWriteTarget::Branch(main.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .row_uuid();
+    // A browser's capture starts when called: the first poll captures.
+    let mut capture = pin!(tab.capture_snapshot());
+    let mut context = Context::from_waker(Waker::noop());
+    let mut snapshot = match capture.as_mut().poll(&mut context) {
+        Poll::Ready(value) => Some(value.unwrap()),
+        Poll::Pending => None,
+    };
+    block_on(tab.update("todos", row, title("Changed"), on(&main, None))).unwrap();
+    block_on(tab.update("todos", other, title("Inherited changed"), on(&main, None))).unwrap();
+    let snapshot = loop {
+        if let Some(snapshot) = snapshot.take() {
+            break snapshot;
+        }
+        let mut context = Context::from_waker(Waker::noop());
+        if let Poll::Ready(value) = capture.as_mut().poll(&mut context) {
+            break value.unwrap();
+        }
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+    };
+    // The worker settles the tab's commits before it reads.
+    pump();
+    let frozen = Some(BranchViewBase::snapshot(main.clone(), snapshot.clone()));
+    let query = tab.prepare_query(&tab.table("todos")).unwrap();
+    let read = |opts: ReadOpts| {
+        let mut all = pin!(tab.all(&query, opts));
+        loop {
+            let mut context = Context::from_waker(Waker::noop());
+            if let Poll::Ready(rows) = all.as_mut().poll(&mut context) {
+                pump();
+                break rows.unwrap();
+            }
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+        }
+    };
+    let titles = |rows: Vec<jazz::db::CurrentRow>| {
+        let table = schema.tables.iter().find(|t| t.name == "todos").unwrap();
+        rows.iter()
+            .map(|row| row.cell(table, "title"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        titles(read(
+            ReadOpts::default().branch_view(draft.clone(), frozen.clone())
+        )),
+        [
+            Some(Value::String("Original".into())),
+            Some(Value::String("Inherited original".into()))
+        ]
+    );
+    assert_eq!(
+        titles(read(ReadOpts::default().branch_view(
+            draft.clone(),
+            Some(BranchViewBase::current(main.clone()))
+        ))),
+        [
+            Some(Value::String("Changed".into())),
+            Some(Value::String("Inherited changed".into()))
+        ]
+    );
+    block_on(tab.update("todos", row, title("Draft"), on(&draft, frozen))).unwrap();
+}

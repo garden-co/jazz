@@ -362,6 +362,16 @@ impl From<&Cell> for Sql {
     }
 }
 
+/// Whether `image` is an older unsettled version of a relay's than the
+/// `held` one: a relay numbers its unsettled versions from `LOCAL_BASE` up,
+/// in its own order, and ships older ones in as-of answers. Cuts never read
+/// them (a snapshot naming another replica's unsettled commit is
+/// unavailable), and their seqs may collide with this replica's own, so the
+/// replica keeps neither as history.
+fn relay_older(held: u64, image: u64) -> bool {
+    image >= LOCAL_BASE && held > image
+}
+
 /// One stored row version: the unit of replication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Image {
@@ -2374,6 +2384,7 @@ impl Inner {
                     .push((image.table.clone(), row, image.key.clone()));
             }
             Some(current) if current.seq == image.seq => {}
+            Some(current) if relay_older(current.seq, image.seq) => {}
             Some(current) if current.seq < image.seq || current.seq >= LOCAL_BASE => {
                 if current.seq < LOCAL_BASE {
                     self.put_image(&current, true)?;
@@ -4526,9 +4537,11 @@ impl Inner {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
+                // A relay's older unsettled version (an as-of answer).
+                Some(old) if relay_older(old.seq, image.seq) => return Ok(false),
                 // The replaced server version stays as history. A relay's
-                // unsettled version (above `LOCAL_BASE`) gives way to any
-                // version it ships, as the relay's store moved on from it.
+                // unsettled version gives way to a settled one, as the
+                // relay's store moved on from it.
                 Some(old) => {
                     let older = std::mem::replace(old, image);
                     if older.seq < LOCAL_BASE {
