@@ -11,6 +11,8 @@
 //! and a mention on a peer shard, plus the tx record and its resolution the
 //! sharding layer would write (intent model: 2 writes on each side).
 //!
+//! `THREADS` hosts several shards per thread (default: one each).
+//!
 //! `SHARDS=1,2,4 CLIENTS=1000 BATCH=1,16 CROSS=0,0.05,0.2 cargo bench --bench shard_capacity`
 
 #[path = "../tests/common/mod.rs"]
@@ -152,6 +154,9 @@ fn schema() -> JazzSchema {
 #[derive(Clone)]
 struct Config {
     shards: usize,
+    /// Threads (cores) the shards are spread over; shard `s` runs on
+    /// thread `s % threads`.
+    threads: usize,
     /// Clients (= users) per shard.
     clients: usize,
     rooms_per_user: usize,
@@ -171,21 +176,39 @@ struct ShardReport {
     cross_sent: usize,
 }
 
-/// A cross-shard request: write a mention for `member_index` on the peer,
+/// A cross-shard request for shard `to`: write a mention for `member`,
 /// then (second message) resolve it.
 enum Cross {
-    Intent { tx: String, member: usize },
-    Resolve { tx: String },
+    Intent {
+        to: usize,
+        tx: String,
+        member: usize,
+    },
+    Resolve {
+        to: usize,
+        tx: String,
+    },
 }
 
-fn run_shard(
+/// One shard: its authority, its clients and the sharding layer's client.
+struct Hosted {
     shard: usize,
-    cfg: &Config,
-    dir: &std::path::Path,
-    inbox: mpsc::Receiver<Cross>,
-    peers: Vec<mpsc::Sender<Cross>>,
-    start: Arc<Barrier>,
-) -> ShardReport {
+    server: Db,
+    clients: Vec<Db>,
+    downs: Vec<Queue>,
+    streams: Vec<jazz::db::SubscriptionStream>,
+    router: Db,
+    router_down: Queue,
+    posted: usize,
+    tx_seq: usize,
+}
+
+fn room_of(cfg: &Config, u: usize, k: usize) -> usize {
+    let rooms = (cfg.clients * cfg.rooms_per_user / cfg.members_per_room).max(1);
+    (u * cfg.rooms_per_user + k) / cfg.members_per_room % rooms
+}
+
+fn setup_shard(shard: usize, cfg: &Config, dir: &std::path::Path) -> Hosted {
     let schema = schema();
     let config = |node: [u8; 16], author: AuthorSubject| {
         DbConfig::new(
@@ -211,7 +234,6 @@ fn run_shard(
 
     let users = cfg.clients;
     let rooms = (users * cfg.rooms_per_user / cfg.members_per_room).max(1);
-    let room_of = |u: usize, k: usize| (u * cfg.rooms_per_user + k) / cfg.members_per_room % rooms;
     let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
         server
             .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
@@ -231,7 +253,7 @@ fn run_shard(
                 "memberships",
                 id(shard, 2, membership),
                 cells(&[
-                    ("room", Value::Uuid(id(shard, 1, room_of(u, k)).0)),
+                    ("room", Value::Uuid(id(shard, 1, room_of(cfg, u, k)).0)),
                     ("member", text(subject(shard, u))),
                 ]),
             );
@@ -267,7 +289,7 @@ fn run_shard(
         node[8..].copy_from_slice(&(u as u64).to_be_bytes());
         let client = block_on(Db::open(config(node, user(shard, u)))).unwrap();
         downs.push(connect(&server, &client, user(shard, u)));
-        let room = id(shard, 1, room_of(u, 0));
+        let room = id(shard, 1, room_of(cfg, u, 0));
         for query in [
             Query::from("messages")
                 .filter(eq(col("room"), lit(Value::Uuid(room.0))))
@@ -287,28 +309,161 @@ fn run_shard(
     router_node[1] = shard as u8;
     let router = block_on(Db::open(config(router_node, AuthorSubject::SYSTEM))).unwrap();
     let router_down = connect(&server, &router, AuthorSubject::SYSTEM);
+    let mut hosted = Hosted {
+        shard,
+        server,
+        clients,
+        downs,
+        streams,
+        router,
+        router_down,
+        posted: 0,
+        tx_seq: 0,
+    };
+    for _ in 0..8 {
+        for client in &hosted.clients {
+            block_on(client.tick()).unwrap();
+        }
+        block_on(hosted.server.tick()).unwrap();
+        hosted.deliver();
+    }
+    for stream in hosted.streams.iter_mut() {
+        while stream.try_next_event().is_some() {}
+    }
+    hosted
+}
 
-    let deliver = |clients: &[Db], downs: &[Queue]| {
-        for (client, down) in clients.iter().zip(downs) {
+impl Hosted {
+    fn deliver(&self) {
+        for (client, down) in self.clients.iter().zip(&self.downs) {
             if !down.borrow().is_empty() {
                 block_on(client.tick()).unwrap();
             }
         }
-        router_down.borrow_mut().clear();
-    };
-    for _ in 0..8 {
-        for client in &clients {
-            block_on(client.tick()).unwrap();
-        }
-        block_on(server.tick()).unwrap();
-        deliver(&clients, &downs);
-    }
-    for stream in streams.iter_mut() {
-        while stream.try_next_event().is_some() {}
+        self.router_down.borrow_mut().clear();
     }
 
+    /// One round: `batch` writers post, cross-shard work goes out to
+    /// `peers` (indexed by thread), then the timed server tick.
+    fn round(
+        &mut self,
+        cfg: &Config,
+        threads: usize,
+        next: &mut dyn FnMut() -> u64,
+        peers: &[mpsc::Sender<Cross>],
+        report: &mut ShardReport,
+    ) {
+        let shard = self.shard;
+        let users = cfg.clients;
+        let mut writers = Vec::new();
+        for _ in 0..cfg.batch {
+            let u = next() as usize % users;
+            let r = room_of(cfg, u, next() as usize % cfg.rooms_per_user);
+            block_on(self.clients[u].insert(
+                "messages",
+                cells(&[
+                    ("room", Value::Uuid(id(shard, 1, r).0)),
+                    ("author", text(subject(shard, u))),
+                    ("body", text("new message body of moderate length")),
+                    ("sent_at", Value::I64((1_000_000 + self.posted) as i64)),
+                ]),
+                Default::default(),
+            ))
+            .unwrap();
+            self.posted += 1;
+            report.commits += 1;
+            writers.push(u);
+            if cfg.shards > 1 && (next() % 1_000_000) as f64 / 1e6 < cfg.cross {
+                let peer = (shard + 1 + next() as usize % (cfg.shards - 1)) % cfg.shards;
+                let tx = format!("{shard}-{}", self.tx_seq);
+                self.tx_seq += 1;
+                block_on(self.router.insert(
+                    "tx_records",
+                    cells(&[
+                        ("state", text("pending")),
+                        ("peer", Value::I64(peer as i64)),
+                    ]),
+                    Default::default(),
+                ))
+                .unwrap();
+                let to = &peers[peer % threads];
+                to.send(Cross::Intent {
+                    to: peer,
+                    tx: tx.clone(),
+                    member: next() as usize % users,
+                })
+                .unwrap();
+                to.send(Cross::Resolve { to: peer, tx }).unwrap();
+                report.cross_sent += 1;
+            }
+        }
+        writers.sort_unstable();
+        writers.dedup();
+        for &u in &writers {
+            block_on(self.clients[u].tick()).unwrap();
+        }
+        block_on(self.router.tick()).unwrap();
+        perf_ctl(b"enable\n");
+        let t = Instant::now();
+        block_on(self.server.tick()).unwrap();
+        let elapsed = t.elapsed();
+        perf_ctl(b"disable\n");
+        report.server_time += elapsed;
+        report.round_times.push(elapsed);
+        for down in &self.downs {
+            let d = down.borrow();
+            report.frames_out += d.len();
+            report.bytes_out += d.iter().map(Vec::len).sum::<usize>();
+        }
+        self.deliver();
+        for &u in &writers {
+            block_on(self.clients[u].tick()).unwrap();
+        }
+        for stream in self.streams.iter_mut() {
+            while stream.try_next_event().is_some() {}
+        }
+    }
+
+    /// Cross-shard work another shard sent here.
+    fn receive(&self, request: Cross) {
+        let insert = |table: &str, values: BTreeMap<String, Value>| {
+            block_on(self.router.insert(table, values, Default::default())).unwrap();
+        };
+        match request {
+            Cross::Intent { tx, member, .. } => insert(
+                "mentions",
+                cells(&[
+                    ("member", text(subject(self.shard, member))),
+                    ("body", text("you were mentioned")),
+                    ("tx", text(tx)),
+                ]),
+            ),
+            // The resolution: one more row on this side.
+            Cross::Resolve { tx, .. } => insert(
+                "tx_records",
+                cells(&[
+                    ("state", text(format!("committed {tx}"))),
+                    ("peer", Value::I64(-1)),
+                ]),
+            ),
+        }
+    }
+}
+
+/// One thread hosting `shards`, round-robin, as one core would.
+fn run_thread(
+    thread: usize,
+    shards: Vec<usize>,
+    cfg: &Config,
+    dir: &std::path::Path,
+    inbox: mpsc::Receiver<Cross>,
+    peers: Vec<mpsc::Sender<Cross>>,
+    start: Arc<Barrier>,
+) -> ShardReport {
+    let mut hosted: Vec<Hosted> = shards.iter().map(|&s| setup_shard(s, cfg, dir)).collect();
+    let threads = peers.len();
     start.wait();
-    let mut rng = 0x9e3779b97f4a7c15u64 ^ shard as u64;
+    let mut rng = 0x9e3779b97f4a7c15u64 ^ thread as u64;
     let mut next = move || {
         rng ^= rng << 13;
         rng ^= rng >> 7;
@@ -323,105 +478,16 @@ fn run_shard(
         bytes_out: 0,
         cross_sent: 0,
     };
-    let mut posted = 0usize;
-    let mut tx_seq = 0usize;
     for _round in 0..cfg.rounds {
-        // Writers: `batch` random users each post into a room of theirs.
-        let mut writers = Vec::new();
-        for _ in 0..cfg.batch {
-            let u = next() as usize % users;
-            let r = room_of(u, next() as usize % cfg.rooms_per_user);
-            block_on(clients[u].insert(
-                "messages",
-                cells(&[
-                    ("room", Value::Uuid(id(shard, 1, r).0)),
-                    ("author", text(subject(shard, u))),
-                    ("body", text("new message body of moderate length")),
-                    ("sent_at", Value::I64((1_000_000 + posted) as i64)),
-                ]),
-                Default::default(),
-            ))
-            .unwrap();
-            posted += 1;
-            report.commits += 1;
-            writers.push(u);
-            if cfg.shards > 1 && (next() % 1_000_000) as f64 / 1e6 < cfg.cross {
-                let peer = (shard + 1 + next() as usize % (cfg.shards - 1)) % cfg.shards;
-                let tx = format!("{shard}-{tx_seq}");
-                tx_seq += 1;
-                block_on(router.insert(
-                    "tx_records",
-                    cells(&[
-                        ("state", text("pending")),
-                        ("peer", Value::I64(peer as i64)),
-                    ]),
-                    Default::default(),
-                ))
-                .unwrap();
-                let target = if peer > shard { peer - 1 } else { peer };
-                peers[target]
-                    .send(Cross::Intent {
-                        tx: tx.clone(),
-                        member: next() as usize % users,
-                    })
-                    .unwrap();
-                peers[target].send(Cross::Resolve { tx }).unwrap();
-                report.cross_sent += 1;
-            }
-        }
-        // Cross-shard work other shards sent here.
         while let Ok(request) = inbox.try_recv() {
-            match request {
-                Cross::Intent { tx, member } => {
-                    block_on(router.insert(
-                        "mentions",
-                        cells(&[
-                            ("member", text(subject(shard, member))),
-                            ("body", text("you were mentioned")),
-                            ("tx", text(tx)),
-                        ]),
-                        Default::default(),
-                    ))
-                    .unwrap();
-                }
-                Cross::Resolve { tx } => {
-                    // The resolution: one more row on this side.
-                    block_on(router.insert(
-                        "tx_records",
-                        cells(&[
-                            ("state", text(format!("committed {tx}"))),
-                            ("peer", Value::I64(-1)),
-                        ]),
-                        Default::default(),
-                    ))
-                    .unwrap();
-                }
-            }
+            let to = match &request {
+                Cross::Intent { to, .. } | Cross::Resolve { to, .. } => *to,
+            };
+            let at = hosted.iter().position(|h| h.shard == to).unwrap();
+            hosted[at].receive(request);
         }
-        writers.sort_unstable();
-        writers.dedup();
-        for &u in &writers {
-            block_on(clients[u].tick()).unwrap();
-        }
-        block_on(router.tick()).unwrap();
-        perf_ctl(b"enable\n");
-        let t = Instant::now();
-        block_on(server.tick()).unwrap();
-        let elapsed = t.elapsed();
-        perf_ctl(b"disable\n");
-        report.server_time += elapsed;
-        report.round_times.push(elapsed);
-        for down in &downs {
-            let d = down.borrow();
-            report.frames_out += d.len();
-            report.bytes_out += d.iter().map(Vec::len).sum::<usize>();
-        }
-        deliver(&clients, &downs);
-        for &u in &writers {
-            block_on(clients[u].tick()).unwrap();
-        }
-        for stream in streams.iter_mut() {
-            while stream.try_next_event().is_some() {}
+        for h in hosted.iter_mut() {
+            h.round(cfg, threads, &mut next, &peers, &mut report);
         }
     }
     // Settle anything still arriving so peers are not left blocked.
@@ -442,22 +508,19 @@ fn perf_ctl(command: &[u8]) {
 
 fn run(cfg: &Config) {
     let dir = tempfile::tempdir().unwrap();
+    let threads = cfg.threads.min(cfg.shards);
     let (senders, receivers): (Vec<_>, Vec<_>) =
-        (0..cfg.shards).map(|_| mpsc::channel::<Cross>()).unzip();
-    let start = Arc::new(Barrier::new(cfg.shards));
+        (0..threads).map(|_| mpsc::channel::<Cross>()).unzip();
+    let start = Arc::new(Barrier::new(threads));
     let mut handles = Vec::new();
-    for (shard, inbox) in receivers.into_iter().enumerate() {
-        let peers: Vec<_> = senders
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != shard)
-            .map(|(_, s)| s.clone())
-            .collect();
+    for (thread, inbox) in receivers.into_iter().enumerate() {
+        let peers = senders.clone();
+        let shards: Vec<usize> = (0..cfg.shards).filter(|s| s % threads == thread).collect();
         let cfg = cfg.clone();
         let start = start.clone();
         let path = dir.path().to_owned();
         handles.push(std::thread::spawn(move || {
-            run_shard(shard, &cfg, &path, inbox, peers, start)
+            run_thread(thread, shards, &cfg, &path, inbox, peers, start)
         }));
     }
     drop(senders);
@@ -477,8 +540,9 @@ fn run(cfg: &Config) {
     let bytes: usize = reports.iter().map(|r| r.bytes_out).sum();
     let cross: usize = reports.iter().map(|r| r.cross_sent).sum();
     println!(
-        "shards={} clients/shard={} members/room={} batch={} cross={:.2} fsync={} | capacity {:>8.0} commits/s ({:>7.0}/shard) | tick p50 {:>9.3?} p99 {:>9.3?} | out/commit {:.1} frames {:.0} B | cross sent {}",
+        "shards={} threads={} clients/shard={} members/room={} batch={} cross={:.2} fsync={} | capacity {:>8.0} commits/s ({:>7.0}/shard) | tick p50 {:>9.3?} p99 {:>9.3?} | out/commit {:.1} frames {:.0} B | cross sent {}",
         cfg.shards,
+        threads,
         cfg.clients,
         cfg.members_per_room,
         cfg.batch,
@@ -523,6 +587,7 @@ fn main() {
                         for fsync in list("FSYNC", "1") {
                             run(&Config {
                                 shards: shards.parse().unwrap(),
+                                threads: one("THREADS", usize::MAX),
                                 clients: clients.parse().unwrap(),
                                 rooms_per_user: one("ROOMS_PER_USER", 3),
                                 members_per_room: members.parse().unwrap(),
