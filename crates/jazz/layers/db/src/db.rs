@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::ids::{AuthorSubject, RowUuid};
 use crate::protocol::{
-    BranchSelector, BranchViewBase, CurrentWriteSchema, MigrationLens, ReadViewSourceSpec,
+    BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
     SchemaVersion,
 };
 use crate::query::Query;
@@ -1813,11 +1813,15 @@ impl Db {
             let mut inner = self.inner();
             let version = schema.version_id();
             let mut defaults = BTreeMap::new();
+            let mut copies = BTreeMap::new();
             for lens in lenses.iter().filter(|lens| lens.target == version) {
-                defaults.extend(LensEffects::of(lens)?.defaults);
+                let effects = LensEffects::of(lens)?;
+                defaults.extend(effects.defaults);
+                copies.extend(effects.copies);
             }
             let base = inner.owner.names();
             let mut target = inner.names.resolve(&schema, lenses, Some(&base))?;
+            let cells = inner.lens_cells(&target, lenses)?;
             let admitted: Vec<Schema> = inner
                 .admitted
                 .iter()
@@ -1844,7 +1848,9 @@ impl Db {
                     {
                         column.default = Some(default.clone());
                     }
-                    if stored.is_some() && column.default.is_none() && !column.nullable() {
+                    // A copy is filled from its source.
+                    let copy = copies.contains_key(&(table.name.clone(), column.name.clone()));
+                    if stored.is_some() && column.default.is_none() && !column.nullable() && !copy {
                         return Err(unsupported(format!(
                             "adding required column {}.{} without a default",
                             table.name, column.name
@@ -1854,8 +1860,28 @@ impl Db {
             }
             let ddl = inner.physical.union(&target)?;
             execute_script(&inner.conn, &ddl)?;
+            // A new copy holds its source's values, in every row version.
+            for cell in &cells {
+                if let crate::names::LensCellRule::Copy(source) = &cell.rule {
+                    for table in [cell.table.clone(), format!("{}__h", cell.table)] {
+                        inner
+                            .conn
+                            .execute(
+                                &format!(
+                                    "UPDATE {} SET {} = {}",
+                                    quote(&table),
+                                    quote(&cell.column),
+                                    quote(source)
+                                ),
+                                [],
+                            )
+                            .map_err(storage)?;
+                    }
+                }
+            }
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &target)?;
+            names.record_lens_cells(conn, cells)?;
             if make_current {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
@@ -2029,6 +2055,106 @@ impl Inner {
             Some(names) => Schema::stored_as(schema, names),
             None => Schema::new(schema),
         }
+    }
+
+    /// The lens cells the lenses into `target` make on this store: a copy
+    /// not stored yet, and each dropped column. Only lenses from a version
+    /// this store admitted count: a store without the source holds no row
+    /// an older version wrote.
+    fn lens_cells(
+        &self,
+        target: &Schema,
+        lenses: &[MigrationLens],
+    ) -> Result<Vec<crate::names::LensCell>, Error> {
+        use crate::names::{LensCell, LensCellRule};
+        let version = target.jazz.version_id();
+        let mut cells = Vec::new();
+        for lens in lenses.iter().filter(|lens| lens.target == version) {
+            let source = if lens.source == self.owner_version {
+                (*self.owner).clone()
+            } else {
+                match self.admitted.iter().find(|(id, _)| *id == lens.source) {
+                    Some((_, jazz)) => self.named(jazz),
+                    None => continue,
+                }
+            };
+            for table_lens in &lens.table_lenses {
+                let (Some(from), Some(to)) = (
+                    source.tables.get(&table_lens.source_table),
+                    target.tables.get(&table_lens.target_table),
+                ) else {
+                    continue;
+                };
+                for op in &table_lens.ops {
+                    match op {
+                        LensOp::CopyColumn {
+                            from: column,
+                            to: copy,
+                        } => {
+                            let Some(source_column) = from.column(column) else {
+                                return Err(schema_error(format!(
+                                    "lens copies `{}.{column}`, but the source has no `{column}`",
+                                    from.name
+                                )));
+                            };
+                            if from.column(copy).is_some() {
+                                return Err(schema_error(format!(
+                                    "lens copies `{}.{column}` into `{copy}`, which the source already has",
+                                    from.name
+                                )));
+                            }
+                            let Some(copy_column) = to.column(copy) else {
+                                return Err(schema_error(format!(
+                                    "lens copies `{}.{column}` into `{copy}`, which `{}` lacks",
+                                    from.name, to.name
+                                )));
+                            };
+                            if copy_column.ty != source_column.ty {
+                                return Err(unsupported(format!(
+                                    "copying {}.{column} into a column of another type",
+                                    from.name
+                                )));
+                            }
+                            let stored = self.physical.tables.get(&to.stored);
+                            if stored
+                                .is_none_or(|stored| stored.column(&copy_column.stored).is_none())
+                            {
+                                cells.push(LensCell {
+                                    table: to.stored.clone(),
+                                    column: copy_column.stored.clone(),
+                                    since: version,
+                                    rule: LensCellRule::Copy(source_column.stored.clone()),
+                                });
+                            }
+                        }
+                        LensOp::DropColumn {
+                            column,
+                            backwards_default,
+                        } => {
+                            let Some(dropped) = from.column(column) else {
+                                return Err(schema_error(format!(
+                                    "lens drops `{}.{column}`, but the source has no `{column}`",
+                                    from.name
+                                )));
+                            };
+                            if to.columns.iter().any(|c| c.stored == dropped.stored) {
+                                continue;
+                            }
+                            let default = crate::values::to_sql(backwards_default)?
+                                .ok_or_else(|| unsupported("a NaN backwards default"))?;
+                            cells.push(LensCell {
+                                table: to.stored.clone(),
+                                column: dropped.stored.clone(),
+                                since: version,
+                                rule: LensCellRule::Dropped(default),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(cells)
     }
 
     /// Runs a write through the statement cache. Writes to app tables
@@ -3380,6 +3506,7 @@ impl Inner {
             Some((_, false)) => return Err(row_already_exists(row)),
             None => {}
         }
+        let (copies, dropped) = self.names.lens_cells(&schema.jazz.version_id(), table);
         let mut names = vec!["id".to_owned(), "_b".to_owned(), "_seq".to_owned()];
         let mut values = vec![
             Sql::Blob(row.0.as_bytes().to_vec()),
@@ -3395,8 +3522,16 @@ impl Inner {
                     return Err(missing_required(table_name, &column.name));
                 }
             };
+            for (_, copy) in copies.iter().filter(|(c, _)| *c == column.name) {
+                names.push(quote(copy));
+                values.push(value.clone());
+            }
             names.push(quote(&column.stored));
             values.push(value);
+        }
+        for (stored, default) in dropped {
+            names.push(quote(&stored));
+            values.push(default);
         }
         let stamp = self.stamp()?;
         // The update stamp stays NULL until the row is updated.
