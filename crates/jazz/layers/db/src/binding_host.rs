@@ -624,8 +624,9 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
-    /// Told of an upload the authority refused that no wait claimed.
-    pub rejected: RefCell<Option<Box<dyn Fn(&TransactionId, &Error)>>>,
+    /// Told of an upload the authority refused that no wait claimed, and
+    /// whether it was a serializable transaction.
+    pub rejected: RefCell<Option<Box<dyn Fn(&TransactionId, &Error, bool)>>>,
     /// Each uploaded write's claim, by commit seq: a wait sets it, and a
     /// dropped receipt leaves no one to claim it.
     claims: RefCell<BTreeMap<u64, Weak<Cell<bool>>>>,
@@ -664,9 +665,10 @@ impl Hooks {
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
     /// A relayed session's refused commit is reported under its own id.
-    fn report(&self, node: NodeUuid, rejections: Vec<([u8; 16], u64, Error)>) {
-        for (writer, seq, error) in rejections {
-            let writer = NodeUuid::from_bytes(writer);
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+        for rejection in rejections {
+            let (seq, error) = (rejection.seq, &rejection.error);
+            let writer = NodeUuid::from_bytes(rejection.writer);
             let claim = (writer == node)
                 .then(|| self.claims.borrow_mut().remove(&seq))
                 .flatten();
@@ -678,9 +680,18 @@ impl Hooks {
             }
             if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, &error);
+                rejected(&tx_id, error, rejection.serializable);
             }
         }
+    }
+}
+
+/// The public `kind` of a transaction in a mutation-error event.
+pub fn transaction_kind(serializable: bool) -> &'static str {
+    if serializable {
+        "serializable"
+    } else {
+        "mergeable"
     }
 }
 
@@ -719,6 +730,8 @@ pub struct Write {
     /// Why the write was refused when it applied, if it was: its waits
     /// fail with this, and nothing was committed.
     pub rejected: Option<Error>,
+    /// Whether the write commits a serializable transaction.
+    pub serializable: bool,
 }
 
 // ---- the binding ------------------------------------------------------------------
@@ -874,20 +887,21 @@ impl Binding {
     /// host reports it through the write's waits.
     fn write(&self, write: Result<WriteHandle, Error>) -> HostResult<Write> {
         let write = match write {
-            Err(error) if error.is_apply_time_rejection() => return self.rejected(error),
+            Err(error) if error.is_apply_time_rejection() => return self.rejected(error, false),
             write => write?,
         };
         self.hooks.after_write();
         self.receipt(write.row_uuid(), write.mergeable_tx_id())
     }
 
-    fn rejected(&self, error: Error) -> HostResult<Write> {
+    fn rejected(&self, error: Error, serializable: bool) -> HostResult<Write> {
         // Rejected transactions take ids from the top of this node's range,
         // which commits (counted from the bottom) never reach.
         static REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut write = self.receipt(RowUuid::from_bytes([0; 16]), u64::MAX - n)?;
         write.rejected = Some(error);
+        write.serializable = serializable;
         Ok(write)
     }
 
@@ -900,6 +914,7 @@ impl Binding {
             tx_id: TransactionId::from_committed_tx(tx_id),
             seq,
             rejected: None,
+            serializable: false,
         })
     }
 
@@ -1031,9 +1046,10 @@ impl Binding {
         let id = open_transaction(id)?;
         self.bound.borrow_mut().remove(&id);
         let kind = TransactionKind::parse(kind.unwrap_or("mergeable"))?;
+        let serializable = matches!(kind, TransactionKind::Serializable);
         if let Some(error) = self.refused.borrow_mut().remove(&id) {
             self.db.abandon_transaction_handle(id)?;
-            return self.rejected(error);
+            return self.rejected(error, serializable);
         }
         let receipt = match kind {
             TransactionKind::Mergeable => block_on(self.db.commit_mergeable_handle(id)),
@@ -1043,12 +1059,14 @@ impl Binding {
         // as the authority's verdict on a replica's commit is.
         let receipt = match receipt {
             Err(error) if error.code == ErrorCode::TransactionConflict => {
-                return self.rejected(error);
+                return self.rejected(error, serializable);
             }
             receipt => receipt?,
         };
         self.hooks.after_write();
-        self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)
+        let mut write = self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)?;
+        write.serializable = serializable;
+        Ok(write)
     }
 
     /// Roll back an open transaction.

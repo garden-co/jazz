@@ -1723,14 +1723,13 @@ impl Inner {
         let mut support = Vec::with_capacity(joins.len());
         for join in joins {
             let target = self.schema.table(&join.table)?;
+            let source = join.source_column.as_deref().unwrap_or("id");
             support.push(Support::Array {
                 table: target.stored.clone(),
                 inner: target.stored_name(&join.on_column).to_owned(),
-                outer: parent
-                    .stored_name(join.source_column.as_deref().unwrap_or("id"))
-                    .to_owned(),
-                outer_array: false,
-                inner_array: false,
+                outer: parent.stored_name(source).to_owned(),
+                outer_array: crate::compile::is_array(parent, source),
+                inner_array: crate::compile::is_array(target, &join.on_column),
                 nested: self.join_support(target, &join.nested_joins)?,
             });
         }
@@ -4112,6 +4111,9 @@ impl Db {
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
+                        let serializable = client.sent.iter().any(|m| {
+                            matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
+                        });
                         client.pending.retain(|p| p.tx != tx);
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
@@ -4132,13 +4134,17 @@ impl Db {
                             if let (Some(rejections), false) =
                                 (inner.upstream_rejections.as_mut(), relayed)
                             {
+                                let rejection = |writer, seq| crate::db::UpstreamRejection {
+                                    writer,
+                                    seq,
+                                    error: error.clone(),
+                                    serializable,
+                                };
                                 if origins.is_empty() {
-                                    rejections.push((me, tx, error.clone()));
+                                    rejections.push(rejection(me, tx));
                                 }
                                 rejections.extend(
-                                    origins
-                                        .into_iter()
-                                        .map(|(node, t)| (node, t, error.clone())),
+                                    origins.into_iter().map(|(node, t)| rejection(node, t)),
                                 );
                             }
                         }

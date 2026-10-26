@@ -1453,7 +1453,7 @@ impl<'a> Ctx<'a> {
                 let source = match &join.source_lookup {
                     // The value the join matches is a column of the row
                     // the source row references.
-                    Some(lookup) => {
+                    Some(lookup) => Some({
                         let referenced = self.table(&lookup.table)?;
                         let l = self.alias("l");
                         let mut found = vec![
@@ -1472,15 +1472,25 @@ impl<'a> Ctx<'a> {
                             self.source(referenced)?,
                             found.join(" AND ")
                         )
-                    }
+                    }),
                     None => {
-                        column_sql(table, alias, join.source_column.as_deref().unwrap_or("id"))?
+                        let column = join.source_column.as_deref().unwrap_or("id");
+                        // A forward hop through an array of references: the
+                        // joined row is one the array holds.
+                        if is_array(table, column) {
+                            let id = column_sql(target, &j, &join.on_column)?;
+                            conds.push(correlate(table, alias, column, &id)?);
+                            None
+                        } else {
+                            Some(column_sql(table, alias, column)?)
+                        }
                     }
                 };
-                conds.push(format!(
-                    "{} = {source}",
-                    column_sql(target, &j, &join.on_column)?
-                ));
+                // A reverse hop through an array of references: the joined
+                // row's array holds the source row.
+                if let Some(source) = source {
+                    conds.push(correlate(target, &j, &join.on_column, &source)?);
+                }
             }
         }
         for correlation in &join.correlated_filters {

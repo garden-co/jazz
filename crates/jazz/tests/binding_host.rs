@@ -1031,7 +1031,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let worker = open(0xe0);
     let refused = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = std::rc::Rc::clone(&refused);
-    *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _| {
+    *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _| {
         seen.borrow_mut().push(tx_id.clone());
     }));
     worker.set_remote_link_hint("live").unwrap();
