@@ -722,3 +722,16 @@ fn synced_include_deleted_subscriptions_keep_deleted_rows() {
         [("first", false), ("second", true), ("third", true)]
     );
 }
+
+/// A remote read asked right after a write, before any tick sent it, goes
+/// out behind that write: the server answers with the writer's own row.
+#[test]
+fn a_remote_read_after_an_unsent_write_sees_it() {
+    let synced = Synced::new();
+    synced.pump();
+    insert(&synced.alice, row(7), "mine");
+    assert_eq!(
+        titles(&synced.alice_reads(&notes().select(["title"]), remote(ReadOpts::default()))),
+        ["mine"]
+    );
+}
