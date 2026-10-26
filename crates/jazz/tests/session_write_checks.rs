@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 
 use duplex_transport::duplex;
 use jazz::db::WriteIdentity;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, UpdateOptions, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ReadOpts, ReadTier, UpdateOptions, UpsertOptions, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::records::Value;
@@ -47,6 +49,15 @@ fn schema() -> JazzSchema {
                                     vec![outer_eq("id", "id"), outer_eq("is_public", "is_public")],
                                 ),
                             ),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("data", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(exists("admins", vec![session_eq("user_id", &SUB)]))
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
                     ),
             )
             .table(
@@ -199,6 +210,61 @@ fn a_trusted_links_session_write_is_checked_as_that_session_at_the_authority() {
     .unwrap();
     pump();
     assert_eq!(cell(&server, "protected", "data"), text("alice"));
+}
+
+/// Read-for-write under a read policy that reads other rows: the replica
+/// may lack the rows that grant access, so it stages an upsert and the
+/// authority refuses a session that may not read the row. An update merges
+/// into the session's view of the row, so the replica refuses it at once.
+#[test]
+fn a_replica_leaves_a_relational_read_for_write_upsert_to_the_authority() {
+    let server = open(0);
+    seed(&server, "admins", id(2, 1), &[("user_id", text("alice"))]);
+    seed(&server, "notes", id(4, 1), &[("data", text("initial"))]);
+    let backend = open(1);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(backend.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let pump = || {
+        for _ in 0..4 {
+            block_on(backend.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(backend.tick()).unwrap();
+    };
+    let prepared = backend.prepare_query(&Query::from("notes")).unwrap();
+    let _stream = block_on(backend.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump();
+    assert_eq!(cell(&backend, "notes", "data"), text("initial"));
+
+    let bob = user(&backend, 2, "bob");
+    user(&server, 2, "bob");
+    let error = block_on(backend.update(
+        "notes",
+        id(4, 1),
+        BTreeMap::from([("data".to_owned(), text("bob"))]),
+        as_session(bob),
+    ))
+    .err()
+    .expect("an update of a row hidden from the session is refused at once");
+    assert!(
+        error.message.contains("read policy denied UPDATE"),
+        "{}",
+        error.message
+    );
+    block_on(backend.upsert(
+        "notes",
+        id(4, 1),
+        BTreeMap::from([("data".to_owned(), text("bob"))]),
+        UpsertOptions {
+            identity: WriteIdentity::Session(bob),
+            ..Default::default()
+        },
+    ))
+    .expect("the replica stages the session upsert");
+    pump();
+    assert_eq!(cell(&server, "notes", "data"), text("initial"));
+    assert_eq!(cell(&backend, "notes", "data"), text("initial"));
 }
 
 /// A session link cannot vouch for the sessions its runtime writes as: the

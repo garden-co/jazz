@@ -4,8 +4,10 @@
 
 use crate::common;
 
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::pin;
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::binding_host::{self, Binding, EventChunk, HostError, Link};
@@ -636,6 +638,66 @@ fn tab_over(worker: &Binding, tab: Binding) -> (Binding, Link, Link) {
     (tab, up, down)
 }
 
+#[test]
+fn a_frame_is_one_message_and_a_rows_message_ends_its_parts() {
+    use jazz::db::{FrameJoiner, SyncMessage, decode_message, encode_frames};
+    let [frame] =
+        <[Vec<u8>; 1]>::try_from(encode_frames(SyncMessage::Unsubscribe { id: 7 }).unwrap())
+            .unwrap();
+    assert!(matches!(
+        decode_message(&frame),
+        Ok(SyncMessage::Unsubscribe { id: 7 })
+    ));
+    // Postcard alone reads a valid prefix and ignores the rest.
+    let trailing = [frame.as_slice(), &[0]].concat();
+    assert!(postcard::from_bytes::<SyncMessage>(&trailing).is_ok());
+    assert!(decode_message(&trailing).is_err());
+    assert!(FrameJoiner::default().push(&trailing).is_err());
+    // Parts followed by anything but their `Rows` are the peer's error.
+    let part = postcard::to_allocvec(&SyncMessage::RowsPart { images: Vec::new() }).unwrap();
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&part).unwrap().is_none());
+    assert!(joiner.push(&frame).is_err());
+}
+
+/// A frame no sync message decodes from.
+const MALFORMED: [u8; 2] = [0xc8, 0x01];
+
+#[test]
+fn a_server_disconnects_a_client_whose_frame_does_not_decode() {
+    let worker = open(0xe0);
+    let (tab, up, down) = tab_over(&worker, open(0xe1));
+    pump(&[(&up, &down)]);
+    assert_eq!(worker.db.open_subscribers(), 1);
+    down.receive([MALFORMED.to_vec()]);
+    block_on(worker.tick()).unwrap();
+    assert_eq!(worker.db.open_subscribers(), 0);
+    // Nothing more reaches the tab over the closed session.
+    worker.insert("notes", &title("after"), &none()).unwrap();
+    block_on(worker.tick()).unwrap();
+    assert!(down.take_outbound().is_empty());
+    drop(tab);
+}
+
+#[test]
+fn a_client_detaches_from_an_upstream_whose_frame_does_not_decode() {
+    let worker = open(0xe2);
+    let (tab, up, down) = tab_over(&worker, open(0xe3));
+    pump(&[(&up, &down)]);
+    // A frame with bytes after its message is as malformed as any.
+    let [frame] = <[Vec<u8>; 1]>::try_from(
+        jazz::db::encode_frames(jazz::db::SyncMessage::Unsubscribe { id: 1 }).unwrap(),
+    )
+    .unwrap();
+    up.receive([[frame.as_slice(), &[0]].concat()]);
+    block_on(tab.tick()).unwrap();
+    // Detached, the tab's writes queue instead of going upstream.
+    tab.insert("notes", &title("offline"), &none()).unwrap();
+    block_on(tab.tick()).unwrap();
+    assert!(up.take_outbound().is_empty());
+    assert_eq!(titles(&tab), ["offline"]);
+}
+
 /// The opening's rows of a fresh subscription on `binding`.
 fn opening_rows(links: &[(&Link, &Link)], binding: &Binding) -> usize {
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
@@ -700,6 +762,122 @@ fn a_tab_reads_and_writes_through_its_worker_to_the_server() {
     let rows = jazz::binding_codec::decode_rows(&drive(&links, read).unwrap()).unwrap();
     assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 2);
     assert_eq!(opening_rows(&links, &tab), 2);
+}
+
+/// The host as a browser runs it: a binding ticks only when it asks
+/// (receiving frames asks), never on a timer.
+fn drive_on_demand<T>(links: &[(&Link, &Link)], future: impl Future<Output = T>) -> T {
+    let mut bindings: Vec<(&Binding, Rc<Cell<bool>>)> = Vec::new();
+    for link in links.iter().flat_map(|(client, server)| [client, server]) {
+        let binding = link.binding();
+        if bindings
+            .iter()
+            .any(|(seen, _)| Rc::ptr_eq(&seen.db, &binding.db))
+        {
+            continue;
+        }
+        let asked = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&asked);
+        *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || flag.set(true)));
+        bindings.push((binding, asked));
+    }
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..50 {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        for (client, server) in links {
+            // An empty delivery is no delivery.
+            let up = client.take_outbound();
+            if !up.is_empty() {
+                server.receive(up);
+            }
+            let down = server.take_outbound();
+            if !down.is_empty() {
+                client.receive(down);
+            }
+        }
+        for (binding, asked) in &bindings {
+            if asked.replace(false) {
+                block_on(binding.tick()).unwrap();
+            }
+        }
+    }
+    panic!("did not complete");
+}
+
+#[test]
+fn a_tab_read_asks_for_the_tick_that_fetches_its_large_values() {
+    // A reloaded tab holds nothing: its read gets the row from the worker
+    // and then the value's chunks, which only a tick sends for. Nothing else
+    // is in flight to tick it.
+    let worker = open(0xd0);
+    let large = "q".repeat(300 * 1024);
+    worker.insert("notes", &title(&large), &none()).unwrap();
+    let (tab, up, down) = tab_over(&worker, open(0xd1));
+    let links = [(&up, &down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let read = tab.all(query, &none(), None, None, None).unwrap();
+    let rows = jazz::binding_codec::decode_rows(&drive_on_demand(&links, read).unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 1);
+    assert_eq!(titles(&tab), [large]);
+}
+
+#[test]
+fn a_tab_reads_a_large_value_its_worker_relays_from_the_server() {
+    // The worker holds the row once the server answers, and fetches its
+    // chunks before it serves the tab's read.
+    let server = authority();
+    let large = "r".repeat(300 * 1024);
+    server.insert("notes", &title(&large), &none()).unwrap();
+    let worker = open(0xd2);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd3));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let read = tab
+        .all(query, &json!({ "tier": "remote" }), None, None, None)
+        .unwrap();
+    let rows = jazz::binding_codec::decode_rows(&drive_on_demand(&links, read).unwrap()).unwrap();
+    assert_eq!(rows.iter().map(|batch| batch.rows.len()).sum::<usize>(), 1);
+    assert_eq!(titles(&tab), [large]);
+}
+
+#[test]
+fn a_tab_subscription_opens_with_a_large_value_its_worker_relays_from_the_server() {
+    // A fresh tab and worker: the opening delta carries the value once the
+    // worker has its chunks.
+    let server = authority();
+    let large = "s".repeat(300 * 1024);
+    server.insert("notes", &title(&large), &none()).unwrap();
+    let worker = open(0xd4);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd5));
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
+    let mut stream = tab.subscribe(&query, &none(), None, None).unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let event = binding_host::event_chunk(drive(&links, tab.next_event(&mut stream))).unwrap();
+        if let EventChunk::Delta { delta, .. } = event {
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+            seen.extend(
+                added
+                    .iter()
+                    .flat_map(|batch| &batch.rows)
+                    .map(|row| row.cells["title"].clone()),
+            );
+        }
+        if !seen.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(seen, [Value::String(large)]);
 }
 
 #[test]
@@ -853,7 +1031,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let worker = open(0xe0);
     let refused = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = std::rc::Rc::clone(&refused);
-    *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _| {
+    *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _| {
         seen.borrow_mut().push(tx_id.clone());
     }));
     worker.set_remote_link_hint("live").unwrap();
@@ -1010,4 +1188,214 @@ fn a_tab_reads_its_workers_store_when_the_worker_has_no_server() {
             "{tier}"
         );
     }
+}
+
+/// `future` is still waiting after `links` moved every frame they could.
+fn still_pending<F: Future + ?Sized>(links: &[(&Link, &Link)], future: std::pin::Pin<&mut F>) {
+    let mut future = future;
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..20 {
+        assert!(
+            future.as_mut().poll(&mut context).is_pending(),
+            "resolved without an authority's answer"
+        );
+        pump(links);
+    }
+}
+
+fn rows_in(bytes: &[u8]) -> usize {
+    let rows = jazz::binding_codec::decode_rows(bytes).unwrap();
+    rows.iter().map(|batch| batch.rows.len()).sum()
+}
+
+fn delta_rows(chunk: EventChunk) -> usize {
+    let EventChunk::Delta { delta, .. } = chunk else {
+        panic!("expected a delta, got {chunk:?}");
+    };
+    let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(&delta).unwrap();
+    added.iter().map(|batch| batch.rows.len()).sum()
+}
+
+/// Only the authority confirms a remote result or makes a write `Global`
+/// (INV-API-32): a worker with no server orders its tabs' writes, but
+/// their strict remote reads and Global waits stay pending, while their
+/// local-first reads answer from its store.
+#[test]
+fn a_tabs_remote_reads_and_global_waits_stay_pending_when_its_worker_has_no_server() {
+    let worker = open(0xb0);
+    worker.set_remote_link_hint("none").unwrap();
+    let (tab, up, down) = tab_over(&worker, open(0xb1));
+    tab.set_remote_link_hint("none").unwrap();
+    let links = [(&up, &down)];
+    worker.insert("notes", &title("worker's"), &none()).unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let remote = json!({ "tier": "remote" });
+
+    let mut read = tab.all(query.clone(), &remote, None, None, None).unwrap();
+    still_pending(&links, read.as_mut());
+    let mut stream = tab.subscribe(&query, &remote, None, None).unwrap();
+    still_pending(&links, pin!(tab.next_event(&mut stream)));
+    let write = tab.insert("notes", &title("tab's"), &none()).unwrap();
+    let mut global = tab.wait_for_write(&write, "global").unwrap();
+    still_pending(&links, global.as_mut());
+
+    let local = tab
+        .all(query, &json!({ "tier": "local-first" }), None, None, None)
+        .unwrap();
+    assert_eq!(rows_in(&drive(&links, local).unwrap()), 2);
+}
+
+/// A strict remote read waits while its path to the server is down, and
+/// is answered by the server once it is back: a tab's through its worker,
+/// and a client's of its own.
+#[test]
+fn a_remote_read_waits_for_the_server_while_offline() {
+    let server = authority();
+    server.insert("notes", &title("server's"), &none()).unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let remote = json!({ "tier": "remote" });
+
+    // A tab, its worker's link down.
+    let worker = open(0xb2);
+    let up = worker.connect_upstream();
+    let down = server.accept_subscriber(worker.author(), Default::default());
+    worker.set_remote_link_hint("failed").unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xb3));
+    let tab_links = [(&tab_up, &tab_down)];
+    let mut read = tab.all(query.clone(), &remote, None, None, None).unwrap();
+    still_pending(&tab_links, read.as_mut());
+    let mut stream = tab.subscribe(&query, &remote, None, None).unwrap();
+    {
+        let opening = tab.next_event(&mut stream);
+        still_pending(&tab_links, pin!(opening));
+    }
+    worker.set_remote_link_hint("live").unwrap();
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+    assert_eq!(rows_in(&drive(&links, read).unwrap()), 1);
+    let opening = binding_host::event_chunk(drive(&links, tab.next_event(&mut stream))).unwrap();
+    assert_eq!(delta_rows(opening), 1);
+
+    // A client of its own, its link down.
+    let client = open(0xb4);
+    let up = client.connect_upstream();
+    let down = server.accept_subscriber(client.author(), Default::default());
+    client.set_remote_link_hint("failed").unwrap();
+    let mut read = client.all(query, &remote, None, None, None).unwrap();
+    still_pending(&[], read.as_mut());
+    client.set_remote_link_hint("live").unwrap();
+    assert_eq!(rows_in(&drive(&[(&up, &down)], read).unwrap()), 1);
+}
+
+/// A tab's `firstLoadRemoteWaitMs` reaches its worker: while the server
+/// has not answered, the opening waits that long, then shows the worker's
+/// store.
+#[test]
+fn a_tabs_first_load_wait_reaches_its_worker() {
+    let server = authority();
+    let worker = open(0xb5);
+    worker.set_remote_link_hint("live").unwrap();
+    // Connected, but the server never answers: its frames are never carried.
+    let _up = worker.connect_upstream();
+    let _down = server.accept_subscriber(worker.author(), Default::default());
+    worker.insert("notes", &title("worker's"), &none()).unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xb6));
+    let links = [(&tab_up, &tab_down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let wait = json!({ "tier": "local-first", "first_load_remote_wait_ms": 300 });
+
+    let mut stream = tab.subscribe(&query, &wait, None, None).unwrap();
+    let mut read = tab.all(query, &wait, None, None, None).unwrap();
+    {
+        let opening = tab.next_event(&mut stream);
+        let mut opening = pin!(opening);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(read.as_mut().poll(&mut context).is_pending());
+        pump(&links);
+        assert!(
+            opening.as_mut().poll(&mut context).is_pending(),
+            "the opening waits for the server first"
+        );
+        assert!(
+            read.as_mut().poll(&mut context).is_pending(),
+            "the read waits for the server first"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        assert_eq!(
+            delta_rows(binding_host::event_chunk(drive(&links, opening)).unwrap()),
+            1
+        );
+    }
+    assert_eq!(rows_in(&drive(&links, read).unwrap()), 1);
+}
+
+/// Whether a subscription event is ready now, without moving any frames.
+fn event_ready(binding: &Binding, stream: &mut jazz::db::SubscriptionStream) -> bool {
+    let mut context = Context::from_waker(Waker::noop());
+    pin!(binding.next_event(stream))
+        .poll(&mut context)
+        .is_ready()
+}
+
+/// A strict remote subscription lists what the server lists, without
+/// pending local versions (INV-API-32): a row written while the server
+/// has not accepted it appears only once it has, and a settled row changed
+/// meanwhile stays listed as it was settled. A local-first one shows both
+/// at once.
+#[test]
+fn a_remote_subscription_never_lists_pending_local_versions() {
+    let server = authority();
+    let row = *server
+        .insert("notes", &title("settled"), &none())
+        .unwrap()
+        .row_id
+        .0
+        .as_bytes();
+    let client = open(0xb7);
+    let up = client.connect_upstream();
+    let down = server.accept_subscriber(client.author(), Default::default());
+    let links = [(&up, &down)];
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut remote = client
+        .subscribe(&query, &json!({ "tier": "remote" }), None, None)
+        .unwrap();
+    let opening = binding_host::event_chunk(drive(&links, client.next_event(&mut remote))).unwrap();
+    assert_eq!(delta_rows(opening), 1);
+    let mut local = client
+        .subscribe(&query, &json!({ "tier": "local-first" }), None, None)
+        .unwrap();
+    drive(&links, client.next_event(&mut local));
+
+    // Written while the server has not seen them: no frames move.
+    client.insert("notes", &title("pending"), &none()).unwrap();
+    client
+        .update("notes", &row, &title("changed"), &none())
+        .unwrap();
+    block_on(client.db.tick()).unwrap();
+    assert!(
+        event_ready(&client, &mut local),
+        "local-first shows pending writes"
+    );
+    assert!(
+        !event_ready(&client, &mut remote),
+        "a remote subscription listed a pending local version"
+    );
+    let read = client
+        .all(
+            query.clone(),
+            &json!({ "tier": "local-only" }),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
+
+    // The server accepts them: now they are listed.
+    let change = binding_host::event_chunk(drive(&links, client.next_event(&mut remote))).unwrap();
+    assert!(delta_rows(change) >= 1);
+    let read = client
+        .all(query, &json!({ "tier": "remote" }), None, None, None)
+        .unwrap();
+    assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
+    assert_eq!(titles(&server), ["changed", "pending"]);
 }

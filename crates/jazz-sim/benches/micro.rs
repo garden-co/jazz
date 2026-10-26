@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::time::Instant;
 
-use jazz::db::{Db, ErrorCode, ReadOpts, block_on};
+use jazz::db::{Db, ReadOpts, block_on};
 use jazz::ids::AuthorSubject;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
@@ -337,7 +337,7 @@ fn read_set_validation(config: &Config) -> Latencies {
             latencies.record_duration_us(start.elapsed());
             match (conflicting, outcome) {
                 (false, Ok(_)) => {}
-                (true, Err(error)) => assert_eq!(error.code, ErrorCode::TransactionConflict),
+                (true, Err(error)) => assert!(error.is_conflict(), "{error}"),
                 (conflicting, outcome) => {
                     panic!("conflicting={conflicting}: unexpected outcome {outcome:?}")
                 }

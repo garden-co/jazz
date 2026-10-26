@@ -227,21 +227,18 @@ fn unsupported_history_shapes_are_explicit_errors() {
                     Value::Uuid(uuid::Uuid::from_bytes(NODE)),
                 ])),
             )),
-            "$transactionId predicates",
+            "user-provided $transactionId predicates",
         ),
         (
             one().order_by("$transactionId", OrderDirection::Asc),
-            "ordering history by $transactionId",
+            "ordering by $transactionId",
         ),
-        (
-            one().include("missing"),
-            "joins or relationships in history queries",
-        ),
+        (one().include("missing"), "joins or relationships"),
     ];
     for (query, expected) in cases {
         let message = error_of(&db, &query, ReadOpts::default());
         assert!(
-            message.contains(expected) && message.contains("not supported yet"),
+            message.contains(expected) && message.contains("not supported in history queries yet"),
             "{query:?}: {message}"
         );
     }
@@ -263,7 +260,10 @@ fn unsupported_history_shapes_are_explicit_errors() {
             ..Default::default()
         },
     );
-    assert!(message.contains("history reads at a snapshot"), "{message}");
+    assert!(
+        message.contains("Reading history at a snapshot"),
+        "{message}"
+    );
 }
 
 /// Deleting a note hides its history; including deleted rows lists its
@@ -436,7 +436,8 @@ fn branch_history_reads_one_branch_and_refuses_a_base() {
         ),
     );
     assert!(
-        message.contains("history reads through a branch view with a base"),
+        message
+            .contains("Reading history with a branch base is not supported in history queries yet"),
         "{message}"
     );
 }
@@ -673,10 +674,14 @@ const BOB_NODE: [u8; 16] = [0x03; 16];
 
 impl Synced {
     fn new() -> Self {
-        let server = open(notes_schema(), SERVER_NODE, AuthorSubject::SYSTEM);
+        Self::with_schema(notes_schema())
+    }
+
+    fn with_schema(schema: JazzSchema) -> Self {
+        let server = open(schema.clone(), SERVER_NODE, AuthorSubject::SYSTEM);
         let connect = |node: [u8; 16], who: u8| {
             let author = AuthorSubject::for_test_bytes([who; 16]);
-            let client = open(notes_schema(), node, author);
+            let client = open(schema.clone(), node, author);
             let (client_side, server_side) = duplex();
             std::mem::forget(block_on(client.connect_upstream(client_side)));
             server.accept_subscriber(server_side, author);
@@ -841,6 +846,69 @@ fn local_first_history_subscriptions_receive_accepted_versions() {
             (second, BOB_NODE),
             (third, ALICE_NODE)
         ]
+    );
+}
+
+/// Alice holds a note's history; her own update makes the current row
+/// unreadable to her. Once the server accepts it, her local-first history
+/// subscription and remote reads lose every version, though her local
+/// copies stay readable (INV-SYNC-14).
+#[test]
+fn local_first_history_retracts_versions_when_access_is_revoked() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::Cmp {
+                                column: "title".to_owned(),
+                                op: CmpOp::Ne,
+                                value: PolicyValue::Literal(PublicValue::Text("hidden".into())),
+                            })
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let synced = Synced::with_schema(schema);
+    let note = row(1);
+    insert(&synced.server, note, "first");
+    synced.pump();
+    let prepared = synced.alice.prepare_query(&history_of(note)).unwrap();
+    let mut subscription =
+        block_on(synced.alice.subscribe(&prepared, ReadOpts::default())).unwrap();
+    synced.pump();
+    let mut visible: Vec<String> = Vec::new();
+    let mut drain = |visible: &mut Vec<String>| {
+        while let Some(event) = subscription.try_next_event() {
+            if let jazz::db::SubscriptionEvent::Delta { added, removed, .. } = event {
+                let added: Vec<CurrentRow> = added.iter().map(|row| (**row).clone()).collect();
+                visible.extend(titles(&added));
+                for _ in 0..removed.len() {
+                    visible.pop();
+                }
+            }
+        }
+    };
+    drain(&mut visible);
+    assert_eq!(visible, ["first"]);
+
+    update(&synced.alice, note, "hidden");
+    synced.pump();
+    drain(&mut visible);
+    assert_eq!(visible, Vec::<String>::new(), "the subscription retracts");
+    let remote = ReadOpts {
+        tier: ReadTier::Remote,
+        ..Default::default()
+    };
+    assert!(
+        synced
+            .alice_reads(&history_of(note), remote)
+            .unwrap()
+            .is_empty()
     );
 }
 

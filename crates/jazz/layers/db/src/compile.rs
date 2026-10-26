@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ids::AuthorSubject;
+use crate::ids::{AuthorSubject, RowUuid};
 use crate::options::Error;
 use crate::query::{
     ArraySubquery, ArraySubqueryRequirement, JoinTarget, Operand, OrderDirection, Predicate, Query,
@@ -21,7 +21,7 @@ use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported}
 mod history;
 
 /// Inherits chains with no explicit bound unroll this deep.
-const DEFAULT_INHERITS_DEPTH: usize = 10;
+pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
 const FIXPOINT_GUARD: usize = 1_000;
 
@@ -245,6 +245,9 @@ pub struct Ctx<'a> {
     pub view: Option<View>,
     /// An as-of cut every table is read through.
     pub cut: Option<Cut>,
+    /// The cut is a replica's last server seq: the read leaves out its
+    /// pending local versions (which history reads do anyway).
+    pub settled_only: bool,
     /// Questions the statement needs answered first.
     pub preps: Vec<Prep>,
     /// The authority's node, whose own commits history reads name by their
@@ -336,6 +339,7 @@ impl<'a> Ctx<'a> {
             tables: BTreeSet::new(),
             view: None,
             cut: None,
+            settled_only: false,
             preps: Vec::new(),
             history_origin: None,
             members_only: false,
@@ -349,7 +353,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// The row at `alias` is one the server still lists for this replica.
-    fn listed(&mut self, table: &Table, alias: &str) -> String {
+    pub(super) fn listed(&mut self, table: &Table, alias: &str) -> String {
         let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
         format!(
             "NOT EXISTS (SELECT 1 FROM _jazz_revoked AS r WHERE r.t = {stored} \
@@ -369,6 +373,16 @@ impl<'a> Ctx<'a> {
 
     pub fn with_cut(mut self, cut: Option<Cut>) -> Self {
         self.cut = cut;
+        self
+    }
+
+    /// Leave out a replica's pending local versions, as of its last server
+    /// seq, unless the read already has a cut.
+    pub fn with_settled_only(mut self, settled_only: bool) -> Self {
+        if settled_only && self.cut.is_none() {
+            self.cut = Some(Cut::at(crate::db::LOCAL_BASE - 1));
+            self.settled_only = true;
+        }
         self
     }
 
@@ -1348,6 +1362,9 @@ impl<'a> Ctx<'a> {
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(child, alias, session)?);
         }
+        if self.members_only {
+            wheres.push(self.listed(child, alias));
+        }
         let (order, ranked_order) = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
             .iter()
@@ -1387,6 +1404,28 @@ impl<'a> Ctx<'a> {
         })
     }
 
+    /// One cell of row `id` of `table`, read through the same view and cut
+    /// as the rows it came from: a relation's parent value. The SQL, its
+    /// params and the cell's type.
+    pub fn compile_cell(
+        mut self,
+        table: &str,
+        column: &str,
+        id: RowUuid,
+    ) -> Result<(String, Vec<Sql>, ValueType), Error> {
+        let table = self.table(table)?;
+        let column = table
+            .column(column)
+            .ok_or_else(|| unsupported("unknown correlation column"))?;
+        let source = self.source(table)?;
+        let id = self.bind(Sql::Blob(id.0.as_bytes().to_vec()));
+        let sql = format!(
+            "SELECT t.{} FROM {source} AS t WHERE t.id = {id}",
+            quote(&column.stored)
+        );
+        Ok((sql, self.params, column.ty.clone()))
+    }
+
     /// A junction traversal from the row of `table` at `alias`: some live
     /// row of the joined table matches its correlations and filters, is
     /// readable by the session, and satisfies its nested joins in turn.
@@ -1414,7 +1453,7 @@ impl<'a> Ctx<'a> {
                 let source = match &join.source_lookup {
                     // The value the join matches is a column of the row
                     // the source row references.
-                    Some(lookup) => {
+                    Some(lookup) => Some({
                         let referenced = self.table(&lookup.table)?;
                         let l = self.alias("l");
                         let mut found = vec![
@@ -1433,15 +1472,25 @@ impl<'a> Ctx<'a> {
                             self.source(referenced)?,
                             found.join(" AND ")
                         )
-                    }
+                    }),
                     None => {
-                        column_sql(table, alias, join.source_column.as_deref().unwrap_or("id"))?
+                        let column = join.source_column.as_deref().unwrap_or("id");
+                        // A forward hop through an array of references: the
+                        // joined row is one the array holds.
+                        if is_array(table, column) {
+                            let id = column_sql(target, &j, &join.on_column)?;
+                            conds.push(correlate(table, alias, column, &id)?);
+                            None
+                        } else {
+                            Some(column_sql(table, alias, column)?)
+                        }
                     }
                 };
-                conds.push(format!(
-                    "{} = {source}",
-                    column_sql(target, &j, &join.on_column)?
-                ));
+                // A reverse hop through an array of references: the joined
+                // row's array holds the source row.
+                if let Some(source) = source {
+                    conds.push(correlate(target, &j, &join.on_column, &source)?);
+                }
             }
         }
         for correlation in &join.correlated_filters {
@@ -1949,6 +1998,13 @@ impl<'a> Ctx<'a> {
                     ))
                 })?;
                 let target = self.table(target_name)?;
+                if let Some(chain) = recursive_base(table, target, *operation, via_column) {
+                    // Distance n is checked with depth - n left, so the
+                    // hop below the first stops at its own bound.
+                    let bound = depth.min(chain.depth.map_or(usize::MAX, |d| d.saturating_add(1)));
+                    return self
+                        .ancestor_closure(target, alias, via_column, &chain, bound, session);
+                }
                 let p = self.alias("p");
                 let inner = match target.policy(*operation) {
                     None => "0".to_owned(),
@@ -1992,6 +2048,50 @@ impl<'a> Ctx<'a> {
                 )
             }
         })
+    }
+
+    /// A row's ancestors through its own reference `via`, up to `bound`
+    /// hops (each taken from an alive row meeting the chain's guards), any
+    /// of which (alive) meets one of its base disjuncts: a parent chain's
+    /// policy as one `WITH RECURSIVE` closure, not one nested EXISTS per
+    /// level (Durable Object SQLite caps expression depth at 100). The
+    /// caller checked the first hop's guards. `UNION` dedupes, so a cycle
+    /// terminates.
+    fn ancestor_closure(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        via: &str,
+        chain: &ParentChain<'_>,
+        bound: usize,
+        session: &Session,
+    ) -> Result<String, Error> {
+        let c = self.alias("anc");
+        let p = self.alias("p");
+        let a = self.alias("a");
+        let seed = column_sql(table, alias, via)?;
+        let parent = column_sql(table, &p, via)?;
+        let steps = self.source(table)?;
+        let mut step = vec![format!("{p}._del = 0"), format!("{c}.d < {bound}")];
+        for guard in &chain.guards {
+            step.push(self.policy_expr(guard, table, &p, None, session, 0)?);
+        }
+        let cte = format!(
+            "{c}(id, d) AS (SELECT {seed}, 1 UNION SELECT {parent}, {c}.d + 1 FROM {steps} AS {p} \
+             JOIN {c} ON {p}.id = {c}.id WHERE {})",
+            and(&step)
+        );
+        let base = chain
+            .base
+            .iter()
+            .map(|part| self.policy_expr(part, table, &a, None, session, 0))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!(
+            "EXISTS (WITH RECURSIVE {cte} SELECT 1 FROM {} AS {a} JOIN {c} ON {a}.id = {c}.id \
+             WHERE {a}._del = 0 AND {})",
+            self.source(table)?,
+            or(&base)
+        ))
     }
 
     // ---- relation IR ----------------------------------------------------
@@ -3392,5 +3492,81 @@ mod tests {
         ] {
             assert_eq!(plain_exists(sql), None, "{sql}");
         }
+    }
+}
+
+/// `target`'s `operation` policy split as a parent chain: when `table`
+/// inherits from its own rows through the scalar reference `via` and that
+/// policy is `base OR (guards AND INHERITS(operation, via))`, the other
+/// disjuncts, the guards a row meets to take the hop, and the hop's own
+/// depth bound. None when any of them inherits further: that case unrolls
+/// level by level.
+fn recursive_base<'p>(
+    table: &Table,
+    target: &'p Table,
+    operation: Operation,
+    via: &str,
+) -> Option<ParentChain<'p>> {
+    let array = |ty: &ValueType| match ty {
+        ValueType::Nullable(inner) => matches!(**inner, ValueType::Array(_)),
+        ty => matches!(ty, ValueType::Array(_)),
+    };
+    if target.stored != table.stored || target.column(via).is_none_or(|c| array(&c.ty)) {
+        return None;
+    }
+    let PolicyExpr::Or(parts) = target.policy(operation)? else {
+        return None;
+    };
+    let is_hop = |part: &PolicyExpr| {
+        matches!(part, PolicyExpr::Inherits { operation: op, via_column, .. }
+            if *op == operation && via_column == via)
+    };
+    let hop = |part: &'p PolicyExpr| -> Option<(Option<usize>, Vec<&'p PolicyExpr>)> {
+        let conds: Vec<&PolicyExpr> = match part {
+            PolicyExpr::And(conds) => conds.iter().collect(),
+            part => vec![part],
+        };
+        let mut hops = conds.iter().filter(|c| is_hop(c));
+        let Some(PolicyExpr::Inherits { max_depth, .. }) = hops.next() else {
+            return None;
+        };
+        if hops.next().is_some() {
+            return None;
+        }
+        let guards = conds.into_iter().filter(|c| !is_hop(c)).collect();
+        Some((*max_depth, guards))
+    };
+    let mut hops = parts.iter().filter_map(|part| hop(part).map(|h| (part, h)));
+    let (hop_part, (depth, guards)) = hops.next()?;
+    if hops.next().is_some() {
+        return None;
+    }
+    let base: Vec<&PolicyExpr> = parts
+        .iter()
+        .filter(|part| !std::ptr::eq(*part, hop_part))
+        .collect();
+    base.iter()
+        .chain(&guards)
+        .all(|part| !inherits(part))
+        .then_some(ParentChain {
+            base,
+            guards,
+            depth,
+        })
+}
+
+struct ParentChain<'p> {
+    base: Vec<&'p PolicyExpr>,
+    guards: Vec<&'p PolicyExpr>,
+    depth: Option<usize>,
+}
+
+fn inherits(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Inherits { .. } | PolicyExpr::InheritsReferencing { .. } => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
+        PolicyExpr::Not(inner) => inherits(inner),
+        PolicyExpr::Exists { condition, .. } => inherits(condition),
+        _ => false,
     }
 }

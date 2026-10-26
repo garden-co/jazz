@@ -190,6 +190,20 @@ impl Net {
         self.drive(db.wait_for_transaction(tx, DurabilityTier::Global))
     }
 
+    /// `tx` was accepted where it was ordered, and is never `Global`:
+    /// there is no authority to make it so.
+    fn never_global(&self, db: &Db, tx: u64) {
+        let mut wait = pin!(db.wait_for_transaction(tx, DurabilityTier::Global));
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..MAX_TURNS {
+            assert!(
+                wait.as_mut().poll(&mut context).is_pending(),
+                "a commit no authority accepted reached Global"
+            );
+            self.pump();
+        }
+    }
+
     fn write_invite(&self, c: &str) -> RowUuid {
         let write = block_on(self.direct.insert("invites", code(c), Default::default())).unwrap();
         self.settle(&self.direct, write.mergeable_tx_id())
@@ -261,6 +275,17 @@ impl Net {
     /// join only if it holds. `between` runs after the read and before the
     /// commit.
     fn redeem(&self, db: &Db, c: &str, between: impl FnOnce()) -> Result<(), jazz::db::Error> {
+        let receipt = self.stage_redeem(db, c, between)?;
+        self.settle(db, receipt).map(drop)
+    }
+
+    /// [`Net::redeem`] up to its commit: its receipt, not yet settled.
+    fn stage_redeem(
+        &self,
+        db: &Db,
+        c: &str,
+        between: impl FnOnce(),
+    ) -> Result<u64, jazz::db::Error> {
         let open = OpenTransactionId::new();
         block_on(db.begin_serializable(open)).unwrap();
         let invite = db.prepare_query(&invite_query(c)).unwrap();
@@ -275,7 +300,8 @@ impl Net {
                 .insert("members", code(c), Default::default()),
         )
         .unwrap();
-        self.finish(db, open)
+        self.drive(db.commit_serializable_handle(open))
+            .map(|receipt| receipt.0)
     }
 
     /// Begin a serializable transaction on `db` whose snapshot is pinned
@@ -313,6 +339,10 @@ fn assert_conflict(result: Result<(), jazz::db::Error>) {
     assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
 }
 
+fn assert_rejected(result: Result<(), jazz::db::Error>) {
+    common::assert_serialization_conflict(&result.expect_err("the authority rejects the commit"));
+}
+
 #[test]
 fn a_tabs_serializable_redemption_through_its_worker_joins() {
     let net = Net::new(1);
@@ -326,7 +356,7 @@ fn a_tabs_serializable_redemption_through_its_worker_joins() {
 fn a_revocation_after_a_tabs_read_rejects_its_redemption() {
     let net = Net::new(1);
     let invite = net.write_invite("abc");
-    assert_conflict(net.redeem(net.tab(0), "abc", || net.revoke(invite)));
+    assert_rejected(net.redeem(net.tab(0), "abc", || net.revoke(invite)));
     assert_eq!(net.count(&members_query("abc")), 0);
 }
 
@@ -381,7 +411,7 @@ fn a_tabs_blind_write_over_a_newer_version_conflicts() {
             Default::default(),
         ))
         .unwrap();
-        assert_conflict(net.finish(tab, open));
+        assert_rejected(net.finish(tab, open));
         assert_eq!(
             net.holders(),
             ["direct"],
@@ -482,8 +512,9 @@ fn a_tabs_commit_over_its_own_unsettled_write_is_accepted() {
     assert_eq!(net.count(&invite_query("own")), 1);
 }
 
-/// A worker with no server is its tabs' authority: it validates their
-/// serializable commits itself.
+/// A worker with no server is its tabs' last word: it validates their
+/// serializable commits itself, ordering them so its tabs converge, but
+/// none of them becomes `Global`, since there is no authority.
 #[test]
 fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
     let net = Net::with_worker_hint(2, RemoteLinkHint::NoServer);
@@ -492,13 +523,15 @@ fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
             .insert("invites", code("abc"), Default::default()),
     )
     .unwrap();
-    net.settle(net.tab(0), write.mergeable_tx_id()).unwrap();
-    net.redeem(net.tab(1), "abc", || {})
+    net.never_global(net.tab(0), write.mergeable_tx_id());
+    let joined = net
+        .stage_redeem(net.tab(1), "abc", || {})
         .expect("an unchanged read holds");
+    net.never_global(net.tab(1), joined);
     let invite = write.row_uuid();
     let revoked = net.redeem(net.tab(1), "abc", || {
         let write = block_on(net.tab(0).delete("invites", invite, Default::default())).unwrap();
-        net.settle(net.tab(0), write.mergeable_tx_id()).unwrap();
+        net.never_global(net.tab(0), write.mergeable_tx_id());
     });
     assert_conflict(revoked);
     let members = net.worker.prepare_query(&members_query("abc")).unwrap();
@@ -508,4 +541,50 @@ fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
             .len(),
         1
     );
+}
+
+#[test]
+fn a_tabs_later_commit_conflicts_with_its_open_transaction_over_the_same_row() {
+    let net = Net::with_worker_hint(1, RemoteLinkHint::NoServer);
+    let tab = net.tab(0);
+    // The seat is still unsettled when both transactions begin.
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let seat = block_on(tab.insert("seats", cells, Default::default()))
+        .unwrap()
+        .row_uuid();
+    let (alice, bob) = (OpenTransactionId::new(), OpenTransactionId::new());
+    block_on(tab.begin_serializable(alice)).unwrap();
+    block_on(tab.begin_serializable(bob)).unwrap();
+    for (open, name) in [(alice, "alice"), (bob, "bob")] {
+        net.drive(tab.serializable_tx_ref(open).update(
+            "seats",
+            seat,
+            holder(name),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    net.drive(tab.commit_serializable_handle(alice)).unwrap();
+    assert_conflict(net.drive(tab.commit_serializable_handle(bob)).map(drop));
+}
+
+#[test]
+fn a_tabs_write_is_local_once_its_worker_stored_it() {
+    let mut net = Net::new(1);
+    // No fate can come back: only the worker's own store makes it local.
+    net.worker_offline();
+    let tab = net.tab(0);
+    let write = block_on(tab.insert("invites", code("offline"), Default::default())).unwrap();
+    let mut local = pin!(tab.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Local));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        local.as_mut().poll(&mut context).is_pending(),
+        "a non-durable tab's own store does not make its write local"
+    );
+    block_on(tab.tick()).unwrap();
+    assert!(local.as_mut().poll(&mut context).is_pending());
+    block_on(net.worker.tick()).unwrap();
+    block_on(tab.tick()).unwrap();
+    assert!(local.as_mut().poll(&mut context).is_ready());
 }

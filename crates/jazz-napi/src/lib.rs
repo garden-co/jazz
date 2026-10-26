@@ -41,7 +41,7 @@
 mod e2ee_crypto;
 
 #[cfg(feature = "rn-test-bridge")]
-compile_error!("the RN test bridge needs jazz-native-relay, which is not ported to SQLite yet");
+mod rn_test_bridge;
 
 #[global_allocator]
 static GLOBAL: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
@@ -106,23 +106,31 @@ pub fn test_binding_codec_golden_fixture() -> String {
     jazz::binding_codec::BINDING_CODEC_GOLDEN_FIXTURE.to_owned()
 }
 
-/// Test-only execution of a frozen v5 frame batch through the
-/// generated NAPI artifact. This reaches the production Rust frame, feature,
-/// compression, and semantic-payload decoders; it is not a host wire API.
+/// Test-only: read one pinned wire corpus batch through the generated NAPI
+/// artifact, as `reader` (`"server-opening"`, `"server"` or `"client"`)
+/// would, with the production frame and sync message decoders. Not a host
+/// wire API.
 #[napi(js_name = "__testValidateWireFrameBatchCorpus", skip_typescript)]
 pub fn test_validate_wire_frame_batch_corpus(
-    frame: Buffer,
+    batch: Buffer,
+    reader: String,
     negotiated_features: String,
 ) -> Result<()> {
     let negotiated_features = negotiated_features
         .parse()
         .map_err(|_| napi::Error::from_reason("test wire corpus features must be a u64 decimal"))?;
-    jazz::wire::decode_websocket_frame_batch(&frame)
-        .map_err(|error| error.to_string())
-        .and_then(|frames| {
-            jazz::wire::validate_frames_for_artifact_corpus(&frames, negotiated_features)
-        })
+    let reader = corpus_reader(&reader).map_err(napi::Error::from_reason)?;
+    jazz::db::validate_frame_batch_for_corpus(&batch, reader, negotiated_features)
         .map_err(napi::Error::from_reason)
+}
+
+fn corpus_reader(name: &str) -> std::result::Result<jazz::db::CorpusReader, String> {
+    match name {
+        "server-opening" => Ok(jazz::db::CorpusReader::ServerOpening),
+        "server" => Ok(jazz::db::CorpusReader::Server),
+        "client" => Ok(jazz::db::CorpusReader::Client),
+        other => Err(format!("unknown wire corpus reader {other:?}")),
+    }
 }
 
 /// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
@@ -561,9 +569,9 @@ impl Inner {
         *binding.hooks.schedule_tick.borrow_mut() =
             Some(Box::new(move || scheduler.request_tick()));
         let reporter = Rc::clone(&host);
-        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error| {
+        *binding.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, error, serializable| {
             if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
-                let event = mutation_error_event(&tx_id.to_string(), error, true);
+                let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
                 callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
             }
         }));
@@ -598,7 +606,8 @@ impl Inner {
         claimed: Rc<Cell<bool>>,
     ) -> napi::Result<()> {
         let host = Rc::clone(&self.host);
-        let event = mutation_error_event(&write.tx_id.to_string(), error, false);
+        let event =
+            mutation_error_event(&write.tx_id.to_string(), error, write.serializable, false);
         let report = env.create_function_from_closure("reportMutationError", move |context| {
             if claimed.get() {
                 return Ok(());
@@ -623,14 +632,19 @@ type SetTimeout<'a> = Function<'a, FnArgs<(Function<'a, (), ()>, f64)>, Unknown<
 
 /// A `MutationErrorEvent` for transaction `tx` rejected with `error` (by
 /// the authority, if `upstream`).
-fn mutation_error_event(tx: &str, error: &CoreError, upstream: bool) -> serde_json::Value {
+fn mutation_error_event(
+    tx: &str,
+    error: &CoreError,
+    serializable: bool,
+    upstream: bool,
+) -> serde_json::Value {
     let (code, reason) = binding_host::mutation_error_parts(error, upstream);
     serde_json::json!({
         "code": code,
         "reason": reason,
         "transaction": {
             "transactionId": tx,
-            "kind": "mergeable",
+            "kind": binding_host::transaction_kind(serializable),
             "sealed": true,
             "latestSettlement": {
                 "kind": "rejected",

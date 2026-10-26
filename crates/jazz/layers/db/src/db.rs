@@ -48,9 +48,10 @@ use crate::values::{
     AuthorKey, Schema, Sql, Table, author_key, from_sql, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, FirstLoad, FrameJoiner, Image, LOCAL_BASE, QueryAttachment, RelationSnapshot,
-    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireError, WireTransport, WireTransportAdapter, duplex, encode_frames,
+    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, QueryAttachment,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, Upstream, WireError, WireTransport, WireTransportAdapter, decode_message,
+    duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -206,6 +207,11 @@ struct ReadSpec {
     include_deleted: bool,
     /// A replica's read of the server's view (`ReadTier::Remote`).
     members_only: bool,
+    /// A replica's `ReadTier::Remote` read: its pending local versions
+    /// (seqs from `LOCAL_BASE` up) are left out, and a row they changed
+    /// reads as its settled version, as the server lists it. Unlike a
+    /// [`ReadSpec::cut`] it stays live.
+    settled_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
 }
@@ -238,6 +244,7 @@ impl ReadSpec {
         Ok(Self {
             include_deleted: opts.read_view.include_deleted,
             members_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
+            settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
         })
@@ -264,15 +271,15 @@ pub struct SubscriptionStream {
         Query,
         BTreeMap<String, Value>,
         bool,
-        ReadTier,
+        sync::RemoteReach,
     )>,
 }
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted, tier)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, tier);
+        if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
         }
     }
 }
@@ -377,10 +384,9 @@ struct Inner {
     /// The stored tables: the union of every admitted schema, keyed and
     /// named by stored names.
     physical: Schema,
-    /// Admitted structural schemas, by version, and registered views.
-    admitted: Vec<JazzSchema>,
-    /// `version_id()` of each of `admitted`, in order.
-    pub(crate) admitted_versions: Vec<crate::ids::SchemaVersionId>,
+    /// Admitted structural schemas with their version ids (hashing a
+    /// whole schema is too slow to repeat per session per tick).
+    admitted: Vec<(crate::ids::SchemaVersionId, JazzSchema)>,
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
@@ -416,7 +422,7 @@ struct Inner {
     authority: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
-    upstream_rejections: Option<Vec<([u8; 16], u64, Error)>>,
+    upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
     /// Rows written since the last server tick (only while serving).
@@ -496,6 +502,15 @@ pub(crate) enum Who {
     /// Unchecked like `Local` (the database identity stays the policy
     /// subject), with this author as the write's provenance.
     Attributed(AuthorSubject),
+}
+
+/// How long a LocalFirst read's first load waits for a relay's upstream
+/// (`firstLoadRemoteWaitMs`), as a non-durable foreground tells its relay.
+pub(crate) fn first_load_wait(tier: ReadTier, first_load: &FirstLoad) -> Option<u64> {
+    match (tier, first_load) {
+        (ReadTier::LocalFirst, FirstLoad::WaitForRemote { timeout_ms }) => Some(*timeout_ms),
+        _ => None,
+    }
 }
 
 fn who(identity: WriteIdentity) -> Who {
@@ -1042,8 +1057,7 @@ impl Db {
                 owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
-                admitted_versions: vec![config.schema.version_id()],
-                admitted: vec![config.schema.clone()],
+                admitted: vec![(config.schema.version_id(), config.schema.clone())],
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
@@ -1115,7 +1129,7 @@ impl Db {
     /// The uploads the authority refused since the last call, by the node
     /// and seq of the commit (this store's, or the relayed session's that
     /// wrote it) (empty unless [`Db::track_upstream_rejections`] was called).
-    pub fn take_upstream_rejections(&self) -> Vec<([u8; 16], u64, Error)> {
+    pub fn take_upstream_rejections(&self) -> Vec<UpstreamRejection> {
         self.inner
             .borrow_mut()
             .upstream_rejections
@@ -1273,7 +1287,8 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().nest_relations(prepared, None, roots)
+        self.inner()
+            .nest_relations(prepared, None, &ReadSpec::default(), roots)
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
@@ -1296,12 +1311,14 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
-        let roots = inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)?;
+        let read = ReadSpec::of(&opts, &inner)?;
+        let roots = inner.run(prepared, None, &read)?;
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
             tree.push(inner.node(
                 prepared,
                 None,
+                &read,
                 &prepared.query.table,
                 &prepared.query.array_subqueries,
                 row,
@@ -1363,14 +1380,18 @@ impl Db {
             self.remote_shape(&prepared.query)?;
         }
         // A non-durable foreground tells its relay how far the read
-        // reaches, as its fetches do; to an authority it is always remote.
-        let tier = if non_durable {
-            opts.tier
+        // reaches, and how long its first load waits for the relay's
+        // upstream, as its fetches do; to an authority it is always remote.
+        let reach = if non_durable {
+            sync::RemoteReach {
+                tier: opts.tier,
+                wait: first_load_wait(opts.tier, &opts.first_load),
+            }
         } else {
-            ReadTier::Remote
+            sync::RemoteReach::REMOTE
         };
         let remote = if remote_read {
-            self.attach_remote(prepared, read.include_deleted, tier)
+            self.attach_remote(prepared, read.include_deleted, reach)
         } else {
             None
         };
@@ -1423,7 +1444,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
-                    tier,
+                    reach,
                 )
             }),
         })
@@ -1842,7 +1863,7 @@ impl Db {
             let admitted: Vec<Schema> = inner
                 .admitted
                 .iter()
-                .map(|admitted| inner.named(admitted))
+                .map(|(_, admitted)| inner.named(admitted))
                 .collect();
             for table in target.tables.values_mut() {
                 let stored = inner.physical.tables.get(&table.stored);
@@ -1881,9 +1902,12 @@ impl Db {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
             }
-            if !inner.admitted_versions.contains(&version) {
-                inner.admitted_versions.push(schema.version_id());
-                inner.admitted.push(schema);
+            if !inner
+                .admitted
+                .iter()
+                .any(|(admitted, _)| *admitted == version)
+            {
+                inner.admitted.push((version, schema));
             }
         }
         let mut inner = self.inner();
@@ -1892,6 +1916,19 @@ impl Db {
             session.revalidate();
         }
         Ok(())
+    }
+}
+
+/// Whether a policy reads rows besides the one it decides on.
+fn policy_reads_other_rows(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsRel { .. }
+        | PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. } => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(policy_reads_other_rows),
+        PolicyExpr::Not(inner) => policy_reads_other_rows(inner),
+        _ => false,
     }
 }
 
@@ -2081,6 +2118,7 @@ impl Inner {
         Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_settled_only(read.settled_only)
             .with_history_origin(self.history_origin())
             .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)
@@ -2300,6 +2338,7 @@ impl Inner {
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
+        read: &ReadSpec,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
         if prepared.query.array_subqueries.is_empty() {
@@ -2311,6 +2350,7 @@ impl Inner {
                 self.node(
                     prepared,
                     identity,
+                    read,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -2335,6 +2375,7 @@ impl Inner {
                 let node = self.node(
                     prepared,
                     identity,
+                    read,
                     &prepared.query.table,
                     &prepared.query.array_subqueries,
                     row,
@@ -2345,30 +2386,51 @@ impl Inner {
         Ok(out)
     }
 
+    /// A row with its array relations, read as the row was: through the
+    /// read's view and cut, settled-only and members-only as it is.
     fn node(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
+        read: &ReadSpec,
         table: &str,
         arrays: &[crate::query::ArraySubquery],
         row: CurrentRow,
     ) -> Result<ResultNode, Error> {
         let mut relations = BTreeMap::new();
         for array in arrays {
+            let (policy, claims) = self.read_sessions(prepared, identity);
+            let ctx = || {
+                Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
+                    .with_view(read.view.clone())
+                    .with_cut(read.cut.clone())
+                    .with_settled_only(read.settled_only)
+                    .with_members_only(read.members_only)
+            };
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
-                self.cell(table, row.id, &array.outer_column)?
+                let (sql, params, ty) = ctx().compile_cell(table, &array.outer_column, row.id)?;
+                let cell: Option<Sql> = self
+                    .conn
+                    .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                    .optional()
+                    .map_err(storage)?;
+                match cell {
+                    Some(cell) => {
+                        from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None))
+                    }
+                    None => Value::Nullable(None),
+                }
             };
-            let (policy, claims) = self.read_sessions(prepared, identity);
-            let compiled = Ctx::new(&self.schema, policy.as_ref(), &claims, &prepared.binding)
-                .compile_children(array, &parent)?;
+            let compiled = ctx().compile_children(array, &parent)?;
             let children = self.execute(&compiled, &array.table)?;
             let mut nodes = Vec::with_capacity(children.len());
             for child in children {
                 nodes.push(self.node(
                     prepared,
                     identity,
+                    read,
                     &array.table,
                     &array.nested_arrays,
                     child,
@@ -2377,24 +2439,6 @@ impl Inner {
             relations.insert(array.column_name.clone(), ResultRelation::Array(nodes));
         }
         Ok(ResultNode { row, relations })
-    }
-
-    fn cell(&self, table: &str, row: RowUuid, column: &str) -> Result<Value, Error> {
-        let table = self.schema.table(table)?;
-        let column = table
-            .column(column)
-            .ok_or_else(|| unsupported("unknown correlation column"))?;
-        let ty = column.ty.clone();
-        let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1",
-            quote(&column.stored),
-            quote(&table.stored)
-        );
-        let cell: Sql = self
-            .conn
-            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| r.get(0))
-            .map_err(storage)?;
-        Ok(from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None)))
     }
 
     // ---- write primitives ---------------------------------------------
@@ -3026,6 +3070,7 @@ impl Inner {
             }
             crate::large::admit(&self.conn, &self.chunks, large)?;
         }
+        crate::large::settle_receipts(&self.conn, &large.root.locator)?;
         self.large_cell(large)
     }
 
@@ -3427,11 +3472,15 @@ impl Inner {
         }
     }
 
-    /// Read-for-write (SPEC 7, INV-RLS-20): a session may update only a
-    /// row it may read, and omitted cells must not be merged blind. A
-    /// replica acting for a session (a backend's request) refuses an update
-    /// of a row hidden from it at once; an upsert there leaves the existing
-    /// target to the authority, which rejects it on upload.
+    /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
+    /// only a row it may read, and omitted cells must not be merged blind.
+    /// A replica acting for a session (a backend's request) refuses an
+    /// update at once when it holds the row hidden from that session: the
+    /// update merges into the session's view of the row. So it does an
+    /// upsert under a read policy decided by the row alone. An upsert under
+    /// a policy that reads other rows is the authority's to decide, as on
+    /// upload: the replica may lack the rows that grant access, and the
+    /// write's waits report the refusal.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -3440,11 +3489,13 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        let reader = match *who {
-            Who::Session(author) if verb == "UPDATE" => Some(author),
-            who => self.checked(who),
-        };
-        if let Some(author) = reader
+        let conclusive = self.client.is_none()
+            || verb != "UPSERT"
+            || !table
+                .policy(Operation::Select)
+                .is_some_and(policy_reads_other_rows);
+        if let Who::Session(author) = *who
+            && conclusive
             && !self.check(table, row, key, author, Operation::Select)?
         {
             let detail = format!(
@@ -4148,7 +4199,7 @@ impl Db {
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
-            if let Some(admitted) = inner.admitted.iter().find(|a| a.version_id() == version) {
+            if let Some((_, admitted)) = inner.admitted.iter().find(|(id, _)| *id == version) {
                 if !same_tables(admitted, &schema, |l, r| {
                     l.read_policy == r.read_policy && l.write_policies == r.write_policies
                 }) {
@@ -4170,8 +4221,7 @@ impl Db {
                 if inner.names.get(&version).is_none() {
                     check_direct_lens(&inner.owner.jazz, &schema)?;
                 }
-                inner.admitted_versions.push(schema.version_id());
-                inner.admitted.push(schema.clone());
+                inner.admitted.push((version, schema.clone()));
             }
             let base = inner.owner.names();
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
@@ -4250,6 +4300,17 @@ struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
     rows: Vec<(RowUuid, u64)>,
+}
+
+/// An upload the authority refused: the node and local seq of the commit
+/// that wrote it (this store's, or a relayed session's), why, and whether
+/// it was a serializable transaction.
+#[derive(Debug, Clone)]
+pub struct UpstreamRejection {
+    pub writer: [u8; 16],
+    pub seq: u64,
+    pub error: Error,
+    pub serializable: bool,
 }
 
 fn conflict(message: impl Into<String>) -> Error {
@@ -4608,6 +4669,23 @@ impl Db {
         // own writes still unsettled at the snapshot, whose landing seqs
         // only the authority can place).
         if self.is_client() {
+            // A row a later local commit wrote (one not unsettled at begin)
+            // changed since the snapshot: the authority gets that commit
+            // first, so it would refuse this one too.
+            {
+                let inner = self.inner();
+                for (schema, op) in &batch.ops {
+                    if let Some(row) = op.row()
+                        && inner
+                            .newest_seq(schema.stored_table(op.table())?, row)?
+                            .is_some_and(|seq| seq >= LOCAL_BASE && !own.contains(&seq))
+                    {
+                        return Err(conflict(
+                            "row visible parent changed since transaction write was staged",
+                        ));
+                    }
+                }
+            }
             if own.is_empty() {
                 let inner = self.inner();
                 for (schema, op) in &batch.ops {
@@ -4804,7 +4882,8 @@ impl Db {
         // A counter write's change is from what the transaction sees.
         self.in_overlay(id, None, |inner, _| inner.counter_deltas(&mut op))?;
         // Validate against the overlay now, so errors surface at the call.
-        self.in_overlay(id, Some(op.clone()), |_, _| Ok(()))?;
+        self.in_overlay(id, Some(op.clone()), |_, _| Ok(()))
+            .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner();
         let schema = inner.schema.clone();
         inner
@@ -4814,6 +4893,41 @@ impl Db {
             .ops
             .push((schema, op));
         Ok(())
+    }
+
+    /// A serializable write the store refuses for its row's state (an id
+    /// taken, a row deleted) conflicts when that state is newer than the
+    /// transaction's snapshot: at the snapshot the write was valid, and a
+    /// retry sees what moved.
+    fn serializable_write_conflict(
+        &self,
+        id: OpenTransactionId,
+        op: &StagedOp,
+        error: Error,
+    ) -> Error {
+        if !error.is_apply_time_rejection() {
+            return error;
+        }
+        let inner = self.inner();
+        let Some(Batch {
+            kind: BatchKind::Serializable { snapshot, own, .. },
+            ..
+        }) = inner.batches.get(&id)
+        else {
+            return error;
+        };
+        let (Some(row), Ok(table)) = (op.row(), inner.schema.stored_table(op.table())) else {
+            return error;
+        };
+        let moved = inner.serializable_cut(*snapshot, own).and_then(|cut| {
+            Ok(inner
+                .newest_seq(table, row)?
+                .is_some_and(|seq| !cut.sees(seq)))
+        });
+        match moved {
+            Ok(true) => conflict("a row written by the transaction changed since its snapshot"),
+            _ => error,
+        }
     }
 
     /// [`Self::stage`] a write whose large values a partial update built:
@@ -4976,6 +5090,20 @@ impl TxRef<'_> {
         include_deleted: bool,
         identity: Option<AuthorSubject>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_at(prepared, include_deleted, identity, ReadTier::LocalFirst)
+            .await
+    }
+
+    /// As [`Self::all_prepared_as`], at `tier`: a `Remote` read waits for
+    /// the authority's answer, offline too; any other tier answers offline
+    /// from the replica, at the cut it knows.
+    pub async fn all_prepared_at(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
         // answers and the authority's validation decides).
@@ -5031,7 +5159,19 @@ impl TxRef<'_> {
             self.db.remote_shape(&prepared.query)?;
             let through = self
                 .db
-                .fetch(prepared, at, include_deleted, ReadTier::Remote, None, None)
+                .fetch(
+                    prepared,
+                    at,
+                    include_deleted,
+                    if tier == ReadTier::Remote {
+                        sync::RemoteReach::REMOTE
+                    } else {
+                        sync::RemoteReach::BEST_EFFORT
+                    },
+                    None,
+                    None,
+                    tier == ReadTier::Remote,
+                )
                 .await?;
             if let Some(Batch {
                 kind:
@@ -5052,16 +5192,13 @@ impl TxRef<'_> {
         }
         // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay(self.id, None, |inner, cut| {
-            let roots = inner.run(
-                prepared,
-                identity,
-                &ReadSpec {
-                    include_deleted,
-                    cut,
-                    ..ReadSpec::default()
-                },
-            )?;
-            inner.nest_relations(prepared, identity, roots)
+            let read = ReadSpec {
+                include_deleted,
+                cut,
+                ..ReadSpec::default()
+            };
+            let roots = inner.run(prepared, identity, &read)?;
+            inner.nest_relations(prepared, identity, &read, roots)
         })?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)

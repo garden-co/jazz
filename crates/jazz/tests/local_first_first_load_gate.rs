@@ -1174,3 +1174,62 @@ fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
         .expect("the second tab's opening");
     assert_eq!(rows, vec![row(30)], "the second tab reads the owner's rows");
 }
+
+/// A foreground's one-shot read with a first-load wait, through a worker
+/// whose live server does not answer: the worker serves its store once the
+/// wait runs out, and the read completes with the rows held locally.
+///
+/// ```text
+/// server (silent) ══ worker ══ tab (hint Live)
+/// tab: all(wait 200ms) ─ worker relays ─ (no answer) ─ 200ms ─► worker's rows
+/// ```
+#[test]
+fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() {
+    let server = seeded_server();
+    let foreground = foreground_over(0x75, worker_connected_to(0x74, &server));
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+
+    // An open subscription to the same query, released by its own wait.
+    let mut stream = subscribe(&foreground.tab, &items(), wait_for_remote(SHORT));
+    let opened = Instant::now();
+    while stream.try_next_event().is_none() {
+        assert!(
+            opened.elapsed() < Duration::from_secs(5),
+            "the opening is released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        foreground.turn(None);
+    }
+
+    let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let started = Instant::now();
+    let read = foreground.tab.all_serialized_query(
+        &bytes,
+        wait_for_remote(SHORT),
+        None,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| foreground.tab.detach_query(attachment),
+    );
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    let rows = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            break match result.expect("foreground one-shot read") {
+                SerializedReadResult::Rows(rows) => rows.len(),
+                SerializedReadResult::Relation(_) => panic!("items is a row query"),
+            };
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the read must not outlive its first-load wait"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        foreground.turn(None);
+    };
+    assert!(started.elapsed() >= SHORT);
+    assert_eq!(rows, 0, "the cold worker holds none of the server's rows");
+}

@@ -72,6 +72,13 @@ pub const LOCAL_BASE: u64 = 1 << 52;
 pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     fn try_recv(&mut self) -> Option<SyncMessage>;
+    /// Why this transport stopped yielding messages, once: a peer's frame
+    /// it cannot decode ends the link rather than the process. The
+    /// database then drops the link (a client detaches, a server closes
+    /// the session).
+    fn take_failure(&mut self) -> Option<TransportError> {
+        None
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -115,6 +122,9 @@ pub use crate::wire::WireTransport;
 pub struct WireTransportAdapter<W> {
     wire: W,
     joiner: FrameJoiner,
+    /// A frame failed to decode: nothing more is read, and
+    /// [`Transport::take_failure`] reports it once.
+    failed: Option<Option<TransportError>>,
 }
 
 /// The largest encoded message one wire frame carries, leaving room for
@@ -163,35 +173,57 @@ fn split_rows(
     split_rows(rest, parts)
 }
 
+/// One frame's [`SyncMessage`]: exactly one postcard value, so a frame
+/// with bytes after its message is malformed rather than truncated.
+pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    match postcard::take_from_bytes(frame)? {
+        (message, []) => Ok(message),
+        _ => Err(postcard::Error::DeserializeBadEncoding),
+    }
+}
+
 /// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
 /// one message they encode.
 #[derive(Default)]
 pub struct FrameJoiner {
-    parts: Vec<Image>,
+    /// The images of the parts received since the last whole message.
+    parts: Option<Vec<Image>>,
 }
 
 impl FrameJoiner {
-    /// The message `frame` completes, if any.
-    pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, postcard::Error> {
-        match postcard::from_bytes(frame)? {
-            SyncMessage::RowsPart { images } => {
-                self.parts.extend(images);
+    /// The message `frame` completes, if any. A frame that does not decode,
+    /// or a message other than `Rows` after a `RowsPart`, is the peer's
+    /// error.
+    pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        let message = decode_message(frame)
+            .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))?;
+        match (self.parts.take(), message) {
+            (parts, SyncMessage::RowsPart { images }) => {
+                self.parts = Some(parts.unwrap_or_default());
+                self.parts.as_mut().expect("parts").extend(images);
                 Ok(None)
             }
-            SyncMessage::Rows { images } if !self.parts.is_empty() => {
-                let mut joined = std::mem::take(&mut self.parts);
+            (Some(mut joined), SyncMessage::Rows { images }) => {
                 joined.extend(images);
                 Ok(Some(SyncMessage::Rows { images: joined }))
             }
-            message => {
-                assert!(
-                    self.parts.is_empty(),
-                    "a Rows message's parts end with its Rows frame, not {message:?}"
-                );
-                Ok(Some(message))
-            }
+            (Some(_), message) => Err(TransportError::Failed(format!(
+                "a Rows message's parts end with its Rows frame, not {}",
+                message_kind(&message)
+            ))),
+            (None, message) => Ok(Some(message)),
         }
     }
+}
+
+/// A message's variant name, for errors that must not dump its contents.
+fn message_kind(message: &SyncMessage) -> String {
+    let debug = format!("{message:?}");
+    debug
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 impl<W> WireTransportAdapter<W> {
@@ -199,6 +231,7 @@ impl<W> WireTransportAdapter<W> {
         Self {
             wire,
             joiner: FrameJoiner::default(),
+            failed: None,
         }
     }
 }
@@ -214,12 +247,82 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     /// The next whole message: a `Rows` whose frames have not all arrived
     /// waits for the rest.
     fn try_recv(&mut self) -> Option<SyncMessage> {
+        if self.failed.is_some() {
+            return None;
+        }
         loop {
             let frame = self.wire.try_recv_frame()?;
-            if let Some(message) = self.joiner.push(&frame).expect("decode sync frame") {
-                return Some(message);
+            match self.joiner.push(&frame) {
+                Ok(Some(message)) => return Some(message),
+                Ok(None) => {}
+                Err(error) => {
+                    self.failed = Some(Some(error));
+                    return None;
+                }
             }
         }
+    }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.failed.as_mut().and_then(Option::take)
+    }
+}
+
+/// Which end of a connection reads a frame batch, at which point, for
+/// [`validate_frame_batch_for_corpus`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CorpusReader {
+    /// The server's first batch: exactly one `Hello`.
+    ServerOpening,
+    /// The server after the `Hello`: every frame is a sync message.
+    Server,
+    /// A client: each frame is a `Hello` (tag 0), an `Error` (tag 1) or a
+    /// sync message, as its websocket reads them. No server-sent message
+    /// has tag 0 or 1.
+    Client,
+}
+
+/// Test-only: decode one websocket frame batch the way `reader` does, with
+/// the production decoders, negotiating a `Hello` against
+/// `negotiated_features`. NAPI and WASM expose it so the pinned wire corpus
+/// (`crates/jazz/fixtures/sqlite_sync_wire_v1.json`) runs through each
+/// shipped artifact. Not a host API.
+#[doc(hidden)]
+pub fn validate_frame_batch_for_corpus(
+    batch: &[u8],
+    reader: CorpusReader,
+    negotiated_features: crate::wire::WireFeatures,
+) -> Result<(), String> {
+    use crate::wire::{
+        WireFrame, decode_frame, decode_hello_frame, decode_websocket_frame_batch, negotiate_wire,
+    };
+    let hello = |frame: &[u8]| {
+        decode_hello_frame(frame)
+            .and_then(|hello| negotiate_wire(&hello, negotiated_features))
+            .map(drop)
+            .map_err(|error| format!("hello rejected: {}", error.message))
+    };
+    let message = |frame: &[u8]| {
+        decode_message(frame)
+            .map(drop)
+            .map_err(|error| format!("malformed sync message: {error}"))
+    };
+    let frames = decode_websocket_frame_batch(batch)
+        .map_err(|error| format!("malformed websocket frame batch: {error}"))?;
+    match reader {
+        CorpusReader::ServerOpening => match frames.as_slice() {
+            [frame] => hello(frame),
+            _ => Err("the opening batch must be exactly one Hello".to_owned()),
+        },
+        CorpusReader::Server => frames.iter().try_for_each(|frame| message(frame)),
+        CorpusReader::Client => frames.iter().try_for_each(|frame| match frame.first() {
+            Some(0) => hello(frame),
+            Some(1) => match decode_frame(frame) {
+                Ok(WireFrame::Error(_)) => Ok(()),
+                _ => Err("malformed WireFrame::Error".to_owned()),
+            },
+            _ => message(frame),
+        }),
     }
 }
 
@@ -257,6 +360,16 @@ impl From<&Cell> for Sql {
             Cell::Blob(v) => Sql::Blob(v.clone()),
         }
     }
+}
+
+/// Whether `image` is an older unsettled version of a relay's than the
+/// `held` one: a relay numbers its unsettled versions from `LOCAL_BASE` up,
+/// in its own order, and ships older ones in as-of answers. Cuts never read
+/// them (a snapshot naming another replica's unsettled commit is
+/// unavailable), and their seqs may collide with this replica's own, so the
+/// replica keeps neither as history.
+fn relay_older(held: u64, image: u64) -> bool {
+    image >= LOCAL_BASE && held > image
 }
 
 /// One stored row version: the unit of replication.
@@ -502,6 +615,11 @@ pub enum SyncMessage {
     /// serves a LocalOnly one from its store alone, without its upstream
     /// (a non-durable foreground's LocalOnly read). An authority's store
     /// is the answer either way.
+    /// `wait`: how long (ms) a relay waits for its upstream's answer
+    /// before it serves its own store: a LocalFirst one's first load (the
+    /// reader's `firstLoadRemoteWaitMs`). `None`: a LocalFirst one waits
+    /// while the upstream may answer, a Remote one however long it takes
+    /// (only the authority confirms a remote result).
     Subscribe {
         id: u64,
         query: Query,
@@ -509,6 +627,7 @@ pub enum SyncMessage {
         since: Option<u64>,
         include_deleted: bool,
         tier: ReadTier,
+        wait: Option<u64>,
     },
     Unsubscribe {
         id: u64,
@@ -524,7 +643,12 @@ pub enum SyncMessage {
     /// `tier` is how far it reaches past a relay: `LocalOnly` is served
     /// from the relay's store, `LocalFirst` too while the relay asks its
     /// upstream to refresh it, `Remote` once its upstream answered. An
-    /// authority's store answers any tier.
+    /// authority's store answers any tier. `wait`: how long (ms) a relay
+    /// waits for its upstream's answer while it may give one, then serves
+    /// its store: a LocalFirst read's first load, or a Remote read that
+    /// takes the relay's view when the authority cannot answer (a
+    /// serializable transaction's snapshot). `None`: a LocalFirst read is
+    /// served now, a Remote one once the upstream answered.
     Fetch {
         id: u64,
         query: Query,
@@ -532,6 +656,7 @@ pub enum SyncMessage {
         at: Option<u64>,
         include_deleted: bool,
         tier: ReadTier,
+        wait: Option<u64>,
     },
     /// `author`: the provenance the writes carry when it is not the
     /// sender's own (a trusted session or an attribution), as a canonical
@@ -612,12 +737,15 @@ pub enum SyncMessage {
     /// `held`: the commit's `expect` entries whose row the server did not
     /// ship because its version at `through` is what the writer expected:
     /// the writer installs its own, with the authority's stamps, as that
-    /// version.
+    /// version. `global`: the fate is the global authority's (directly, or
+    /// relayed from it), not the last word of a replica with no server,
+    /// which orders its sessions' commits but cannot make them `Global`.
     Fate {
         tx: u64,
         through: u64,
         result: Result<(), WireError>,
         held: Vec<Held>,
+        global: bool,
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
@@ -667,6 +795,13 @@ pub enum SyncMessage {
     RowsPart {
         images: Vec<Image>,
     },
+    /// A relay holds the session's commit `tx` in its store and uploads
+    /// it: the commit is `Local` for a non-durable session (a tab over its
+    /// worker), whose own store is memory. Its fate follows once the
+    /// relay's upstream answers.
+    Stored {
+        tx: u64,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -715,7 +850,7 @@ pub(crate) struct Remote {
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
     /// How far it reaches (see `SyncMessage::Subscribe`).
-    tier: ReadTier,
+    reach: RemoteReach,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// Whether the last answer was the global authority's.
     pub(crate) global: Rc<StdCell<bool>>,
@@ -758,6 +893,12 @@ pub(crate) struct Client {
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
+    /// Accepted fates from a replica with no server: they order the
+    /// commit, but it never becomes `Global`.
+    local_fates: HashSet<u64>,
+    /// Commits the relay this non-durable replica writes through holds
+    /// in its store, their fate still to come ([`SyncMessage::Stored`]).
+    stored: HashSet<u64>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
@@ -798,9 +939,21 @@ pub(crate) struct Client {
 type RelayedFate = (usize, u64, Vec<(String, RowUuid, Vec<u8>)>);
 
 /// A session's `Fetch` a relay asked its upstream for.
+/// A relayed read's upstream answer: its query, binding, whether it read
+/// deleted rows, and the rows it listed.
+type RelayedAnswer = (Query, BTreeMap<String, Value>, bool, Vec<[u8; 16]>, u64);
+
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
     upstream: u64,
+    /// What it asked its upstream: asked again on a new connection, since
+    /// an answer the last one owed is lost with it.
+    ask: SyncMessage,
+    /// A Remote read with no wait: served only once the upstream answered.
+    strict: bool,
+    /// Otherwise it is served from this store once the upstream can no
+    /// longer answer, or its wait runs out (`None`: never).
+    until: Option<Instant>,
     session: usize,
     /// The session's `Fetch`, served locally once the upstream answered.
     message: SyncMessage,
@@ -810,9 +963,38 @@ fn remote_key(
     query: &Query,
     binding: &BTreeMap<String, Value>,
     include_deleted: bool,
-    tier: ReadTier,
+    reach: RemoteReach,
 ) -> String {
-    format!("{query:?}{binding:?}{include_deleted}{tier:?}")
+    format!("{query:?}{binding:?}{include_deleted}{reach:?}")
+}
+
+/// How far a read reaches past a relay: its tier, and how long the relay
+/// waits for its upstream (see `SyncMessage::Subscribe` and `Fetch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteReach {
+    pub(crate) tier: ReadTier,
+    pub(crate) wait: Option<u64>,
+}
+
+impl RemoteReach {
+    /// What the authority lists, once it answers.
+    pub(crate) const REMOTE: RemoteReach = RemoteReach {
+        tier: ReadTier::Remote,
+        wait: None,
+    };
+
+    /// What the authority lists while it can answer, else the relay's
+    /// view: a serializable transaction's snapshot read, which pins
+    /// offline at the cut the replica knows.
+    pub(crate) const BEST_EFFORT: RemoteReach = RemoteReach {
+        tier: ReadTier::Remote,
+        wait: Some(u64::MAX),
+    };
+}
+
+/// When a wait of `ms` from now runs out; `None` if never.
+fn wait_until(ms: u64) -> Option<Instant> {
+    Instant::now().checked_add(std::time::Duration::from_millis(ms))
 }
 
 /// Whether a read may wait for the server: a live link needs the own
@@ -965,11 +1147,13 @@ pub(crate) struct Session {
     /// Pushed chunk bytes admitted in the current staging-policy window,
     /// and when it started (the ingress rate limit).
     ingress: (Instant, usize),
-    /// Inbound messages held back by the rate limit, in order.
+    /// Inbound messages held back by the rate limit, or reads waiting for
+    /// large-value chunks from this relay's upstream, in order.
     backlog: VecDeque<SyncMessage>,
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
-    /// Fetches whose upstream answer arrived: served from this store.
+    /// Fetches whose upstream answer arrived, or that this relay already
+    /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
@@ -980,6 +1164,18 @@ pub(crate) struct Session {
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
+    /// On a relay, LocalFirst subscriptions waiting for the upstream's
+    /// first answer for at most their first-load wait.
+    first_load: BTreeMap<u64, FirstLoadWait>,
+}
+
+/// A relayed LocalFirst subscription's first-load wait: once `until`
+/// passes unanswered, its result is this store's (see
+/// [`Db::serve_due_first_loads`]).
+struct FirstLoadWait {
+    until: Instant,
+    prepared: PreparedQuery,
+    include_deleted: bool,
 }
 
 impl Session {
@@ -1014,6 +1210,7 @@ impl Session {
             told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
+            first_load: BTreeMap::new(),
         }
     }
 
@@ -1098,17 +1295,18 @@ fn snapshot_unavailable(why: &str) -> Error {
 }
 
 /// Whether a reachability traversal is a gather the replica can evaluate
-/// from the result and its edges ([`Support::Reach`]): seeded by rows of
-/// the root table that are themselves in the result (no filter after the
-/// gather), reaching root rows by id.
+/// from the result and its edges ([`Support::Reach`]), reaching root rows
+/// by id: seeded by root rows themselves, or by rows that reference root
+/// rows (a hop), which ship as [`Support::Array`] children of what they
+/// reference. Filters after the gather apply on the replica
+/// ([`remote_query`]).
 fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
     via.seed.as_ref().is_some_and(|seed| {
-        seed.table == query.table && seed.user_column.is_none() && seed.team_column == "id"
+        seed.user_column.is_none() && (seed.team_column != "id" || seed.table == query.table)
     }) && via.access_table == query.table
         && via.access_row_column == "id"
         && via.access_team_column == "id"
         && via.access_filters.is_empty()
-        && query.filters.is_empty()
 }
 
 /// What a remote read of `query` subscribes to: the query itself, or for
@@ -1117,6 +1315,20 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
     if let Some(prefix) = crate::db::union_prefix(query) {
         return std::borrow::Cow::Owned(prefix);
+    }
+    // A gather's closure runs through rows its later filters (or window)
+    // leave out: the replica holds the whole closure and narrows it itself.
+    if !query.reachable.is_empty()
+        && (!query.filters.is_empty() || query.limit.is_some() || query.offset > 0)
+    {
+        let mut closure = query.clone();
+        closure.filters.clear();
+        closure.aggregate = None;
+        closure.select = None;
+        closure.order_by.clear();
+        closure.limit = None;
+        closure.offset = 0;
+        return std::borrow::Cow::Owned(closure);
     }
     // A window past an offset is only right over the rows before it too:
     // the replica holds the whole prefix and applies the offset itself.
@@ -1449,7 +1661,20 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
+        support.extend(self.inherited_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
         for via in &query.reachable {
+            // Seed rows that reference the rows the walk starts from.
+            if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
+                let seeds = self.schema.table(&seed.table)?;
+                support.push(Support::Array {
+                    table: seeds.stored.clone(),
+                    inner: seeds.stored_name(&seed.team_column).to_owned(),
+                    outer: "id".to_owned(),
+                    outer_array: false,
+                    inner_array: crate::compile::is_array(seeds, &seed.team_column),
+                    nested: Vec::new(),
+                });
+            }
             let edges = self.schema.table(&via.edge_table)?;
             support.push(Support::Reach {
                 frontier: table.stored_name(&via.access_team_column).to_owned(),
@@ -1483,6 +1708,57 @@ impl Inner {
         Ok(support)
     }
 
+    /// The parents whose read permission rows of `table` inherit, `depth`
+    /// hops up: a replica holds the row its read rests on, as it would
+    /// had it read that row itself.
+    fn inherited_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+    ) -> Result<Vec<Support>, Error> {
+        use crate::tools::{Operation, PolicyExpr};
+        fn hops<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, Option<usize>)>) {
+            match policy {
+                PolicyExpr::Inherits {
+                    operation: Operation::Select,
+                    via_column,
+                    max_depth,
+                } => out.push((via_column, *max_depth)),
+                PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+                    parts.iter().for_each(|part| hops(part, out))
+                }
+                _ => {}
+            }
+        }
+        let mut support = Vec::new();
+        if depth == 0 {
+            return Ok(support);
+        }
+        let mut via = Vec::new();
+        if let Some(policy) = table.policy(Operation::Select) {
+            hops(policy, &mut via);
+        }
+        for (column, max_depth) in via {
+            let Some(target) = table.references.get(column) else {
+                continue;
+            };
+            let parent = self.schema.table(target)?;
+            let depth = max_depth.map_or(depth, |bound| bound.min(depth));
+            if depth == 0 {
+                continue;
+            }
+            support.push(Support::Array {
+                table: parent.stored.clone(),
+                inner: "id".to_owned(),
+                outer: table.stored_name(column).to_owned(),
+                outer_array: crate::compile::is_array(table, column),
+                inner_array: false,
+                nested: self.inherited_support(parent, depth - 1)?,
+            });
+        }
+        Ok(support)
+    }
+
     /// The support of junction traversals from rows of `parent`: every
     /// readable row of the joined table correlated with the parent row
     /// (the client applies the join's filters), and its nested joins'.
@@ -1494,14 +1770,13 @@ impl Inner {
         let mut support = Vec::with_capacity(joins.len());
         for join in joins {
             let target = self.schema.table(&join.table)?;
+            let source = join.source_column.as_deref().unwrap_or("id");
             support.push(Support::Array {
                 table: target.stored.clone(),
                 inner: target.stored_name(&join.on_column).to_owned(),
-                outer: parent
-                    .stored_name(join.source_column.as_deref().unwrap_or("id"))
-                    .to_owned(),
-                outer_array: false,
-                inner_array: false,
+                outer: parent.stored_name(source).to_owned(),
+                outer_array: crate::compile::is_array(parent, source),
+                inner_array: crate::compile::is_array(target, &join.on_column),
                 nested: self.join_support(target, &join.nested_joins)?,
             });
         }
@@ -2146,6 +2421,7 @@ impl Inner {
                     .push((image.table.clone(), row, image.key.clone()));
             }
             Some(current) if current.seq == image.seq => {}
+            Some(current) if relay_older(current.seq, image.seq) => {}
             Some(current) if current.seq < image.seq || current.seq >= LOCAL_BASE => {
                 if current.seq < LOCAL_BASE {
                     self.put_image(&current, true)?;
@@ -2818,6 +3094,8 @@ impl Client {
             pending: Vec::new(),
             unsent: Vec::new(),
             fates: HashMap::new(),
+            local_fates: HashSet::new(),
+            stored: HashSet::new(),
             shadow: HashMap::new(),
             known: 0,
             persisted_known: 0,
@@ -2867,7 +3145,8 @@ impl Db {
                     binding: r.binding.clone(),
                     since: r.through,
                     include_deleted: r.include_deleted,
-                    tier: r.tier,
+                    tier: r.reach.tier,
+                    wait: r.reach.wait,
                 }
             })
             .collect();
@@ -2891,6 +3170,19 @@ impl Db {
         // that reads them reports the error, and the next one tries again.
         client.hold_owed = true;
         client.outbox.extend(resubscribe);
+        // Relayed reads still waiting are asked again: the old session's
+        // answers are lost with it.
+        let reask: Vec<SyncMessage> = client
+            .relayed_fetches
+            .iter()
+            .filter(|fetch| matches!(client.answers.get(&fetch.upstream), Some(None)))
+            .map(|fetch| fetch.ask.clone())
+            .collect();
+        let relayed: HashSet<u64> = client.relayed_fetches.iter().map(|f| f.upstream).collect();
+        client
+            .outbox
+            .retain(|m| !matches!(m, SyncMessage::Fetch { id, .. } if relayed.contains(id)));
+        client.outbox.extend(reask);
         // Sent-but-unsettled commits go first, in their original order.
         let mut resend = client.sent.clone();
         resend.append(&mut client.unsent);
@@ -2906,6 +3198,76 @@ impl Db {
         Upstream(client.connection)
     }
 
+    /// Unlist the cached rows of a remote query's settled view that its
+    /// answer, listing `listed`, left out. Each pass reads the view again,
+    /// so rows that move up into a window are checked too.
+    fn unlist_unanswered(
+        &self,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        listed: &[[u8; 16]],
+        through: u64,
+    ) -> Result<(), Error> {
+        // A history read lists versions and a flat join tuples, not the
+        // rows a replica caches.
+        if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
+            return Ok(());
+        }
+        let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
+        // Only which rows the view holds matters: ids, not values (whose
+        // large chunks may not be here yet), nor included rows.
+        let mut query = remote_query(&query).into_owned();
+        query.select = Some(Vec::new());
+        query.includes.clear();
+        query.array_subqueries.clear();
+        let prepared = PreparedQuery {
+            query,
+            binding,
+            shape: Shape([0; 16]),
+            binding_id: Binding([0; 16]),
+            request_claims: None,
+            schema: self.view.clone(),
+        };
+        // The answer lists the result as of `through`: rows that arrived
+        // after it (later in the same batch) are not its to judge.
+        let read = ReadSpec {
+            members_only: true,
+            settled_only: true,
+            include_deleted,
+            cut: Some(crate::compile::Cut::at(through)),
+            ..ReadSpec::default()
+        };
+        let inner = self.inner.borrow();
+        let table = inner.schema.stored_table(&prepared.query.table)?.to_owned();
+        let mut previous = Vec::new();
+        loop {
+            // Ordering by a value whose chunks are not here yet: the rows
+            // are reconciled by a later answer.
+            let rows = match inner.run(&prepared, None, &read) {
+                Err(error) if crate::large::is_missing(&error) => return Ok(()),
+                rows => rows?,
+            };
+            let stale: Vec<RowUuid> = rows
+                .into_iter()
+                .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
+                .map(|row| row.id)
+                .collect();
+            if stale.is_empty() || stale == previous {
+                return Ok(());
+            }
+            for &row in &stale {
+                let id = row.0.as_bytes().to_vec();
+                for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
+                    if image.seq <= through {
+                        inner.unlist(&table, row, &image.key)?;
+                    }
+                }
+            }
+            previous = stale;
+        }
+    }
+
     /// Drop the upstream: reads stop waiting, writes queue.
     pub fn detach_connection(&self, upstream: &Upstream) -> bool {
         let mut inner = self.inner.borrow_mut();
@@ -2915,16 +3277,7 @@ impl Db {
         if client.connection != upstream.0 || client.transport.is_none() {
             return false;
         }
-        client.transport = None;
-        let mut link = client.hint.get();
-        link.detached = true;
-        client.hint.set(link);
-        // Nothing settles at the server's tier while detached: a
-        // subscription (or one opened meanwhile) is held until the next
-        // upstream answers it again.
-        for remote in client.remote.values() {
-            remote.answered.set(false);
-        }
+        inner.detach_upstream();
         true
     }
 
@@ -3104,11 +3457,11 @@ impl Db {
 
     /// Remote reads ship the query's rows plus its supporting rows (single
     /// hop includes, array subqueries, junction traversals, gathers), and
-    /// an aggregate's input rows ([`remote_query`]); the client evaluates
-    /// locally. Other shapes that read further tables
-    /// (uncorrelated traversals or ones through a referenced row, gathers
-    /// filtered after the gather, multi-hop includes) would see a partial
-    /// replica, so they are refused explicitly.
+    /// an aggregate's input rows or a gather's whole closure
+    /// ([`remote_query`]); the client evaluates locally. Other shapes that
+    /// read further tables (uncorrelated traversals or ones through a
+    /// referenced row, gathers seeded by a claim, multi-hop includes) would
+    /// see a partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(&self, query: &Query) -> Result<(), Error> {
         let schema = self.inner().schema.clone();
         if let Some(plan) = crate::db::union_plan(query, &schema)? {
@@ -3127,7 +3480,7 @@ impl Db {
                 .any(|include| include.path.contains('.'));
         if other_tables {
             return Err(crate::values::unsupported(format!(
-                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers or multi-hop includes)",
+                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, claim-seeded gathers or multi-hop includes)",
                 query.table
             )));
         }
@@ -3140,7 +3493,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
     ) -> Option<(
         Rc<StdCell<bool>>,
         Rc<RefCell<Option<Error>>>,
@@ -3149,7 +3502,7 @@ impl Db {
         let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut()?;
-        let key = remote_key(&query, &prepared.binding, include_deleted, tier);
+        let key = remote_key(&query, &prepared.binding, include_deleted, reach);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some((
@@ -3169,7 +3522,8 @@ impl Db {
             binding: prepared.binding.clone(),
             since: None,
             include_deleted,
-            tier,
+            tier: reach.tier,
+            wait: reach.wait,
         });
         client.remote.insert(
             key.clone(),
@@ -3179,7 +3533,7 @@ impl Db {
                 query: query.into_owned(),
                 binding: prepared.binding.clone(),
                 include_deleted,
-                tier,
+                reach,
                 answered: answered.clone(),
                 refused: refused.clone(),
                 global: global.clone(),
@@ -3196,11 +3550,11 @@ impl Db {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
     ) {
         self.inner
             .borrow_mut()
-            .release_remote(query, binding, include_deleted, tier);
+            .release_remote(query, binding, include_deleted, reach);
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -3216,12 +3570,12 @@ impl Inner {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
     ) {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = remote_key(&remote_query(query), binding, include_deleted, tier);
+        let key = remote_key(&remote_query(query), binding, include_deleted, reach);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -3239,19 +3593,25 @@ impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
     /// answer is complete through, if it answered, or why it refused.
+    /// `strict` (a Remote read): the read waits for an answer while the
+    /// link is down or there is no server, asking again on each new
+    /// connection, since an answer the last one owed is lost with it.
     /// `coverage`: the read must be covered by the server. It fails once
     /// the check says the caller's budget is spent (`NotObserved`), or as
     /// soon as the server says it has not admitted this client's schema
     /// version.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
-        tier: ReadTier,
+        reach: RemoteReach,
         deadline: Option<Instant>,
         coverage: Option<&dyn Fn() -> bool>,
+        strict: bool,
     ) -> Result<Option<u64>, Error> {
+        let tier = reach.tier;
         // A non-durable foreground's relay answers a local read from its
         // store whatever its own path to the server: the read waits for it
         // while connected to it.
@@ -3260,40 +3620,61 @@ impl Db {
             may_wait(client.hint.get())
                 || (inner.non_durable && tier != ReadTier::Remote && client.transport.is_some())
         };
-        let id = {
-            let mut inner = self.inner.borrow_mut();
-            if inner.client.is_none() || !answerable(&inner) {
+        {
+            let inner = self.inner.borrow();
+            if inner.client.is_none() || !strict && !answerable(&inner) {
                 return Ok(None);
             }
-            let client = inner.client.as_mut().expect("client");
-            let id = client.next_id;
-            client.next_id += 1;
-            client.answers.insert(id, None);
-            client.outbox.push(SyncMessage::Fetch {
-                id,
-                query: remote_query(&prepared.query).into_owned(),
-                binding: prepared.binding.clone(),
-                at,
-                include_deleted,
-                tier,
-            });
-            id
+        }
+        let message = |id: u64| SyncMessage::Fetch {
+            id,
+            query: remote_query(&prepared.query).into_owned(),
+            binding: prepared.binding.clone(),
+            at,
+            include_deleted,
+            tier,
+            wait: reach.wait,
         };
-        poll_fn(|_| {
+        // The request in flight, and the connection it went out on.
+        let mut asked: Option<(u64, u64)> = None;
+        let answer = poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
-            if let Some(Some(_)) = client.answers.get(&id) {
+            if let Some((id, _)) = asked
+                && let Some(Some(_)) = client.answers.get(&id)
+            {
                 let answer = client.answers.remove(&id).flatten().expect("answered");
-                return Poll::Ready(answer.map(|(through, _)| Some(through)));
+                return Poll::Ready(answer.map(Some));
             }
-            if !answerable || deadline.is_some_and(|d| Instant::now() >= d) {
-                client.answers.remove(&id);
+            let ask = if strict {
+                client.transport.is_some()
+                    && asked.is_none_or(|(_, connection)| connection != client.connection)
+            } else {
+                asked.is_none()
+            };
+            if ask {
+                if let Some((id, _)) = asked {
+                    client.answers.remove(&id);
+                }
+                let id = client.next_id;
+                client.next_id += 1;
+                client.answers.insert(id, None);
+                client.outbox.push(message(id));
+                asked = Some((id, client.connection));
+            }
+            let forget = |client: &mut Client| {
+                if let Some((id, _)) = asked {
+                    client.answers.remove(&id);
+                }
+            };
+            if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
+                forget(client);
                 return Poll::Ready(Ok(None));
             }
             if let Some(expired) = coverage {
                 if client.unadmitted {
-                    client.answers.remove(&id);
+                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::Schema,
                         "schema version is awaiting published catalogue admission; \
@@ -3301,7 +3682,7 @@ impl Db {
                     )));
                 }
                 if expired() {
-                    client.answers.remove(&id);
+                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,
                         "Timed out waiting for query coverage",
@@ -3310,7 +3691,23 @@ impl Db {
             }
             Poll::Pending
         })
-        .await
+        .await?;
+        // A current answer lists its result's rows: cached rows the
+        // replica's settled view of it holds and the answer lacks lost their
+        // listing (INV-SYNC-14), though no subscription saw them leave.
+        let Some((through, listed)) = answer else {
+            return Ok(None);
+        };
+        if at.is_none() {
+            self.unlist_unanswered(
+                prepared.query.clone(),
+                prepared.binding.clone(),
+                include_deleted,
+                &listed,
+                through,
+            )?;
+        }
+        Ok(Some(through))
     }
 
     /// Freeze everything this database has committed, its own unsettled
@@ -3365,17 +3762,38 @@ impl Db {
         })
     }
 
+    /// Whether a commit reaching `tier` takes more than this store: `Global`
+    /// takes the authority, and `Local` on a non-durable replica its relay.
+    fn waits_upstream(&self, tier: DurabilityTier) -> bool {
+        self.is_client()
+            && match tier {
+                DurabilityTier::None => false,
+                DurabilityTier::Local => self.inner.borrow().non_durable,
+                DurabilityTier::Global => true,
+            }
+    }
+
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
-        if tier < DurabilityTier::Global || !self.is_client() {
+        if !self.waits_upstream(tier) {
             return Ok(tx);
         }
         poll_fn(|_| {
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             match client.fates.get(&tx) {
+                // Ordered by a replica with no server: no authority makes
+                // it `Global`.
+                Some(Ok(()))
+                    if tier == DurabilityTier::Global && client.local_fates.contains(&tx) =>
+                {
+                    Poll::Pending
+                }
                 Some(Ok(())) => Poll::Ready(Ok(tx)),
                 Some(Err(error)) => Poll::Ready(Err(error.clone())),
+                None if tier == DurabilityTier::Local && client.stored.contains(&tx) => {
+                    Poll::Ready(Ok(tx))
+                }
                 None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
                 // Not pending and no fate: a local no-op or pre-connection commit.
                 None => Poll::Ready(Ok(tx)),
@@ -3388,7 +3806,7 @@ impl Db {
     /// ones included) reaches `tier`, failing with the first the server
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
-        if tier < DurabilityTier::Global || !self.is_client() {
+        if !self.waits_upstream(tier) {
             return Ok(());
         }
         let pending: Vec<u64> = {
@@ -3403,13 +3821,32 @@ impl Db {
     }
 
     /// Whether chunks this replica requested may still arrive: it is
-    /// connected to an upstream that may answer, with requests outstanding.
+    /// connected to an upstream that may answer, with requests outstanding
+    /// (sent, or recorded by a read for the next send). A non-durable
+    /// foreground's relay answers from its store whatever its own path to
+    /// the server. Chunks the upstream answered missing are not waited for
+    /// again.
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
         inner.client.as_ref().is_some_and(|client| {
+            let unavailable = |request: &ChunkRequest| client.unavailable.contains(request);
             client.transport.is_some()
-                && may_wait(client.hint.get())
-                && !(client.requested.is_empty() && client.wanted.is_empty())
+                && (may_wait(client.hint.get()) || inner.non_durable)
+                && (!client.requested.is_empty()
+                    || client.wanted.iter().any(|request| !unavailable(request))
+                    || inner.chunks.has_demand_beyond(unavailable))
+        })
+    }
+
+    /// Whether a read recorded chunk requests that only the next send
+    /// carries upstream: a host that ticks when asked should tick.
+    pub fn owes_chunk_requests(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.client.as_ref().is_some_and(|client| {
+            client.transport.is_some()
+                && inner.chunks.has_demand_beyond(|request| {
+                    client.requested.contains(request) || client.unavailable.contains(request)
+                })
         })
     }
 
@@ -3601,10 +4038,17 @@ impl Db {
                 return Ok(());
             };
             let mut inbound = Vec::new();
+            let mut failed = false;
             if let Some(transport) = client.transport.as_mut() {
                 while let Some(message) = transport.try_recv() {
                     inbound.push(message);
                 }
+                failed = transport.take_failure().is_some();
+            }
+            // An upstream that sent what this client cannot decode is
+            // dropped like a lost link; what arrived before it applies.
+            if failed {
+                inner.detach_upstream();
             }
             // Chunks are not ordered with rows; everything else is applied
             // in arrival order.
@@ -3676,8 +4120,10 @@ impl Db {
                             answered_remotes.push((
                                 remote.query.clone(),
                                 remote.binding.clone(),
+                                remote.include_deleted,
                                 Some(ids),
                                 resumed,
+                                through,
                             ));
                         }
                     }
@@ -3718,11 +4164,18 @@ impl Db {
                             *remote.refused.borrow_mut() = Some(error);
                         }
                     }
+                    SyncMessage::Stored { tx } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if client.pending.iter().any(|p| p.tx == tx) {
+                            client.stored.insert(tx);
+                        }
+                    }
                     SyncMessage::Fate {
                         tx,
                         through,
                         result,
                         held,
+                        global,
                     } => {
                         let accepted = result.is_ok();
                         if accepted {
@@ -3731,7 +4184,11 @@ impl Db {
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
+                        let serializable = client.sent.iter().any(|m| {
+                            matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
+                        });
                         client.pending.retain(|p| p.tx != tx);
+                        client.stored.remove(&tx);
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
@@ -3751,17 +4208,24 @@ impl Db {
                             if let (Some(rejections), false) =
                                 (inner.upstream_rejections.as_mut(), relayed)
                             {
+                                let rejection = |writer, seq| crate::db::UpstreamRejection {
+                                    writer,
+                                    seq,
+                                    error: error.clone(),
+                                    serializable,
+                                };
                                 if origins.is_empty() {
-                                    rejections.push((me, tx, error.clone()));
+                                    rejections.push(rejection(me, tx));
                                 }
                                 rejections.extend(
-                                    origins
-                                        .into_iter()
-                                        .map(|(node, t)| (node, t, error.clone())),
+                                    origins.into_iter().map(|(node, t)| rejection(node, t)),
                                 );
                             }
                         }
                         let client = inner.client.as_mut().expect("client");
+                        if accepted && !global {
+                            client.local_fates.insert(tx);
+                        }
                         client.fates.insert(tx, result);
                         let node = client.node;
                         if let Some(locators) = client.pushed.remove(&tx) {
@@ -3792,6 +4256,7 @@ impl Db {
                                     through,
                                     result: fate.clone().map_err(|error| wire_error(&error)),
                                     held: Vec::new(),
+                                    global,
                                 });
                             }
                         }
@@ -3805,9 +4270,16 @@ impl Db {
         } else if shadow_changed {
             self.inner.borrow().persist_shadow()?;
         }
+        // A settled answer lists its result's rows: cached rows the
+        // replica's view of that result holds and the server's lacks lost
+        // their listing (INV-SYNC-14), as rows a commit took away do.
         // Nothing to reconcile after a resume: the client declared what it
         // holds (`Hold`), so the server ships what is missing or stale.
-        drop(answered_remotes);
+        for (query, binding, include_deleted, listed, resumed, through) in answered_remotes {
+            if let (Some(listed), false) = (listed, resumed) {
+                self.unlist_unanswered(query, binding, include_deleted, &listed, through)?;
+            }
+        }
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
@@ -3841,6 +4313,13 @@ impl Db {
         }
         let client = inner.client.as_mut().expect("client");
         let mut out = std::mem::take(&mut client.outbox);
+        // Commits staged since the last send go ahead of the one-shot reads
+        // asked since, so a read sees the writer's own earlier writes.
+        let first_fetch = out
+            .iter()
+            .position(|m| matches!(m, SyncMessage::Fetch { .. }))
+            .unwrap_or(out.len());
+        let fetches = out.split_off(first_fetch);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -3873,6 +4352,7 @@ impl Db {
             out.extend(batches);
             out.push(commit);
         }
+        out.extend(fetches);
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
         let mut out = out.into_iter();
@@ -3951,6 +4431,23 @@ impl Inner {
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
     /// schema (also for a version this store has not admitted).
+    /// Drop the upstream link: reads stop waiting, writes queue.
+    fn detach_upstream(&mut self) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        client.transport = None;
+        let mut link = client.hint.get();
+        link.detached = true;
+        client.hint.set(link);
+        // Nothing settles at the server's tier while detached: a
+        // subscription (or one opened meanwhile) is held until the next
+        // upstream answers it again.
+        for remote in client.remote.values() {
+            remote.answered.set(false);
+        }
+    }
+
     /// Session `index` closed: what this relay owed it is dropped, so a
     /// later session in its slot is not handed it.
     fn forget_relayed(&mut self, index: usize) {
@@ -3974,19 +4471,23 @@ impl Inner {
     }
 
     /// Session `index`'s relayed reads that are ready to serve from this
-    /// store: the upstream answered, or can no longer. A refusal goes to
-    /// the session as its own.
-    fn relayed_fetches_ready(&mut self, index: usize) -> Vec<SyncMessage> {
+    /// store: the upstream answered, or a first-load wait ran out or can no
+    /// longer be answered. A refusal goes to the session as its own.
+    fn relayed_fetches_ready(&mut self, index: usize) -> (Vec<SyncMessage>, Vec<RelayedAnswer>) {
         let Some(client) = self.client.as_mut() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
+        let mut answers = Vec::new();
         let can_wait = may_wait(client.hint.get());
+        let now = Instant::now();
         let mut ready = Vec::new();
         let mut refused = Vec::new();
         let mut kept = Vec::new();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
-            if fetch.session != index || !answered && can_wait {
+            let given_up =
+                !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
+            if fetch.session != index || !answered && !given_up {
                 kept.push(fetch);
                 continue;
             }
@@ -4000,19 +4501,39 @@ impl Inner {
                     code: error.code,
                     message: error.message,
                 }),
-                _ => ready.push((*id, fetch.message)),
+                Some(Ok((through, listed))) => {
+                    if let SyncMessage::Fetch {
+                        query,
+                        binding,
+                        at: None,
+                        include_deleted,
+                        ..
+                    } = &fetch.ask
+                    {
+                        answers.push((
+                            query.clone(),
+                            binding.clone(),
+                            *include_deleted,
+                            listed,
+                            through,
+                        ));
+                    }
+                    ready.push((*id, fetch.message));
+                }
+                None => ready.push((*id, fetch.message)),
             }
         }
         client.relayed_fetches = kept;
         let session = &mut self.sessions[index];
         session.outbox.extend(refused);
-        ready
+        let ready = ready
             .into_iter()
             .map(|(id, message)| {
                 session.fetched_upstream.insert(id);
                 message
             })
-            .collect()
+            .collect();
+        (ready, answers)
     }
 
     /// The identity whose policies govern session `index`'s reads and
@@ -4030,7 +4551,7 @@ impl Inner {
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
         self.sessions[index].version.is_some_and(|version| {
-            version != self.owner_version && !self.admitted_versions.contains(&version)
+            version != self.owner_version && !self.admitted.iter().any(|(id, _)| *id == version)
         })
     }
 
@@ -4056,8 +4577,7 @@ impl Inner {
         let jazz = if version == self.owner_version {
             &self.owner.jazz
         } else {
-            let at = self.admitted_versions.iter().position(|v| *v == version)?;
-            &self.admitted[at]
+            &self.admitted.iter().find(|(id, _)| *id == version)?.1
         };
         Some(Rc::new(
             self.named(jazz).with_policies_of(self.owner.clone()),
@@ -4080,9 +4600,11 @@ impl Inner {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
+                // A relay's older unsettled version (an as-of answer).
+                Some(old) if relay_older(old.seq, image.seq) => return Ok(false),
                 // The replaced server version stays as history. A relay's
-                // unsettled version (above `LOCAL_BASE`) gives way to any
-                // version it ships, as the relay's store moved on from it.
+                // unsettled version gives way to a settled one, as the
+                // relay's store moved on from it.
                 Some(old) => {
                     let older = std::mem::replace(old, image);
                     if older.seq < LOCAL_BASE {
@@ -4137,7 +4659,7 @@ impl Db {
         let dropped = inner.fan.dropped.clone();
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
             for (query, binding, include_deleted) in session.close(&dropped) {
-                inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
+                inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
             }
             inner.forget_relayed(subscriber.0);
         }
@@ -4182,7 +4704,7 @@ impl Db {
         }
         crate::large::expire_receipts(&self.inner.borrow().conn, now_ms())?;
         for index in 0..sessions {
-            let inbound: Vec<SyncMessage> = {
+            let (inbound, failed): (Vec<SyncMessage>, bool) = {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 if !session.open {
@@ -4190,12 +4712,25 @@ impl Db {
                 }
                 let mut inbound = std::mem::take(&mut session.backlog);
                 inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
-                inbound.into()
+                let failed = session.transport.take_failure().is_some();
+                (inbound.into(), failed)
             };
+            // A client that sent what this server cannot decode is
+            // disconnected; nothing it sent is served.
+            if failed {
+                self.disconnect_subscriber(SubscriberId(index));
+                continue;
+            }
             let mut inbound: VecDeque<SyncMessage> = inbound.into();
+            self.serve_due_first_loads(index)?;
             // Relayed reads the upstream answered (or can no longer answer)
             // are served from this store first, in the order they came.
-            let relayed = self.inner.borrow_mut().relayed_fetches_ready(index);
+            let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
+            // The upstream's answers list their results' rows: cached rows
+            // they left out are not served as the reader's (INV-SYNC-14).
+            for (query, binding, include_deleted, listed, through) in answers {
+                self.unlist_unanswered(query, binding, include_deleted, &listed, through)?;
+            }
             for message in relayed.into_iter().rev() {
                 inbound.push_front(message);
             }
@@ -4249,8 +4784,22 @@ impl Db {
                     SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
                     _ => None,
                 };
+                let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
                 match (self.serve(index, message), read) {
                     (Ok(()), _) => {}
+                    // A relay's read whose large values it is still fetching
+                    // from its upstream is served again once they arrive,
+                    // from its store: the upstream is not asked again.
+                    (Err(error), Some(id))
+                        if crate::large::is_missing(&error)
+                            && fetch.is_some()
+                            && self.awaiting_chunks() =>
+                    {
+                        self.inner.borrow_mut().sessions[index]
+                            .fetched_upstream
+                            .insert(id);
+                        held.push_back(fetch.expect("a fetch"));
+                    }
                     (Err(error), Some(id)) => {
                         self.inner.borrow_mut().sessions[index]
                             .outbox
@@ -4703,7 +5252,12 @@ impl Db {
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
                     for (query, binding, include_deleted) in released {
-                        inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
+                        inner.release_remote(
+                            &query,
+                            &binding,
+                            include_deleted,
+                            RemoteReach::REMOTE,
+                        );
                     }
                     inner.forget_relayed(index);
                     break;
@@ -4714,6 +5268,57 @@ impl Db {
     }
 
     /// A handle that reads and writes through session `index`'s schema.
+    /// Session `index`'s relayed LocalFirst subscriptions whose first-load
+    /// wait ran out before the upstream answered: from now on each is this
+    /// store's result, settled at once, as when the upstream cannot answer.
+    /// The upstream subscription it keeps fills the store when it answers.
+    fn serve_due_first_loads(&self, index: usize) -> Result<(), Error> {
+        let now = Instant::now();
+        let due: Vec<(u64, FirstLoadWait)> = {
+            let mut inner = self.inner.borrow_mut();
+            let session = &mut inner.sessions[index];
+            let ids: Vec<u64> = session
+                .first_load
+                .iter()
+                .filter(|(_, wait)| wait.until <= now)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| session.first_load.remove(&id).map(|wait| (id, wait)))
+                .collect()
+        };
+        for (id, wait) in due {
+            let policy = {
+                let inner = self.inner.borrow();
+                // Answered and sent meanwhile: it already lists the
+                // upstream's result.
+                if !matches!(inner.sessions[index].subs.get(&id), Some((.., false))) {
+                    continue;
+                }
+                inner.session_policy(index)
+            };
+            let db = self.session_db(index);
+            let mut inner = db.inner();
+            let authority = inner.authority;
+            let (queue, group) = inner.subscribe_member(
+                &wait.prepared,
+                policy,
+                ReadSpec {
+                    include_deleted: wait.include_deleted,
+                    ..ReadSpec::default()
+                },
+                SettledBy::Always(authority),
+            )?;
+            let session = &mut inner.sessions[index];
+            if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
+                session.subs.insert(id, (queue, group, windowed, false));
+                let dropped = inner.fan.dropped.clone();
+                dropped.set(dropped.get() + 1);
+            }
+        }
+        Ok(())
+    }
+
     fn session_db(&self, index: usize) -> Db {
         let view = self.inner.borrow_mut().session_schema(index);
         Db {
@@ -4795,27 +5400,47 @@ impl Db {
                 since,
                 include_deleted,
                 tier,
+                wait,
             } => {
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = crate::db::is_windowed(&query);
                 // A relay serves what its upstream lists, settled once the
-                // upstream answers: its own store may be cold. A relay
-                // whose upstream cannot answer yet (its link is down, or
-                // still to come) serves its own store, settled at once,
-                // while the upstream subscription it keeps fills that store
-                // once the link is up.
+                // upstream answers: its own store may be cold. A Remote
+                // read waits for that answer however long it takes, its
+                // link down or no server at all: only the authority
+                // confirms a remote result. A LocalFirst one whose upstream
+                // cannot answer yet (its link is down, or still to come)
+                // serves this store, settled at once, while the upstream
+                // subscription it keeps fills the store once the link is
+                // up; one with a first-load wait is served so once the wait
+                // runs out.
                 let upstream = db
                     .inner()
                     .client
                     .as_ref()
                     .map(|client| may_wait(client.hint.get()));
                 let attached = if upstream.is_some() && !local {
-                    db.attach_remote(&prepared, include_deleted, ReadTier::Remote)
+                    db.attach_remote(&prepared, include_deleted, RemoteReach::REMOTE)
                 } else {
                     None
                 };
-                let relayed = attached.as_ref().filter(|_| upstream == Some(true));
+                let strict = tier == ReadTier::Remote && wait.is_none();
+                let relayed = attached
+                    .as_ref()
+                    .filter(|_| upstream == Some(true) || strict);
+                if relayed.is_some()
+                    && let Some(until) = wait.and_then(wait_until)
+                {
+                    self.inner.borrow_mut().sessions[index].first_load.insert(
+                        id,
+                        FirstLoadWait {
+                            until,
+                            prepared: prepared.clone(),
+                            include_deleted,
+                        },
+                    );
+                }
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
@@ -4825,6 +5450,9 @@ impl Db {
                     ReadSpec {
                         include_deleted,
                         members_only: relayed.is_some(),
+                        // A Remote one leaves out this replica's pending
+                        // versions: only the authority confirms them.
+                        settled_only: relayed.is_some() && tier == ReadTier::Remote,
                         ..ReadSpec::default()
                     },
                     match relayed {
@@ -4848,7 +5476,7 @@ impl Db {
                             &prepared.query,
                             &prepared.binding,
                             include_deleted,
-                            ReadTier::Remote,
+                            RemoteReach::REMOTE,
                         ),
                     }
                 }
@@ -4926,10 +5554,11 @@ impl Db {
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
+                inner.sessions[index].first_load.remove(&id);
                 if let Some((query, binding, include_deleted)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
-                    inner.release_remote(&query, &binding, include_deleted, ReadTier::Remote);
+                    inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
                 }
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
@@ -5010,21 +5639,27 @@ impl Db {
                 at,
                 include_deleted,
                 tier,
+                wait,
             } => {
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
-                // it. A LocalFirst read is served now, and its upstream's
-                // answer refreshes the store for the next.
+                // it; the read waits for that answer while the link is down
+                // or there is no server, since only the authority confirms
+                // a remote result. A read with a wait is asked the same way
+                // while the upstream may answer, and served once it does or
+                // the wait runs out. Any other LocalFirst read is served
+                // now, and its upstream's answer refreshes the store for
+                // the next.
                 let (relay, refresh) = {
                     let mut inner = self.inner.borrow_mut();
                     let answered = inner.sessions[index].fetched_upstream.remove(&id);
-                    let upstream = inner
-                        .client
-                        .as_ref()
-                        .is_some_and(|client| may_wait(client.hint.get()));
+                    let client = inner.client.as_ref();
+                    let upstream = client.is_some_and(|client| may_wait(client.hint.get()));
+                    let waits = upstream && tier != ReadTier::LocalOnly && wait.is_some();
+                    let strict = client.is_some() && tier == ReadTier::Remote && wait.is_none();
                     (
-                        upstream && !answered && tier == ReadTier::Remote,
-                        upstream && tier == ReadTier::LocalFirst,
+                        (!answered && (strict || waits)).then_some(strict),
+                        upstream && !answered && tier == ReadTier::LocalFirst && !waits,
                     )
                 };
                 if refresh {
@@ -5040,26 +5675,32 @@ impl Db {
                         at,
                         include_deleted,
                         tier: ReadTier::Remote,
+                        wait: None,
                     });
                 }
-                if relay {
+                if let Some(strict) = relay {
                     let prepared = db.prepare_query_bound(&query, binding.clone())?;
                     let mut inner = self.inner.borrow_mut();
                     let client = inner.client.as_mut().expect("client");
                     let upstream = client.next_id;
                     client.next_id += 1;
                     client.answers.insert(upstream, None);
-                    client.outbox.push(SyncMessage::Fetch {
+                    let ask = SyncMessage::Fetch {
                         id: upstream,
                         query: remote_query(&prepared.query).into_owned(),
                         binding: prepared.binding.clone(),
                         at,
                         include_deleted,
-                        tier,
-                    });
+                        tier: ReadTier::Remote,
+                        wait: None,
+                    };
+                    client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
                         upstream,
                         session: index,
+                        ask,
+                        strict,
+                        until: wait.and_then(wait_until),
                         message: SyncMessage::Fetch {
                             id,
                             query,
@@ -5067,6 +5708,7 @@ impl Db {
                             at,
                             include_deleted,
                             tier,
+                            wait,
                         },
                     });
                     return Ok(());
@@ -5079,9 +5721,16 @@ impl Db {
                     .schema
                     .stored_table(history.unwrap_or(&query.table))?
                     .to_owned();
+                // A strict Remote read leaves out this replica's pending
+                // versions, and the cached rows its upstream no longer lists
+                // for it: only the authority confirms them. One with a wait
+                // (a serializable snapshot) takes this replica's view.
+                let strict = tier == ReadTier::Remote && wait.is_none() && inner.client.is_some();
                 let read = ReadSpec {
                     cut: at.map(Cut::at),
                     include_deleted,
+                    settled_only: strict,
+                    members_only: strict,
                     ..ReadSpec::default()
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
@@ -5230,6 +5879,9 @@ impl Db {
                         .entry(through)
                         .or_default()
                         .push((index, tx, rows));
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::Stored { tx });
                 } else {
                     // The rows the writer holds as they now are need no
                     // echo: fan-out drops their images if still current.
@@ -5250,11 +5902,15 @@ impl Db {
                         });
                         inner.sessions[index].echoes.extend(echoes);
                     }
+                    // A replica's own last word (it has no server) orders
+                    // the commit at a local seq, but is not the authority's.
+                    let global = inner.client.is_none() || through < LOCAL_BASE;
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
                         through,
                         result,
                         held: Vec::new(),
+                        global,
                     });
                 }
             }
@@ -5409,10 +6065,7 @@ impl Db {
                         .is_some_and(|seq| !in_snapshot(seq))
                 {
                     let rows = mentioned(&inner);
-                    return Err((
-                        conflict("row visible parent changed since transaction write was staged"),
-                        rows,
-                    ));
+                    return Err((Error::serialization_conflict(), rows));
                 }
             }
             for read in reads {
@@ -5443,10 +6096,7 @@ impl Db {
                     .collect();
                 if now != then {
                     let rows = mentioned(&inner);
-                    return Err((
-                        conflict("a row read by the transaction changed since its snapshot"),
-                        rows,
-                    ));
+                    return Err((Error::serialization_conflict(), rows));
                 }
             }
         }
@@ -5533,6 +6183,10 @@ impl Db {
             .is_some_and(|client| std::mem::take(&mut client.relay_ready));
         if ready {
             self.server_tick()?;
+            // Chunks a relayed read found missing go upstream now.
+            if self.owes_chunk_requests() {
+                self.client_send()?;
+            }
         }
         Ok(())
     }
@@ -5752,7 +6406,12 @@ impl Db {
         if let Some(tx) = open_tx {
             let rows = self
                 .serializable_tx_ref(tx)
-                .all_prepared_as(&prepared, opts.read_view.include_deleted, identity)
+                .all_prepared_at(
+                    &prepared,
+                    opts.read_view.include_deleted,
+                    identity,
+                    opts.tier,
+                )
                 .await?;
             return Ok(result(rows));
         }
@@ -5777,19 +6436,25 @@ impl Db {
                 let coverage: Option<&dyn Fn() -> bool> =
                     require_coverage.then_some(&coverage_expired);
                 // A non-durable foreground reads its relay's view at the
-                // tier it was asked for.
-                let tier = if non_durable {
-                    opts.tier
+                // tier it was asked for, with its first load's wait.
+                let reach = if non_durable {
+                    RemoteReach {
+                        tier: opts.tier,
+                        wait: crate::db::first_load_wait(opts.tier, &opts.first_load),
+                    }
                 } else {
-                    ReadTier::Remote
+                    RemoteReach::REMOTE
                 };
+                // A Remote read waits for the server while offline.
+                let strict = opts.tier == ReadTier::Remote;
                 self.fetch(
                     &prepared,
                     None,
                     opts.read_view.include_deleted,
-                    tier,
+                    reach,
                     deadline,
                     coverage,
+                    strict,
                 )
                 .await?;
             }
@@ -5798,9 +6463,25 @@ impl Db {
             first_load: FirstLoad::Deliver,
             ..opts
         };
-        let inner = self.inner();
-        let roots = inner.run(&prepared, identity, &ReadSpec::of(&opts, &inner)?)?;
-        Ok(result(inner.nest_relations(&prepared, identity, roots)?))
+        // A row whose large values are still being fetched answers once
+        // their chunks arrive, while the upstream that will send them is
+        // connected (a reloaded tab's rows come from its relay first).
+        poll_fn(|_| {
+            let read = {
+                let inner = self.inner();
+                ReadSpec::of(&opts, &inner).and_then(|spec| {
+                    let roots = inner.run(&prepared, identity, &spec)?;
+                    inner.nest_relations(&prepared, identity, &spec, roots)
+                })
+            };
+            match read {
+                Err(error) if crate::large::is_missing(&error) && self.awaiting_chunks() => {
+                    Poll::Pending
+                }
+                read => Poll::Ready(read.map(result)),
+            }
+        })
+        .await
     }
 }
 

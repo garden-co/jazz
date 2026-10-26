@@ -6,7 +6,7 @@ import { acquireBrowserPhysicalDatabaseEpoch } from "../../src/runtime/browser-p
  * exercises the production adapter against that exact namespace.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import pageV1LeafHex from "../../../../crates/idb-tree/fixtures/page-v1-leaf.hex?raw";
+import pageV1LeafHex from "./fixtures/page-v1-leaf.hex?raw";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_FORMAT_MAGIC,

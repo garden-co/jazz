@@ -319,7 +319,7 @@ impl Inner {
         // A replica missing chunks the result needs opens it once they arrive.
         let (rows, awaiting) = match self
             .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, rows))
+            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
         {
             Ok(rows) => (rows, false),
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
@@ -415,6 +415,7 @@ impl Inner {
         let compiled = Ctx::new(schema, policy.as_ref(), &claims, &prepared.binding)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_settled_only(read.settled_only)
             .with_history_origin(self.history_origin())
             .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)?;
@@ -517,7 +518,13 @@ impl Inner {
             })
             .and_then(|(column, value)| {
                 let governing = policies.by_stored(&root.stored)?;
-                Some((governing.stored_name(&column).to_owned(), value))
+                // As for a query key: only an application column is in a
+                // changed row's image (`$createdBy.account` is not).
+                governing
+                    .columns
+                    .iter()
+                    .any(|c| c.name == column)
+                    .then(|| (governing.stored_name(&column).to_owned(), value))
             });
         let mut watches = Vec::new();
         let root_key = if structural.contains(&root.stored) {
@@ -1096,7 +1103,7 @@ impl Inner {
     /// A group's rows, with array relations nested in their cells.
     fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
         let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, rows)
+        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -1246,7 +1253,8 @@ impl Group {
 
 /// Whether a group may apply root-only commits by re-checking ids: a
 /// single-table query (not a union), unbounded or a first page, (no joins, arrays, required includes,
-/// aggregates, windows), outside branch views and cuts, whose compiled SQL
+/// aggregates, windows), outside branch views and cuts (a settled-only
+/// read is one), whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
 /// rows of the same table would let one row's change move another). A
 /// synced read (`members_only`) qualifies: whether the server lists a row
@@ -1265,6 +1273,7 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()
+        && !read.settled_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
 }

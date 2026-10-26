@@ -991,7 +991,7 @@ impl Owner {
         };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
-            match postcard::from_bytes::<SyncMessage>(&frame) {
+            match jazz::db::decode_message(&frame) {
                 Ok(SyncMessage::Commit { tx, .. }) if gated => {
                     owner_session
                         .queues
@@ -1005,6 +1005,7 @@ impl Owner {
                                     .to_owned(),
                             )),
                             held: Vec::new(),
+                            global: true,
                         });
                 }
                 Ok(

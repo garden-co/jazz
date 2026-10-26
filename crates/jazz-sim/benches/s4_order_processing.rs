@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use jazz::db::{Db, ErrorCode, ReadOpts};
+use jazz::db::{Db, ReadOpts};
 use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
@@ -332,7 +332,7 @@ impl<'a> Txn<'a> {
         };
         match outcome {
             Ok(()) => true,
-            Err(error) if error.code == ErrorCode::TransactionConflict => false,
+            Err(error) if error.is_conflict() => false,
             Err(error) => panic!("unexpected commit failure: {error}"),
         }
     }

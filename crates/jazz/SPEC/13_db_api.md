@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
 - `INV-API-31`: `Db::disconnect` MUST mark the `Db` intentionally offline, disconnect every schema client from its server transport, and leave the local runtime and store alive; `Db::reconnect` MUST clear that marker and reconnect every schema client. A schema client created while intentionally offline MUST remain offline until `reconnect`.
-- `INV-API-32`: `ReadOpts.tier` selects read behavior: `LocalOnly` evaluates local data and pending writes without requesting upstream results; `LocalFirst` also requests upstream results while delivering local data; `Remote` requires server-confirmed results. Offline `LocalFirst` reads return locally known data; rows not yet delivered remain absent until reconnect.
+- `INV-API-32`: `ReadOpts.tier` selects read behavior: `LocalOnly` evaluates local data and pending writes without requesting upstream results; `LocalFirst` also requests upstream results while delivering local data; `Remote` requires server-confirmed results: it waits while offline or without a server, through a relay too, since only the authority confirms a remote result. Offline `LocalFirst` reads return locally known data; rows not yet delivered remain absent until reconnect.
 - `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
 - `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorSubject` passed to `Node::accept_subscriber`, not under the serving node's own identity.
@@ -312,9 +312,11 @@ first_load: FirstLoad::WaitForRemote { timeout_ms }
 }`; they pass it through and run no probe query and no catch-up timer. Host
 bindings accept the timeout as the `first_load_remote_wait_ms` read-option
 field. The read uses an _opening gate_ that carries its deadline. The gate applies only
-to `LocalFirst` reads with client-local serving; any other read ignores the option. `FirstLoad` is a host read
-option only: it is never persisted or sent to a peer, so no wire or on-disk
-bytes change.
+to `LocalFirst` reads with client-local serving; any other read ignores the option. `FirstLoad` is never persisted. A
+non-durable foreground (below) sends its timeout to its relay with the read
+(the `wait` of `SyncMessage::Subscribe` and `Fetch`), because the relay holds
+the store it waits on: the relay waits that long for its upstream's answer,
+then serves its own store. No other peer sees it.
 
 The gate withholds _any_ unsettled opening, empty or not, and every wait
 ends at its deadline at the latest.

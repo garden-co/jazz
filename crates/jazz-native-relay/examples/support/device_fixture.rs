@@ -1,7 +1,7 @@
 //! Synthetic device-only schema and canonical byte fixtures. Scope rows need
 //! explicit authorization: separate local roots do not make public rows private.
-use jazz::groove::records::{OwnedRecord, RecordDescriptor, Value as RecordValue, ValueType};
 use jazz::query::Query;
+use jazz::records::{OwnedRecord, RecordDescriptor, Value as RecordValue, ValueType};
 use jazz::tools::policy_expr::{always, eq, session};
 use jazz::tools::{ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 
@@ -134,7 +134,6 @@ mod tests {
                             server_url: server.base_url(),
                             data_dir: dir.path().to_owned(),
                             storage: ClientStorage::Memory,
-                            storage_factory: None,
                             account_id: None,
                             jwt_token: Some(TestJwtIssuer::jwt_for_user(&format!(
                                 "rn-device-private-{scope}"

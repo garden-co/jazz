@@ -2593,6 +2593,9 @@ mod tests {
             self.received.borrow_mut().push(message.clone());
             Some(message)
         }
+        fn take_failure(&mut self) -> Option<TransportError> {
+            self.adapter.take_failure()
+        }
     }
 
     /// A remote subscription held open by a test; it is covered once the
