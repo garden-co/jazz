@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use duplex_transport::duplex;
 use jazz::db::WriteIdentity;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, ReadTier, UpdateOptions, UpsertOptions, block_on,
+    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, ReadTier, UpdateOptions,
+    UpsertOptions, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -71,6 +72,12 @@ fn schema() -> JazzSchema {
                                 PolicyExpr::True,
                             ),
                     ),
+            )
+            .table(
+                // Only reads are declared: every write is denied.
+                TableSchemaBuilder::new("drafts")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
             )
             .build(),
     )
@@ -165,6 +172,57 @@ fn with_check_compares_the_new_row_with_the_old_one() {
     .err()
     .expect("visibility may not change");
     assert!(error.message.contains("WITH CHECK"), "{}", error.message);
+}
+
+/// A policy set is closed: an operation without a declared policy denies
+/// every session write of that kind, while the database itself may write.
+#[test]
+fn an_operation_without_a_policy_denies_session_writes() {
+    let db = open(0);
+    seed(&db, "drafts", id(4, 1), &[("body", text("first"))]);
+    let alice = user(&db, 1, "alice");
+    let session = WriteIdentity::Session(alice);
+    let insert = block_on(db.insert(
+        "drafts",
+        BTreeMap::from([("body".to_owned(), text("second"))]),
+        InsertOptions {
+            identity: session,
+            ..Default::default()
+        },
+    ))
+    .err()
+    .expect("no insert policy");
+    assert!(insert.is_authorization_denied(), "{}", insert.message);
+    let update = block_on(db.update(
+        "drafts",
+        id(4, 1),
+        BTreeMap::from([("body".to_owned(), text("edited"))]),
+        as_session(alice),
+    ))
+    .err()
+    .expect("no update policy");
+    assert!(update.is_authorization_denied(), "{}", update.message);
+    let delete = block_on(db.delete(
+        "drafts",
+        id(4, 1),
+        DeleteOptions {
+            identity: session,
+            ..Default::default()
+        },
+    ))
+    .err()
+    .expect("no delete policy");
+    assert!(delete.is_authorization_denied(), "{}", delete.message);
+    assert_eq!(cell(&db, "drafts", "body"), text("first"));
+
+    block_on(db.update(
+        "drafts",
+        id(4, 1),
+        BTreeMap::from([("body".to_owned(), text("edited"))]),
+        UpdateOptions::default(),
+    ))
+    .expect("the database writes without a policy");
+    assert_eq!(cell(&db, "drafts", "body"), text("edited"));
 }
 
 #[test]

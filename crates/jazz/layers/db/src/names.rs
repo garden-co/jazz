@@ -324,3 +324,57 @@ impl Names {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::TableLens;
+
+    fn lens(ops: Vec<LensOp>) -> MigrationLens {
+        MigrationLens::new(
+            SchemaVersionId::from_bytes([1; 16]),
+            SchemaVersionId::from_bytes([2; 16]),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops,
+            }],
+        )
+        .unwrap()
+    }
+
+    /// SQLite applies a lens by naming and growing the stored tables. A
+    /// rename only names the stored column; a copy, a transform or a
+    /// rejected source delta would need rows rewritten, and is refused.
+    #[test]
+    fn lenses_rename_and_grow_stored_tables_and_refuse_what_would_rewrite_rows() {
+        let renamed = LensEffects::of(&lens(vec![LensOp::RenameColumn {
+            from: "title".to_owned(),
+            to: "name".to_owned(),
+        }]))
+        .unwrap();
+        assert_eq!(
+            renamed
+                .columns
+                .get(&("todos".to_owned(), "name".to_owned())),
+            Some(&"title".to_owned())
+        );
+
+        for op in [
+            LensOp::CopyColumn {
+                from: "title".to_owned(),
+                to: "copy".to_owned(),
+            },
+            LensOp::TransformColumn {
+                column: "title".to_owned(),
+                transform: "jazz.identity".to_owned(),
+            },
+            LensOp::RejectSourceDelta {
+                reason: "frozen".to_owned(),
+            },
+        ] {
+            let error = LensEffects::of(&lens(vec![op])).unwrap_err();
+            assert!(error.to_string().contains("not supported yet"), "{error}");
+        }
+    }
+}
