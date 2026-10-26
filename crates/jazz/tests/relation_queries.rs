@@ -1,4 +1,4 @@
-//! Relation facade queries on SQLite: a client's hopTo, gather or match read
+//! Relation facade queries: a client's hopTo, gather or match read
 //! arrives as relation IR ending in a full-row projection, and is read as
 //! the ordinary query it stands for. Projections that rename or narrow the
 //! output are refused as not supported yet. Unions: `union_queries.rs`.

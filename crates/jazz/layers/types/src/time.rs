@@ -1,9 +1,8 @@
 //! Distinct monotone ordering values used by Jazz. This module owns transaction
 //! HLC packing (`TxTime`) and authority serialization positions (`GlobalTime`);
-//! clock mutation and skew checks live in `jazz::node::ingest` and
-//! `jazz::node::open_tx`, while merge/currency interpretation lives in
-//! `jazz::node::currency`. The types flow from facade writes through protocol
-//! records down into storage keys.
+//! clock mutation, skew checks and merge interpretation live in `jazz-db`.
+//! The types flow from facade writes through protocol records down into
+//! storage keys.
 
 use crate::ids::NodeUuid;
 

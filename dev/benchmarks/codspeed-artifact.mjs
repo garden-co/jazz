@@ -48,8 +48,7 @@ const workloadSpecs = {
   "stage-plan": {
     ...nativeExample("stage-plan"),
     timeout: 40,
-    // Former W1 diagnostics (scaling points and memory twins) and SQLite
-    // twins of the storage-bound cases (the native relay's mobile store).
+    // The W1 diagnostics (scaling points and memory twins).
     nightly: { benches: ["nightly"], env: {}, timeout: 40 },
   },
   "band-chat": nativeExample("band-chat"),

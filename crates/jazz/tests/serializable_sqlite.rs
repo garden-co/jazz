@@ -2,8 +2,7 @@
 //! as-of cut over current + history rows, read-your-writes through the same
 //! cut, and commit-time validation of the write set and every read's result
 //! (so phantoms entering a predicate or window conflict, and unrelated
-//! concurrent writes do not). Not ported from Jazz: these pin the prototype's
-//! design from sqlite-experiment/serializable.md.
+//! concurrent writes do not).
 
 use crate::common;
 
@@ -80,7 +79,7 @@ fn a_phantom_entering_a_predicate_read_conflicts() {
         )
         .unwrap();
     assert!(
-        block_on(db.serializable_tx_ref(tx).all_prepared(&taken_in_a))
+        block_on(db.tx_ref(tx).all_prepared(&taken_in_a))
             .unwrap()
             .is_empty()
     );
@@ -91,7 +90,7 @@ fn a_phantom_entering_a_predicate_read_conflicts() {
         Default::default(),
     ))
     .unwrap();
-    block_on(db.serializable_tx_ref(tx).update(
+    block_on(db.tx_ref(tx).update(
         "seats",
         RowUuid::from_bytes([1; 16]),
         take(true),
@@ -119,9 +118,7 @@ fn an_unrelated_concurrent_write_commits() {
         .prepare_query(&db.table("seats").filter(eq(col("room"), lit("A"))))
         .unwrap();
     assert_eq!(
-        block_on(db.serializable_tx_ref(tx).all_prepared(&room_a))
-            .unwrap()
-            .len(),
+        block_on(db.tx_ref(tx).all_prepared(&room_a)).unwrap().len(),
         1
     );
     block_on(db.update(
@@ -131,7 +128,7 @@ fn an_unrelated_concurrent_write_commits() {
         Default::default(),
     ))
     .unwrap();
-    block_on(db.serializable_tx_ref(tx).update(
+    block_on(db.tx_ref(tx).update(
         "seats",
         RowUuid::from_bytes([1; 16]),
         take(true),
@@ -175,10 +172,10 @@ fn snapshot_reads_see_history_images_and_own_writes() {
     let ordered = db
         .prepare_query(&db.table("seats").order_by("room", OrderDirection::Asc))
         .unwrap();
-    let rows = block_on(db.serializable_tx_ref(tx).all_prepared(&ordered)).unwrap();
+    let rows = block_on(db.tx_ref(tx).all_prepared(&ordered)).unwrap();
     let seen: Vec<(RowUuid, Option<Value>)> = rows
         .iter()
-        .map(|row| (row.row_uuid(), row.cell(&schema().tables[0], "room")))
+        .map(|row| (row.row_uuid(), row.cell("room")))
         .collect();
     assert_eq!(
         seen,
@@ -195,7 +192,7 @@ fn snapshot_reads_see_history_images_and_own_writes() {
     );
 
     seat(&db, 5, "Q", false);
-    let tx_ref = db.serializable_tx_ref(tx);
+    let tx_ref = db.tx_ref(tx);
     block_on(tx_ref.insert(
         "seats",
         BTreeMap::from([
@@ -214,7 +211,7 @@ fn snapshot_reads_see_history_images_and_own_writes() {
             .unwrap()
             .is_none()
     );
-    db.abandon_serializable_handle(tx).unwrap();
+    db.abandon_transaction_handle(tx).unwrap();
     // Seats 1, 4 and 5; seat 2 is deleted and seat 6 was abandoned.
     assert_eq!(db.read(&ordered).unwrap().len(), 3);
 }

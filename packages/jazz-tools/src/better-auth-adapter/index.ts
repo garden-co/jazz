@@ -135,7 +135,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         if (querySupportedByJazz) {
           // Preserve ordering semantics: until sorting is lowered, pagination
           // must remain after the client-side sort. Predicate-only bounded reads
-          // (including mutation/uniqueness warmups) can be bounded in Groove.
+          // (including mutation/uniqueness warmups) can be bounded by the engine.
           const lowerPagination = storedSortBy === undefined;
           const qb = createQueryBuilder(table, wasmSchema, {
             conditions: (options.where ?? []).map((condition) =>

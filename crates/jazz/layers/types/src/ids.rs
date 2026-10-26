@@ -1,9 +1,8 @@
 //! Wire-stable identifier newtypes for nodes, rows, schemas, branches, lenses,
 //! and compact storage aliases. This module owns identity vocabulary and UUID
-//! byte ordering only; allocation, alias persistence, and recovery live in
-//! `jazz::node::codec` and `jazz::node::recovery`. These ids are shared
-//! across every layer from `Db` facade calls through protocol messages to groove
-//! storage keys.
+//! byte ordering only; allocation and persistence live in `jazz-db`. These ids
+//! are shared across every layer from `Db` facade calls through protocol
+//! messages to storage keys.
 
 use crate::identity::principal_is_nonempty;
 
@@ -402,7 +401,7 @@ impl RowAuthor {
         crate::records::Value::Record(self.encoded_record().clone())
     }
 
-    /// The cached groove record encoding of this row author.
+    /// The cached record encoding of this row author.
     pub fn encoded_record(self) -> &'static crate::records::OwnedRecord {
         let author = match self.0 {
             RowAuthorKind::SystemAt(author) | RowAuthorKind::Account(author) => author.as_ref(),
@@ -435,7 +434,7 @@ impl RowAuthor {
         Self::from_record(record.borrowed())
     }
 
-    /// Decode an author subject from its groove record encoding.
+    /// Decode an author subject from its record encoding.
     pub fn from_record(
         record: crate::records::BorrowedRecord<'_>,
     ) -> Result<Self, AuthorSubjectError> {
@@ -726,7 +725,7 @@ impl AuthorSubject {
         crate::records::Value::Record(self.encoded_record().clone())
     }
 
-    /// The cached groove record encoding of this author.
+    /// The cached record encoding of this author.
     pub fn encoded_record(self) -> &'static crate::records::OwnedRecord {
         match self {
             Self::System => {

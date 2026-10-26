@@ -4,7 +4,7 @@ use jazz_testkit as support;
 use std::time::{Duration, Instant};
 
 use jazz::query::{Aggregate, AggregateFunction, OrderDirection};
-use jazz::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
+use jazz::records::{BorrowedRecord, RecordDescriptor, Value as RecordValue, ValueType};
 use jazz::row_input;
 use jazz::tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, Row, RowDescriptor,
@@ -327,20 +327,20 @@ impl ObservedSubscription {
                     .skip(4)
                     .take(self.descriptor.fields().len())
                     .map(|value| match value {
-                        GrooveValue::Nullable(None) => Value::Null,
-                        GrooveValue::Nullable(Some(value)) => match *value {
-                            GrooveValue::String(value) => Value::Text(value),
-                            GrooveValue::I32(value) => Value::Integer(value),
-                            GrooveValue::I64(value) => Value::BigInt(value),
-                            GrooveValue::U64(value) => Value::Timestamp(value),
-                            GrooveValue::F64(value) => Value::Double(value),
+                        RecordValue::Nullable(None) => Value::Null,
+                        RecordValue::Nullable(Some(value)) => match *value {
+                            RecordValue::String(value) => Value::Text(value),
+                            RecordValue::I32(value) => Value::Integer(value),
+                            RecordValue::I64(value) => Value::BigInt(value),
+                            RecordValue::U64(value) => Value::Timestamp(value),
+                            RecordValue::F64(value) => Value::Double(value),
                             other => panic!("unsupported delivered aggregate value: {other:?}"),
                         },
-                        GrooveValue::String(value) => Value::Text(value),
-                        GrooveValue::I32(value) => Value::Integer(value),
-                        GrooveValue::I64(value) => Value::BigInt(value),
-                        GrooveValue::U64(value) => Value::Timestamp(value),
-                        GrooveValue::F64(value) => Value::Double(value),
+                        RecordValue::String(value) => Value::Text(value),
+                        RecordValue::I32(value) => Value::Integer(value),
+                        RecordValue::I64(value) => Value::BigInt(value),
+                        RecordValue::U64(value) => Value::Timestamp(value),
+                        RecordValue::F64(value) => Value::Double(value),
                         other => panic!("unsupported delivered aggregate value: {other:?}"),
                     })
                     .collect::<Vec<_>>()

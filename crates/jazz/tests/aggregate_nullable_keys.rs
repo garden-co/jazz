@@ -52,7 +52,6 @@ fn apply_event(rows: &mut Vec<SubscriptionOutputRow>, event: SubscriptionEvent, 
 fn assert_rows<'a>(
     context: &str,
     rows: impl IntoIterator<Item = &'a CurrentRow>,
-    schema: &JazzSchema,
     expected: &[(Option<&str>, u64, Option<i32>)],
 ) {
     let rows = rows.into_iter().collect::<Vec<_>>();
@@ -60,7 +59,7 @@ fn assert_rows<'a>(
     for (row, (key, count, sum)) in rows.into_iter().zip(expected) {
         let key = key.map(|key| Value::String(key.to_owned()));
         assert_eq!(
-            row.cell(&schema.tables[0], "bucket"),
+            row.cell("bucket"),
             Some(nullable(key.clone())),
             "{context}: a NULL group key remains a present logical nullable value"
         );
@@ -180,7 +179,6 @@ fn nullable_group_keys_agree_across_reads_and_live_subscription() {
         assert_rows(
             &format!("stage {stage} subscription"),
             rows.iter().map(|row| &row.row),
-            &schema,
             &expected,
         );
         for row in &rows {
@@ -196,6 +194,6 @@ fn nullable_group_keys_agree_across_reads_and_live_subscription() {
             assert_eq!(*original, row.row_uuid());
         }
         let read = block_on(db.all(&query, local())).unwrap();
-        assert_rows(&format!("stage {stage} read"), &read, &schema, &expected);
+        assert_rows(&format!("stage {stage} read"), &read, &expected);
     }
 }

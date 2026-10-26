@@ -225,7 +225,7 @@ test("jazz-rn relay production builds are SQLite-only on every artifact target",
     const dependencies = productionDependencyNames(metadata, "jazz-native-relay");
     assert.ok(dependencies.has("jazz-db"), `${target} relay must run on jazz-db`);
     assert.ok(dependencies.has("libsqlite3-sys"), `${target} relay must retain SQLite`);
-    for (const forbidden of ["jazz-storage-rocksdb", "jazz-benchmark-guard", "tempfile"])
+    for (const forbidden of ["jazz-benchmark-guard", "tempfile"])
       assert.ok(!dependencies.has(forbidden), `${target} relay must exclude ${forbidden}`);
   }
 });
@@ -2437,13 +2437,10 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       "--",
       "Cargo.lock",
       "Cargo.toml",
-      "crates/groove",
-      "crates/idb-tree",
       "crates/jazz",
       "crates/jazz-compression",
       "crates/jazz-native-relay",
       "crates/jazz-native-transport",
-      "crates/jazz-storage-sqlite",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
     ],
     { cwd: sourceRoot, encoding: "utf8" },

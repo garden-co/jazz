@@ -1,7 +1,7 @@
-//! Session write checks on SQLite: WITH CHECK compares the new row with
+//! Session write checks: WITH CHECK compares the new row with
 //! the other rows as they were before the write, and a trusted link's
 //! session write is staged on the replica and checked as that session, with
-//! the claims the link vouches for, at the authority. Not ported from Jazz.
+//! the claims the link vouches for, at the authority.
 
 use crate::common;
 

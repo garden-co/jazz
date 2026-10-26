@@ -1,9 +1,9 @@
-//! Flat joins on SQLite (`Query::flat_join`): one output row per matching
+//! Flat joins (`Query::flat_join`): one output row per matching
 //! tuple of the root and each joined source, every source live and read
 //! policy filtered, cells qualified as `<source>.<column>`. A row's
 //! occurrence is its root id followed by its joined rows, and maintained
 //! results add, remove and replace by that occurrence (SPEC 6.4.1). Synced
-//! reads ship each occurrence's joined rows. Not ported from Jazz.
+//! reads ship each occurrence's joined rows.
 
 use crate::common;
 
@@ -431,16 +431,7 @@ fn synced_flat_join_with_history_ships_versions() {
         ..ReadOpts::default()
     };
     let bytes = postcard::to_allocvec(&query).unwrap();
-    let read = fresh.all_serialized_query(
-        &bytes,
-        remote,
-        None,
-        None,
-        None,
-        false,
-        || false,
-        |attachment| fresh.detach_query(attachment),
-    );
+    let read = fresh.all_serialized_query(&bytes, remote, None, None, None);
     let mut read = std::pin::pin!(read);
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     let rows = loop {

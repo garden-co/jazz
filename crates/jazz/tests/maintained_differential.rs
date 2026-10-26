@@ -30,8 +30,7 @@
 //!   room per churn phase, comma-separated (default `10,1000`).
 //!
 //! CI runs it bounded (seed 11; see the `rust-differential` partition in
-//! `dev/gates/local-ci-equivalent.mjs`). Not ported from Jazz: the Groove
-//! oracle it replaces drove the Groove node directly.
+//! `dev/gates/local-ci-equivalent.mjs`).
 
 mod common;
 

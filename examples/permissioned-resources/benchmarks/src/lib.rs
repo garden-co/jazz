@@ -6,7 +6,7 @@
 //!
 //! Workload revision 3: Core -> Client over the encoded wire, with a zstd
 //! roundtrip per frame. Revision 2 put a device-local persistence relay
-//! between them, which the SQLite engine does not support yet.
+//! between them.
 
 mod policy;
 

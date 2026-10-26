@@ -254,9 +254,6 @@ pub struct Ctx<'a> {
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
     pub history_origin: Option<[u8; 16]>,
-    /// Read the server's view on a replica: root rows the server stopped
-    /// listing for it (`_jazz_revoked`) are left out.
-    pub members_only: bool,
     next_alias: usize,
 }
 
@@ -342,23 +339,8 @@ impl<'a> Ctx<'a> {
             settled_only: false,
             preps: Vec::new(),
             history_origin: None,
-            members_only: false,
             next_alias: 0,
         }
-    }
-
-    pub fn with_members_only(mut self, members_only: bool) -> Self {
-        self.members_only = members_only;
-        self
-    }
-
-    /// The row at `alias` is one the server still lists for this replica.
-    pub(super) fn listed(&mut self, table: &Table, alias: &str) -> String {
-        let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
-        format!(
-            "NOT EXISTS (SELECT 1 FROM _jazz_revoked AS r WHERE r.t = {stored} \
-             AND r.id = {alias}.id AND r.k = {alias}._b)"
-        )
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -371,17 +353,16 @@ impl<'a> Ctx<'a> {
         self
     }
 
-    pub fn with_cut(mut self, cut: Option<Cut>) -> Self {
-        self.cut = cut;
-        self
-    }
-
-    /// Leave out a replica's pending local versions, as of its last server
-    /// seq, unless the read already has a cut.
-    pub fn with_settled_only(mut self, settled_only: bool) -> Self {
-        if settled_only && self.cut.is_none() {
-            self.cut = Some(Cut::at(crate::db::LOCAL_BASE - 1));
-            self.settled_only = true;
+    /// Read as of `cut`. Without one, `settled_only` leaves out a replica's
+    /// pending local versions, reading as of its last server seq.
+    pub fn with_cut(mut self, cut: Option<Cut>, settled_only: bool) -> Self {
+        match cut {
+            Some(cut) => self.cut = Some(cut),
+            None if settled_only => {
+                self.cut = Some(Cut::at(crate::db::LOCAL_BASE - 1));
+                self.settled_only = true;
+            }
+            None => {}
         }
         self
     }
@@ -735,7 +716,7 @@ impl<'a> Ctx<'a> {
             || query.relation.is_some()
         {
             return Err(unsupported(
-                "this query form (policy branches, inherits, relation) on SQLite",
+                "this query form (policy branches, inherits, relation)",
             ));
         }
         let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
@@ -743,7 +724,7 @@ impl<'a> Ctx<'a> {
         if let Some(aggregate) = &query.aggregate {
             if !query.array_subqueries.is_empty() || query.select.is_some() {
                 return Err(unsupported(
-                    "aggregates with selections or array subqueries on SQLite",
+                    "aggregates with selections or array subqueries",
                 ));
             }
             let from = self.source(table)?;
@@ -793,9 +774,6 @@ impl<'a> Ctx<'a> {
         if !include_deleted {
             wheres.push(format!("{alias}._del = 0"));
         }
-        if self.members_only {
-            wheres.push(self.listed(table, alias));
-        }
         for filter in &query.filters {
             wheres.push(self.predicate(filter, table, alias)?);
         }
@@ -813,7 +791,7 @@ impl<'a> Ctx<'a> {
                 .ok_or_else(|| query_error(format!("`{}` is not a reference", include.path)))?;
             let target = self.table(target_name)?;
             if include.path.contains('.') {
-                return Err(unsupported("multi-hop include paths on SQLite"));
+                return Err(unsupported("multi-hop include paths"));
             }
             if include.require {
                 let i = self.alias("i");
@@ -1166,11 +1144,6 @@ impl<'a> Ctx<'a> {
                 wheres.push(self.read_policy(&source.table, &source.alias, session)?);
             }
         }
-        if self.members_only {
-            for source in sources.iter().filter(|source| !source.history) {
-                wheres.push(self.listed(&source.table, &source.alias));
-            }
-        }
         let version = |source: &FlatSource| match source.history {
             true => format!(
                 "{}.{}",
@@ -1305,7 +1278,7 @@ impl<'a> Ctx<'a> {
             }
             if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
                 return Err(unsupported(
-                    "cardinality-matching requirements on scalar relations on SQLite",
+                    "cardinality-matching requirements on scalar relations",
                 ));
             }
             conds.push(correlate(child, &c, &array.inner_column, &outer)?);
@@ -1361,9 +1334,6 @@ impl<'a> Ctx<'a> {
         self.array_requirements(child, alias, &array.nested_arrays, &mut wheres)?;
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(child, alias, session)?);
-        }
-        if self.members_only {
-            wheres.push(self.listed(child, alias));
         }
         let (order, ranked_order) = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
@@ -1520,7 +1490,7 @@ impl<'a> Ctx<'a> {
         alias: &str,
     ) -> Result<String, Error> {
         if via.access_team_target == JoinTarget::Uncorrelated {
-            return Err(unsupported("uncorrelated reachability on SQLite"));
+            return Err(unsupported("uncorrelated reachability"));
         }
         let access = self.table(&via.access_table)?;
         let edges = self.table(&via.edge_table)?;
@@ -1713,7 +1683,7 @@ impl<'a> Ctx<'a> {
                 term => format!("({} IS NULL)", term.sql().expect("present")),
             },
             Predicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload predicates on SQLite"));
+                return Err(unsupported("enum payload predicates"));
             }
         })
     }
@@ -2150,8 +2120,8 @@ impl<'a> Ctx<'a> {
                 on,
                 join_kind,
             } => {
-                if format!("{join_kind:?}") != "Inner" {
-                    return Err(unsupported("outer relation joins on SQLite"));
+                if *join_kind != crate::query::RelationJoinKind::Inner {
+                    return Err(unsupported("outer relation joins"));
                 }
                 let mut left = self.relation(left, scope)?;
                 let right = self.relation(right, scope)?;
@@ -2189,9 +2159,7 @@ impl<'a> Ctx<'a> {
             } => {
                 let current = RelationKeyRef::RowId(RelationRowIdRef::Current);
                 if *frontier_key != current || dedupe_key.iter().any(|key| *key != current) {
-                    return Err(unsupported(
-                        "gather frontiers other than the row id on SQLite",
-                    ));
+                    return Err(unsupported("gather frontiers other than the row id"));
                 }
                 let g = self.alias("g");
                 let seed = self.relation(seed, scope)?;
@@ -2245,7 +2213,7 @@ impl<'a> Ctx<'a> {
                 })
             }
             other => Err(unsupported(format!(
-                "relation `{}` on SQLite",
+                "relation `{}`",
                 format!("{other:?}")
                     .split([' ', '{', '('])
                     .next()
@@ -2344,7 +2312,7 @@ impl<'a> Ctx<'a> {
                     .ok_or_else(|| query_error("outer column outside a policy"))?;
                 self.column_term(table, alias, &column.column)
             }
-            RelationValueRef::FrontierColumn(_) => Err(unsupported("frontier columns on SQLite")),
+            RelationValueRef::FrontierColumn(_) => Err(unsupported("frontier columns")),
             RelationValueRef::RowId(row) => Ok(Term::Sql(self.row_id(rel, *row, scope)?)),
         }
     }
@@ -2409,7 +2377,7 @@ impl<'a> Ctx<'a> {
                 self.contains(left, right)
             }
             RelationPredicate::EnumMatch { .. } => {
-                return Err(unsupported("enum payload relation predicates on SQLite"));
+                return Err(unsupported("enum payload relation predicates"));
             }
         })
     }

@@ -1,17 +1,14 @@
-//! Jazz schema metadata and lowering to groove storage schemas. This module
-//! owns table/column declarations, merge-strategy declarations, policy metadata,
-//! storage-table naming, and migration-lens schema surfaces from
-//! `jazz/SPEC/10_lenses_migrations.md`;
-//! policy evaluation lives in `jazz::node::policy`, query shapes in
-//! [`crate::query`], and runtime catalogue ingestion in `jazz::node::ingest`.
-//! In the layer map it is the schema bridge from Jazz concepts to groove tables.
+//! Jazz schema metadata: table/column declarations, merge strategies, policy
+//! metadata, storage-table naming and migration-lens schema surfaces
+//! (`jazz/SPEC/10_lenses_migrations.md`). Query shapes are in
+//! [`crate::query`]; `jazz-db` turns the schema into SQLite tables.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 
 use jazz_types::column_schema::{
-    ColumnType as GrooveColumnType, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
-    PrimaryKeyColumn, TableSchema as GrooveTableSchema,
+    ColumnType as StorageColumnType, IndexSchema as StorageIndexSchema, IntegerKeyType, PrimaryKey,
+    PrimaryKeyColumn, TableSchema as StorageTableSchema,
 };
 use jazz_types::records::{
     EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value,
@@ -46,9 +43,9 @@ pub const AUTHORITY_POLICY_BINDINGS_STORE: &str = "jazz_authority_policy_binding
 pub const SUBSCRIPTION_WATERMARKS_STORE: &str = "jazz_subscription_watermarks_v1";
 /// Versioned local current-row availability and ordering receipts.
 pub const LOCAL_ROW_AVAILABILITY_STORE: &str = "jazz_local_row_availability_v1";
-/// The Groove dictionary that every stored author column is interned into
-/// (`groove.dictionary.v1`): transaction records' `made_by` and the row
-/// images' `created_by`/`updated_by` store a node-local 4-byte code, while
+/// The dictionary that every stored author column is interned into:
+/// transaction records' `made_by` and the row images'
+/// `created_by`/`updated_by` store a node-local code, while
 /// every read, query, policy and the wire see the full [`RowAuthor`].
 ///
 /// [`RowAuthor`]: crate::ids::RowAuthor
@@ -400,21 +397,21 @@ impl RuntimeSchema {
                     "duplicate table branch column"
                 );
                 assert!(
-                    !matches!(column.column_type, GrooveColumnType::Nullable(_)),
+                    !matches!(column.column_type, StorageColumnType::Nullable(_)),
                     "branch columns must be non-nullable"
                 );
                 assert!(
                     matches!(
                         column.column_type,
-                        GrooveColumnType::String
-                            | GrooveColumnType::Uuid
-                            | GrooveColumnType::U8
-                            | GrooveColumnType::U16
-                            | GrooveColumnType::U32
-                            | GrooveColumnType::U64
-                            | GrooveColumnType::I32
-                            | GrooveColumnType::I64
-                            | GrooveColumnType::EnumTag(_)
+                        StorageColumnType::String
+                            | StorageColumnType::Uuid
+                            | StorageColumnType::U8
+                            | StorageColumnType::U16
+                            | StorageColumnType::U32
+                            | StorageColumnType::U64
+                            | StorageColumnType::I32
+                            | StorageColumnType::I64
+                            | StorageColumnType::EnumTag(_)
                     ),
                     "branch columns require string, UUID, stable enum, or fixed-width integer values"
                 );
@@ -508,21 +505,21 @@ pub enum MergeStrategy {
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
+fn is_counter_column_type(column_type: &StorageColumnType) -> bool {
     matches!(
         column_type,
-        GrooveColumnType::U8
-            | GrooveColumnType::U16
-            | GrooveColumnType::U32
-            | GrooveColumnType::U64
-            | GrooveColumnType::I32
-            | GrooveColumnType::I64
+        StorageColumnType::U8
+            | StorageColumnType::U16
+            | StorageColumnType::U32
+            | StorageColumnType::U64
+            | StorageColumnType::I32
+            | StorageColumnType::I64
     )
 }
 
 #[cfg(any(test, feature = "testing"))]
-fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
-    matches!(column_type, GrooveColumnType::Array(_))
+fn is_gset_column_type(column_type: &StorageColumnType) -> bool {
+    matches!(column_type, StorageColumnType::Array(_))
 }
 
 /// Semantics declared for a built-in column transform.
@@ -563,11 +560,11 @@ pub enum LargeValueSemanticKind {
 pub struct ColumnSchema {
     /// Logical column name.
     pub name: String,
-    /// Groove storage type used for this column's cell value.
-    pub column_type: GrooveColumnType,
+    /// Storage type used for this column's cell value.
+    pub column_type: StorageColumnType,
     /// Immutable, schema-derived semantic kind used only by the hidden
     /// physical large-scalar envelope. JSON remains logically string-shaped in
-    /// Groove, but cannot be decoded or staged as text at this boundary.
+    /// storage, but cannot be decoded or staged as text at this boundary.
     pub large_value_kind: LargeValueSemanticKind,
     /// Literal value used when an insert omits this column.
     #[serde(default)]
@@ -577,7 +574,7 @@ pub struct ColumnSchema {
 #[derive(serde::Deserialize)]
 struct SerializedColumnSchema {
     name: String,
-    column_type: GrooveColumnType,
+    column_type: StorageColumnType,
     #[serde(default)]
     large_value_kind: Option<LargeValueSemanticKind>,
     #[serde(default)]
@@ -592,7 +589,7 @@ impl<'de> serde::Deserialize<'de> for ColumnSchema {
         let serialized = SerializedColumnSchema::deserialize(deserializer)?;
         if contains_internal_storage_type(&serialized.column_type) {
             return Err(serde::de::Error::custom(
-                "internal Groove storage types cannot appear in a Jazz schema",
+                "internal storage types cannot appear in a Jazz schema",
             ));
         }
         let derived = large_value_kind_for_type(&serialized.column_type);
@@ -620,13 +617,13 @@ impl ColumnSchema {
         &self.name
     }
 
-    /// Public logical Groove type. Physical large-scalar backing types remain sealed.
-    pub fn column_type(&self) -> &GrooveColumnType {
+    /// Public logical storage type. Physical large-scalar backing types remain sealed.
+    pub fn column_type(&self) -> &StorageColumnType {
         &self.column_type
     }
 
-    /// Construct an ordinary column from a groove storage type.
-    pub fn new(name: impl Into<String>, column_type: GrooveColumnType) -> Self {
+    /// Construct an ordinary column from a storage type.
+    pub fn new(name: impl Into<String>, column_type: StorageColumnType) -> Self {
         assert!(
             !contains_internal_storage_type(&column_type),
             "raw and stored-scalar value types are physical-only and cannot be declared in a Jazz schema"
@@ -650,7 +647,7 @@ impl ColumnSchema {
     /// there is no separate slot for the column's own nullability.
     pub fn is_nullable_json(&self) -> bool {
         self.large_value_kind == LargeValueSemanticKind::Json
-            && matches!(self.column_type, GrooveColumnType::Nullable(_))
+            && matches!(self.column_type, StorageColumnType::Nullable(_))
     }
 
     /// Lower a newly authored logical cell to its storage value without
@@ -664,20 +661,20 @@ impl ColumnSchema {
     }
 }
 
-fn contains_internal_storage_type(column_type: &GrooveColumnType) -> bool {
+fn contains_internal_storage_type(column_type: &StorageColumnType) -> bool {
     if column_type.is_internal_storage_type() {
         return true;
     }
     match column_type {
-        GrooveColumnType::Nullable(inner) | GrooveColumnType::Array(inner) => {
+        StorageColumnType::Nullable(inner) | StorageColumnType::Array(inner) => {
             contains_internal_storage_type(inner)
         }
-        GrooveColumnType::Tuple(members) => members.iter().any(contains_internal_storage_type),
-        GrooveColumnType::Record(descriptor) => descriptor
+        StorageColumnType::Tuple(members) => members.iter().any(contains_internal_storage_type),
+        StorageColumnType::Record(descriptor) => descriptor
             .fields()
             .iter()
             .any(|field| contains_internal_storage_type(&field.value_type)),
-        GrooveColumnType::Enum(schema) => schema.cases.iter().any(|case| {
+        StorageColumnType::Enum(schema) => schema.cases.iter().any(|case| {
             case.payload
                 .fields()
                 .iter()
@@ -687,11 +684,11 @@ fn contains_internal_storage_type(column_type: &GrooveColumnType) -> bool {
     }
 }
 
-fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemanticKind {
+fn large_value_kind_for_type(column_type: &StorageColumnType) -> LargeValueSemanticKind {
     match column_type {
-        GrooveColumnType::String => LargeValueSemanticKind::String,
-        GrooveColumnType::Bytes => LargeValueSemanticKind::Bytes,
-        GrooveColumnType::Nullable(inner) => large_value_kind_for_type(inner),
+        StorageColumnType::String => LargeValueSemanticKind::String,
+        StorageColumnType::Bytes => LargeValueSemanticKind::Bytes,
+        StorageColumnType::Nullable(inner) => large_value_kind_for_type(inner),
         _ => LargeValueSemanticKind::NotLarge,
     }
 }
@@ -699,7 +696,7 @@ fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemant
 /// Storage descriptors are schema-derived. JSON remains string-shaped to
 /// callers and operators, but its internal cell codec is distinct so a large
 /// JSON descriptor cannot be mistaken for text.
-pub fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
+pub fn storage_column_type(column: &ColumnSchema) -> StorageColumnType {
     match column.large_value_kind {
         LargeValueSemanticKind::Json => jazz_types::large_values::physical_storage_value_type(
             jazz_types::large_values::LargeValueKind::Json,
@@ -889,11 +886,11 @@ impl TableSchema {
     }
 
     /// Return the storage table for rejected versions of this application table.
-    pub fn rejected_versions_storage_table(&self) -> GrooveTableSchema {
+    pub fn rejected_versions_storage_table(&self) -> StorageTableSchema {
         let mut columns = vec![
-            column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
-            column("row_uuid", GrooveColumnType::Uuid),
+            column("tx_time", StorageColumnType::U64),
+            column("tx_node_id", StorageColumnType::U64),
+            column("row_uuid", StorageColumnType::Uuid),
             column("_deletion", deletion_column().nullable()),
         ];
         columns.extend(self.columns.iter().map(|user_column| {
@@ -902,7 +899,7 @@ impl TableSchema {
                 storage_column_type(user_column).nullable(),
             )
         }));
-        GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
+        StorageTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
                 PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
@@ -911,27 +908,27 @@ impl TableSchema {
     }
 
     /// Return the storage history table for this application table.
-    pub fn history_storage_table(&self) -> GrooveTableSchema {
+    pub fn history_storage_table(&self) -> StorageTableSchema {
         self.history_storage_table_named(format!("jazz_{}_history", self.name))
     }
 
     /// Alias kept at the codec boundary to make the physical interpretation
     /// explicit at call sites.
-    pub fn authored_history_storage_table(&self) -> GrooveTableSchema {
+    pub fn authored_history_storage_table(&self) -> StorageTableSchema {
         self.history_storage_table()
     }
 
-    fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
+    fn history_storage_table_named(&self, name: String) -> StorageTableSchema {
         let mut columns = vec![
-            column("branch_key", GrooveColumnType::Bytes),
-            column("row_uuid", GrooveColumnType::Uuid),
-            column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
-            column("schema_version", GrooveColumnType::U64),
+            column("branch_key", StorageColumnType::Bytes),
+            column("row_uuid", StorageColumnType::Uuid),
+            column("tx_time", StorageColumnType::U64),
+            column("tx_node_id", StorageColumnType::U64),
+            column("schema_version", StorageColumnType::U64),
             column("created_by", interned_author_type()),
-            column("created_at", GrooveColumnType::U64),
+            column("created_at", StorageColumnType::U64),
             column("updated_by", interned_author_type()),
-            column("updated_at", GrooveColumnType::U64),
+            column("updated_at", StorageColumnType::U64),
             // Deletion is a cell of the row image: null until deleted or restored.
             column("_deletion", deletion_column().nullable()),
         ];
@@ -946,17 +943,17 @@ impl TableSchema {
         // version. Logical names remain a wire/schema-boundary concern.
         columns.push(column(
             "authored_columns",
-            GrooveColumnType::U64.array_of().nullable(),
+            StorageColumnType::U64.array_of().nullable(),
         ));
         // Sign bits of a pending patch's counter ops, one per counter column
         // in schema order (SPEC 4, "Counter ops"). Empty on a settled image.
-        columns.push(column(COUNTER_SIGNS_FIELD, GrooveColumnType::Bytes));
+        columns.push(column(COUNTER_SIGNS_FIELD, StorageColumnType::Bytes));
         // The write's accepted seq; 0 while it has no accepted fate (SPEC 4
         // §4.6, "Durable layout").
-        columns.push(column(SEQ_FIELD, GrooveColumnType::U64));
+        columns.push(column(SEQ_FIELD, StorageColumnType::U64));
         // The write's base: the settled seq its writer's image rested on and
         // the writer's own pending predecessor to this row.
-        columns.push(column(BASE_SEQ_FIELD, GrooveColumnType::U64.nullable()));
+        columns.push(column(BASE_SEQ_FIELD, StorageColumnType::U64.nullable()));
         columns.push(column(
             BASE_PENDING_FIELD,
             history_base_pending_storage_type(),
@@ -966,7 +963,7 @@ impl TableSchema {
         // read and "the row's writes after S" a range read. A write without
         // an accepted fate has seq 0, and its transaction identity keeps it
         // apart from the row's other pending writes.
-        GrooveTableSchema::new(name, columns).with_primary_key(PrimaryKey::composite([
+        StorageTableSchema::new(name, columns).with_primary_key(PrimaryKey::composite([
             PrimaryKeyColumn::bytes("branch_key"),
             PrimaryKeyColumn::uuid("row_uuid"),
             PrimaryKeyColumn::integer(SEQ_FIELD, IntegerKeyType::U64),
@@ -979,19 +976,19 @@ impl TableSchema {
     }
 
     /// Return the global-current table: one settled row image per row.
-    pub fn global_current_storage_table(&self) -> GrooveTableSchema {
+    pub fn global_current_storage_table(&self) -> StorageTableSchema {
         let indexed_columns = self.global_current_indexed_columns();
         let mut content_columns = vec![
-            column("branch_key", GrooveColumnType::Bytes),
-            column("row_uuid", GrooveColumnType::Uuid),
-            column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
-            column("schema_version", GrooveColumnType::U64),
+            column("branch_key", StorageColumnType::Bytes),
+            column("row_uuid", StorageColumnType::Uuid),
+            column("tx_time", StorageColumnType::U64),
+            column("tx_node_id", StorageColumnType::U64),
+            column("schema_version", StorageColumnType::U64),
             column("created_by", interned_author_type()),
-            column("created_at", GrooveColumnType::U64),
+            column("created_at", StorageColumnType::U64),
             column("updated_by", interned_author_type()),
-            column("updated_at", GrooveColumnType::U64),
-            column("global_time", GrooveColumnType::U64.nullable()),
+            column("updated_at", StorageColumnType::U64),
+            column("global_time", StorageColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
         ];
         // Carry every user column (not only indexed ones) so the global-current
@@ -1007,9 +1004,9 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::U64.array_of().nullable(),
+            StorageColumnType::U64.array_of().nullable(),
         ));
-        let mut content_table = GrooveTableSchema::new(
+        let mut content_table = StorageTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
         )
@@ -1018,13 +1015,13 @@ impl TableSchema {
             PrimaryKeyColumn::uuid("row_uuid"),
         ]));
         for indexed in &indexed_columns {
-            content_table = content_table.with_index(GrooveIndexSchema::new(
+            content_table = content_table.with_index(StorageIndexSchema::new(
                 global_current_index_name(indexed),
                 ["branch_key".to_owned(), app_storage_column_name(indexed)],
             ));
         }
         for columns in &self.composite_indexes {
-            content_table = content_table.with_index(GrooveIndexSchema::new(
+            content_table = content_table.with_index(StorageIndexSchema::new(
                 global_current_composite_index_name(columns),
                 std::iter::once("branch_key".to_owned())
                     .chain(columns.iter().map(|column| app_storage_column_name(column))),
@@ -1033,25 +1030,25 @@ impl TableSchema {
         // `by_seq`: rows ordered by the seq of their latest accepted change.
         // "Rows changed since W" is a range read here; there is no separate
         // change log.
-        content_table.with_index(GrooveIndexSchema::new(
+        content_table.with_index(StorageIndexSchema::new(
             GLOBAL_CURRENT_BY_SEQ_INDEX,
             ["branch_key", "global_time", "row_uuid"],
         ))
     }
 
     /// Return the ahead-of-global candidate table (local pending rows).
-    pub fn ahead_current_storage_table(&self) -> GrooveTableSchema {
+    pub fn ahead_current_storage_table(&self) -> StorageTableSchema {
         let mut content_columns = vec![
-            column("branch_key", GrooveColumnType::Bytes),
-            column("row_uuid", GrooveColumnType::Uuid),
-            column("tx_time", GrooveColumnType::U64),
-            column("tx_node_id", GrooveColumnType::U64),
-            column("schema_version", GrooveColumnType::U64),
+            column("branch_key", StorageColumnType::Bytes),
+            column("row_uuid", StorageColumnType::Uuid),
+            column("tx_time", StorageColumnType::U64),
+            column("tx_node_id", StorageColumnType::U64),
+            column("schema_version", StorageColumnType::U64),
             column("created_by", interned_author_type()),
-            column("created_at", GrooveColumnType::U64),
+            column("created_at", StorageColumnType::U64),
             column("updated_by", interned_author_type()),
-            column("updated_at", GrooveColumnType::U64),
-            column("global_time", GrooveColumnType::U64.nullable()),
+            column("updated_at", StorageColumnType::U64),
+            column("global_time", StorageColumnType::U64.nullable()),
             column("_deletion", deletion_column().nullable()),
         ];
         content_columns.extend(self.columns.iter().map(|user_column| {
@@ -1062,9 +1059,9 @@ impl TableSchema {
         }));
         content_columns.push(column(
             "authored_columns",
-            GrooveColumnType::U64.array_of().nullable(),
+            StorageColumnType::U64.array_of().nullable(),
         ));
-        GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
+        StorageTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
             // One overlay row per row: the newest pending local image.
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::bytes("branch_key"),
@@ -1137,33 +1134,33 @@ impl Policy {
     }
 }
 
-fn storage_enum(name: &str, variants: &[&str]) -> GrooveColumnType {
-    GrooveColumnType::EnumTag(
+fn storage_enum(name: &str, variants: &[&str]) -> StorageColumnType {
+    StorageColumnType::EnumTag(
         ScalarEnumSchema::new(name, variants.iter().copied()).expect("valid enum schema"),
     )
 }
 
-fn tx_kind_column() -> GrooveColumnType {
+fn tx_kind_column() -> StorageColumnType {
     storage_enum("jazz_tx_kind", &["mergeable", "exclusive"])
 }
 
-fn fate_column() -> GrooveColumnType {
+fn fate_column() -> StorageColumnType {
     storage_enum("jazz_fate", &["pending", "accepted", "rejected"])
 }
 
-fn deletion_column() -> GrooveColumnType {
-    GrooveColumnType::EnumTag(
+fn deletion_column() -> StorageColumnType {
+    StorageColumnType::EnumTag(
         ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
             .expect("valid deletion enum")
             .with_system_registry(SystemVariantRegistry::deletion_state()),
     )
 }
 
-fn rejection_reason_column() -> GrooveColumnType {
+fn rejection_reason_column() -> StorageColumnType {
     crate::tx::RejectionReason::storage_value_type()
 }
 
-fn durability_column() -> GrooveColumnType {
+fn durability_column() -> StorageColumnType {
     storage_enum("jazz_durability", &["none", "local", "global"])
 }
 
@@ -1183,10 +1180,10 @@ pub const BASE_PENDING_FIELD: &str = "base_pending";
 /// predecessor's `(time, node)`. A record is variable-width, so the common
 /// null costs a null byte and an offset instead of a reserved 25-byte tuple.
 #[doc(hidden)]
-pub fn history_base_pending_storage_type() -> GrooveColumnType {
-    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
-        ("time", GrooveColumnType::U64),
-        ("node", GrooveColumnType::Uuid),
+pub fn history_base_pending_storage_type() -> StorageColumnType {
+    StorageColumnType::Record(Box::new(RecordDescriptor::new([
+        ("time", StorageColumnType::U64),
+        ("node", StorageColumnType::Uuid),
     ])))
     .nullable()
 }
@@ -1199,7 +1196,7 @@ pub const COUNTER_SIGNS_FIELD: &str = "counter_signs";
 
 fn column(
     name: impl Into<String>,
-    column_type: GrooveColumnType,
+    column_type: StorageColumnType,
 ) -> jazz_types::column_schema::ColumnSchema {
     jazz_types::column_schema::ColumnSchema::new(name, column_type)
 }
@@ -1253,27 +1250,27 @@ pub fn global_current_composite_index_name(columns: &[String]) -> String {
 ///   of writes, in `jazz_tx_provenance`, so status reads never copy it;
 /// - the rejection reason in one nullable record that costs a byte on every
 ///   transaction that was not rejected.
-fn transactions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
+fn transactions_table() -> StorageTableSchema {
+    StorageTableSchema::new(
         "jazz_transactions",
         [
-            column("time", GrooveColumnType::U64),
-            column("node_id", GrooveColumnType::U64),
+            column("time", StorageColumnType::U64),
+            column("node_id", StorageColumnType::U64),
             column("kind", tx_kind_column()),
             // Bit 0: `n_total_writes` is only the view-redacted cardinality.
             // Bit 1: a `jazz_tx_provenance` record exists.
             // Bit 2: the permission subject is the author itself. Other bits
             // are reserved and refused on read.
-            column("flags", GrooveColumnType::U8),
-            column("n_total_writes", GrooveColumnType::U32),
+            column("flags", StorageColumnType::U8),
+            column("n_total_writes", StorageColumnType::U32),
             column("made_by", interned_author_type()),
             // upstream-decided: written only by fate/state application.
             column("fate", fate_column()),
             // upstream-decided: written only by fate/state application.
-            column("global_time", GrooveColumnType::U64.nullable()),
+            column("global_time", StorageColumnType::U64.nullable()),
             // node-local-derived: updated when the node learns stronger durability.
             column("durability", durability_column()),
-            column("user_metadata", GrooveColumnType::String.nullable()),
+            column("user_metadata", StorageColumnType::String.nullable()),
             // upstream-decided: set exactly when `fate` is rejected.
             column("rejection", rejection_reason_column().nullable()),
             // The identity the writes were authorized as when it is not the
@@ -1289,13 +1286,13 @@ fn transactions_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("time", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("node_id", IntegerKeyType::U64),
     ]))
-    .with_index(GrooveIndexSchema::new("by_global_time", ["global_time"]))
+    .with_index(StorageIndexSchema::new("by_global_time", ["global_time"]))
 }
 
 const TX_PROVENANCE_TABLE: &str = "jazz_tx_provenance";
 
-fn contribution_component_column() -> GrooveColumnType {
-    GrooveColumnType::Enum(Box::new(
+fn contribution_component_column() -> StorageColumnType {
+    StorageColumnType::Enum(Box::new(
         EnumSchema::new(
             "jazz_contribution_component",
             [
@@ -1324,8 +1321,8 @@ fn contribution_component_column() -> GrooveColumnType {
     ))
 }
 
-fn contribution_coordinate_column() -> GrooveColumnType {
-    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+fn contribution_coordinate_column() -> StorageColumnType {
+    StorageColumnType::Record(Box::new(RecordDescriptor::new([
         ("branch_key", ValueType::Bytes),
         ("physical_table_id", ValueType::U64),
         ("row_uuid", ValueType::Uuid),
@@ -1337,37 +1334,37 @@ fn contribution_coordinate_column() -> GrooveColumnType {
     ])))
 }
 
-fn contribution_dot_column() -> GrooveColumnType {
-    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+fn contribution_dot_column() -> StorageColumnType {
+    StorageColumnType::Record(Box::new(RecordDescriptor::new([
         ("tx_time", ValueType::U64),
         ("tx_node", ValueType::Uuid),
         ("coordinate", contribution_coordinate_column()),
     ])))
 }
 
-fn contribution_merge_column() -> GrooveColumnType {
-    GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+fn contribution_merge_column() -> StorageColumnType {
+    StorageColumnType::Record(Box::new(RecordDescriptor::new([
         ("source", ValueType::Bytes),
         ("target", ValueType::Bytes),
         (
             "substitutions",
-            GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+            StorageColumnType::Record(Box::new(RecordDescriptor::new([
                 ("target", contribution_coordinate_column()),
                 ("sources", contribution_dot_column().array_of()),
             ])))
             .array_of(),
         ),
         // Versioned non-causal authorization evidence for a first head
-        // overlay. This is a normal Groove record, not an opaque postcard
+        // overlay. This is a normal record, not an opaque postcard
         // payload: every field remains inspectable by authority admission.
         (
             "branch_view_copy_v1",
-            GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+            StorageColumnType::Record(Box::new(RecordDescriptor::new([
                 ("version", ValueType::U8),
                 ("head", ValueType::Bytes),
                 (
                     "base",
-                    GrooveColumnType::Enum(Box::new(
+                    StorageColumnType::Enum(Box::new(
                         EnumSchema::new(
                             "jazz_branch_view_copy_base_v1",
                             [
@@ -1409,7 +1406,7 @@ fn contribution_merge_column() -> GrooveColumnType {
         // historical logical names when admission resolves it.
         (
             "branch_write_intent_v1",
-            GrooveColumnType::Record(Box::new(RecordDescriptor::new([
+            StorageColumnType::Record(Box::new(RecordDescriptor::new([
                 ("version", ValueType::U8),
                 ("physical_table_id", ValueType::U64),
                 ("authored_schema", ValueType::Uuid),
@@ -1417,7 +1414,7 @@ fn contribution_merge_column() -> GrooveColumnType {
                 ("head", ValueType::Bytes),
                 (
                     "operation",
-                    GrooveColumnType::Enum(
+                    StorageColumnType::Enum(
                         Box::new(
                             EnumSchema::new(
                                 "jazz_branch_write_operation_v1",
@@ -1456,7 +1453,7 @@ fn contribution_merge_column() -> GrooveColumnType {
 
 /// Bound physical type of `jazz_transactions.rejection`, with the registry
 /// paths of the real column.
-pub fn transaction_rejection_storage_type() -> GrooveColumnType {
+pub fn transaction_rejection_storage_type() -> StorageColumnType {
     transactions_table()
         .columns
         .into_iter()
@@ -1468,8 +1465,8 @@ pub fn transaction_rejection_storage_type() -> GrooveColumnType {
 /// Bound physical type used by the transaction codec. Constructing the
 /// single-column table applies the same durable registry paths as the real
 /// `jazz_tx_provenance.contribution_merge` column.
-pub fn contribution_merge_storage_type() -> GrooveColumnType {
-    GrooveTableSchema::new(
+pub fn contribution_merge_storage_type() -> StorageColumnType {
+    StorageTableSchema::new(
         TX_PROVENANCE_TABLE,
         [column("contribution_merge", contribution_merge_column())],
     )
@@ -1556,20 +1553,20 @@ fn put_merge_strategy(bytes: &mut Vec<u8>, strategy: MergeStrategy) {
     });
 }
 
-fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
+fn put_column_type(bytes: &mut Vec<u8>, column_type: &StorageColumnType) {
     match column_type {
-        GrooveColumnType::U8 => bytes.push(0),
-        GrooveColumnType::U16 => bytes.push(1),
-        GrooveColumnType::U32 => bytes.push(2),
-        GrooveColumnType::U64 => bytes.push(3),
-        GrooveColumnType::I32 => bytes.push(4),
-        GrooveColumnType::I64 => bytes.push(5),
-        GrooveColumnType::F64 => bytes.push(6),
-        GrooveColumnType::Bool => bytes.push(7),
-        GrooveColumnType::String => bytes.push(8),
-        GrooveColumnType::Bytes => bytes.push(9),
-        GrooveColumnType::Uuid => bytes.push(10),
-        GrooveColumnType::EnumTag(schema) => {
+        StorageColumnType::U8 => bytes.push(0),
+        StorageColumnType::U16 => bytes.push(1),
+        StorageColumnType::U32 => bytes.push(2),
+        StorageColumnType::U64 => bytes.push(3),
+        StorageColumnType::I32 => bytes.push(4),
+        StorageColumnType::I64 => bytes.push(5),
+        StorageColumnType::F64 => bytes.push(6),
+        StorageColumnType::Bool => bytes.push(7),
+        StorageColumnType::String => bytes.push(8),
+        StorageColumnType::Bytes => bytes.push(9),
+        StorageColumnType::Uuid => bytes.push(10),
+        StorageColumnType::EnumTag(schema) => {
             bytes.push(11);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.variants.len() as u64);
@@ -1577,22 +1574,22 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                 put_str(bytes, variant);
             }
         }
-        GrooveColumnType::Tuple(members) => {
+        StorageColumnType::Tuple(members) => {
             bytes.push(12);
             put_u64(bytes, members.len() as u64);
             for member in members {
                 put_column_type(bytes, member);
             }
         }
-        GrooveColumnType::Array(member) => {
+        StorageColumnType::Array(member) => {
             bytes.push(13);
             put_column_type(bytes, member);
         }
-        GrooveColumnType::Nullable(member) => {
+        StorageColumnType::Nullable(member) => {
             bytes.push(14);
             put_column_type(bytes, member);
         }
-        GrooveColumnType::Record(descriptor) => {
+        StorageColumnType::Record(descriptor) => {
             bytes.push(15);
             put_u64(bytes, descriptor.fields().len() as u64);
             for field in descriptor.fields() {
@@ -1606,7 +1603,7 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                 put_column_type(bytes, &field.value_type);
             }
         }
-        GrooveColumnType::Enum(schema) => {
+        StorageColumnType::Enum(schema) => {
             bytes.push(16);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.cases.len() as u64);
@@ -1885,16 +1882,16 @@ mod tests {
             "right",
             [ColumnSchema::new("state", ColumnType::EnumTag(state))],
         );
-        let registry = |table: GrooveTableSchema, name: &str| match &table
+        let registry = |table: StorageTableSchema, name: &str| match &table
             .columns
             .iter()
             .find(|column| column.name == name)
             .unwrap()
             .column_type
         {
-            GrooveColumnType::EnumTag(schema) => schema.registry_id(),
-            GrooveColumnType::Nullable(inner) => match inner.as_ref() {
-                GrooveColumnType::EnumTag(schema) => schema.registry_id(),
+            StorageColumnType::EnumTag(schema) => schema.registry_id(),
+            StorageColumnType::Nullable(inner) => match inner.as_ref() {
+                StorageColumnType::EnumTag(schema) => schema.registry_id(),
                 other => panic!("expected enum field, got {other:?}"),
             },
             other => panic!("expected enum field, got {other:?}"),
@@ -1929,7 +1926,7 @@ mod tests {
 
         let spoofed_kind = serde_json::json!({
             "name": "body",
-            "column_type": GrooveColumnType::Bytes,
+            "column_type": StorageColumnType::Bytes,
             "large_value_kind": "Json",
             "default": null,
         });

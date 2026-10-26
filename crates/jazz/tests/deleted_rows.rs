@@ -1,11 +1,11 @@
-//! Deleted rows on SQLite: `includeDeleted` subscriptions and the
+//! Deleted rows: `includeDeleted` subscriptions and the
 //! `$deletedAt` / `$deletedBy` columns. A deleted row's deletion metadata
 //! is the update stamp of its deleted current version; live and restored
 //! rows read NULL, and every history version reads its row's current
 //! deletion. Include-deleted subscriptions keep deleted rows through their
 //! deletion and restoration, locally and synced (a server ships a deleted
 //! row's current version, and a resumed client keeps the deleted versions
-//! it holds). Ported from #4173 and #4182's Groove behaviour.
+//! it holds).
 
 use crate::common;
 
@@ -604,16 +604,9 @@ impl Synced {
     fn alice_reads(&self, query: &Query, opts: ReadOpts) -> Vec<CurrentRow> {
         use std::future::Future;
         let bytes = postcard::to_allocvec(query).unwrap();
-        let read = self.alice.all_serialized_query(
-            &bytes,
-            opts,
-            None,
-            None,
-            None,
-            false,
-            || false,
-            |attachment| self.alice.detach_query(attachment),
-        );
+        let read = self
+            .alice
+            .all_serialized_query(&bytes, opts, None, None, None);
         let mut read = std::pin::pin!(read);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         for _ in 0..50 {

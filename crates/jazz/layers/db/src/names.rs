@@ -72,7 +72,7 @@ impl LensEffects {
                         }
                         effects.tables.insert(to.clone(), from.clone());
                     }
-                    other => return Err(unsupported(format!("lens op {other:?} on SQLite"))),
+                    other => return Err(unsupported(format!("lens op {other:?}"))),
                 }
             }
         }
@@ -252,9 +252,7 @@ impl Names {
                     .get(&(name.clone(), column.name.clone()))
                     .unwrap_or(&column.name);
                 if from != &column.name && table.branch_by.contains(&column.name) {
-                    return Err(unsupported(format!(
-                        "renaming branch column {name}.{from} on SQLite"
-                    )));
+                    return Err(unsupported(format!("renaming branch column {name}.{from}")));
                 }
                 match source_columns.and_then(|columns| columns.get(from)) {
                     Some(stored_column) => {

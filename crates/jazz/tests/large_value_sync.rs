@@ -1,7 +1,7 @@
 //! Chunked large values over sync: row images carry descriptors, replicas
 //! pull chunks by locator (prefetching indexed columns before the row is
 //! installed), and clients push the nodes of their new values ahead of the
-//! commit that references them (Groove SPEC ch. 19 §19.4, §19.6).
+//! commit that references them (`SPEC/19_large_values.md`).
 
 use crate::common;
 

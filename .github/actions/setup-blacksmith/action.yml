@@ -62,7 +62,7 @@ runs:
         cache-on-failure: true
         cache-bin: false
         save-if: ${{ github.ref == 'refs/heads/main' }}
-        prefix-key: blacksmith-rocksdb-v2
+        prefix-key: blacksmith-rust-v1
         key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
 
     - name: Start isolated sccache daemon

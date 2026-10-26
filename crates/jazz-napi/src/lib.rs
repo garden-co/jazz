@@ -1,4 +1,4 @@
-//! jazz-napi — Native Node.js bindings for Jazz on SQLite (`jazz-db`).
+//! jazz-napi — Native Node.js bindings for the Jazz database (`jazz-db`).
 //!
 //! Provides Node.js bindings for the Jazz database, server helpers, and
 //! local-first identity utilities.
@@ -9,8 +9,7 @@
 //!   TypeScript client packages share with the WASM binding. Both delegate to
 //!   [`jazz::binding_host`]; this crate only adapts it to Node: options
 //!   objects, pollable pending reads, write promises and the tick callback.
-//!   Engine features `jazz-db` does not have yet fail with an explicit "not
-//!   supported on SQLite yet" error instead of a stand-in.
+//!   Unsupported features fail with an explicit "not supported yet" error.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
 //! - Local-first JWT helpers stay here as package-level native utilities.
@@ -1073,10 +1072,9 @@ impl NapiDb {
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
         let db_config = binding_host::db_config(schema, &config, identity);
         let db = match data_path {
-            None => block_on(binding_host::open_memory(db_config, &config)),
+            None => block_on(binding_host::open_memory(db_config)),
             Some(data_path) => block_on(binding_host::open_file(
                 db_config,
-                &config,
                 &store_file(data_path)?,
                 FileOptions::default(),
             )),
@@ -1114,9 +1112,9 @@ impl NapiDb {
 
 /// The SQLite file of a persistent store in directory `data_path`.
 ///
-/// A directory the Groove engine wrote (RocksDB) is refused with the
-/// `unsupported_storage_codecs` code rather than opened empty next to its
-/// data.
+/// A directory that holds a store from before storage format 1 is refused
+/// with the `unsupported_storage_codecs` code rather than opened empty next to
+/// its data.
 fn store_file(data_path: &str) -> napi::Result<std::path::PathBuf> {
     let dir = std::path::Path::new(data_path);
     jazz::format::refuse_groove_store(dir).map_err(|error| host_error(HostError::Engine(error)))?;

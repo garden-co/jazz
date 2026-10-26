@@ -9,9 +9,9 @@ use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
     TableSchema as CoreTableSchema, WritePolicies,
 };
-use jazz_types::column_schema::ColumnType as GrooveColumnType;
+use jazz_types::column_schema::ColumnType as StorageColumnType;
 use jazz_types::records::{
-    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as GrooveValue,
+    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as RecordValue,
 };
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
@@ -84,7 +84,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
     };
     validate_converted_references(tables)?;
 
-    let mut branch_column_types = BTreeMap::<String, GrooveColumnType>::new();
+    let mut branch_column_types = BTreeMap::<String, StorageColumnType>::new();
     for table in tables {
         let mut bound = std::collections::BTreeSet::new();
         for branch_column in &table.branch_by {
@@ -104,7 +104,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
                     format!("branch column {branch_column:?} is listed more than once"),
                 ));
             }
-            if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+            if matches!(column.column_type, StorageColumnType::Nullable(_)) {
                 return Err(err(
                     format!("$.{}.branchBy", table.name),
                     format!("branch column {branch_column:?} must be non-null"),
@@ -112,15 +112,15 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             }
             if !matches!(
                 column.column_type,
-                GrooveColumnType::String
-                    | GrooveColumnType::Uuid
-                    | GrooveColumnType::U8
-                    | GrooveColumnType::U16
-                    | GrooveColumnType::U32
-                    | GrooveColumnType::U64
-                    | GrooveColumnType::I32
-                    | GrooveColumnType::I64
-                    | GrooveColumnType::EnumTag(_)
+                StorageColumnType::String
+                    | StorageColumnType::Uuid
+                    | StorageColumnType::U8
+                    | StorageColumnType::U16
+                    | StorageColumnType::U32
+                    | StorageColumnType::U64
+                    | StorageColumnType::I32
+                    | StorageColumnType::I64
+                    | StorageColumnType::EnumTag(_)
             ) {
                 return Err(err(
                     format!("$.{}.branchBy", table.name),
@@ -194,18 +194,18 @@ fn validate_converted_references(tables: &[CoreTableSchema]) -> Result<(), Schem
     Ok(())
 }
 
-fn is_uuid_reference_type(column_type: &GrooveColumnType) -> bool {
+fn is_uuid_reference_type(column_type: &StorageColumnType) -> bool {
     match column_type {
-        GrooveColumnType::Nullable(inner) => is_uuid_reference_type(inner),
-        GrooveColumnType::Uuid => true,
-        GrooveColumnType::Array(inner) => matches!(inner.as_ref(), GrooveColumnType::Uuid),
+        StorageColumnType::Nullable(inner) => is_uuid_reference_type(inner),
+        StorageColumnType::Uuid => true,
+        StorageColumnType::Array(inner) => matches!(inner.as_ref(), StorageColumnType::Uuid),
         _ => false,
     }
 }
 
 #[derive(Clone)]
 enum TypedLiteralTarget {
-    Core(GrooveColumnType),
+    Core(StorageColumnType),
     PublicEnum,
 }
 
@@ -373,7 +373,7 @@ fn coerce_operand_pair_typed_literal(
     if let Some(discriminant) =
         column_enum_literal_discriminant(table, column, literal_operand, column_types)
     {
-        *literal_operand = Operand::Literal(GrooveValue::EnumTag(discriminant));
+        *literal_operand = Operand::Literal(RecordValue::EnumTag(discriminant));
         return false;
     }
     if column_is_enum(table, column, column_types) {
@@ -382,8 +382,8 @@ fn coerce_operand_pair_typed_literal(
     if !column_is_string(table, column, column_types) {
         return false;
     }
-    if let Operand::Literal(GrooveValue::Uuid(uuid)) = literal_operand {
-        *literal_operand = Operand::Literal(GrooveValue::String(uuid.to_string()));
+    if let Operand::Literal(RecordValue::Uuid(uuid)) = literal_operand {
+        *literal_operand = Operand::Literal(RecordValue::String(uuid.to_string()));
     }
     false
 }
@@ -397,58 +397,58 @@ fn column_type_for_operand(
         return Some(TypedLiteralTarget::Core(ty.clone()));
     }
     match column {
-        "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
+        "id" => Some(TypedLiteralTarget::Core(StorageColumnType::Uuid)),
         "$createdAt" | "$updatedAt" | "$deletedAt" => {
-            Some(TypedLiteralTarget::Core(GrooveColumnType::U64))
+            Some(TypedLiteralTarget::Core(StorageColumnType::U64))
         }
         _ => column_target(column_types, table, column).cloned(),
     }
 }
 
-fn coerce_literal_for_target(value: GrooveValue, target: &TypedLiteralTarget) -> GrooveValue {
+fn coerce_literal_for_target(value: RecordValue, target: &TypedLiteralTarget) -> RecordValue {
     match target {
         TypedLiteralTarget::Core(column_type) => coerce_literal_for_column_type(value, column_type),
         TypedLiteralTarget::PublicEnum => match value {
-            GrooveValue::String(value) => uuid::Uuid::parse_str(&value)
-                .map(GrooveValue::Uuid)
-                .unwrap_or(GrooveValue::String(value)),
+            RecordValue::String(value) => uuid::Uuid::parse_str(&value)
+                .map(RecordValue::Uuid)
+                .unwrap_or(RecordValue::String(value)),
             value => value,
         },
     }
 }
 
 fn coerce_literal_for_column_type(
-    value: GrooveValue,
-    column_type: &GrooveColumnType,
-) -> GrooveValue {
+    value: RecordValue,
+    column_type: &StorageColumnType,
+) -> RecordValue {
     match (value, column_type) {
-        (GrooveValue::Uuid(value), GrooveColumnType::String) => {
-            GrooveValue::String(value.to_string())
+        (RecordValue::Uuid(value), StorageColumnType::String) => {
+            RecordValue::String(value.to_string())
         }
-        (GrooveValue::String(value), GrooveColumnType::Uuid) => uuid::Uuid::parse_str(&value)
-            .map(GrooveValue::Uuid)
-            .unwrap_or(GrooveValue::String(value)),
-        (GrooveValue::U64(value), GrooveColumnType::I64) => i64::try_from(value)
-            .map(GrooveValue::I64)
-            .unwrap_or(GrooveValue::U64(value)),
-        (GrooveValue::U64(value), GrooveColumnType::I32) => i32::try_from(value)
-            .map(GrooveValue::I32)
-            .unwrap_or(GrooveValue::U64(value)),
-        (GrooveValue::Nullable(Some(value)), GrooveColumnType::Nullable(inner)) => {
-            GrooveValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
+        (RecordValue::String(value), StorageColumnType::Uuid) => uuid::Uuid::parse_str(&value)
+            .map(RecordValue::Uuid)
+            .unwrap_or(RecordValue::String(value)),
+        (RecordValue::U64(value), StorageColumnType::I64) => i64::try_from(value)
+            .map(RecordValue::I64)
+            .unwrap_or(RecordValue::U64(value)),
+        (RecordValue::U64(value), StorageColumnType::I32) => i32::try_from(value)
+            .map(RecordValue::I32)
+            .unwrap_or(RecordValue::U64(value)),
+        (RecordValue::Nullable(Some(value)), StorageColumnType::Nullable(inner)) => {
+            RecordValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
                 *value, inner,
             ))))
         }
-        (GrooveValue::Array(values), GrooveColumnType::Array(inner)) => GrooveValue::Array(
+        (RecordValue::Array(values), StorageColumnType::Array(inner)) => RecordValue::Array(
             values
                 .into_iter()
                 .map(|value| coerce_literal_for_column_type(value, inner))
                 .collect(),
         ),
-        (GrooveValue::Tuple(values), GrooveColumnType::Tuple(types))
+        (RecordValue::Tuple(values), StorageColumnType::Tuple(types))
             if values.len() == types.len() =>
         {
-            GrooveValue::Tuple(
+            RecordValue::Tuple(
                 values
                     .into_iter()
                     .zip(types)
@@ -456,10 +456,10 @@ fn coerce_literal_for_column_type(
                     .collect(),
             )
         }
-        (GrooveValue::Nullable(Some(value)), column_type) => GrooveValue::Nullable(Some(Box::new(
+        (RecordValue::Nullable(Some(value)), column_type) => RecordValue::Nullable(Some(Box::new(
             coerce_literal_for_column_type(*value, column_type),
         ))),
-        (value, GrooveColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
+        (value, StorageColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
         (value, _) => value,
     }
 }
@@ -470,7 +470,7 @@ fn column_enum_literal_discriminant(
     literal_operand: &Operand,
     column_types: &ColumnTypes,
 ) -> Option<u8> {
-    let Operand::Literal(GrooveValue::String(value)) = literal_operand else {
+    let Operand::Literal(RecordValue::String(value)) = literal_operand else {
         return None;
     };
     column_enum_schema(table, column, column_types)
@@ -489,13 +489,13 @@ fn column_enum_schema<'a>(
     let TypedLiteralTarget::Core(column_type) = column_target(column_types, table, column)? else {
         return None;
     };
-    groove_column_type_enum_schema(column_type)
+    column_type_enum_schema(column_type)
 }
 
-fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&ScalarEnumSchema> {
+fn column_type_enum_schema(column_type: &StorageColumnType) -> Option<&ScalarEnumSchema> {
     match column_type {
-        GrooveColumnType::EnumTag(schema) => Some(schema),
-        GrooveColumnType::Nullable(inner) => groove_column_type_enum_schema(inner),
+        StorageColumnType::EnumTag(schema) => Some(schema),
+        StorageColumnType::Nullable(inner) => column_type_enum_schema(inner),
         _ => None,
     }
 }
@@ -503,14 +503,14 @@ fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&Sca
 fn column_is_string(table: &str, column: &str, column_types: &ColumnTypes) -> bool {
     matches!(
         column_target(column_types, table, column),
-        Some(TypedLiteralTarget::Core(column_type)) if groove_column_type_is_string(column_type)
+        Some(TypedLiteralTarget::Core(column_type)) if column_type_is_string(column_type)
     )
 }
 
-fn groove_column_type_is_string(column_type: &GrooveColumnType) -> bool {
+fn column_type_is_string(column_type: &StorageColumnType) -> bool {
     match column_type {
-        GrooveColumnType::String => true,
-        GrooveColumnType::Nullable(inner) => groove_column_type_is_string(inner),
+        StorageColumnType::String => true,
+        StorageColumnType::Nullable(inner) => column_type_is_string(inner),
         _ => false,
     }
 }
@@ -699,7 +699,7 @@ fn convert_column(
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
     if matches!(column.column_type, ColumnType::Json { .. }) {
-        // JSON is logically represented as Groove's canonical string value,
+        // JSON is logically represented as the canonical string value,
         // but its physical large-scalar interpretation is schema-derived and
         // deliberately distinct from text.
         converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
@@ -714,7 +714,7 @@ fn convert_column_default(
     table: &TableName,
     column: &ColumnDescriptor,
     value: &Value,
-) -> Result<GrooveValue, SchemaConversionError> {
+) -> Result<RecordValue, SchemaConversionError> {
     crate::model::public_schema::validate_json_value(
         value,
         &column.column_type,
@@ -729,14 +729,14 @@ fn convert_column_default(
                 "null default requires a nullable column",
             ));
         }
-        return Ok(GrooveValue::Nullable(None));
+        return Ok(RecordValue::Nullable(None));
     }
-    // Record cells carry logical signed values. Groove applies its separate
-    // order-preserving transform only when those values become ordered keys.
+    // Record cells carry logical signed values. The record encoding applies its
+    // separate order-preserving transform only when they become ordered keys.
     let default =
         convert_default_for_column_type(table, column.name.as_str(), &column.column_type, value)?;
     if column.nullable {
-        Ok(GrooveValue::Nullable(Some(Box::new(default))))
+        Ok(RecordValue::Nullable(Some(Box::new(default))))
     } else {
         Ok(default)
     }
@@ -747,11 +747,11 @@ fn convert_default_for_column_type(
     column: &str,
     column_type: &ColumnType,
     value: &Value,
-) -> Result<GrooveValue, SchemaConversionError> {
+) -> Result<RecordValue, SchemaConversionError> {
     match (column_type, value) {
-        (ColumnType::Boolean, Value::Boolean(value)) => Ok(GrooveValue::Bool(*value)),
+        (ColumnType::Boolean, Value::Boolean(value)) => Ok(RecordValue::Bool(*value)),
         (ColumnType::Text | ColumnType::Json { .. }, Value::Text(value)) => {
-            Ok(GrooveValue::String(value.clone()))
+            Ok(RecordValue::String(value.clone()))
         }
         (ColumnType::Enum { variants }, Value::Text(value)) => {
             if !variants.contains(value) {
@@ -761,7 +761,7 @@ fn convert_default_for_column_type(
                     format!("enum default value {value:?} is not declared"),
                 ));
             }
-            Ok(GrooveValue::String(value.clone()))
+            Ok(RecordValue::String(value.clone()))
         }
         (
             ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
@@ -800,7 +800,7 @@ fn convert_default_for_column_type(
                             "payload enum default cannot use null for a required field",
                         ));
                     }
-                    GrooveValue::Nullable(None)
+                    RecordValue::Nullable(None)
                 } else {
                     let inner = convert_default_for_column_type(
                         table,
@@ -809,7 +809,7 @@ fn convert_default_for_column_type(
                         value,
                     )?;
                     if field.nullable {
-                        GrooveValue::Nullable(Some(Box::new(inner)))
+                        RecordValue::Nullable(Some(Box::new(inner)))
                     } else {
                         inner
                     }
@@ -820,16 +820,16 @@ fn convert_default_for_column_type(
             let case_tag = u32::try_from(case_index)
                 .map_err(|_| column_err(table, column, "payload enum case index exceeds u32"))?;
             EnumValue::create(case_tag, RecordDescriptor::new(fields), &converted)
-                .map(GrooveValue::Enum)
+                .map(RecordValue::Enum)
                 .map_err(|error| column_err(table, column, error.to_string()))
         }
-        (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(GrooveValue::U64(*value)),
-        (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
-        (ColumnType::Uuid, Value::Uuid(value)) => Ok(GrooveValue::Uuid(*value.uuid())),
-        (ColumnType::Bytea, Value::Bytea(value)) => Ok(GrooveValue::Bytes(value.clone())),
-        (ColumnType::Integer, Value::Integer(value)) => Ok(GrooveValue::I32(*value)),
+        (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(RecordValue::U64(*value)),
+        (ColumnType::Double, Value::Double(value)) => Ok(RecordValue::F64(*value)),
+        (ColumnType::Uuid, Value::Uuid(value)) => Ok(RecordValue::Uuid(*value.uuid())),
+        (ColumnType::Bytea, Value::Bytea(value)) => Ok(RecordValue::Bytes(value.clone())),
+        (ColumnType::Integer, Value::Integer(value)) => Ok(RecordValue::I32(*value)),
         (ColumnType::Integer, Value::BigInt(value)) => {
-            i32::try_from(*value).map(GrooveValue::I32).map_err(|_| {
+            i32::try_from(*value).map(RecordValue::I32).map_err(|_| {
                 column_err(
                     table,
                     column,
@@ -837,13 +837,13 @@ fn convert_default_for_column_type(
                 )
             })
         }
-        (ColumnType::BigInt, Value::Integer(value)) => Ok(GrooveValue::I64(i64::from(*value))),
-        (ColumnType::BigInt, Value::BigInt(value)) => Ok(GrooveValue::I64(*value)),
+        (ColumnType::BigInt, Value::Integer(value)) => Ok(RecordValue::I64(i64::from(*value))),
+        (ColumnType::BigInt, Value::BigInt(value)) => Ok(RecordValue::I64(*value)),
         (ColumnType::Array { element }, Value::Array(values)) => values
             .iter()
             .map(|value| convert_default_for_column_type(table, column, element.as_ref(), value))
             .collect::<Result<Vec<_>, _>>()
-            .map(GrooveValue::Array),
+            .map(RecordValue::Array),
         _ => Err(column_err(
             table,
             column,
@@ -856,18 +856,18 @@ fn convert_column_type(
     table: &TableName,
     column: &str,
     column_type: &ColumnType,
-) -> Result<GrooveColumnType, SchemaConversionError> {
+) -> Result<StorageColumnType, SchemaConversionError> {
     match column_type {
-        ColumnType::Boolean => Ok(GrooveColumnType::Bool),
-        ColumnType::Text => Ok(GrooveColumnType::String),
-        ColumnType::Timestamp => Ok(GrooveColumnType::U64),
-        ColumnType::Double => Ok(GrooveColumnType::F64),
-        ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
-        ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
-        ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
+        ColumnType::Boolean => Ok(StorageColumnType::Bool),
+        ColumnType::Text => Ok(StorageColumnType::String),
+        ColumnType::Timestamp => Ok(StorageColumnType::U64),
+        ColumnType::Double => Ok(StorageColumnType::F64),
+        ColumnType::Uuid => Ok(StorageColumnType::Uuid),
+        ColumnType::Bytea => Ok(StorageColumnType::Bytes),
+        ColumnType::Enum { .. } => Ok(StorageColumnType::String),
         ColumnType::ScalarEnum { name, variants } => {
             jazz_types::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
-                .map(GrooveColumnType::EnumTag)
+                .map(StorageColumnType::EnumTag)
                 .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
@@ -896,22 +896,22 @@ fn convert_column_type(
                 _ => format!("{}_{}", table.as_str(), column),
             };
             EnumSchema::new(enum_name, converted_cases)
-                .map(|schema| GrooveColumnType::Enum(Box::new(schema)))
+                .map(|schema| StorageColumnType::Enum(Box::new(schema)))
                 .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
         // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
-        ColumnType::Integer => Ok(GrooveColumnType::I32),
+        ColumnType::Integer => Ok(StorageColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
-        ColumnType::BigInt => Ok(GrooveColumnType::I64),
+        ColumnType::BigInt => Ok(StorageColumnType::I64),
         ColumnType::TransactionId => Err(column_err(
             table,
             column,
             "TransactionId columns are not supported by core schema conversion yet",
         )),
-        ColumnType::Json { .. } => Ok(GrooveColumnType::String),
+        ColumnType::Json { .. } => Ok(StorageColumnType::String),
         ColumnType::Row { .. } => Err(column_err(
             table,
             column,
@@ -3020,7 +3020,7 @@ fn convert_policy_literal(
     table: &TableName,
     path: &str,
     value: &Value,
-) -> Result<GrooveValue, SchemaConversionError> {
+) -> Result<RecordValue, SchemaConversionError> {
     // Recurse here so an error names the offending array element's path.
     if let Value::Array(values) = value {
         return values
@@ -3030,7 +3030,7 @@ fn convert_policy_literal(
                 convert_policy_literal(table, &format!("{path}.Array[{index}]"), value)
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(GrooveValue::Array);
+            .map(RecordValue::Array);
     }
     crate::query::public_value_to_record_value(value)
         .map_err(|message| policy_error(table, path, message))
@@ -3124,8 +3124,8 @@ mod tests {
         let compiled =
             JazzSchema::new(&schema).expect("column names may be reused in different tables");
         for (name, column_type) in [
-            ("items", GrooveColumnType::String),
-            ("counts", GrooveColumnType::I32),
+            ("items", StorageColumnType::String),
+            ("counts", StorageColumnType::I32),
         ] {
             let table = compiled
                 .tables()
@@ -3407,7 +3407,7 @@ mod tests {
                 .find(|column| column.name == "done")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::Bool
+            StorageColumnType::Bool
         );
     }
 
@@ -3430,7 +3430,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I32
+            StorageColumnType::I32
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -3455,7 +3455,7 @@ mod tests {
                 .find(|column| column.name == "partSizes")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I32.array_of()
+            StorageColumnType::I32.array_of()
         );
 
         let numeric_default_schema = SchemaBuilder::new()
@@ -3487,14 +3487,14 @@ mod tests {
                 .map(|column| (column.name.as_str(), &column.default))
                 .collect::<Vec<_>>(),
             vec![
-                ("integer", &Some(GrooveValue::I32(-7))),
-                ("bigint", &Some(GrooveValue::I64(-7))),
-                ("bigint_literal", &Some(GrooveValue::I64(-7))),
+                ("integer", &Some(RecordValue::I32(-7))),
+                ("bigint", &Some(RecordValue::I64(-7))),
+                ("bigint_literal", &Some(RecordValue::I64(-7))),
                 (
                     "integers",
-                    &Some(GrooveValue::Array(vec![
-                        GrooveValue::I32(-7),
-                        GrooveValue::I32(8),
+                    &Some(RecordValue::Array(vec![
+                        RecordValue::I32(-7),
+                        RecordValue::I32(8),
                     ])),
                 ),
             ]
@@ -3523,7 +3523,7 @@ mod tests {
                 .find(|column| column.name == "title")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String
+            StorageColumnType::String
         );
         assert_eq!(
             default_table
@@ -3532,7 +3532,7 @@ mod tests {
                 .find(|column| column.name == "title")
                 .unwrap()
                 .default,
-            Some(GrooveValue::String("x".to_owned()))
+            Some(RecordValue::String("x".to_owned()))
         );
     }
 
@@ -3562,7 +3562,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_declared_scalar_enum_text_default_as_groove_string() {
+    fn converts_declared_scalar_enum_text_default_as_string() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("items").column_with_default(
                 "status",
@@ -3586,10 +3586,10 @@ mod tests {
             .find(|column| column.name == "status")
             .expect("status column must be present");
 
-        assert_eq!(status.column_type, GrooveColumnType::String);
+        assert_eq!(status.column_type, StorageColumnType::String);
         assert_eq!(
             status.default,
-            Some(GrooveValue::String("published".to_owned()))
+            Some(RecordValue::String("published".to_owned()))
         );
     }
 
@@ -3646,7 +3646,7 @@ mod tests {
             .iter()
             .find(|column| column.name == "nullable_status")
             .expect("nullable enum column must be present");
-        assert_eq!(nullable_status.default, Some(GrooveValue::Nullable(None)));
+        assert_eq!(nullable_status.default, Some(RecordValue::Nullable(None)));
 
         let required_schema = Schema::from([(
             TableName::new("items"),
@@ -3706,15 +3706,15 @@ mod tests {
             .find(|column| column.name == "event")
             .and_then(|column| column.default.as_ref())
             .unwrap();
-        let GrooveValue::Enum(value) = default else {
+        let RecordValue::Enum(value) = default else {
             panic!("expected a payload enum default");
         };
         assert_eq!(value.tag(), 0);
         assert_eq!(
             value.record().to_values().unwrap(),
             vec![
-                GrooveValue::String("hello".to_owned()),
-                GrooveValue::Nullable(None),
+                RecordValue::String("hello".to_owned()),
+                RecordValue::Nullable(None),
             ]
         );
     }
@@ -3756,7 +3756,7 @@ mod tests {
             .iter()
             .find(|column| column.name == "event")
             .unwrap();
-        let GrooveColumnType::Enum(payload_enum) = &event.column_type else {
+        let StorageColumnType::Enum(payload_enum) = &event.column_type else {
             panic!("payload enum column expected");
         };
 
@@ -3764,15 +3764,15 @@ mod tests {
         assert_eq!(payload_enum.tag("case-256").unwrap(), 256);
         assert_eq!(
             &payload_enum.cases[256].payload.fields()[0].value_type,
-            &GrooveColumnType::String
+            &StorageColumnType::String
         );
-        let Some(GrooveValue::Enum(default)) = &event.default else {
+        let Some(RecordValue::Enum(default)) = &event.default else {
             panic!("payload enum default expected");
         };
         assert_eq!(default.tag(), 256);
         assert_eq!(
             default.record().to_values().unwrap(),
-            vec![GrooveValue::String("wide default".to_owned())]
+            vec![RecordValue::String("wide default".to_owned())]
         );
     }
 
@@ -3919,7 +3919,7 @@ mod tests {
         let values = descriptor
             .fields()
             .iter()
-            .map(|field| sample_groove_value(&field.value_type))
+            .map(|field| sample_record_value(&field.value_type))
             .collect::<Vec<_>>();
         let record = descriptor.create(&values).unwrap();
         let score_idx = descriptor.field_index("_app_score").unwrap();
@@ -3927,47 +3927,47 @@ mod tests {
 
         assert_eq!(
             descriptor.bind(&record).get_idx(score_idx).unwrap(),
-            GrooveValue::Nullable(Some(Box::new(GrooveValue::I32(-5))))
+            RecordValue::Nullable(Some(Box::new(RecordValue::I32(-5))))
         );
         assert_eq!(score_span.end - score_span.start, 5);
         assert_eq!(score_span.end - score_span.start - 1, 4);
     }
 
-    fn sample_groove_value(value_type: &jazz_types::records::ValueType) -> GrooveValue {
+    fn sample_record_value(value_type: &jazz_types::records::ValueType) -> RecordValue {
         match value_type {
-            jazz_types::records::ValueType::U8 => GrooveValue::U8(1),
-            jazz_types::records::ValueType::U16 => GrooveValue::U16(2),
-            jazz_types::records::ValueType::U32 => GrooveValue::U32(3),
-            jazz_types::records::ValueType::U64 => GrooveValue::U64(4),
-            jazz_types::records::ValueType::U48 => GrooveValue::U48(4),
-            jazz_types::records::ValueType::I32 => GrooveValue::I32(-5),
-            jazz_types::records::ValueType::I64 => GrooveValue::I64(-6),
-            jazz_types::records::ValueType::F64 => GrooveValue::F64(7.0),
-            jazz_types::records::ValueType::Bool => GrooveValue::Bool(true),
-            jazz_types::records::ValueType::String => GrooveValue::String("value".to_owned()),
-            jazz_types::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
+            jazz_types::records::ValueType::U8 => RecordValue::U8(1),
+            jazz_types::records::ValueType::U16 => RecordValue::U16(2),
+            jazz_types::records::ValueType::U32 => RecordValue::U32(3),
+            jazz_types::records::ValueType::U64 => RecordValue::U64(4),
+            jazz_types::records::ValueType::U48 => RecordValue::U48(4),
+            jazz_types::records::ValueType::I32 => RecordValue::I32(-5),
+            jazz_types::records::ValueType::I64 => RecordValue::I64(-6),
+            jazz_types::records::ValueType::F64 => RecordValue::F64(7.0),
+            jazz_types::records::ValueType::Bool => RecordValue::Bool(true),
+            jazz_types::records::ValueType::String => RecordValue::String("value".to_owned()),
+            jazz_types::records::ValueType::Bytes => RecordValue::Bytes(vec![8]),
             // Author columns hold dictionary codes.
-            value_type if value_type.as_interned().is_some() => GrooveValue::U32(0),
+            value_type if value_type.as_interned().is_some() => RecordValue::U32(0),
             jazz_types::records::ValueType::Internal(_) => {
-                panic!("public schemas must not contain Groove internal storage types")
+                panic!("public schemas must not contain internal storage types")
             }
-            jazz_types::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
-            jazz_types::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
+            jazz_types::records::ValueType::Uuid => RecordValue::Uuid(Uuid::from_bytes([9; 16])),
+            jazz_types::records::ValueType::EnumTag(_) => RecordValue::EnumTag(0),
             jazz_types::records::ValueType::Tuple(members) => {
-                GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
+                RecordValue::Tuple(members.iter().map(sample_record_value).collect::<Vec<_>>())
             }
-            jazz_types::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
+            jazz_types::records::ValueType::Array(_) => RecordValue::Array(Vec::new()),
             jazz_types::records::ValueType::Nullable(inner) => {
-                GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
+                RecordValue::Nullable(Some(Box::new(sample_record_value(inner))))
             }
             jazz_types::records::ValueType::Record(descriptor) => {
-                GrooveValue::Record(jazz_types::records::OwnedRecord::new(
+                RecordValue::Record(jazz_types::records::OwnedRecord::new(
                     descriptor
                         .create(
                             &descriptor
                                 .fields()
                                 .iter()
-                                .map(|field| sample_groove_value(&field.value_type))
+                                .map(|field| sample_record_value(&field.value_type))
                                 .collect::<Vec<_>>(),
                         )
                         .unwrap(),
@@ -3975,7 +3975,7 @@ mod tests {
                 ))
             }
             jazz_types::records::ValueType::Enum(_) => {
-                panic!("Jazz public schema conversion must not receive whole-row Groove enums")
+                panic!("public schema conversion must not receive whole-row enums")
             }
         }
     }
@@ -4015,7 +4015,7 @@ mod tests {
                 .find(|column| column.name == "payload")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String
+            StorageColumnType::String
         );
         assert_eq!(
             table
@@ -4034,7 +4034,7 @@ mod tests {
                 .find(|column| column.name == "metadata")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String.nullable()
+            StorageColumnType::String.nullable()
         );
         assert_eq!(
             table
@@ -4067,7 +4067,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I64
+            StorageColumnType::I64
         );
     }
 
@@ -4160,7 +4160,7 @@ mod tests {
                 ),
                 Predicate::Not(Box::new(Predicate::Eq(
                     Operand::Column("archived".to_owned()),
-                    Operand::Literal(GrooveValue::Bool(false)),
+                    Operand::Literal(RecordValue::Bool(false)),
                 ))),
                 Predicate::Any(vec![
                     Predicate::IsNull(Operand::Column("deleted_at".to_owned())),
@@ -4182,7 +4182,7 @@ mod tests {
             todos.write_policies.insert_check.as_ref().unwrap().filters,
             vec![Predicate::Eq(
                 Operand::Column("token_id".to_owned()),
-                Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
+                Operand::Literal(RecordValue::Uuid(Uuid::nil())),
             )]
         );
     }
@@ -4229,21 +4229,21 @@ mod tests {
             vec![
                 Predicate::Eq(
                     Operand::Column("occurred_at".to_owned()),
-                    Operand::Literal(GrooveValue::U64(1_767_323_045_000)),
+                    Operand::Literal(RecordValue::U64(1_767_323_045_000)),
                 ),
                 Predicate::Eq(
                     Operand::Column("ratio".to_owned()),
-                    Operand::Literal(GrooveValue::F64(1.5)),
+                    Operand::Literal(RecordValue::F64(1.5)),
                 ),
                 Predicate::Eq(
                     Operand::Column("digest".to_owned()),
-                    Operand::Literal(GrooveValue::Bytes(vec![1, 2, 3])),
+                    Operand::Literal(RecordValue::Bytes(vec![1, 2, 3])),
                 ),
                 Predicate::Eq(
                     Operand::Column("roles".to_owned()),
-                    Operand::Literal(GrooveValue::Array(vec![
-                        GrooveValue::String("owner".to_owned()),
-                        GrooveValue::String("editor".to_owned()),
+                    Operand::Literal(RecordValue::Array(vec![
+                        RecordValue::String("owner".to_owned()),
+                        RecordValue::String("editor".to_owned()),
                     ])),
                 ),
             ]
@@ -4308,7 +4308,7 @@ mod tests {
             messages.read_policy.as_ref().unwrap().filters,
             vec![Predicate::Eq(
                 Operand::Claim("authMode".to_owned()),
-                Operand::Literal(GrooveValue::String("external".to_owned())),
+                Operand::Literal(RecordValue::String("external".to_owned())),
             )]
         );
     }
@@ -4319,19 +4319,19 @@ mod tests {
         let mut filters = vec![
             Predicate::Eq(
                 Operand::Column("id".to_owned()),
-                Operand::Literal(GrooveValue::String(
+                Operand::Literal(RecordValue::String(
                     "00000000-0000-4000-8000-000000000001".to_owned(),
                 )),
             ),
             Predicate::Eq(
                 Operand::Column("$createdBy".to_owned()),
-                Operand::Literal(GrooveValue::String(
+                Operand::Literal(RecordValue::String(
                     r#"["https://issuer.example","alice"]"#.to_owned(),
                 )),
             ),
             Predicate::Eq(
                 Operand::Column("$updatedBy".to_owned()),
-                Operand::Literal(GrooveValue::String(
+                Operand::Literal(RecordValue::String(
                     r#"["https://issuer.example","alice"]"#.to_owned(),
                 )),
             ),
@@ -4344,19 +4344,19 @@ mod tests {
             vec![
                 Predicate::Eq(
                     Operand::Column("id".to_owned()),
-                    Operand::Literal(GrooveValue::Uuid(
+                    Operand::Literal(RecordValue::Uuid(
                         Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
                     )),
                 ),
                 Predicate::Eq(
                     Operand::Column("$createdBy".to_owned()),
-                    Operand::Literal(GrooveValue::String(
+                    Operand::Literal(RecordValue::String(
                         r#"["https://issuer.example","alice"]"#.to_owned(),
                     )),
                 ),
                 Predicate::Eq(
                     Operand::Column("$updatedBy".to_owned()),
-                    Operand::Literal(GrooveValue::String(
+                    Operand::Literal(RecordValue::String(
                         r#"["https://issuer.example","alice"]"#.to_owned(),
                     )),
                 ),
@@ -4677,7 +4677,7 @@ mod tests {
             join.filters,
             vec![Predicate::Eq(
                 Operand::Column("isPublic".to_owned()),
-                Operand::Literal(GrooveValue::Bool(true)),
+                Operand::Literal(RecordValue::Bool(true)),
             )]
         );
     }
@@ -4895,7 +4895,7 @@ mod tests {
             policy.policy_branches[0].filters,
             vec![Predicate::Eq(
                 Operand::Column("visibility".to_owned()),
-                Operand::Literal(GrooveValue::String("public".to_owned())),
+                Operand::Literal(RecordValue::String("public".to_owned())),
             )]
         );
         assert_eq!(policy.policy_branches[0].joins.len(), 0);
@@ -5014,7 +5014,7 @@ mod tests {
             policy.filters,
             vec![Predicate::Eq(
                 Operand::Column("published".to_owned()),
-                Operand::Literal(GrooveValue::Bool(true)),
+                Operand::Literal(RecordValue::Bool(true)),
             )]
         );
         assert_eq!(policy.inherits.len(), 1);
@@ -5130,8 +5130,8 @@ mod tests {
             vec![Predicate::In(
                 Operand::Claim(provider_claim_operand_key("role")),
                 vec![
-                    Operand::Literal(GrooveValue::String(legacy_role_id.uuid().to_string())),
-                    Operand::Literal(GrooveValue::String("member".to_owned())),
+                    Operand::Literal(RecordValue::String(legacy_role_id.uuid().to_string())),
+                    Operand::Literal(RecordValue::String("member".to_owned())),
                 ],
             )]
         );
@@ -5162,7 +5162,7 @@ mod tests {
             policy.filters,
             vec![Predicate::Eq(
                 Operand::Claim(provider_claim_operand_key("role")),
-                Operand::Literal(GrooveValue::String("admin".to_owned())),
+                Operand::Literal(RecordValue::String("admin".to_owned())),
             )]
         );
     }
@@ -5207,8 +5207,8 @@ mod tests {
             vec![Predicate::In(
                 Operand::Column("grant_role".to_owned()),
                 vec![
-                    Operand::Literal(GrooveValue::String("VIEWER".to_owned())),
-                    Operand::Literal(GrooveValue::Uuid(*legacy_role_id.uuid())),
+                    Operand::Literal(RecordValue::String("VIEWER".to_owned())),
+                    Operand::Literal(RecordValue::Uuid(*legacy_role_id.uuid())),
                 ],
             )]
         );

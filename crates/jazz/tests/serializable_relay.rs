@@ -3,8 +3,7 @@
 //! The authority validates a tab's commit as it validates any client's, so
 //! a stale tab or worker can only cause a conflict, never a
 //! non-serializable commit. A worker its host says has no server is the
-//! last word on its tabs' commits and validates them itself. Not ported
-//! from Jazz.
+//! last word on its tabs' commits and validates them itself.
 
 use crate::common;
 
@@ -290,13 +289,13 @@ impl Net {
         block_on(db.begin_serializable(open)).unwrap();
         let invite = db.prepare_query(&invite_query(c)).unwrap();
         let live = !self
-            .drive(db.serializable_tx_ref(open).all_prepared(&invite))
+            .drive(db.tx_ref(open).all_prepared(&invite))
             .unwrap()
             .is_empty();
         assert!(live, "the invite is live at the snapshot");
         between();
         self.drive(
-            db.serializable_tx_ref(open)
+            db.tx_ref(open)
                 .insert("members", code(c), Default::default()),
         )
         .unwrap();
@@ -310,8 +309,7 @@ impl Net {
         let open = OpenTransactionId::new();
         block_on(db.begin_serializable(open)).unwrap();
         let audit = db.prepare_query(&Query::from("audit")).unwrap();
-        self.drive(db.serializable_tx_ref(open).all_prepared(&audit))
-            .unwrap();
+        self.drive(db.tx_ref(open).all_prepared(&audit)).unwrap();
         open
     }
 
@@ -369,12 +367,10 @@ fn a_tabs_blind_write_to_an_unchanged_row_is_accepted() {
     let tab = net.tab(0);
     let _seats = net.watch_seats(tab);
     let open = net.begin_pinned(tab);
-    net.drive(tab.serializable_tx_ref(open).update(
-        "seats",
-        seat,
-        holder("tab"),
-        Default::default(),
-    ))
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seat, holder("tab"), Default::default()),
+    )
     .unwrap();
     net.finish(tab, open).expect("nothing changed the seat");
     assert_eq!(net.holders(), ["tab"]);
@@ -404,12 +400,10 @@ fn a_tabs_blind_write_over_a_newer_version_conflicts() {
             )
             .unwrap();
         net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
-        net.drive(tab.serializable_tx_ref(open).update(
-            "seats",
-            seat,
-            holder("tab"),
-            Default::default(),
-        ))
+        net.drive(
+            tab.tx_ref(open)
+                .update("seats", seat, holder("tab"), Default::default()),
+        )
         .unwrap();
         assert_rejected(net.finish(tab, open));
         assert_eq!(
@@ -441,11 +435,9 @@ fn racing_seat_bookings_from_tabs_and_a_client_never_double_book() {
                         .filter(eq(col("holder"), lit(Value::String(String::new())))),
                 )
                 .unwrap();
-            let rows = net
-                .drive(db.serializable_tx_ref(open).all_prepared(&free))
-                .unwrap();
+            let rows = net.drive(db.tx_ref(open).all_prepared(&free)).unwrap();
             assert_eq!(rows.len(), 2, "both seats are free at every snapshot");
-            net.drive(db.serializable_tx_ref(open).update(
+            net.drive(db.tx_ref(open).update(
                 "seats",
                 seats[0],
                 holder(&format!("r{i}")),
@@ -486,13 +478,13 @@ fn a_tabs_commit_over_its_own_unsettled_write_is_accepted() {
     block_on(tab.begin_serializable(open)).unwrap();
     let query = tab.prepare_query(&invite_query("own")).unwrap();
     assert_eq!(
-        net.drive(tab.serializable_tx_ref(open).all_prepared(&query))
+        net.drive(tab.tx_ref(open).all_prepared(&query))
             .unwrap()
             .len(),
         1,
         "the snapshot holds the tab's own unsettled insert"
     );
-    net.drive(tab.serializable_tx_ref(open).update(
+    net.drive(tab.tx_ref(open).update(
         "invites",
         invite.row_uuid(),
         code("own"),
@@ -500,7 +492,7 @@ fn a_tabs_commit_over_its_own_unsettled_write_is_accepted() {
     ))
     .unwrap();
     net.drive(
-        tab.serializable_tx_ref(open)
+        tab.tx_ref(open)
             .insert("members", code("own"), Default::default()),
     )
     .unwrap();
@@ -557,12 +549,10 @@ fn a_tabs_later_commit_conflicts_with_its_open_transaction_over_the_same_row() {
     block_on(tab.begin_serializable(alice)).unwrap();
     block_on(tab.begin_serializable(bob)).unwrap();
     for (open, name) in [(alice, "alice"), (bob, "bob")] {
-        net.drive(tab.serializable_tx_ref(open).update(
-            "seats",
-            seat,
-            holder(name),
-            Default::default(),
-        ))
+        net.drive(
+            tab.tx_ref(open)
+                .update("seats", seat, holder(name), Default::default()),
+        )
         .unwrap();
     }
     net.drive(tab.commit_serializable_handle(alice)).unwrap();

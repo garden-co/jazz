@@ -833,7 +833,7 @@ function jsonPointerValue(value: unknown, pointer: string): unknown {
 
 /**
  * Temporary binding-level materialization until #2090 carries exact terminal
- * demand into Groove. It preserves the public result/coordinate contract and
+ * demand into the engine. It preserves the public result/coordinate contract and
  * only touches selected columns; it must not be used as a chunk-demand model.
  */
 function applyPartialValueSelections<T>(

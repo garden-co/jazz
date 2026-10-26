@@ -1,7 +1,6 @@
-//! Correctness contracts the Groove-era `jazz` benches asserted, restated
-//! on the SQLite engine: cold subscription over deep history, four-tier
-//! sync through relays, serializable validation against a model, relation
-//! include delivery, and same-shape route subscriptions. Timing is not
+//! Correctness contracts for the core scenarios: cold subscription over deep
+//! history, four-tier sync through relays, serializable validation against a
+//! model, relation include delivery, and same-shape route subscriptions. Timing is not
 //! measured here; the scenario benches and CodSpeed own that.
 
 use std::collections::{BTreeMap, BTreeSet};

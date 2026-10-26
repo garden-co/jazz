@@ -273,7 +273,7 @@ impl Fixture {
     pub fn ordered_z_indices(&self) -> Vec<i32> {
         self.read(&self.ordered_shapes)
             .into_iter()
-            .map(|row| match row.cell(&self.shapes, "z_index") {
+            .map(|row| match row.cell("z_index") {
                 Some(Value::I32(value)) => value,
                 value => panic!("unexpected z_index: {value:?}"),
             })

@@ -1152,7 +1152,7 @@ mod tests {
     #[tokio::test]
     async fn persistent_adapter_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("rocksdb-server-shell-restart");
+        let app_id = AppId::from_name("persistent-server-shell-restart");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("todos")
@@ -1168,7 +1168,7 @@ mod tests {
                 })
                 .build()
                 .await
-                .expect("build RocksDB server with server shell");
+                .expect("build persistent server with server shell");
 
             assert!(built.state.runtime().is_some());
             assert!(data_dir.path().join(CATALOGUE_FILE).exists());
@@ -1176,7 +1176,7 @@ mod tests {
             assert_eq!(
                 built.shutdown().await,
                 crate::server::ShutdownPhase::StorageClosed,
-                "the public builder lifecycle must join the shell before its RocksDB path is reopened"
+                "the public builder lifecycle must join the shell before its store is reopened"
             );
             Arc::clone(&built.state)
         };
@@ -1192,7 +1192,7 @@ mod tests {
             })
             .build()
             .await
-            .expect("rebuild RocksDB server with server shell");
+            .expect("rebuild persistent server with server shell");
 
         assert!(rebuilt.state.runtime().is_some());
         assert!(data_dir.path().join("jazz.sqlite").exists());
@@ -1210,7 +1210,7 @@ mod tests {
                 })
                 .build()
                 .await
-                .expect("build RocksDB server for direct-drop lifecycle");
+                .expect("build persistent server for direct-drop lifecycle");
             assert!(dropped.state.runtime().is_some());
         }
 
@@ -1221,7 +1221,7 @@ mod tests {
             })
             .build()
             .await
-            .expect("reopen RocksDB server after direct builder drop");
+            .expect("reopen persistent server after direct builder drop");
         assert!(reopened_after_drop.state.runtime().is_some());
         assert_eq!(
             reopened_after_drop.shutdown().await,
@@ -1233,7 +1233,7 @@ mod tests {
     #[tokio::test]
     async fn persistent_adapter_reopens_after_first_shutdown_waiter_is_aborted() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
+        let app_id = AppId::from_name("persistent-server-shell-aborted-shutdown");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(jazz::tools::public_schema::TableSchema::builder("todos"))
             .build();
@@ -1244,7 +1244,7 @@ mod tests {
             })
             .build()
             .await
-            .expect("build RocksDB server");
+            .expect("build persistent server");
         let state = Arc::clone(&built.state);
         let request = state
             .shutdown
@@ -1276,7 +1276,7 @@ mod tests {
             })
             .build()
             .await
-            .expect("reopen RocksDB after aborted shutdown waiter");
+            .expect("reopen persistent server after aborted shutdown waiter");
         assert_eq!(
             reopened.shutdown().await,
             crate::server::ShutdownPhase::StorageClosed
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     fn persistent_adapter_shutdown_survives_initiating_runtime_drop() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
+        let app_id = AppId::from_name("persistent-server-shell-foreign-shutdown");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(jazz::tools::public_schema::TableSchema::builder("todos"))
             .build();
@@ -1304,7 +1304,7 @@ mod tests {
                         })
                         .build(),
                 )
-                .expect("build RocksDB server");
+                .expect("build persistent server");
             let state = Arc::clone(&built.state);
             let request = state
                 .shutdown
@@ -1349,7 +1349,7 @@ mod tests {
                 })
                 .build()
                 .await
-                .expect("reopen RocksDB after live shutdown")
+                .expect("reopen persistent server after live shutdown")
         });
         assert_eq!(
             second_runtime.block_on(reopened.shutdown()),

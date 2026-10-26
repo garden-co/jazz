@@ -12,9 +12,9 @@ identity.
 
 Revision 2 (`first_sync_local_relay_27518_rocksdb`) put a device-local
 persistence relay between Core and Client, and revision 1
-(`first_sync_27518_rocksdb`) a server edge. The SQLite engine has neither tier
-yet, so `first_sync_direct_27518_file` is a new baseline, not a like-for-like
-comparison. The old metadata remains for historical runs.
+(`first_sync_27518_rocksdb`) a server edge, so `first_sync_direct_27518_file`
+is its own baseline, not a like-for-like comparison. Their metadata remains for
+historical runs.
 
 Core seeding is outside the wall-time measurement. Client opening, connection,
 query preparation, subscription and settling until every expected row is present
@@ -32,4 +32,4 @@ and settle times, ticks and compressed bytes sent to the client. Identities are
 `member`, `spy` (no grants) and `admin` (sees everything).
 
 `reference/` contains the earlier SQLite/Postgres comparison drivers and
-historical research receipts; they describe the retired Groove topologies.
+research receipts for revisions 1 and 2.

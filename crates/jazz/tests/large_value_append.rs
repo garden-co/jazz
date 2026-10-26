@@ -3,7 +3,7 @@
 //! An append derived from an already published descriptor must produce the
 //! exact logical value, keep rejecting invalid input, and validate only what
 //! it added before it is admitted. The scale check uses
-//! Groove's test-only `finalize_validation_bytes_for_test` counter: it is the
+//! the test-only `finalize_validation_bytes_for_test` counter: it is the
 //! one internal hook here, because "how much of the value was re-read" has no
 //! public observable other than elapsed time, which cannot prove scaling.
 
@@ -242,8 +242,7 @@ fn local_append_validation_does_not_scale_with_value_size() {
     let (large_insert, large_append) = validation_bytes(0x35, 1024 * 1024, appends);
 
     // A value built by this store is trusted as built, so its insert reads
-    // nothing back (Groove re-read it before issuing a staging receipt);
-    // uploaded values are fully validated on admission instead.
+    // nothing back; uploaded values are fully validated on admission instead.
     assert_eq!((small_insert, large_insert), (0, 0));
 
     // A derived append re-reads only its newly staged nodes and the base

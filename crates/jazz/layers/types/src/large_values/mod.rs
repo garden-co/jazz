@@ -149,7 +149,7 @@ pub const LOCATOR_BYTES: usize = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContentHash(pub [u8; 32]);
 
-/// An opaque retrieval capability allocated by Groove.
+/// An opaque retrieval capability allocated by storage.
 ///
 /// ```compile_fail
 /// use jazz_types::large_values::Locator;
@@ -284,7 +284,7 @@ pub struct StagedChunk {
     pub encoded: Vec<u8>,
 }
 
-/// A read-only preparation returned by Groove's graph builder.
+/// A read-only preparation returned by the chunk graph builder.
 ///
 /// ```compile_fail
 /// use jazz_types::large_values::{LargeValueRef, PreparedLargeValue, StagedChunk};
@@ -299,7 +299,7 @@ pub struct PreparedLargeValue {
     pub staged_chunks: Vec<StagedChunk>,
 }
 
-/// Opaque identity for a persisted Groove staging root.
+/// Opaque identity for a persisted staging root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StagedLargeValueId(pub [u8; 16]);
 
@@ -322,7 +322,7 @@ pub struct StagedLargeValue {
 }
 
 /// Persisted metadata for a push upload that has not yet produced a root
-/// receipt. Chunk identities stay Groove-owned and are used only for safe
+/// receipt. Chunk identities stay storage-owned and are used only for safe
 /// expiry/reclamation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingLargeValueUpload {
@@ -986,7 +986,7 @@ fn utf16_length_of(text: &str) -> Result<u64, Error> {
 
 /// Physical arm stored inside a logical bytes/string/JSON cell.
 ///
-/// This is deliberately an engine-owned *normal Groove enum*: `Primitive`
+/// This is deliberately an engine-owned *normal record enum*: `Primitive`
 /// carries the declared primitive in a raw backing field and `Chunked` carries
 /// its descriptor and tail as ordinary records, arrays, and primitives. The
 /// raw backing fields terminate the envelope recursion; they are not public
@@ -1796,7 +1796,7 @@ fn walk_logical<V: LogicalVisitor>(
 ///
 /// The traversal is depth-first and retains only a bounded branch frontier;
 /// Jazz can therefore feed each visited exact locator into its own mark set
-/// without learning or reimplementing Groove's node encoding.
+/// without learning or reimplementing the node encoding.
 pub async fn visit_reachable_chunks(
     value: &LargeValueRef,
     provider: &dyn crate::large_values::chunks::ChunkProvider,
@@ -1891,7 +1891,7 @@ pub async fn validate_finalized_upload(
     Ok(())
 }
 
-/// Validate a descriptor that Groove itself derived from `base` by a local
+/// Validate a descriptor that storage itself derived from `base` by a local
 /// append, splice or consolidation, before its staging receipt is issued.
 ///
 /// Precondition: `base` is a published descriptor, and therefore (by the
@@ -2258,7 +2258,7 @@ pub fn prepare_reusing(
     })
 }
 
-/// Encode the internal stored-scalar enum using Groove's ordinary enum and
+/// Encode the internal stored-scalar enum using the ordinary enum and
 /// record codecs. The containing schema supplies the declared kind, including
 /// the backing primitive type and the expected kind of every referenced node.
 pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Result<Vec<u8>, Error> {
@@ -2472,7 +2472,7 @@ fn node_ref_from_values(values: &[Value]) -> Result<NodeRef, Error> {
     })
 }
 
-/// Encode a physical chunk identity through the same canonical Groove record
+/// Encode a physical chunk identity through the same canonical record
 /// used by indirect scalar roots.
 ///
 /// This is an engine-format primitive for storage compatibility receipts and
@@ -2516,11 +2516,9 @@ fn build_stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
             LargeValueKind::String => "groove.internal.stored_scalar.string",
             LargeValueKind::Json => "groove.internal.stored_scalar.json",
         },
-        // Tags 0 and 1 are reused: under `groove.large-value.v1` they were
-        // reserved for the retired private `[tag] + payload` codec and
-        // Primitive/Chunked were 2/3. Old roots are refused at manifest
-        // admission and old peers at the wire version, so no v1 byte
-        // sequence reaches this decoder (SPEC 9, "Scalar tag history").
+        // Primitive is tag 0 and Chunked tag 1. Stores and peers from before
+        // storage format 1 are refused at admission, so no other byte
+        // sequence reaches this decoder.
         [
             EnumCase::new("Primitive", primitive),
             EnumCase::new("Chunked", chunked),
@@ -3562,7 +3560,7 @@ pub fn decode_node_untyped_verified(encoded: &[u8]) -> Result<ChunkNode, Error> 
     preflight_node_format(encoded)?.decode_node(encoded)
 }
 
-/// Encode a chunk node using Groove's ordinary canonical enum/record algebra.
+/// Encode a chunk node using the ordinary canonical enum/record algebra.
 pub fn encode_node(node: &ChunkNode) -> Result<Vec<u8>, Error> {
     LargeValueFormat::from_version(node_format(node))?.encode_node(node)
 }

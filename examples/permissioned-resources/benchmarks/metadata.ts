@@ -31,7 +31,7 @@ export const permissionedBenchmarks: BenchmarkMetadata[] = [
     name: "first_sync_direct_27518_file",
     title: "Permissioned first sync",
     description:
-      "Bring an empty client to a fully settled permissioned view straight from Core (workload revision 3). Core authorizes the fixed Member identity, not anonymous. Not comparable with the relay or server-edge topologies, which the SQLite engine does not have.",
+      "Bring an empty client to a fully settled permissioned view straight from Core (workload revision 3). Core authorizes the fixed Member identity, not anonymous. Not comparable with revisions 1 and 2, which measured a relay and a server edge.",
     fixture:
       "39 subscriptions; 27,518 visible resource, permission-input and inherited-access child rows. Shallow-history fixture, scale 1.",
     storage:

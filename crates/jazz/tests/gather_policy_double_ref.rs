@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Recursive `gather` read policies over a same-table double-reference edge,
 //! evaluated by a history-complete (Global-tier) node for an admitted session.
 //!
@@ -6,13 +5,6 @@
 //! "evaluates explicit gather seeds through a same-table double-ref edge":
 //! a backend Node runtime with `tier: "global"` writes the graph locally and
 //! then reads through `forSession`.
-//!
-//! The lowered read graph reaches one input node along two paths. Hydration
-//! used to clear its "visiting" mark inside `debug_assert!`, so release builds
-//! (NAPI/WASM) reported that shared input as "graph contains a dependency
-//! cycle". Debug test builds only catch that regression with groove's debug
-//! assertions disabled:
-//! `cargo test --config 'profile.dev.package.groove.debug-assertions=false' ...`.
 
 use crate::common;
 
@@ -29,9 +21,7 @@ use jazz::tools::public_schema::{
     RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
     RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
-use jazz::tools::{
-    ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchemaBuilder,
-};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 use common::compile_schema;
@@ -350,7 +340,7 @@ fn assert_session_reads_only_the_reachable_grant(bound: RecursionBound) {
         .collect::<BTreeSet<_>>();
     assert_eq!(one_shot, BTreeSet::from([visible]));
 
-    let mut stream = block_on(db.subscribe_client_for_identity(&prepared, local_opts(), user()))
+    let mut stream = block_on(db.subscribe_for_identity(&prepared, local_opts(), user()))
         .expect("session subscription of dropdowns");
     let opened = match block_on(stream.next_event()).expect("subscription opening") {
         SubscriptionEvent::Delta {

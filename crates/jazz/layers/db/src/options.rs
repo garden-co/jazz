@@ -209,26 +209,6 @@ impl RemoteLinkHint {
     }
 }
 
-/// How urgently a runtime should service pending sync work.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TickUrgency {
-    /// Run as soon as the runtime can.
-    Immediate,
-    /// Coalesce bursty local work before ticking.
-    Deferred,
-    /// Service work in a later host turn.
-    AfterCurrentTurn,
-}
-
-/// Runtime-neutral wake hook for thread-affine sync work.
-pub trait TickScheduler {
-    /// Schedule a future tick for pending sync work.
-    fn schedule_tick(&self, urgency: TickUrgency);
-
-    /// Schedule one future tick no earlier than the supplied delay.
-    fn schedule_tick_after(&self, delay_ms: u64);
-}
-
 /// Identity used to author and authorize a standalone write.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WriteIdentity {

@@ -3,7 +3,7 @@
 //! committed prefix (a Jazz transaction is all or nothing); a replica's
 //! pending uploads survive a restart and are resent; a server restart
 //! between applying a commit and acknowledging it does not apply it twice;
-//! memory stays bounded by the page cache. Not ported from Jazz.
+//! memory stays bounded by the page cache.
 
 mod common;
 
@@ -54,7 +54,7 @@ fn config(node: u8) -> DbConfig {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("jazz-sqlite-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("jazz-durable-file-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("store.sqlite")
@@ -110,7 +110,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
             Default::default(),
         ))
         .unwrap();
-        db.abandon_serializable_handle(open).unwrap();
+        db.abandon_transaction_handle(open).unwrap();
         block_on(db.insert("items", item(99), Default::default()))
             .unwrap()
             .mergeable_tx_id()
@@ -131,12 +131,12 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
                 .limit(1),
         )
         .unwrap();
-    let rows = block_on(db.serializable_tx_ref(open).all_prepared(&first)).unwrap();
+    let rows = block_on(db.tx_ref(open).all_prepared(&first)).unwrap();
     assert_eq!(
         rows[0].cells().find(|(n, _)| *n == "label").unwrap().1,
         Some(&Value::String("changed".to_owned()))
     );
-    db.abandon_serializable_handle(open).unwrap();
+    db.abandon_transaction_handle(open).unwrap();
 }
 
 /// The page size in a SQLite file's header (bytes 16-17; 1 means 65536).
@@ -695,16 +695,7 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
     let read = postcard::to_allocvec(&Query::from("items")).unwrap();
     let result = drive(
         &[&tab, &relay, &tab],
-        tab.all_serialized_query(
-            &read,
-            ReadOpts::default(),
-            None,
-            None,
-            None,
-            false,
-            || false,
-            |_| {},
-        ),
+        tab.all_serialized_query(&read, ReadOpts::default(), None, None, None),
     )
     .unwrap();
     let jazz::db::SerializedReadResult::Rows(rows) = result else {

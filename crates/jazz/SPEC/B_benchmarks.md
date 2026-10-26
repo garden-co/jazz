@@ -116,28 +116,22 @@ the per-milestone benchmarks that gate individual features.
 
 A micro tier (scenario 0) covers the primitive costs underneath all of them.
 
-### SQLite harness (2026-10-25)
+### Harness
 
-jazz-sim was rebuilt on jazz-db when Groove was removed. Every scenario
-(`micro`, S1–S5, S7–S9) runs on one deterministic simulator (`jazz_sim::Sim`):
+Every scenario (`micro`, S1–S5, S7–S9) runs on one deterministic simulator
+(`jazz_sim::Sim`):
 full `Db` clients and relays linked to an authority over a seeded virtual
 network, carrying native messages or encoded wire frames. Its smoke tests are
 `jazz-sim/tests/scenario_smoke.rs`. The focused `jazz` bench contracts
 (cold subscription over deep history, four-tier sync, serializable
 validation against a model, relation include delivery, same-shape route
-subscriptions) are `jazz-sim/tests/core_benchmark_smoke.rs`. Changes from the
-Groove harness:
+subscriptions) are `jazz-sim/tests/core_benchmark_smoke.rs`. `Db` is
+single-threaded, so timing runs use the simulator at bench scale, with latency
+in virtual milliseconds and wall-clock microseconds for local work; sizes are
+wire bytes from the simulator's link stats.
 
-- There is no threaded driver: `Db` is single-threaded, so timing runs are
-  the deterministic simulator at bench scale, with latency in virtual
-  milliseconds and wall-clock microseconds for local work.
-- Committed fixtures, the policy-graph benches and the RocksDB storage
-  walkers are gone; sizes are wire bytes from the simulator's link stats.
-- Serializable commits through a relay are refused with an explicit
-  "not supported yet" error, which the sync smoke asserts.
-
-The audit table below still describes the Groove-era harness and the
-retired `jazz/benches` receipts; rows that name them are pending a refresh.
+The audit table below predates this harness; rows that name `jazz/benches` or
+`groove/benches` receipts are pending a refresh.
 
 ### Overview: phase-level coverage audit
 

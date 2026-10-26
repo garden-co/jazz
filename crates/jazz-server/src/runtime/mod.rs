@@ -1062,6 +1062,20 @@ impl Owner {
         if let Err(error) = block_on(self.db.tick()) {
             tracing::error!(%error, "server runtime tick failed");
         }
+        for (subscriber, error) in self.db.take_closed_subscribers() {
+            let Some(id) = self
+                .sessions
+                .iter()
+                .find_map(|(id, session)| (session.subscriber == subscriber).then_some(*id))
+            else {
+                continue;
+            };
+            tracing::warn!(%error, "closing sync session for a message it sent");
+            let _ = self.sessions[&id]
+                .output
+                .send((Err(format!("sync session closed: {error}")), 0));
+            self.close_session(id);
+        }
         let mut gone = Vec::new();
         for (id, session) in &self.sessions {
             let mut outbound = session.queues.outbound.borrow_mut();

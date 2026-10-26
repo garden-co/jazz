@@ -2,14 +2,9 @@
 //! maintained subscription whose initial hydration must follow the declared
 //! `label` index instead of scanning every tenant's releases.
 //!
-//! Moved from `crates/jazz/benches/selective_global_hydration.rs`
-//! (`maintained_subscription_hydration_100k`), reframed in BigLabel terms:
-//! documents are releases, the selected team is one label, the filler team is
-//! every other tenant. Fixture, query shape, timed work and read-bound
-//! assertions are unchanged, except that
-//! selectivity is checked on SQLite's query plan instead of Groove's read
-//! counters. The crate bench keeps the JSONL scale receipt
-//! (`JAZZ_SELECTIVE_HYDRATION_RECEIPT`, including the 1M rung) for diagnosis.
+//! In BigLabel terms: documents are releases, the selected team is one label,
+//! the filler team is every other tenant. Selectivity is checked on the query
+//! plan.
 
 use std::collections::BTreeMap;
 use std::path::Path;

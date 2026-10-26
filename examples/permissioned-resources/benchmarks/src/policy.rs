@@ -1,4 +1,4 @@
-//! The recursive access-edge select policy (formerly in `jazz-sim`).
+//! The recursive access-edge select policy.
 
 use jazz::tools::public_schema::{
     PolicyExpr, RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr,

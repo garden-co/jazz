@@ -49,7 +49,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
 /// framing of a `Rows` too large for one frame, whose real frames are
 /// megabytes (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 21] = [
+const VARIANTS: [&str; 20] = [
     "Subscribe",
     "Unsubscribe",
     "Hold",
@@ -60,7 +60,6 @@ const VARIANTS: [&str; 21] = [
     "Chunks",
     "Rows",
     "Evict",
-    "Unlist",
     "Settled",
     "Answer",
     "Refused",
@@ -361,15 +360,15 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(alice.begin_serializable(open_tx)).unwrap();
     let _ = drive(
         &[&alice, &server, &alice],
-        alice.serializable_tx_ref(open_tx).all_prepared(&notes),
+        alice.tx_ref(open_tx).all_prepared(&notes),
     );
     block_on(server.update("notes", shared, note(1, large(4)), UpdateOptions::default())).unwrap();
     pump(&[&alice, &server, &alice]);
     let _ = drive(
         &[&alice, &server, &alice],
-        alice.serializable_tx_ref(open_tx).all_prepared(&notes),
+        alice.tx_ref(open_tx).all_prepared(&notes),
     );
-    alice.abandon_serializable_handle(open_tx).unwrap();
+    alice.abandon_transaction_handle(open_tx).unwrap();
 
     // Origins: a history subscription ships superseded versions, and the
     // commits behind them first.
@@ -391,7 +390,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     let _ = drive(&[&alice, &server, &alice], alice.permission_advice(id));
 
-    // Unlist: the server gives the shared note away while alice holds it.
+    // The server gives the shared note away while alice holds it: evicted.
     block_on(server.update(
         "notes",
         shared,
@@ -504,8 +503,8 @@ fn produce_sqlite_sync_wire_corpus_v1() {
     commit.truncate(commit.len() / 2);
     let subscribe = unhex(&messages[0].frame_hex);
     let unsubscribe = unhex(&messages[1].frame_hex);
-    // The last Groove-era wire version, from the corpus this one replaced.
-    let groove: serde_json::Value = serde_json::from_str(
+    // Wire v5 hellos are refused; the frame comes from the v6 corpus.
+    let v6_corpus: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/wire_frame_artifact_corpus_v6.json"),
@@ -513,7 +512,7 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         .unwrap(),
     )
     .unwrap();
-    let v5_hello = groove["rejections"]
+    let v5_hello = v6_corpus["rejections"]
         .as_array()
         .unwrap()
         .iter()

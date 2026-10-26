@@ -1163,7 +1163,7 @@ mod tests {
     };
     use jazz::ids::{NodeUuid, RowAuthor};
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
-    use jazz::schema::{JazzSchema, TableSchema};
+    use jazz::schema::JazzSchema;
     use jazz::tx::DurabilityTier;
     use jazz::wire::decode_frame;
     use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION};
@@ -1558,19 +1558,6 @@ mod tests {
         jazz::schema::JazzSchema::new(&source).expect("websocket public schema compiles")
     }
 
-    fn compiled_table(schema: &JazzSchema, table: &str) -> TableSchema {
-        schema
-            .tables
-            .iter()
-            .find(|candidate| candidate.name == table)
-            .unwrap_or_else(|| panic!("compiled websocket schema contains {table}"))
-            .clone()
-    }
-
-    fn ws_todos_table_schema() -> TableSchema {
-        compiled_table(&ws_public_schema_convert(), "todos")
-    }
-
     fn ws_private_docs_schema_convert() -> JazzSchema {
         let source = SchemaBuilder::new()
             .table(
@@ -1589,10 +1576,6 @@ mod tests {
             .build();
         jazz::schema::JazzSchema::new(&source)
             .expect("websocket private docs public schema compiles")
-    }
-
-    fn ws_private_docs_table_schema() -> TableSchema {
-        compiled_table(&ws_private_docs_schema_convert(), "docs")
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
@@ -2608,7 +2591,6 @@ mod tests {
     struct TestClient {
         db: Db,
         transport: TestWireTransport,
-        todos_table: TableSchema,
         received: Rc<RefCell<Vec<SyncMessage>>>,
     }
 
@@ -2651,7 +2633,6 @@ mod tests {
             Self {
                 db,
                 transport,
-                todos_table: ws_todos_table_schema(),
                 received,
             }
         }
@@ -2751,16 +2732,16 @@ mod tests {
         }
 
         async fn remote_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
-            self.remote_titles(query, &self.todos_table).await
+            self.remote_titles(query).await
         }
 
-        async fn remote_titles(&self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
+        async fn remote_titles(&self, query: &PreparedQuery) -> Vec<String> {
             self.db
                 .all(query, ReadOpts::default())
                 .await
                 .expect("read synced rows")
                 .into_iter()
-                .filter_map(|row| match row.cell(table, "title") {
+                .filter_map(|row| match row.cell("title") {
                     Some(CoreValue::String(title)) => Some(title),
                     _ => None,
                 })
@@ -3865,7 +3846,6 @@ mod tests {
             "Alice must upload the private row through the websocket route"
         );
 
-        let docs_table = ws_private_docs_table_schema();
         let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws_session(addr, &state, bob).await;
         let (client_b_docs, client_b_docs_attachment) = client_b.attach_table_query("docs");
@@ -3883,10 +3863,7 @@ mod tests {
             "Bob's docs query must be covered by the websocket route"
         );
         assert!(
-            client_b
-                .remote_titles(&client_b_docs, &docs_table)
-                .await
-                .is_empty(),
+            client_b.remote_titles(&client_b_docs).await.is_empty(),
             "Bob must receive empty remote rows for Alice's private row"
         );
     }

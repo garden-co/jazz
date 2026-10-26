@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use crate::common;
 
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
@@ -163,7 +162,7 @@ fn registered_schema_views_share_one_open_batch() {
         let batch = OpenTransactionId::new();
         owner.begin_mergeable(batch).await.unwrap();
         old_view
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -175,7 +174,7 @@ fn registered_schema_views_share_one_open_batch() {
             .await
             .unwrap();
         new_view
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -192,11 +191,11 @@ fn registered_schema_views_share_one_open_batch() {
         let rows = owner.read(&query).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].cell(&schema("old-default").tables[0], "label"),
+            rows[0].cell("label"),
             Some(Value::String("old-default".to_owned()))
         );
         assert_eq!(
-            rows[1].cell(&schema("new-default").tables[0], "label"),
+            rows[1].cell("label"),
             Some(Value::String("new-default".to_owned()))
         );
     });
@@ -343,7 +342,7 @@ fn empty_owner_accepts_first_typed_schema_view() {
         let batch = OpenTransactionId::new();
         owner.begin_mergeable(batch).await.unwrap();
         let view = owner.register_schema_view(schema("first")).await.unwrap();
-        view.mergeable_tx_ref(batch)
+        view.tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -355,11 +354,7 @@ fn empty_owner_accepts_first_typed_schema_view() {
             .await
             .unwrap();
         let prepared = view.prepare_query(&view.table("items")).unwrap();
-        let rows = view
-            .mergeable_tx_ref(batch)
-            .all_prepared(&prepared)
-            .await
-            .unwrap();
+        let rows = view.tx_ref(batch).all_prepared(&prepared).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].row_uuid(), RowUuid::from_bytes([3; 16]));
         owner.commit_mergeable_handle(batch).await.unwrap();
@@ -376,7 +371,7 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
         owner.begin_mergeable(batch).await.unwrap();
         let first = owner.register_schema_view(schema("same")).await.unwrap();
         first
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -392,7 +387,7 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
             .await
             .unwrap();
         second
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -405,11 +400,7 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
             .unwrap();
 
         let prepared = second.prepare_query(&second.table("items")).unwrap();
-        let rows = second
-            .mergeable_tx_ref(batch)
-            .all_prepared(&prepared)
-            .await
-            .unwrap();
+        let rows = second.tx_ref(batch).all_prepared(&prepared).await.unwrap();
         assert_eq!(rows.len(), 2);
         owner.commit_mergeable_handle(batch).await.unwrap();
     });
@@ -426,7 +417,7 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
 
         let seed = OpenTransactionId::new();
         owner.begin_mergeable(seed).await.unwrap();
-        view.mergeable_tx_ref(seed)
+        view.tx_ref(seed)
             .insert(
                 "items",
                 Default::default(),
@@ -441,7 +432,7 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
 
         let batch = OpenTransactionId::new();
         owner.begin_mergeable(batch).await.unwrap();
-        let tx = view.mergeable_tx_ref(batch);
+        let tx = view.tx_ref(batch);
         assert_eq!(
             tx.read("items", row).await.unwrap().unwrap()["label"],
             Value::String("initial".to_owned())
@@ -501,13 +492,13 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
 
         let prepared = view.prepare_query(&view.table("items")).unwrap();
         assert!(
-            view.serializable_tx_ref(batch)
+            view.tx_ref(batch)
                 .all_prepared(&prepared)
                 .await
                 .unwrap()
                 .is_empty()
         );
-        owner.abandon_serializable_handle(batch).unwrap();
+        owner.abandon_transaction_handle(batch).unwrap();
         assert_eq!(view.read(&prepared).unwrap().len(), 1);
     });
 }
@@ -533,7 +524,7 @@ fn serializable_view_commit_rejects_concurrent_local_row_change() {
 
         let batch = OpenTransactionId::new();
         owner.begin_serializable(batch).await.unwrap();
-        let tx = view.serializable_tx_ref(batch);
+        let tx = view.tx_ref(batch);
         assert!(tx.read("items", row).await.unwrap().is_some());
         view.update(
             "items",

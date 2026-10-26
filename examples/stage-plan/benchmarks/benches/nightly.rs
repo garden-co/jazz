@@ -3,8 +3,8 @@
 //! history continues. The per-merge suite (`walltime`) measures one point of
 //! each area; these extra points explain how a cost scales.
 //!
-//! The `_rocksdb` names are kept for history; those cases now run over a
-//! file-backed SQLite database. Run locally with:
+//! The `_rocksdb` cases run over a file-backed SQLite database. Run locally
+//! with:
 //!
 //! ```sh
 //! cargo bench -p jazz-example-stage-plan-benchmark --bench nightly
