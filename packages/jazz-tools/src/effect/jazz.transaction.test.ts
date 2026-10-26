@@ -12,6 +12,7 @@ describe.each(["mergeable", "serializable"] as const)("%s Effect transaction", (
     { failure: "throw", rollbackFails: false },
     { failure: "die", rollbackFails: false },
     { failure: "throw", rollbackFails: true },
+    { failure: "die", rollbackFails: true },
   ])(
     "rolls back and preserves the body defect ($failure, rollback fails: $rollbackFails)",
     async ({ failure, rollbackFails }) => {
