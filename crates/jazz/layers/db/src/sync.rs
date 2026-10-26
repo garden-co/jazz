@@ -795,6 +795,13 @@ pub enum SyncMessage {
     RowsPart {
         images: Vec<Image>,
     },
+    /// A relay holds the session's commit `tx` in its store and uploads
+    /// it: the commit is `Local` for a non-durable session (a tab over its
+    /// worker), whose own store is memory. Its fate follows once the
+    /// relay's upstream answers.
+    Stored {
+        tx: u64,
+    },
 }
 
 // ---- client state ---------------------------------------------------------
@@ -889,6 +896,9 @@ pub(crate) struct Client {
     /// Accepted fates from a replica with no server: they order the
     /// commit, but it never becomes `Global`.
     local_fates: HashSet<u64>,
+    /// Commits the relay this non-durable replica writes through holds
+    /// in its store, their fate still to come ([`SyncMessage::Stored`]).
+    stored: HashSet<u64>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
@@ -3085,6 +3095,7 @@ impl Client {
             unsent: Vec::new(),
             fates: HashMap::new(),
             local_fates: HashSet::new(),
+            stored: HashSet::new(),
             shadow: HashMap::new(),
             known: 0,
             persisted_known: 0,
@@ -3751,9 +3762,20 @@ impl Db {
         })
     }
 
+    /// Whether a commit reaching `tier` takes more than this store: `Global`
+    /// takes the authority, and `Local` on a non-durable replica its relay.
+    fn waits_upstream(&self, tier: DurabilityTier) -> bool {
+        self.is_client()
+            && match tier {
+                DurabilityTier::None => false,
+                DurabilityTier::Local => self.inner.borrow().non_durable,
+                DurabilityTier::Global => true,
+            }
+    }
+
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
-        if tier < DurabilityTier::Global || !self.is_client() {
+        if !self.waits_upstream(tier) {
             return Ok(tx);
         }
         poll_fn(|_| {
@@ -3762,9 +3784,16 @@ impl Db {
             match client.fates.get(&tx) {
                 // Ordered by a replica with no server: no authority makes
                 // it `Global`.
-                Some(Ok(())) if client.local_fates.contains(&tx) => Poll::Pending,
+                Some(Ok(()))
+                    if tier == DurabilityTier::Global && client.local_fates.contains(&tx) =>
+                {
+                    Poll::Pending
+                }
                 Some(Ok(())) => Poll::Ready(Ok(tx)),
                 Some(Err(error)) => Poll::Ready(Err(error.clone())),
+                None if tier == DurabilityTier::Local && client.stored.contains(&tx) => {
+                    Poll::Ready(Ok(tx))
+                }
                 None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
                 // Not pending and no fate: a local no-op or pre-connection commit.
                 None => Poll::Ready(Ok(tx)),
@@ -3777,7 +3806,7 @@ impl Db {
     /// ones included) reaches `tier`, failing with the first the server
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
-        if tier < DurabilityTier::Global || !self.is_client() {
+        if !self.waits_upstream(tier) {
             return Ok(());
         }
         let pending: Vec<u64> = {
@@ -4135,6 +4164,12 @@ impl Db {
                             *remote.refused.borrow_mut() = Some(error);
                         }
                     }
+                    SyncMessage::Stored { tx } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if client.pending.iter().any(|p| p.tx == tx) {
+                            client.stored.insert(tx);
+                        }
+                    }
                     SyncMessage::Fate {
                         tx,
                         through,
@@ -4153,6 +4188,7 @@ impl Db {
                             matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
                         });
                         client.pending.retain(|p| p.tx != tx);
+                        client.stored.remove(&tx);
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
                         );
@@ -5843,6 +5879,9 @@ impl Db {
                         .entry(through)
                         .or_default()
                         .push((index, tx, rows));
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::Stored { tx });
                 } else {
                     // The rows the writer holds as they now are need no
                     // echo: fan-out drops their images if still current.

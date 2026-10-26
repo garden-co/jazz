@@ -568,3 +568,23 @@ fn a_tabs_later_commit_conflicts_with_its_open_transaction_over_the_same_row() {
     net.drive(tab.commit_serializable_handle(alice)).unwrap();
     assert_conflict(net.drive(tab.commit_serializable_handle(bob)).map(drop));
 }
+
+#[test]
+fn a_tabs_write_is_local_once_its_worker_stored_it() {
+    let mut net = Net::new(1);
+    // No fate can come back: only the worker's own store makes it local.
+    net.worker_offline();
+    let tab = net.tab(0);
+    let write = block_on(tab.insert("invites", code("offline"), Default::default())).unwrap();
+    let mut local = pin!(tab.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Local));
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(
+        local.as_mut().poll(&mut context).is_pending(),
+        "a non-durable tab's own store does not make its write local"
+    );
+    block_on(tab.tick()).unwrap();
+    assert!(local.as_mut().poll(&mut context).is_pending());
+    block_on(net.worker.tick()).unwrap();
+    block_on(tab.tick()).unwrap();
+    assert!(local.as_mut().poll(&mut context).is_ready());
+}

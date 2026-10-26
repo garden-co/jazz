@@ -49,7 +49,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
 /// framing of a `Rows` too large for one frame, whose real frames are
 /// megabytes (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 20] = [
+const VARIANTS: [&str; 21] = [
     "Subscribe",
     "Unsubscribe",
     "Hold",
@@ -70,6 +70,7 @@ const VARIANTS: [&str; 20] = [
     "Schema",
     "Origins",
     "SchemaAdmission",
+    "Stored",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -415,6 +416,15 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let bob = open(0x52, user(2), true);
     connect(&bob, &server, user(2), &recorded);
     pump(&[&bob, &server, &bob]);
+
+    // Stored: a worker relays its tab's write upstream.
+    let worker = open(0x53, user(1), false);
+    connect(&worker, &server, user(1), &recorded);
+    let tab = open(0x54, user(1), false);
+    tab.set_non_durable_client();
+    connect(&tab, &worker, user(1), &recorded);
+    block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default())).unwrap();
+    pump(&[&tab, &worker, &server, &worker, &tab]);
 
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
