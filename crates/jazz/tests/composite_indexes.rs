@@ -17,7 +17,7 @@ use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuil
 #[cfg(any())] // jazz-sqlite: not ported, RocksDB storage
 use jazz_storage_rocksdb::RocksDbStorage;
 
-mod common;
+use crate::common;
 
 use common::allow_all_policies;
 
@@ -681,4 +681,59 @@ fn composite_indexes_can_order_by_provenance_timestamps() {
             3
         );
     }
+}
+
+/// A single-column index that a composite one leads is not created (the
+/// composite serves its reads, and writes keep one entry fewer), and a read
+/// that names row ids seeks them rather than scanning a declared index that
+/// also covers its other filter.
+#[test]
+fn composite_indexes_subsume_their_prefixes_and_id_reads_seek_by_id() {
+    let schema = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(
+                tasks_table()
+                    .index_only(["owner"])
+                    .composite_index(["owner", "rank"]),
+            )
+            .build(),
+    )
+    .unwrap();
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 0..20u8 {
+        block_on(db.insert(
+            "tasks",
+            BTreeMap::from([
+                ("owner".to_owned(), Value::String("ada".to_owned())),
+                ("rank".to_owned(), Value::I32(i32::from(n))),
+                ("title".to_owned(), Value::String(format!("t{n}"))),
+            ]),
+            InsertOptions {
+                row_id: Some(row(n + 1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let ada =
+        || Query::from("tasks").filter(eq(col("owner"), lit(Value::String("ada".to_owned()))));
+    let (_, plan) = db
+        .explain_query_plan(&db.prepare_query(&ada()).unwrap(), None)
+        .unwrap();
+    assert!(plan.contains("tasks__ix(owner,rank)"), "{plan}");
+
+    let point = db
+        .prepare_query(&ada().filter(eq(col("id"), lit(Value::Uuid(row(5).0)))))
+        .unwrap();
+    let (_, plan) = db.explain_query_plan(&point, None).unwrap();
+    assert!(plan.contains("(id=? AND _b=?)"), "{plan}");
+    let rows = block_on(db.all(&point, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
 }

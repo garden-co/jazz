@@ -234,6 +234,7 @@ impl Inner {
         };
         if let Some(occurrences) = &snapshot.union {
             unions::check(&rows, occurrences)?;
+            return Ok(union_page(&prepared.query, rows));
         }
         Ok(rows)
     }

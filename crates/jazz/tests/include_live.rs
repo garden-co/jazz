@@ -2,7 +2,7 @@
 //! big unbounded view re-checks only the rows that reference the changed
 //! target. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

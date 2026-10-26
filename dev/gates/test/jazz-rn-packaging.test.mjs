@@ -39,7 +39,10 @@ async function packPrebuildPayloadFixtures(directory) {
     await mkdir(source, { recursive: true });
     await writeFile(
       join(source, "package.json"),
-      JSON.stringify({ name: `jazz-rn-${platform}`, version: packageJson.version }),
+      JSON.stringify({
+        name: `jazz-rn-${platform}`,
+        version: packageJson.version,
+      }),
     );
     await mkdir(join(source, platform), { recursive: true });
     await writeFile(join(source, platform, "jazz-native-relay.manifest.json"), "{}\n");
@@ -224,6 +227,7 @@ test("jazz-rn relay production builds are SQLite-only on every artifact target",
     // every production target and both the Rust wrapper and native engine.
     for (const sqlite of ["rusqlite", "libsqlite3-sys"])
       assert.ok(dependencies.has(sqlite), `${target} relay must retain ${sqlite}`);
+    assert.ok(dependencies.has("jazz-db"), `${target} relay must run on jazz-db`);
     for (const forbidden of ["jazz-storage-rocksdb", "jazz-benchmark-guard", "tempfile"])
       assert.ok(!dependencies.has(forbidden), `${target} relay must exclude ${forbidden}`);
   }
@@ -2578,7 +2582,14 @@ ${
     await writeFile(
       destination,
       `${JSON.stringify(
-        { format: 2, nativeRelayAbi, sourceRevision, nativeSourceFingerprint, ...extra, files },
+        {
+          format: 2,
+          nativeRelayAbi,
+          sourceRevision,
+          nativeSourceFingerprint,
+          ...extra,
+          files,
+        },
         null,
         2,
       )}\n`,
@@ -2622,7 +2633,10 @@ ${
             process.execPath,
             [verifier.pathname, "--package-root", packageRoot, "android"],
             {
-              env: { ...environment, JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk },
+              env: {
+                ...environment,
+                JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk,
+              },
               stdio: "pipe",
             },
           ),
@@ -3097,13 +3111,10 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   for (const nativeInput of [
     "Cargo.lock",
     "Cargo.toml",
-    "crates/groove",
-    "crates/idb-tree",
     "crates/jazz",
     "crates/jazz-compression",
     "crates/jazz-native-relay",
     "crates/jazz-native-transport",
-    "crates/jazz-storage-sqlite",
   ]) {
     assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);
     assert.ok(verifier.includes(nativeInput), `artifact verifier omits ${nativeInput}`);

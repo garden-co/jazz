@@ -13,6 +13,23 @@ receipt's numeric sequence.
 Closing a WASM write handle makes its snapshot unavailable. The core sequence API
 can inspect recovered writes after reopening the same node's SQLite database.
 
+Authority conflicts remain retryable throughout the host adapters. Upstream
+represents them as `WriteRejected` with its `SerializationConflict` marker;
+`Write.writeState()` maps that marker to `SerializableConflict`, and mutation
+callbacks report `serialization_conflict`. Local conflict callbacks keep
+`transaction_conflict`. A conflict must not become `AuthorizationDenied`, which
+would suppress retries and enter permission-denial fallback paths. This changes
+error interpretation only; stored and transmitted bytes are unchanged.
+E2EE account initialisation, device responses and space maintenance recognise
+both conflict codes in their existing bounded retry paths. Each retry obtains
+fresh authority evidence; permission failures and signer errors retain their
+existing handling.
+
+The public host regression
+`binding_host::authority_conflicts_remain_conflicts_in_host_receipts_and_events`
+covers Alice's empty read invalidated by Bob's accepted insert, then checks the
+write fate, unclaimed callback, retryable wait error and surviving authority row.
+
 ## Durable encoding
 
 The record role is `jazz.sqlite.write-fate.v1`, version 1. The existing SQLite

@@ -154,6 +154,27 @@ async fn read(db: &Db, query: Query) -> Result<Vec<String>, Error> {
         .collect())
 }
 
+/// Alice's ordinary relay inherits host-bound claims when its subscriber has
+/// no connection override. An explicitly empty or different token must still
+/// fail the relay's upstream-scope check, even for the same author.
+#[test]
+fn ordinary_relay_fetch_inherits_only_unoverridden_host_claims() {
+    for override_claims in [None, Some(BTreeMap::new()), Some(claims("b"))] {
+        let server = authority();
+        let relay = open(1, user("alice"), false);
+        let foreground = open(2, user("alice"), true);
+        connect(&server, &relay, user("alice"), claims("a"));
+        let (up, down) = duplex();
+        block_on(foreground.connect_upstream(up));
+        relay.accept_subscriber_with_claims(down, user("alice"), override_claims.clone());
+        let result = drive(&[&foreground, &relay, &server], read(&foreground, query()));
+        match override_claims {
+            None => assert_eq!(result.unwrap(), ["alpha", "beta", "gamma"]),
+            Some(_) => assert_eq!(result.unwrap_err().code, ErrorCode::WriteRejected),
+        }
+    }
+}
+
 // Gate only real authority answer frames: public reads cannot pause between
 // delivered row images and their receipt. No storage or permission hooks.
 #[derive(Default)]
@@ -257,6 +278,9 @@ fn ordinary_relay_refuses_different_identity_or_claims_before_forwarding() {
         })
         .unwrap();
         peer.send(SyncMessage::Fetch {
+            view: jazz::protocol::ReadViewSourceSpec::Current,
+            tier: jazz::db::ReadTier::Remote,
+            wait: None,
             id: 77,
             query: query(),
             binding: BTreeMap::new(),
@@ -354,12 +378,18 @@ fn ordinary_forwarded_read_refuses_disconnect_and_recovers_after_reconnect() {
     assert!(relay.detach_connection(&upstream));
     let error = drive(&nodes, future).unwrap_err();
     assert_eq!(error.code, ErrorCode::NotObserved);
-    // A new offline request retains the existing cache-recovery contract;
-    // it does not turn the interrupted upstream request into a success.
-    assert_eq!(
-        drive(&nodes, read(&client, query())).unwrap(),
-        ["alpha", "beta", "gamma"]
-    );
+    // A new Remote request waits for fresh authority coverage; cached rows
+    // cannot turn the interrupted request into a success.
+    let mut recovered = std::pin::pin!(read(&client, query()));
+    for _ in 0..3 {
+        assert!(
+            recovered
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        turns(&nodes);
+    }
     block_on(server.update(
         "notes",
         RowUuid::from_bytes([1; 16]),
@@ -368,10 +398,7 @@ fn ordinary_forwarded_read_refuses_disconnect_and_recovers_after_reconnect() {
     ))
     .unwrap();
     connect(&server, &relay, user("alice"), claims("a"));
-    assert_eq!(
-        drive(&nodes, read(&client, query())).unwrap(),
-        ["beta", "gamma", "zeta"]
-    );
+    assert_eq!(drive(&nodes, recovered).unwrap(), ["beta", "gamma", "zeta"]);
 }
 
 /// A host-trusted SYSTEM relay may delegate Alice's authenticated ordinary

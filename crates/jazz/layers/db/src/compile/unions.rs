@@ -56,7 +56,16 @@ impl Ctx<'_> {
                 arm.label,
                 compiled.sql,
                 compiled.ranked_sql,
-                compiled.union_arms,
+                if compiled.union {
+                    crate::query::relation_union_leaf_projections(
+                        input.relation.as_ref().expect("nested union"),
+                    )
+                    .map_err(|error| query_error(error.to_string()))?
+                    .into_keys()
+                    .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                },
             ));
         }
         let projection = projection.ok_or_else(|| query_error("union requires an arm"))?;
@@ -80,27 +89,25 @@ impl Ctx<'_> {
         let mut ctes = Vec::new();
         let mut plain = Vec::new();
         let mut ranked = Vec::new();
-        let mut union_arms = Vec::new();
         let mut any_ranked = false;
         // Slots are only SQL-local lookups. Semantic identity is always the
         // declared label, and tie order is independent of sibling declaration.
         for (index, (label, sql, ranked_sql, nested_arms)) in arms.into_iter().enumerate() {
             let label = if nested_arms.is_empty() {
-                let slot = union_arms.len();
-                union_arms.push(label);
-                slot.to_string()
+                self.bind(Sql::Text(label.as_bytes().to_vec()))
             } else {
                 let mut cases = Vec::new();
-                for (child, nested) in nested_arms.iter().enumerate() {
-                    let slot = union_arms.len();
-                    union_arms.push(compose_union_arm_path(&label, nested));
-                    cases.push(format!("WHEN {child} THEN {slot}"));
+                for nested in &nested_arms {
+                    let child = self.bind(Sql::Text(nested.as_bytes().to_vec()));
+                    let path = compose_union_arm_path(&label, nested);
+                    let parent = self.bind(Sql::Text(path.as_bytes().to_vec()));
+                    cases.push(format!("WHEN {child} THEN {parent}"));
                 }
                 format!("CASE {arm_column} {} END", cases.join(" "))
             };
             let mut names = columns.clone();
             if !nested_arms.is_empty() {
-                names.push(arm_name.clone());
+                names.insert(3, arm_name.clone());
             }
             let names = names
                 .iter()
@@ -109,12 +116,18 @@ impl Ctx<'_> {
                 .join(", ");
             let output = columns
                 .iter()
+                .skip(3)
                 .map(|s| quote(s))
                 .collect::<Vec<_>>()
                 .join(", ");
             ctes.push(format!("u{index}({names}) AS ({sql})"));
             plain.push(format!(
-                "SELECT {output}, {label} AS {arm_column} FROM u{index}"
+                "SELECT id, _seq, _del, {label} AS {arm_column}{} FROM u{index}",
+                if output.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {output}")
+                }
             ));
             ranked.push(format!(
                 "u{index}({names}) AS ({})",
@@ -180,6 +193,10 @@ impl Ctx<'_> {
             }
             sources.insert(key.column.clone(), source);
         }
+        let tie = match order.last().map(|key| key.direction) {
+            Some(OrderDirection::Desc) => "DESC",
+            _ => "ASC",
+        };
         let (order, ranked_order) = self.order_projected_sql(table, "t", &order, &sources)?;
         any_ranked |= ranked_order.is_some();
         let limit = self.bind(Sql::Integer(
@@ -197,7 +214,7 @@ impl Ctx<'_> {
         let compound = plain.join(" UNION ALL ");
         let statement = |ctes: &[String], order: &str| {
             format!(
-                "WITH {} SELECT t.* FROM ({compound}) AS t ORDER BY {order}, t.{arm_column} ASC LIMIT {limit} OFFSET {offset}",
+                "WITH {} SELECT t.* FROM ({compound}) AS t ORDER BY {order}, t.{arm_column} {tie} LIMIT {limit} OFFSET {offset}",
                 ctes.join(", ")
             )
         };
@@ -210,7 +227,8 @@ impl Ctx<'_> {
             tables: self.tables,
             aggregate: false,
             joined: 0,
-            union_arms,
+            union: true,
+            versioned: false,
             preps: self.preps,
         })
     }

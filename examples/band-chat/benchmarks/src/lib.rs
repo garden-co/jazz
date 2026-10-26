@@ -205,7 +205,7 @@ fn schema() -> JazzSchema {
                 .column("unread", ColumnType::Boolean)
                 .column("last_activity", ColumnType::Timestamp)
                 .index_only(["room", "member", "unread", "last_activity"])
-                .composite_index(["unread", "last_activity"]),
+                .composite_index(["member", "unread", "last_activity"]),
         )
         .table(
             TableSchemaBuilder::new("messages")

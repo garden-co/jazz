@@ -52,7 +52,7 @@ fn owner(path: Option<&Path>) -> Db {
 }
 fn foreground(node: u8, owner: &Db) -> Db {
     let db = open(node, None);
-    db.set_non_durable_client();
+    db.set_private_owner_client().unwrap();
     connect(&db, owner);
     turns(&[&db, owner]);
     block_on(db.wait_for_storage_owner()).unwrap();
@@ -429,7 +429,7 @@ fn owner_rejects_forged_initialization_publications() {
     for case in ["nonce", "ordinary", "mergeable", "author", "transaction"] {
         let storage = owner(None);
         let tab = open(1, None);
-        tab.set_non_durable_client();
+        tab.set_private_owner_client().unwrap();
         let (up, down) = duplex();
         let wire = Rc::new(RefCell::new(up));
         let captured = Rc::new(RefCell::new(Vec::new()));
@@ -559,7 +559,7 @@ fn supplied_claims_cannot_grant_initialization_permission() {
     let path = dir.path().join("alice.sqlite");
     let storage = owner(Some(&path));
     let tab = open(1, None);
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     let (up, down) = duplex();
     let wire = Rc::new(RefCell::new(up));
     let captured = Rc::new(RefCell::new(Vec::new()));

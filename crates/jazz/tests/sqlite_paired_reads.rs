@@ -173,7 +173,9 @@ fn cold_online_pair_and_read_only_validation() {
             alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
         );
         if change {
-            assert_eq!(accepted.unwrap_err().code, ErrorCode::TransactionConflict);
+            let error = accepted.unwrap_err();
+            assert!(error.is_serialization_conflict(), "{error}");
+            assert!(error.is_conflict(), "authority conflicts remain retryable");
         } else {
             accepted.unwrap();
         }
@@ -391,17 +393,29 @@ fn authority_begin_hydrates_cold_history_without_advancing_local_observation() {
                 .is_empty()
         );
         alice.abandon_transaction_handle(observed_tx).unwrap();
-        let accepted = match block_on(alice.commit_serializable_handle(tx)) {
-            Err(error) => Err(error),
-            Ok(receipt) => drive(
-                &[&alice, &server],
-                alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
+        let (accepted, authority) = match block_on(alice.commit_serializable_handle(tx)) {
+            Err(error) => (Err(error), false),
+            Ok(receipt) => (
+                drive(
+                    &[&alice, &server],
+                    alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
+                ),
+                true,
             ),
         };
         if change == "unchanged" {
             accepted.unwrap();
         } else {
-            assert_eq!(accepted.unwrap_err().code, ErrorCode::TransactionConflict);
+            let error = accepted.unwrap_err();
+            if authority {
+                assert!(error.is_serialization_conflict(), "{error}");
+            } else {
+                assert_eq!(error.code, ErrorCode::TransactionConflict);
+            }
+            assert!(
+                error.is_conflict(),
+                "both conflict sources remain retryable"
+            );
         }
     }
 }
@@ -631,15 +645,13 @@ fn empty_pair_records_the_phantom_read_set() {
     );
     insert(&server, "notes", "phantom");
     let receipt = block_on(alice.commit_serializable_handle(tx)).unwrap();
-    assert_eq!(
-        drive(
-            &[&alice, &server],
-            alice.wait_for_transaction(receipt.0, DurabilityTier::Global)
-        )
-        .unwrap_err()
-        .code,
-        ErrorCode::TransactionConflict
-    );
+    let error = drive(
+        &[&alice, &server],
+        alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
+    )
+    .unwrap_err();
+    assert!(error.is_serialization_conflict(), "{error}");
+    assert!(error.is_conflict(), "authority conflicts remain retryable");
 }
 
 /// Alice's cancelled or rolled-back first read releases Bob's queued waiter;
@@ -1288,13 +1300,13 @@ fn accepted_dependency_notifications_follow_fresh_evidence_without_row_edits() {
                 Query::from("refs").filter(eq(col("text"), lit("tracked")))
             };
             let prepared = alice.prepare_query(&query).unwrap();
-            let mut plain = block_on(alice.subscribe(&prepared, options(false, false))).unwrap();
-            let mut observed = block_on(alice.subscribe(&prepared, options(false, false))).unwrap();
+            let mut plain = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
+            let mut observed = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
             observed.observe_accepted_evidence();
             let unrelated = alice
                 .prepare_query(&Query::from("refs").filter(eq(col("text"), lit("unrelated"))))
                 .unwrap();
-            let mut quiet = block_on(alice.subscribe(&unrelated, options(false, false))).unwrap();
+            let mut quiet = block_on(alice.subscribe(&unrelated, ReadOpts::default())).unwrap();
             quiet.observe_accepted_evidence();
             for _ in 0..12 {
                 turn(&dbs);
@@ -1382,7 +1394,7 @@ fn accepted_notification_survives_separate_proof_and_receipt_delivery() {
     block_on(alice.connect_upstream(client));
     server.accept_subscriber(authority, AuthorSubject::SYSTEM);
     let prepared = alice.prepare_query(&Query::from("refs")).unwrap();
-    let mut observed = block_on(alice.subscribe(&prepared, options(false, false))).unwrap();
+    let mut observed = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
     observed.observe_accepted_evidence();
     for _ in 0..12 {
         step(&alice, &server, &mut *down, &mut *up, || {});

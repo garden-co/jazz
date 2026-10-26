@@ -1,6 +1,6 @@
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import fixture from "../../fixtures/browser-sqlite-root-v1.json";
+import fixture from "../../fixtures/browser-sqlite-root-v2.json";
 import {
   acquireBrowserPhysicalDatabaseEpoch,
   type BrowserPhysicalDatabaseEpoch,
@@ -9,6 +9,7 @@ import {
   decodeSqliteBrowserRoot,
   encodeSqliteBrowserRoot,
   sqliteBrowserDescriptor,
+  SQLITE_BROWSER_ROOT_KEY,
   type SqliteBrowserRoot,
 } from "./browser-sqlite-storage.js";
 import {
@@ -52,13 +53,11 @@ function request<T>(r: IDBRequest<T>): Promise<T> {
     r.onerror = () => reject(r.error);
   });
 }
-async function manifest(name = "notes") {
+async function manifest(name = "notes", key = SQLITE_BROWSER_ROOT_KEY) {
   const db = await request(indexedDB.open(name));
   try {
     const tx = db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
-    return await request(
-      tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_MANIFEST_KEY),
-    );
+    return await request(tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(key));
   } finally {
     db.close();
   }
@@ -160,10 +159,17 @@ describe("SQLite browser root", () => {
   it("refuses an old Groove root without upgrading its manifest", async () => {
     const legacy = await IndexedDbPageStore.open("notes", { owner: "alice" });
     stores.push(legacy);
-    const before = await manifest();
     await legacy.close();
+    const raw = await request(indexedDB.open("notes"));
+    const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+    const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    const old = await request(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY));
+    old.requiredCodecIds = ["groove.ordered-kv.v1"];
+    await request(plane.put(old, INDEXEDDB_STORAGE_MANIFEST_KEY));
+    raw.close();
+    const before = await manifest("notes", INDEXEDDB_STORAGE_MANIFEST_KEY);
     await expect(open()).rejects.toThrow("storage epoch manifest");
-    expect(await manifest()).toEqual(before);
+    expect(await manifest("notes", INDEXEDDB_STORAGE_MANIFEST_KEY)).toEqual(before);
     const db = await request(indexedDB.open("notes"));
     expect(db.version).toBe(3);
     db.close();
@@ -234,7 +240,7 @@ describe("SQLite browser root", () => {
     expect(await recovered.store.foregroundNodeLeaseNodeState(oldLease.node)).toBe("missing");
     await recovered.store.openSqliteRuntime(async (storage) => {
       expect(storage.requireExisting).toBe(false);
-      expect(storage.path).not.toBe(mocks.destroy.mock.calls[0]![0].path);
+      expect(storage.path).toBe(mocks.destroy.mock.calls[0]![0].path);
       return runtime();
     });
     expect(mocks.destroy).toHaveBeenCalledTimes(2);
@@ -263,14 +269,14 @@ describe("SQLite browser root", () => {
     mocks.destroy.mockImplementation(async (storage, owner) => {
       expect(db.close).toHaveBeenCalledOnce();
       expect(storage.path).toBe(descriptor!.path);
-      expect(owner).toBe("alice");
+      expect(owner).toBe("notes");
       expect(JSON.parse(new TextDecoder().decode(await manifest())).at(-1)).toBe("resetting");
     });
     await h.store.destroyUnderOwner(h.epoch);
     await h.epoch.release();
     const next = await open();
     await next.store.openSqliteRuntime(async (storage) => {
-      expect(storage.path).not.toBe(descriptor!.path);
+      expect(storage.path).toBe(descriptor!.path);
       return runtime();
     });
   });
@@ -309,13 +315,16 @@ describe("SQLite browser root", () => {
     expect(next.store.replicaNode).not.toEqual(node);
   });
 
-  it("releases its owned physical lock even when runtime close reports a flush failure", async () => {
+  it("retains its owned physical lock after a close failure until a retry succeeds", async () => {
     const store = await IndexedDbPageStore.open("notes", { owner: "alice", format: "sqlite" });
     stores.push(store);
     const db = runtime();
-    db.close.mockRejectedValue(new Error("final flush failed"));
+    db.close.mockRejectedValueOnce(new Error("final flush failed"));
     await store.openSqliteRuntime(async () => db);
     await expect(store.close()).rejects.toThrow("final flush failed");
+    await expect(open().then(() => undefined)).rejects.toThrow("active in another");
+    await store.close();
+    expect(db.close).toHaveBeenCalledTimes(2);
     await open();
   });
 

@@ -43,7 +43,7 @@ fn send(runtime: &ServerRuntimeHandle, session: ServerSession, messages: Vec<Syn
             session,
             messages
                 .iter()
-                .map(|m| postcard::to_allocvec(m).unwrap())
+                .map(|m| jazz::db::encode_message(m).unwrap())
                 .collect(),
         )
         .unwrap();
@@ -55,7 +55,7 @@ async fn batch(stream: &mut ServerRuntimeFrameStream) -> Vec<SyncMessage> {
         .unwrap()
         .unwrap()
         .iter()
-        .map(|f| postcard::from_bytes(f).unwrap())
+        .map(|f| jazz::sync_codec::decode_sync_message(f).unwrap())
         .collect()
 }
 /// Alice receives exactly the authority's authored UUIDs on its native stream,
@@ -166,7 +166,7 @@ async fn server_holds_scoped_accepted_and_catalogue_reads_until_permissions() {
         tokio::time::timeout(Duration::from_millis(30), stream.recv()).await
     {
         for frame in frames.unwrap() {
-            let message: SyncMessage = postcard::from_bytes(&frame).unwrap();
+            let message: SyncMessage = jazz::sync_codec::decode_sync_message(&frame).unwrap();
             assert!(!matches!(
                 message,
                 SyncMessage::CatalogueCoveredV1 { .. }

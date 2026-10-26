@@ -28,7 +28,22 @@ remain refused on this connection, even when Alice requests her own identity.
 
 Two tabs may use the same local transaction number. Their node identifiers keep
 the receipts distinct. Retrying those exact uploads after a persistent authority
-restart returns the stored receipts and creates no duplicate rows.
+restart returns the stored authority result and creates no duplicate rows.
+Connection-local echo hints are cleared on reconnect; all other receipt bytes,
+including the original writer, transaction and authority cut, remain unchanged.
+
+The server passes private-link admission into the SQLite subscriber. Before it
+looks up a prior transaction result, it requires the upload to name the admitted
+author exactly. A forged or missing author receives a rejection without replacing
+the original transaction's recorded result. A valid retry can still settle once.
+Ordinary workers retain upstream's connection-based attribution behaviour, and
+trusted backend links retain their separate delegation contract.
+
+Authentication supplies the private connection's permission claims. Payload
+claims cannot replace them: an ordinary node's own upload can carry an empty
+claims map while still being checked against its authenticated connection. This
+keeps claim-dependent policies enforced without treating local metadata as a
+credential.
 
 ## Protocol compatibility
 

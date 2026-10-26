@@ -756,12 +756,12 @@ fn accepted_union_observed_begin_refuses_late_proof() {
 fn accepted_union_coverage_sequence_has_fixed_bytes() {
     use jazz::db::{ScopedReadRowV1, UnionOccurrenceV1};
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_accepted_union_coverage_v1.json"
+        "../fixtures/sqlite-sync-v2/accepted-union.json"
     ))
     .unwrap();
     assert_eq!(
         fixture["role"],
-        "jazz.sqlite.sync.accepted-union-coverage.v1"
+        "jazz.sqlite.sync.accepted-union-coverage.v2"
     );
     for scoped in [false, true] {
         for (key, id, through, populated) in
@@ -818,7 +818,7 @@ fn accepted_union_coverage_sequence_has_fixed_bytes() {
             .zip(fixture[mode][key].as_array().unwrap())
             {
                 let bytes = hex::decode(encoded.as_str().unwrap()).unwrap();
-                assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
+                assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
                 assert_eq!(
                     serde_json::to_value(jazz::sync_codec::decode_sync_message(&bytes).unwrap())
                         .unwrap(),

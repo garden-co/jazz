@@ -138,7 +138,7 @@ it("accepts one competing group reconciliation and converges the space on its ac
     expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
     const rejected = outcomes.find((result) => result.status === "rejected");
     if (rejected?.status !== "rejected") throw new Error("Missing rejected rotation");
-    expect(rejected.reason).toMatchObject({ code: "transaction_conflict" });
+    expect(rejected.reason).toMatchObject({ code: "serialization_conflict" });
     const groupSuccessors = await owner.all(app.__e2ee_group_successors, { tier: "remote" });
     expect(groupSuccessors).toHaveLength(1);
     expect(groupSuccessors[0]!.groupId).toBe(group.id);

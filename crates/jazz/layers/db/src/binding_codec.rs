@@ -201,7 +201,7 @@ fn occurrence(
     joined: &[crate::values::JoinedRow],
     union_arm: Option<&str>,
 ) -> ResultKey {
-    crate::values::occurrence_key_with_union_arm(row, version, joined, union_arm)
+    crate::values::occurrence_key(row, version, joined, union_arm)
 }
 
 /// Encode an incremental subscription delta with aligned occurrence sidecars.
@@ -293,11 +293,58 @@ pub fn row_record(row: &CurrentRow) -> Result<OwnedRecord, postcard::Error> {
     Ok(OwnedRecord::new(raw, descriptor))
 }
 
+/// [`row_record`] as a host reads it. History metadata (reserved names,
+/// read only from `history.<table>`) is converted only here, after the
+/// read: `$transactionId` becomes the public transaction id a write handle
+/// reports, and `$acceptedAt` its HLC's milliseconds. Ordering and
+/// occurrence identity keep the full values.
+fn published_record(row: &CurrentRow) -> Result<OwnedRecord, postcard::Error> {
+    use crate::schema::history::HistoryMetadataColumn;
+    use crate::schema::history::{ACCEPTED_AT_COLUMN, TRANSACTION_ID_COLUMN};
+    let record = row_record(row)?;
+    if !row
+        .cells()
+        .any(|(name, _)| HistoryMetadataColumn::contains(name))
+    {
+        return Ok(record);
+    }
+    let mut fields = Vec::with_capacity(record.descriptor().fields().len());
+    let mut values = Vec::with_capacity(fields.capacity());
+    for ((name, value), field) in row.cells().zip(record.descriptor().fields()) {
+        let value = value.cloned().unwrap_or(Value::Nullable(None));
+        let (ty, value) = match (name, value) {
+            (TRANSACTION_ID_COLUMN, Value::Tuple(parts)) => {
+                let [Value::U64(time), Value::Uuid(node)] = parts.as_slice() else {
+                    return Err(postcard::Error::SerdeSerCustom);
+                };
+                let tx = jazz_model::tx::TxId::new(
+                    jazz_types::time::TxTime(*time),
+                    jazz_types::ids::NodeUuid(*node),
+                );
+                let id = jazz_model::model::transaction::TransactionId::from_committed_tx(tx);
+                (ValueType::String, Value::String(id.to_string()))
+            }
+            (ACCEPTED_AT_COLUMN, Value::U64(hlc)) => (
+                ValueType::U64,
+                Value::U64(jazz_types::time::GlobalTime(hlc).physical_ms()),
+            ),
+            (_, value) => (field.value_type.clone(), value),
+        };
+        fields.push((name.to_owned(), ty));
+        values.push(value);
+    }
+    let descriptor = RecordDescriptor::new(fields);
+    let raw = descriptor
+        .create(&values)
+        .map_err(|_| postcard::Error::SerdeSerCustom)?;
+    Ok(OwnedRecord::new(raw, descriptor))
+}
+
 /// Group only adjacent rows with equal table and tagged descriptor.
 pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
-        let record = row_record(row)?;
+        let record = published_record(row)?;
         let descriptor = row
             .cells()
             .zip(record.descriptor().fields())

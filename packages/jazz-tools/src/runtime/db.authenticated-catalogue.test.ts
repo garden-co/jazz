@@ -113,3 +113,35 @@ it("keeps authenticated local lookups separate from fresh general identities", a
   expect(queryInternal).toHaveBeenCalledOnce();
   expect(coverCatalogue).toHaveBeenCalledTimes(2);
 });
+
+it("returns no local identity before catalogue admission without fetching coverage", async () => {
+  const app = s.defineApp({ projects: s.table({ title: s.string() }, {}) });
+  let published = false;
+  const identity = "00000000-0000-4000-8000-000000000001";
+  const runtime = {
+    tableIdentity: vi.fn(async () => identity),
+    columnIdentity: vi.fn(async () => identity),
+  };
+  const client = {
+    getRuntime: () => runtime,
+    hasAuthenticatedCatalogue: async () => published,
+    coverCatalogue: vi.fn(async () => undefined),
+  };
+  const ensureReady = vi.fn(async (_tier: string) => undefined);
+  const db = Object.create(Db.prototype) as Db;
+  Object.defineProperties(db, {
+    getClient: { value: () => client },
+    ensureReady: { value: ensureReady },
+    assertOpen: { value: () => undefined },
+  });
+  await expect(db.tableIdentity(app.projects, true)).resolves.toBeNull();
+  await expect(db.columnIdentity(app.projects, "title", true)).resolves.toBeNull();
+  expect(runtime.tableIdentity).not.toHaveBeenCalled();
+  expect(runtime.columnIdentity).not.toHaveBeenCalled();
+  expect(client.coverCatalogue).not.toHaveBeenCalled();
+  published = true;
+  await expect(db.tableIdentity(app.projects, true)).resolves.toBe(identity);
+  await expect(db.columnIdentity(app.projects, "title", true)).resolves.toBe(identity);
+  expect(ensureReady.mock.calls.every(([tier]) => tier === "runtime")).toBe(true);
+  expect(client.coverCatalogue).not.toHaveBeenCalled();
+});

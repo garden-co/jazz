@@ -1,3 +1,4 @@
+import { ownerPreparation } from "./write-preparation.js";
 import {
   BrowserCatalogueCache,
   ephemeralCatalogueCache,
@@ -247,7 +248,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
     }
     if (browserMode) {
-      mainThreadPeerRuntime.setNonDurableClient();
+      mainThreadPeerRuntime.setPrivateOwnerClient();
       if (!foregroundNodeLease) {
         throw new Error("Persistent browser runtime requires a foreground node lease");
       }
@@ -336,7 +337,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const dbName = resolveDefaultPersistentDbName(config);
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     if (config.runtimeSources?.browserWorkerPort) {
-      return new AttachedBrowserWorkerConnection(
+      const connection = new AttachedBrowserWorkerConnection(
         runtime,
         config.runtimeSources.browserWorkerPort,
         sessionFromConfig(config)?.claims ?? {},
@@ -352,8 +353,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         },
         config.runtimeSources.inspectorBinding,
       );
+      this.prepareBrowserWrites(client, runtime, connection);
+      return connection;
     }
-    return new SharedBrowserWorkerConnection(
+    const connection = new SharedBrowserWorkerConnection(
       runtime,
       {
         runtimeSources: browserWorkerRuntimeSources(config),
@@ -383,6 +386,21 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         onStorageInvalidated,
       },
     );
+    this.prepareBrowserWrites(client, runtime, connection);
+    return connection;
+  }
+
+  private prepareBrowserWrites(
+    client: JazzClient,
+    runtime: NativeRuntimeAdapter,
+    connection: Pick<BrowserFollowerConnection, "ready">,
+  ): void {
+    if (!runtime.requiresStorageOwnerAdmission()) return;
+    // Reserve the existing mutation-preparation queue before returning the
+    // synchronous client. Row handles remain immediate; SQLite staging waits
+    // for the worker's actual identity/schema acknowledgement.
+    const readiness = connection.ready();
+    void Promise.resolve(ownerPreparation(client).run(() => readiness)).catch(() => undefined);
   }
 
   override createBrowserFollowerConnection({
@@ -414,6 +432,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       },
     );
     connection.updateAuth(JSON.stringify(browserWorkerTransportAuth(config)), sessionClaims);
+    this.prepareBrowserWrites(client, runtime, connection);
     return connection;
   }
 

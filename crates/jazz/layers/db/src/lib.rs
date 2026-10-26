@@ -37,6 +37,7 @@ pub mod db;
 #[cfg(feature = "durable-object-limits")]
 mod durable_object_limits;
 pub mod foreground_node_lease;
+pub mod format;
 pub(crate) mod large;
 pub(crate) mod merge;
 pub mod names;

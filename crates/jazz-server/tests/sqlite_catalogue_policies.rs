@@ -34,7 +34,7 @@ async fn batch(stream: &mut ServerRuntimeFrameStream) -> Vec<SyncMessage> {
         .unwrap()
         .unwrap()
         .iter()
-        .map(|frame| postcard::from_bytes(frame).unwrap())
+        .map(|frame| jazz::sync_codec::decode_sync_message(frame).unwrap())
         .collect()
 }
 /// Alice's live old-schema subscription must survive a complete deployment whose
@@ -64,7 +64,7 @@ async fn deployment_installs_policy_manifests_before_resetting_live_subscription
                 session,
                 messages
                     .iter()
-                    .map(|m| postcard::to_allocvec(m).unwrap())
+                    .map(|m| jazz::db::encode_message(m).unwrap())
                     .collect(),
             )
             .unwrap()
@@ -74,6 +74,8 @@ async fn deployment_installs_policy_manifests_before_resetting_live_subscription
             version: *source.version_id().as_bytes(),
         },
         SyncMessage::Subscribe {
+            tier: jazz::db::ReadTier::Remote,
+            wait: None,
             id: 1,
             query: Query::from("documents"),
             binding: BTreeMap::new(),

@@ -52,24 +52,24 @@ fn policy_descriptor_v1_pins_wire_and_storage_bytes() {
         },
         schema: SchemaVersion::new(schema.clone()),
     };
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_policy_descriptor_v1.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v2/policy-descriptor.json"
+    ))
+    .unwrap();
     let blob = hex::decode(fixture["descriptor"].as_str().unwrap()).unwrap();
     let message = hex::decode(fixture["message"].as_str().unwrap()).unwrap();
     assert_eq!(postcard::to_allocvec(&descriptor).unwrap(), blob);
     assert_eq!(
-        postcard::to_allocvec(&SyncMessage::PolicyDescriptorV1(descriptor.clone())).unwrap(),
+        jazz::db::encode_message(&SyncMessage::PolicyDescriptorV1(descriptor.clone())).unwrap(),
         message
     );
     let (decoded, rest) = postcard::take_from_bytes::<PolicyDescriptorV1>(&blob).unwrap();
     assert!(rest.is_empty());
     assert_eq!(decoded, descriptor);
-    let (SyncMessage::PolicyDescriptorV1(decoded), rest) =
-        postcard::take_from_bytes::<SyncMessage>(&message).unwrap()
+    let SyncMessage::PolicyDescriptorV1(decoded) = jazz::db::decode_message(&message).unwrap()
     else {
         panic!("policy descriptor tag changed")
     };
-    assert!(rest.is_empty());
     assert_eq!(decoded, descriptor);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("alice.sqlite");

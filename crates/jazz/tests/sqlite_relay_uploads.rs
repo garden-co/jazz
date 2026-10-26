@@ -262,37 +262,42 @@ fn send_upload(peer: &mut dyn jazz::db::Transport, messages: &[jazz::db::SyncMes
 fn receipts(peer: &mut dyn jazz::db::Transport) -> Vec<Result<(), jazz::db::WireError>> {
     std::iter::from_fn(|| peer.try_recv())
         .filter_map(|message| match message {
-            jazz::db::SyncMessage::FateV1 { result, .. } => Some(result),
+            jazz::db::SyncMessage::FateV1 { result, .. }
+            | jazz::db::SyncMessage::OriginFateV2 {
+                result,
+                global: true,
+                ..
+            } => Some(result),
             _ => None,
         })
         .collect()
 }
 
-/// Mallory may not forge Alice's attribution through Bob's trusted relay;
-/// rejection must precede both durable queuing and any authority write.
+/// Bob names Alice on an ordinary session link. The relay normalizes the
+/// upload to authenticated Bob, and the authority records Bob as its author.
 #[test]
-fn ordinary_connection_cannot_forge_another_author() {
+fn ordinary_connection_uses_its_authenticated_author() {
     let server = authority();
     let relay = open(50, AuthorSubject::SYSTEM, None);
     connect(&relay, &server, AuthorSubject::SYSTEM);
-    let (mut mallory, link) = duplex_transport::duplex();
+    let (mut peer, link) = duplex_transport::duplex();
     relay.accept_subscriber(link, bob());
-    let mut forged = captured_upload(1, "forged", true);
-    for message in &mut forged {
-        if let jazz::db::SyncMessage::Commit { author, .. } = message {
-            *author = Some(alice().canonical().to_owned());
-        }
-    }
-    send_upload(mallory.as_mut(), &forged);
+    let upload = captured_upload(1, "normalized", true);
+    send_upload(peer.as_mut(), &upload);
     turns(&[&relay, &server]);
-    let results = receipts(mallory.as_mut());
-    assert_eq!(results.len(), 1);
-    assert!(
-        matches!(&results[0], Err(jazz::db::WireError::Rejected(message)) if message.contains("trusted serving node")),
-        "{results:?}"
-    );
-    assert!(texts(&server).is_empty());
-    assert!(texts(&relay).is_empty());
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Ok(())]));
+    assert_eq!(texts(&server), ["normalized"]);
+    let rows = block_on(server.all(
+        &server.prepare_query(&Query::from("notes")).unwrap(),
+        ReadOpts::default(),
+    ))
+    .unwrap();
+    let provenance = server
+        .row_provenance("notes", rows[0].row_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(provenance.1, bob().canonical());
+    assert_eq!(provenance.3, bob().canonical());
 }
 
 /// Alice retries the same pending identity; Mallory and a changed Alice unit
@@ -456,7 +461,8 @@ fn serializable_read_validation_stays_at_the_authority() {
         client.wait_for_transaction(stale, DurabilityTier::Global),
     )
     .unwrap_err();
-    assert_eq!(error.code, jazz::db::ErrorCode::TransactionConflict);
+    assert!(error.is_serialization_conflict(), "{error}");
+    assert!(error.is_conflict(), "authority conflicts remain retryable");
     let _watch =
         block_on(client.subscribe(&query, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)))
             .unwrap();
@@ -485,26 +491,27 @@ fn serializable_read_validation_stays_at_the_authority() {
 fn relay_journal_and_fates_have_frozen_versioned_bytes() {
     use jazz::db::{SyncMessage, WireError};
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_relay_upload_v1.json")).unwrap();
-    assert_eq!(fixture["journalRole"], "jazz.sqlite.relay-upload.v1");
-    assert_eq!(fixture["fateRole"], "jazz.sqlite.sync.origin-write-fate.v1");
-    assert_eq!(fixture["version"], 1);
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/relay-upload.json")).unwrap();
+    assert_eq!(fixture["journalRole"], "jazz.sqlite.relay-upload.v2");
+    assert_eq!(fixture["fateRole"], "jazz.sqlite.sync.origin-fate.v2");
+    assert_eq!(fixture["version"], 2);
     for (name, result) in [
         ("accepted", Ok(())),
         ("conflict", Err(WireError::Conflict("stale".into()))),
         ("rejected", Err(WireError::Rejected("denied".into()))),
         ("other", Err(WireError::Other("oops".into()))),
     ] {
-        let message = SyncMessage::FateV1 {
+        let message = SyncMessage::OriginFateV2 {
             node: [17; 16],
             tx: 127,
             through: 128,
             result,
+            held: vec![],
+            global: true,
         };
         let bytes = hex::decode(fixture["fates"][name].as_str().unwrap()).unwrap();
-        assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
-        let (decoded, rest): (SyncMessage, _) = postcard::take_from_bytes(&bytes).unwrap();
-        assert!(rest.is_empty());
+        assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
+        let decoded = jazz::sync_codec::decode_sync_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
             serde_json::to_value(message).unwrap()
@@ -522,15 +529,18 @@ fn relay_journal_and_fates_have_frozen_versioned_bytes() {
         ops,
         author,
         session,
-        updated_at,
+        expect,
         ..
     } = &mut message
     {
         *tx = 127;
-        ops.clear();
+        *ops = serde_json::from_value(serde_json::json!([
+            {"Delete": {"table": "notes", "row": vec![0x66_u8;16], "target": "Root", "at": 300}}
+        ]))
+        .unwrap();
         *author = Some(alice().canonical().to_owned());
         *session = None;
-        *updated_at = Some(300);
+        expect.clear();
     } else {
         panic!("expected commit");
     }
@@ -793,4 +803,192 @@ fn reconnect_replays_a_partially_backpressured_upload() {
     .unwrap();
     assert_eq!(texts(&server), [text]);
     assert_eq!(server.seq_high_water(), 1);
+}
+
+/// Alice's private owner refuses a foreground payload with a missing or changed
+/// author/session binding before journalling. Raw transport is necessary to
+/// alter that otherwise host-bound payload; reopening and retrying the original
+/// unit prove the rejected payload neither persisted nor consumed its identity.
+#[test]
+fn private_owner_upload_keeps_its_bound_author_before_and_after_reopen() {
+    use jazz::db::SyncMessage;
+    for case in ["different author", "missing author", "missing session"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private-owner.sqlite");
+        let original = captured_upload(1, "alice's original", true);
+        {
+            let owner = open(50, alice(), Some(&path));
+            owner.set_scope_isolated_storage_owner().unwrap();
+            let (mut peer, link) = duplex_transport::duplex();
+            owner.accept_subscriber(link, alice());
+            let mut changed = original.clone();
+            for message in &mut changed {
+                if let SyncMessage::Commit {
+                    author, session, ..
+                } = message
+                {
+                    match case {
+                        "different author" => *author = Some(bob().canonical().to_owned()),
+                        "missing author" => *author = None,
+                        "missing session" => *session = None,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            send_upload(peer.as_mut(), &changed);
+            turns(&[&owner]);
+            let fates = receipts(peer.as_mut());
+            assert!(matches!(fates.as_slice(), [Err(_)]), "{case}: {fates:?}");
+            assert!(texts(&owner).is_empty(), "{case}");
+            block_on(owner.close()).unwrap();
+        }
+        let owner = open(50, alice(), Some(&path));
+        owner.set_scope_isolated_storage_owner().unwrap();
+        let server = authority();
+        connect(&owner, &server, alice());
+        turns(&[&owner, &server]);
+        assert!(
+            texts(&server).is_empty(),
+            "{case}: rejected upload survived reopen"
+        );
+        let (mut peer, link) = duplex_transport::duplex();
+        owner.accept_subscriber(link, alice());
+        send_upload(peer.as_mut(), &original);
+        turns(&[&owner, &server]);
+        assert!(
+            matches!(receipts(peer.as_mut()).as_slice(), [Ok(())]),
+            "{case}"
+        );
+        assert_eq!(texts(&server), ["alice's original"]);
+        let rows = block_on(server.all(
+            &server.prepare_query(&Query::from("notes")).unwrap(),
+            ReadOpts::default(),
+        ))
+        .unwrap();
+        let provenance = server
+            .row_provenance("notes", rows[0].row_uuid())
+            .unwrap()
+            .unwrap();
+        assert_eq!(provenance.1, alice().canonical());
+        assert_eq!(provenance.3, alice().canonical());
+        block_on(owner.close()).unwrap();
+    }
+}
+
+/// Bob cannot adopt Alice's already-journalled unit after the relay restarts,
+/// even by changing its author to match his valid connection. Raw upload replay
+/// controls the original transaction identity; public rows and provenance prove
+/// that only Alice's retained unit reaches the authority.
+#[test]
+fn durable_relay_retry_cannot_change_the_admitted_sender() {
+    use jazz::db::SyncMessage;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.sqlite");
+    let original = captured_upload(1, "alice's retained unit", true);
+    {
+        let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+        relay.set_remote_link_hint(RemoteLinkHint::Failed);
+        let (mut peer, link) = duplex_transport::duplex();
+        relay.accept_subscriber(link, alice());
+        send_upload(peer.as_mut(), &original);
+        turns(&[&relay]);
+        assert!(receipts(peer.as_mut()).is_empty());
+        block_on(relay.close()).unwrap();
+    }
+    let relay = open(50, AuthorSubject::SYSTEM, Some(&path));
+    let (mut bob_peer, link) = duplex_transport::duplex();
+    relay.accept_subscriber(link, bob());
+    for change_author in [false, true] {
+        let mut substituted = original.clone();
+        if change_author {
+            for message in &mut substituted {
+                if let SyncMessage::Commit { author, .. } = message {
+                    *author = Some(bob().canonical().to_owned());
+                }
+            }
+        }
+        send_upload(bob_peer.as_mut(), &substituted);
+        turns(&[&relay]);
+        let fates = receipts(bob_peer.as_mut());
+        assert!(matches!(fates.as_slice(), [Err(_)]), "{fates:?}");
+    }
+    let server = authority();
+    connect(&relay, &server, AuthorSubject::SYSTEM);
+    turns(&[&relay, &server]);
+    assert_eq!(texts(&server), ["alice's retained unit"]);
+    let rows = block_on(server.all(
+        &server.prepare_query(&Query::from("notes")).unwrap(),
+        ReadOpts::default(),
+    ))
+    .unwrap();
+    let provenance = server
+        .row_provenance("notes", rows[0].row_uuid())
+        .unwrap()
+        .unwrap();
+    assert_eq!(provenance.1, alice().canonical());
+    assert_eq!(provenance.3, alice().canonical());
+    block_on(relay.close()).unwrap();
+}
+
+/// Alice's private relay cannot substitute or omit the original author, including
+/// on a replay. An inadmissible frame cannot poison the original transaction:
+/// the valid upload still settles once and retains its original accepted fate.
+#[test]
+fn private_upload_scope_is_checked_before_replay_without_poisoning_the_original() {
+    use jazz::db::SyncMessage;
+    let server = authority();
+    let admitted = BTreeMap::from([("tenant".into(), Value::String("alice".into()))]);
+    let (mut peer, link) = duplex_transport::duplex();
+    server
+        .accept_scope_isolated_subscriber(link, alice(), admitted.clone())
+        .unwrap();
+    let mut expected = Vec::new();
+    for scenario in 0..4 {
+        let text = format!("allowed-{scenario}");
+        let mut valid = captured_upload(70 + scenario, &text, true);
+        for message in &mut valid {
+            if let SyncMessage::Commit { session, .. } = message {
+                *session = Some(admitted.clone());
+            }
+        }
+        let mut forged = valid.clone();
+        for message in &mut forged {
+            if let SyncMessage::Commit { author, .. } = message {
+                match scenario {
+                    0 => *author = Some(bob().canonical().to_owned()),
+                    1 => *author = None,
+                    2 => *author = Some(AuthorSubject::SYSTEM.canonical().to_owned()),
+                    3 => {
+                        *author = Some(
+                            AuthorSubject::system_at(NodeUuid::from_bytes([99; 16]))
+                                .canonical()
+                                .to_owned(),
+                        )
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        for already_accepted in [false, true] {
+            send_upload(peer.as_mut(), &forged);
+            turns(&[&server]);
+            assert!(matches!(receipts(peer.as_mut()).as_slice(), [Err(_)]));
+            assert_eq!(
+                texts(&server),
+                expected,
+                "a forged upload cannot change rows"
+            );
+            send_upload(peer.as_mut(), &valid);
+            turns(&[&server]);
+            assert!(matches!(receipts(peer.as_mut()).as_slice(), [Ok(())]));
+            if !already_accepted {
+                expected.push(text.clone());
+            }
+            assert_eq!(
+                texts(&server),
+                expected,
+                "the valid upload applies only once"
+            );
+        }
+    }
 }

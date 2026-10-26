@@ -135,7 +135,7 @@ describe("React Native account preparation", () => {
     expect(manager.getLoggedIn()).toBe(account);
   });
 
-  it("neither retains an external assignment nor revalidates it in place", async () => {
+  it("retains only an external assignment and requires a fresh credential before revalidation", async () => {
     const identity = { issuer: "https://issuer.example", subject: "alice" };
     const account = "00000000-0000-4000-8000-00000000000a";
     vi.stubGlobal(
@@ -155,13 +155,28 @@ describe("React Native account preparation", () => {
       store: accountStore,
     };
     const manager = await createAccountManager(config);
-    expect(manager.revalidatesInPlace).toBe(false);
+    expect(manager.revalidatesInPlace).toBe(true);
     const exp = Math.floor(Date.now() / 1000) + 3600;
-    await manager.loginJWT(
-      `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`,
+    const jwt = `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`;
+    await manager.loginJWT(jwt);
+    await vi.waitFor(async () =>
+      expect(JSON.parse((await accountStore.read())!).assignment).toEqual({ account, ...identity }),
     );
-    await vi.waitFor(async () => expect(await accountStore.read()).not.toBeNull());
-    expect(JSON.parse((await accountStore.read())!).assignment).toBeNull();
+    expect(await accountStore.read()).not.toContain(jwt);
+    const restored = await createAccountManager(config);
+    const retained = restored.getLoggedIn()!;
+    expect(retained).toMatchObject({ id: account, identity });
+    const registry = accountRegistryUrl(config.serverUrl, config.appId);
+    await expect(accountToken(retained, registry)).rejects.toMatchObject({
+      code: "account_credential_pending",
+    });
+    await expect(restored.loginJWT(jwt)).resolves.toBe(retained);
+    expect(restored.getLoggedIn()).toBe(retained);
+    await expect(accountToken(retained, registry)).resolves.toBe(jwt);
+    restored.logout();
+    await vi.waitFor(async () =>
+      expect(JSON.parse((await accountStore.read())!).assignment).toBeNull(),
+    );
     expect((await createAccountManager(config)).getLoggedIn()).toBeUndefined();
   });
 });

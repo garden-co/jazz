@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "wireRole": "jazz.sqlite.serializable-observed.v1",
+  "contentRole": "jazz.sqlite.serializable-read-content.v1",
+  "preimageHex": "08636f756e746572730707070707070707070707070707070700010576616c7565010f040000",
+  "commitHex": "4a53514c0204222222222222222222222222222222228001037f0001818080808080800811111111111111111111111111111111ac020000000000",
+  "encoding": "jazz.sqlite.sync.v2"
+}

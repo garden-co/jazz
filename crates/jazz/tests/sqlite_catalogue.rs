@@ -586,3 +586,176 @@ fn missing_derived_table_record_is_a_storage_error() {
     );
     assert_eq!(db.table_identity("unknown").unwrap(), None);
 }
+
+/// Alice's first catalogue request crosses her private owner while Bob's
+/// authority policy descriptor is still arriving. Installing that descriptor
+/// must not cancel the same connection's exact catalogue coverage receipt.
+#[test]
+fn cold_private_owner_catalogue_request_survives_policy_installation() {
+    let snapshot = genesis(schema("notes", "text"));
+    let server = authority(3, &snapshot, None);
+    let open_private = |node| {
+        block_on(Db::open(DbConfig::new(
+            snapshot.schemas[0].schema.without_permissions(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: user("alice"),
+            },
+        )))
+        .unwrap()
+    };
+    let owner = open_private(2);
+    owner.set_scope_isolated_storage_owner().unwrap();
+    let tab = open_private(1);
+    tab.set_private_owner_client().unwrap();
+    connect(&owner, &server, user("alice"), None);
+    connect(&tab, &owner, user("alice"), None);
+    drive(&[&tab, &owner, &server], tab.cover_catalogue("notes", None)).unwrap();
+    assert_eq!(
+        tab.table_identity("notes").unwrap(),
+        server.table_identity("notes").unwrap()
+    );
+}
+
+/// Alice keeps the old public schema while Bob renames its column and table.
+/// Her private owner must retain exact catalogue identities and compile the
+/// current policy against the same accepted storage epochs, including restart.
+#[test]
+fn private_owner_retains_old_names_under_renamed_authority_policies() {
+    use jazz::db::{ReadOpts, ReadTier};
+    use jazz::query::Query;
+    use jazz::tools::{PolicyExpr, TablePolicies, Value as PublicValue};
+    let mut snapshot = genesis(schema("notes", "text"));
+    let server = authority(3, &snapshot, None);
+    for text in ["visible", "hidden"] {
+        block_on(server.insert(
+            "notes",
+            BTreeMap::from([("text".into(), Value::String(text.into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    }
+    let old_schema = snapshot.schemas[0].schema.without_permissions();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("renamed-private.sqlite");
+    let open_owner = || {
+        let db = block_on(Db::open_at(
+            DbConfig::new(
+                old_schema.clone(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([2; 16]),
+                    author: user("alice"),
+                },
+            ),
+            &path,
+            Default::default(),
+        ))
+        .unwrap();
+        db.set_scope_isolated_storage_owner().unwrap();
+        db
+    };
+    let owner = open_owner();
+    connect(&owner, &server, user("alice"), None);
+    drive(&[&owner, &server], owner.cover_catalogue("notes", None)).unwrap();
+    let query = owner.prepare_query(&Query::from("notes")).unwrap();
+    let bytes = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let rows = drive(
+        &[&owner, &server],
+        owner.all_serialized_query(
+            &bytes,
+            ReadOpts::for_read_tier(ReadTier::Remote),
+            None,
+            None,
+            Some(user("alice")),
+            false,
+            || false,
+            |_| {},
+        ),
+    )
+    .unwrap();
+    let jazz::db::SerializedReadResult::Rows(rows) = rows else {
+        panic!("expected rows")
+    };
+    assert_eq!(rows.len(), 2);
+    let table = owner.table_identity("notes").unwrap();
+    let column = owner.column_identity("notes", "text").unwrap();
+    let lens = rename(&mut snapshot, "tasks", "body");
+    let governed = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_literal(
+                        "body",
+                        PublicValue::Text("visible".into()),
+                    ))),
+            )
+            .build(),
+    );
+    snapshot.schemas.last_mut().unwrap().schema = governed.clone();
+    block_on(server.activate_schema_with_lenses(governed, &[lens])).unwrap();
+    server.install_authority_catalogue(&snapshot).unwrap();
+    drive(&[&owner, &server], owner.cover_catalogue("notes", None)).unwrap();
+    assert_eq!(owner.table_identity("tasks").unwrap(), table);
+    assert_eq!(owner.column_identity("tasks", "body").unwrap(), column);
+    let rows = block_on(owner.all_for_identity(
+        &query,
+        ReadOpts::for_read_tier(ReadTier::LocalOnly),
+        user("alice"),
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cells().find(|(name, _)| *name == "text").unwrap().1,
+        Some(&Value::String("visible".into()))
+    );
+    let tab = block_on(Db::open(DbConfig::new(
+        old_schema.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: user("alice"),
+        },
+    )))
+    .unwrap();
+    tab.set_private_owner_client().unwrap();
+    connect(&tab, &owner, user("alice"), None);
+    let rows = drive(
+        &[&tab, &owner, &server],
+        tab.all_serialized_query(
+            &bytes,
+            ReadOpts::for_read_tier(ReadTier::LocalFirst),
+            None,
+            None,
+            None,
+            false,
+            || false,
+            |_| {},
+        ),
+    )
+    .unwrap();
+    let jazz::db::SerializedReadResult::Rows(rows) = rows else {
+        panic!("expected foreground rows")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cells().find(|(name, _)| *name == "text").unwrap().1,
+        Some(&Value::String("visible".into()))
+    );
+    block_on(tab.close()).unwrap();
+    block_on(owner.close()).unwrap();
+    drop(owner);
+    let owner = open_owner();
+    owner.set_remote_link_hint(RemoteLinkHint::Failed);
+    let query = owner.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(owner.all_for_identity(
+        &query,
+        ReadOpts::for_read_tier(ReadTier::LocalOnly),
+        user("alice"),
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cells().find(|(name, _)| *name == "text").unwrap().1,
+        Some(&Value::String("visible".into()))
+    );
+}

@@ -1,4 +1,4 @@
-use crate::*;
+use super::*;
 use jazz::records::{RecordDescriptor, ValueType};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
 
@@ -157,11 +157,7 @@ fn napi_seal_is_unpublished_owner_bound_single_use_and_preserves_insert_absence(
         db.seal_initialization_transaction(open.clone()).unwrap(),
     )
     .unwrap();
-    assert!(
-        foreign
-            .publish_initialization_transaction(sealed.token.clone())
-            .is_err()
-    );
+    assert!(foreign.publish_test(sealed.token.clone()).is_err());
     let before = db
         .local_current_row("items".into(), Uint8Array::new(row.to_vec()))
         .unwrap();
@@ -176,10 +172,8 @@ fn napi_seal_is_unpublished_owner_bound_single_use_and_preserves_insert_absence(
     )
     .unwrap();
     assert_eq!(status["statuses"][0]["kind"], "not-observed");
-    let _write = db
-        .publish_initialization_transaction(sealed.token.clone())
-        .unwrap();
-    assert!(db.publish_initialization_transaction(sealed.token).is_err());
+    let _write = db.publish_test(sealed.token.clone()).unwrap();
+    assert!(db.publish_test(sealed.token).is_err());
     assert!(
         db.initialization_transaction_status(vec![sealed.reserved_tx_id.clone(); 65])
             .is_err()
@@ -246,37 +240,29 @@ fn schema_view_cannot_drain_authenticated_catalogue_capture_from_runtime_owner()
         None,
     )
     .unwrap();
-    let authority = NapiDb::open_memory_as_backend(
-        Uint8Array::new(schema.clone()),
-        config(authority_node, true),
-    )
+    // Native hosts are replicas; use the actual authority constructor for
+    // the peer which supplies authenticated catalogue coverage.
+    let identity = CoreDbIdentity {
+        node: authority_node,
+        author: CoreAuthorSubject::SYSTEM,
+    };
+    let authority_db = block_on(jazz::db::Db::open_history_complete(
+        jazz::db::DbConfig::new(binding_host::decode_schema(&schema).unwrap(), identity),
+    ))
     .unwrap();
+    let authority = NapiDb::runtime_owner(Binding::new(authority_db, identity, true));
+
     let core = |db: &NapiDb| {
         let inner = db.inner.borrow();
         let Some(inner) = inner.as_ref() else {
             panic!("memory fixture");
         };
-        let core = &inner.core;
+        let core = &inner.binding.db;
         Rc::clone(core)
     };
     let owner_core = core(&owner);
     let authority_core = core(&authority);
-    // SQLite authorities explicitly install their accepted catalogue before
-    // advertising it; a runtime's opened schema alone is not a deployment.
-    let compiled = crate::decode_public_schema(&schema).unwrap();
-    authority_core
-        .install_authority_catalogue(&jazz::protocol::CatalogueSnapshot {
-            genesis_physical_identities: jazz::protocol::PhysicalIdentityManifest::allocate(
-                &compiled,
-            ),
-            schemas: vec![jazz::protocol::SchemaVersion::new(compiled.clone())],
-            lineages: vec![],
-            current_write_schema: jazz::protocol::CurrentWriteSchema {
-                revision: 1,
-                schema: compiled.version_id(),
-            },
-        })
-        .unwrap();
+    // open_history_complete installed the actual authority's catalogue.
     let (client_link, authority_link) = jazz::db::duplex();
     let upstream = core_block_on(owner_core.connect_upstream(client_link));
     let downstream = authority_core.accept_subscriber(authority_link, author);

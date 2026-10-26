@@ -775,7 +775,7 @@ fn private_owner_checks_accepted_rows_with_authenticated_catalogue() {
     let owner = open_alice(1);
     owner.set_scope_isolated_storage_owner().unwrap();
     let foreground = open_alice(2);
-    foreground.set_non_durable_client();
+    foreground.set_private_owner_client().unwrap();
     spoof(&server, fake);
     spoof(&owner, fake);
     spoof(&foreground, fake);
@@ -827,4 +827,60 @@ fn private_owner_checks_accepted_rows_with_authenticated_catalogue() {
         fresh.try_next_event(),
         Some(jazz::db::SubscriptionEvent::Delta { added, settled: true, .. }) if added.is_empty()
     ));
+}
+
+/// Alice's nested document read uses the authority's accepted table identity
+/// for both parent lookup and child policies, ignoring Mallory's spoofed claims.
+#[test]
+fn nested_reads_keep_the_accepted_catalogue_identity() {
+    let db = authority(&snapshot(schema("documents", intrinsic("documents"))));
+    let scope = db.table_identity("documents").unwrap().unwrap().0;
+    let mut expected = vec![
+        seed(&db, "documents", scope, "first"),
+        seed(&db, "documents", scope, "second"),
+    ];
+    expected.sort();
+    let forged = uuid::Uuid::new_v4();
+    seed(&db, "documents", forged, "hidden");
+    spoof(&db, forged);
+    let query = Query::from("documents").array_subquery(
+        jazz::query::ArraySubquery::new("related", "documents", "scopeId", "scopeId")
+            .select(["text"]),
+    );
+    let prepared = db.prepare_query(&query).unwrap();
+    let mut stream =
+        block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), alice())).unwrap();
+    let jazz::db::SubscriptionEvent::Delta { added: rows, .. } =
+        block_on(stream.next_event()).unwrap()
+    else {
+        panic!("expected document subscription rows");
+    };
+    let mut parents = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+    parents.sort();
+    assert_eq!(parents, expected);
+    for row in rows {
+        let Value::Array(children) = row
+            .cells()
+            .find(|(name, _)| *name == "related")
+            .unwrap()
+            .1
+            .unwrap()
+        else {
+            panic!("expected related documents");
+        };
+        let mut ids = children
+            .iter()
+            .map(|child| {
+                let Value::Record(child) = child else {
+                    panic!("expected document record")
+                };
+                let Value::Uuid(id) = child.get_idx(0).unwrap() else {
+                    panic!("expected document id")
+                };
+                RowUuid(id)
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, expected);
+    }
 }

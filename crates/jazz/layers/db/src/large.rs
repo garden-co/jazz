@@ -26,6 +26,7 @@
 //! transaction; per-root reference counts are kept by triggers on every
 //! table that has a large-capable column.
 
+use crate::values::CachedRow;
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -81,7 +82,7 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// store built or validated it; later descriptors over the same root are
 /// checked against it instead of walking the tree again.
 /// `_jazz_lv_receipt` holds nodes a client pushed ahead of the commit that
-/// references them, until `expires` (ms); `_jazz_lv_unpushed` holds nodes
+/// references them, until that commit lands or `expires` (ms); `_jazz_lv_unpushed` holds nodes
 /// this replica wrote that its upstream may not have yet; `_jazz_lv_upload`
 /// leases a local streaming upload's nodes (`_jazz_lv_upload_node`) until
 /// its row commits, it is aborted, or it goes untouched past the staging
@@ -480,6 +481,14 @@ impl Chunks {
         }
     }
 
+    /// Close the read-only connection. The store's own connection must be
+    /// the last one on the file when it closes: only the last connection
+    /// checkpoints the WAL into the file and removes it, and a read-only one
+    /// cannot.
+    pub(crate) fn close_reader(&self) {
+        self.state.lock().expect("chunk cache").reader = None;
+    }
+
     /// The open transaction ended: its nodes are readable from the file (or
     /// were rolled back, and are unreferenced but still correct bytes).
     pub(crate) fn unpin(&self) {
@@ -498,6 +507,13 @@ impl Chunks {
     /// Whether the cache is the store's only readable copy of its nodes.
     pub(crate) fn in_memory(&self) -> bool {
         self.state.lock().expect("chunk cache").budget.is_none()
+    }
+
+    /// Whether a read recorded chunks to request, beyond those `settled`
+    /// accounts for, that the next send has not taken yet.
+    pub(crate) fn has_demand_beyond(&self, settled: impl Fn(&ChunkRequest) -> bool) -> bool {
+        let state = self.state.lock().expect("chunk cache");
+        state.demand.iter().any(|request| !settled(request))
     }
 
     /// The chunks statements needed since the last call.
@@ -960,7 +976,7 @@ fn record_base(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
     Ok(())
 }
 
-fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
+pub(crate) fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
     conn.prepare_cached("INSERT OR IGNORE INTO _jazz_lv_unpushed (locator) VALUES (?1)")
         .and_then(|mut statement| statement.execute([locator.as_bytes().as_slice()]))
         .map_err(storage)?;
@@ -969,6 +985,7 @@ fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> 
 
 /// Store one node, caching it pinned when `cache` is given. A new branch
 /// records an edge to each child, whether or not the child is stored yet.
+/// The caller verified `chunk` against its hash (or produced it).
 fn store_chunk(
     conn: &Connection,
     cache: Option<&Chunks>,
@@ -1001,8 +1018,7 @@ fn store_chunk(
     if inserted == 0 {
         return Ok(());
     }
-    let node = lv::decode_node_untyped_authenticated(chunk.node_ref.object_hash, &chunk.encoded)
-        .map_err(corrupt)?;
+    let node = lv::decode_node_untyped_verified(&chunk.encoded).map_err(corrupt)?;
     if let ChunkNode::Branch { children, .. } = node {
         let mut edge = conn
             .prepare_cached("INSERT OR IGNORE INTO _jazz_lv_edge (child, parent) VALUES (?1, ?2)")
@@ -1249,8 +1265,10 @@ fn walk(
         if !descend(&request, bytes)? {
             continue;
         }
+        // Stored nodes were verified on the way in.
         if let Some(bytes) = bytes
-            && let ChunkNode::Branch { children, .. } = authenticate(&request, bytes)?
+            && let ChunkNode::Branch { children, .. } =
+                lv::decode_node_untyped_verified(bytes).map_err(corrupt)?
         {
             stack.extend(children.iter().map(|child| request_of(&child.node_ref)));
         }
@@ -1371,6 +1389,22 @@ pub(crate) fn receive_pushed(
     Ok(())
 }
 
+/// Drop the receipts of the pushed nodes under `root`, which a commit now
+/// references: the cell holds the tree from here on. Walks only nodes that
+/// still hold a receipt, so an append settles just the nodes it pushed.
+pub(crate) fn settle_receipts(conn: &Connection, root: &lv::Locator) -> Result<(), Error> {
+    conn.prepare_cached(
+        "WITH RECURSIVE pushed (locator) AS ( \
+           SELECT locator FROM _jazz_lv_receipt WHERE locator = ?1 \
+           UNION SELECT e.child FROM _jazz_lv_edge e JOIN pushed p ON e.parent = p.locator \
+           WHERE EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = e.child)) \
+         DELETE FROM _jazz_lv_receipt WHERE locator IN (SELECT locator FROM pushed)",
+    )
+    .and_then(|mut statement| statement.execute([root.as_bytes().as_slice()]))
+    .map_err(storage)?;
+    Ok(())
+}
+
 /// Drop receipts that expired by `now`; their nodes are reclaimed unless a
 /// commit referenced them meanwhile.
 pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
@@ -1462,7 +1496,7 @@ pub(crate) fn admit(
 
 /// Whether the root `value` names is stored here.
 pub(crate) fn root_is_local(conn: &Connection, value: &LargeValueRef) -> Result<bool, Error> {
-    conn.query_row(
+    conn.cached_row(
         "SELECT EXISTS (SELECT 1 FROM _jazz_lv_node WHERE locator = ?1)",
         [value.root.locator.as_bytes().as_slice()],
         |r| r.get(0),
@@ -1499,7 +1533,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             continue;
         }
         let referenced: bool = conn
-            .query_row(
+            .cached_row(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_root WHERE root = ?1 \
                  AND durable > 0) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
@@ -1514,7 +1548,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             continue;
         }
         let node: Option<(Vec<u8>, Vec<u8>)> = conn
-            .query_row(
+            .cached_row(
                 "SELECT hash, bytes FROM _jazz_lv_node WHERE locator = ?1",
                 [&locator],
                 |r| Ok((r.get(0)?, r.get(1)?)),
@@ -1947,6 +1981,39 @@ mod tests {
         expire_receipts(&conn, 1_000).unwrap();
         while reclaim(&conn, &chunks, 64).unwrap() > 0 {}
         assert_eq!(count(), 0, "nothing referenced them");
+    }
+
+    #[test]
+    fn a_commit_settles_the_receipts_of_the_tree_it_references() {
+        let (conn, chunks) = chunks();
+        let receipts = || {
+            conn.query_row("SELECT count(*) FROM _jazz_lv_receipt", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let push = |built: &lv::PreparedLargeValue| {
+            for chunk in &built.staged_chunks {
+                receive_pushed(
+                    &conn,
+                    &chunks,
+                    &request_of(&chunk.node_ref),
+                    chunk.encoded.clone(),
+                    1_000,
+                )
+                .unwrap();
+            }
+        };
+        let referenced = lv::prepare(LargeValueKind::String, &text(11, 300_000)).unwrap();
+        let pending = lv::prepare(LargeValueKind::String, &text(12, 300_000)).unwrap();
+        push(&referenced);
+        push(&pending);
+        let pending_nodes = pending.staged_chunks.len() as i64;
+        assert!(receipts() > pending_nodes);
+        settle_receipts(&conn, &referenced.value_ref.root.locator).unwrap();
+        // Only the other push, still ahead of its commit, keeps receipts,
+        // so expiring them later touches nothing the commit holds.
+        assert_eq!(receipts(), pending_nodes);
     }
 
     #[test]

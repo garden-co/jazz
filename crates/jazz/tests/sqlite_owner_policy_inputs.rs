@@ -134,7 +134,7 @@ fn cold_owner_follows_readable_membership_dependencies_and_revocation() {
     let owner = open(50, bob(), schema.without_permissions());
     owner.set_scope_isolated_storage_owner().unwrap();
     let tab = open(1, bob(), schema.without_permissions());
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     connect(&owner, &authority, bob());
     connect(&tab, &owner, bob());
     let dbs = [&tab, &owner, &authority];
@@ -193,7 +193,7 @@ fn private_reader(authority: &Db, schema: &JazzSchema) -> (Db, Db) {
     let owner = open(50, bob(), schema.without_permissions());
     owner.set_scope_isolated_storage_owner().unwrap();
     let tab = open(1, bob(), schema.without_permissions());
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     connect(&owner, authority, bob());
     connect(&tab, &owner, bob());
     drive(&[&tab, &owner, authority], tab.wait_for_storage_owner()).unwrap();
@@ -344,6 +344,8 @@ fn readable_inputs_use_each_connections_claims_without_borrowing_another_token()
     // require disclosing the supporting membership to this connection.
     denied
         .send(SyncMessage::Subscribe {
+            tier: jazz::db::ReadTier::Remote,
+            wait: None,
             id: 2,
             query: Query::from("notes"),
             binding: BTreeMap::new(),
@@ -372,6 +374,8 @@ fn readable_policy_subscription_v1_has_frozen_wire_bytes() {
         include_deleted: true,
     };
     let ordinary = SyncMessage::Subscribe {
+        tier: jazz::db::ReadTier::Remote,
+        wait: None,
         id: 300,
         query,
         binding,
@@ -379,19 +383,18 @@ fn readable_policy_subscription_v1_has_frozen_wire_bytes() {
         include_deleted: true,
     };
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_readable_policy_subscription_v1.json"
+        "../fixtures/sqlite-sync-v2/readable-policy.json"
     ))
     .unwrap();
     assert_eq!(
         fixture["role"],
         "jazz.sqlite.sync.readable-policy-subscribe.v1"
     );
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     for (name, message) in [("readable", request), ("ordinary", ordinary)] {
         let bytes = hex::decode(fixture[name].as_str().unwrap()).unwrap();
-        assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
-        let (decoded, rest) = postcard::take_from_bytes::<SyncMessage>(&bytes).unwrap();
-        assert!(rest.is_empty());
+        assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
+        let decoded = jazz::db::decode_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
             serde_json::to_value(message).unwrap()
@@ -408,7 +411,7 @@ fn owner_reconnect_preserves_the_input_request_and_reconciles_revocation() {
     let owner = open(50, bob(), schema.without_permissions());
     owner.set_scope_isolated_storage_owner().unwrap();
     let tab = open(1, bob(), schema.without_permissions());
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     let (up, down) = duplex();
     let upstream = block_on(owner.connect_upstream(up));
     let subscriber = authority.accept_subscriber(down, bob());

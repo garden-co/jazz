@@ -728,10 +728,10 @@ describe("forRequest concurrent session isolation", () => {
 
     // Cross-user update must be rejected.
     expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
-      'Update failed: WriteError("authorization_denied: read policy denied UPDATE: the target requires read permission")',
+      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
     );
     expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
-      'Update failed: WriteError("authorization_denied: read policy denied UPDATE: the target requires read permission")',
+      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
     );
 
     // Upsert of an existing foreign row follows the same read-before-write
@@ -745,7 +745,7 @@ describe("forRequest concurrent session isolation", () => {
         owner_id: bob.user,
       }),
     ).toThrow(
-      'Upsert failed: WriteError("authorization_denied: read policy denied UPSERT: the target requires read permission")',
+      'Upsert failed: WriteError("read policy denied UPSERT on table todos: the operation requires read permission on the target row")',
     );
 
     // None of the rejected UPDATE/UPSERT attempts may alter either owner's row.
@@ -822,14 +822,18 @@ describe("forRequest concurrent session isolation", () => {
         .wait({ tier: "global" }),
     ]);
 
-    // Read-before-delete admission rejects a foreign row synchronously, before
-    // returning a write handle or staging a transaction for the authority.
-    expect(() => aliceDb.delete(todoApp.todos, bobRow.id)).toThrow(
-      'Delete failed: WriteError("authorization_denied: read policy denied DELETE: the target requires read permission")',
-    );
-    expect(() => bobDb.delete(todoApp.todos, aliceRow.id)).toThrow(
-      'Delete failed: WriteError("authorization_denied: read policy denied DELETE: the target requires read permission")',
-    );
+    // DELETE permission rejects each foreign target through its write receipt;
+    // SELECT denial is independent and neither rejected write may remove a row.
+    await expect(
+      aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "global" }),
+    ).rejects.toMatchObject({
+      code: "permission_denied",
+    });
+    await expect(
+      bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "global" }),
+    ).rejects.toMatchObject({
+      code: "permission_denied",
+    });
     await vi.waitFor(
       async () => {
         const [aliceRows, bobRows] = await Promise.all([

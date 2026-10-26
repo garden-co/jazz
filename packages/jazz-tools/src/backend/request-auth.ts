@@ -27,6 +27,7 @@ import type { Session } from "../runtime/context.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import type { BackendJwtPublicKey } from "./create-jazz-context.js";
 import { isRecord, toError } from "../runtime/util.js";
+import { resolveAllowLocalFirstAuth } from "./local-first-auth.js";
 
 /**
  * The request's credential was missing, malformed, unverifiable, expired, for
@@ -104,6 +105,12 @@ export interface BackendRequestAuthConfig {
   jwtPublicKey?: BackendJwtPublicKey;
   jwtIssuer?: string;
   jwtAudience?: string | readonly string[];
+  /**
+   * Whether request verification accepts local-first bearer JWTs. Defaults to
+   * `false` when `NODE_ENV` is `production` (case-insensitive), and `true`
+   * otherwise. Explicit `true` or `false` overrides the default; account
+   * verification with the configured sync-server registry still applies.
+   */
   allowLocalFirstAuth?: boolean;
 }
 
@@ -662,7 +669,7 @@ export async function resolveRequestSession(
   }
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
-  const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
+  const allowLocalFirstAuth = resolveAllowLocalFirstAuth(config.allowLocalFirstAuth);
   const admit = async (session: Session): Promise<Session> => {
     if (!config.accountRegistry) return session; // standalone signature-verification helper
     let assignment: unknown;
@@ -691,7 +698,9 @@ export async function resolveRequestSession(
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
     if (!allowLocalFirstAuth) {
       throw new RequestAuthenticationError(
-        "Received local-first JWT, but createJazzSession() has allowLocalFirstAuth disabled.",
+        "Received local-first JWT, but createJazzSession() has allowLocalFirstAuth disabled. " +
+          "Local-first authentication defaults to disabled when NODE_ENV is production. " +
+          "Set allowLocalFirstAuth: true to enable it; the sync server must also allow local-first authentication.",
       );
     }
 

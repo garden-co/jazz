@@ -63,7 +63,7 @@ fn owner(path: Option<&Path>) -> Db {
 }
 fn foreground(node: u8) -> Db {
     let db = open(node, None);
-    db.set_non_durable_client();
+    db.set_private_owner_client().unwrap();
     db
 }
 
@@ -84,7 +84,7 @@ fn cold_foreground(node: u8) -> Db {
     let mut config = config(node);
     config.schema = config.schema.without_permissions();
     let db = block_on(Db::open(config)).unwrap();
-    db.set_non_durable_client();
+    db.set_private_owner_client().unwrap();
     db
 }
 fn connect(client: &Db, owner: &Db) {
@@ -253,6 +253,9 @@ fn cold_private_previews_reject_a_different_admitted_identity() {
     let (mut peer, link) = duplex_transport::duplex();
     owner.accept_subscriber(link, mallory);
     peer.send(SyncMessage::Fetch {
+        view: jazz::protocol::ReadViewSourceSpec::Current,
+        tier: jazz::db::ReadTier::LocalOnly,
+        wait: None,
         id: 7,
         query: Query::from("notes"),
         binding: BTreeMap::new(),
@@ -336,8 +339,8 @@ fn cold_preview_does_not_grant_read_access_to_its_accepted_row() {
     assert!(values(&reopened).is_empty());
 }
 
-/// Alice reloads into a fresh tab after her owner reopens. LocalOnly does not
-/// fetch worker-only rows; a propagated query recovers only its pending inputs.
+/// Alice reloads after her owner reopens. LocalOnly sees the owner cache; a
+/// separate fresh tab recovers only the pending inputs named by its first query.
 #[test]
 fn reloaded_foreground_recovers_relevant_pending_inputs_through_its_query() {
     let dir = tempfile::tempdir().unwrap();
@@ -352,18 +355,25 @@ fn reloaded_foreground_recovers_relevant_pending_inputs_through_its_query() {
         tx
     };
     let owner = owner(Some(&path));
-    let tab = foreground(2);
-    connect(&tab, &owner);
+    let local_tab = foreground(3);
+    connect(&local_tab, &owner);
     let mut local = subscribe(
-        &tab,
+        &local_tab,
         Query::from("notes"),
         ReadOpts::for_read_tier(ReadTier::LocalOnly),
     );
-    turns(&[&tab, &owner]);
-    assert!(values(&tab).is_empty());
-    assert!(
-        matches!(local.try_next_event(),Some(SubscriptionEvent::Delta{reset:true,added,..}) if added.is_empty())
+    assert_eq!(
+        opening(&mut local, &[&local_tab, &owner]),
+        (
+            vec!["unrelated".into(), "wanted".into()],
+            DurabilityTier::Local
+        )
     );
+    drop(local);
+    block_on(local_tab.close()).unwrap();
+    let tab = foreground(2);
+    connect(&tab, &owner);
+    assert!(values(&tab).is_empty());
     let mut remote = subscribe(
         &tab,
         Query::from("notes").filter(eq(col("text"), lit("wanted"))),
@@ -495,7 +505,7 @@ fn recovered_update_replays_over_accepted_base_and_rejection_restores_it() {
     let owner = owner(None);
     owner.set_remote_link_hint(RemoteLinkHint::Live);
     connect(&owner, &server);
-    let writer = open(1, None);
+    let writer = foreground(1);
     connect(&writer, &owner);
     let warm = subscribe(
         &writer,
@@ -518,7 +528,6 @@ fn recovered_update_replays_over_accepted_base_and_rejection_restores_it() {
     ))
     .unwrap()
     .mergeable_tx_id();
-    writer.set_non_durable_client();
     connect(&writer, &owner);
     turns(&[&writer, &owner]);
     let tab = foreground(2);
@@ -573,8 +582,11 @@ fn an_own_counter_echo_is_promoted_once_and_keeps_original_snapshot_dots() {
     owner.set_remote_link_hint(RemoteLinkHint::Failed);
     let tab = opened(1);
     tab.set_remote_link_hint(RemoteLinkHint::Failed);
-    // Public foreground mutations remain guarded. Queue ordinary replica writes
-    // in the foreground suffix to isolate input replay from mutation admission.
+    tab.set_private_owner_client().unwrap();
+    connect(&tab, &owner);
+    turns(&[&tab, &owner]);
+    // Stage without driving the owner, so these original tab positions have
+    // not yet been promoted when the snapshot is captured.
     tab.seed_seq_floor((1u64 << 52) + (1u64 << 51));
     let row = block_on(tab.insert(
         "notes",
@@ -594,7 +606,6 @@ fn an_own_counter_echo_is_promoted_once_and_keeps_original_snapshot_dots() {
     ))
     .unwrap();
     let before = block_on(tab.capture_snapshot()).unwrap();
-    tab.set_non_durable_client();
     struct Capture {
         transport: Box<dyn Transport>,
         sent: Rc<RefCell<Vec<SyncMessage>>>,
@@ -699,6 +710,9 @@ fn a_peer_without_input_support_never_receives_unqualified_pending_rows() {
     let (mut peer, link) = duplex_transport::duplex();
     owner.accept_subscriber(link, alice());
     peer.send(SyncMessage::Fetch {
+        view: jazz::protocol::ReadViewSourceSpec::Current,
+        tier: jazz::db::ReadTier::LocalOnly,
+        wait: None,
         id: 7,
         query: Query::from("notes"),
         binding: BTreeMap::new(),
@@ -747,6 +761,9 @@ fn malformed_or_misattributed_owner_inputs_fail_closed() {
     peer.send(SyncMessage::OwnerProjectionV1 { known: Vec::new() })
         .unwrap();
     peer.send(SyncMessage::Fetch {
+        view: jazz::protocol::ReadViewSourceSpec::Current,
+        tier: jazz::db::ReadTier::LocalOnly,
+        wait: None,
         id: 7,
         query: Query::from("notes"),
         binding: BTreeMap::new(),
@@ -805,11 +822,11 @@ fn malformed_or_misattributed_owner_inputs_fail_closed() {
 /// handshake and complete-input envelopes. Independently authored bytes pin
 /// enum tags, varint boundaries, field order and the nested Commit encoding.
 #[test]
-fn owner_input_wire_v1_matches_independent_byte_fixtures() {
+fn owner_input_wire_v2_matches_independent_byte_fixtures() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_owner_inputs_v1.json")).unwrap();
-    assert_eq!(fixture["version"], 1);
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/owner-inputs.json")).unwrap();
+    assert_eq!(fixture["version"], 2);
     assert_eq!(
         fixture["projectionRole"],
         "jazz.sqlite.sync.owner-projection.v1"
@@ -819,7 +836,7 @@ fn owner_input_wire_v1_matches_independent_byte_fixtures() {
         known: vec![([0x11; 16], 127), ([0x22; 16], 128)],
     };
     assert_eq!(
-        hex::encode(postcard::to_allocvec(&hello).unwrap()),
+        hex::encode(jazz::db::encode_message(&hello).unwrap()),
         fixture["helloHex"].as_str().unwrap()
     );
     let commit = hex::decode(fixture["commitHex"].as_str().unwrap()).unwrap();
@@ -831,14 +848,19 @@ fn owner_input_wire_v1_matches_independent_byte_fixtures() {
         ops,
         author,
         session,
-        updated_at,
+        expect,
     } = &decoded
     else {
         panic!("wrong nested variant")
     };
     assert_eq!(*node, [0x11; 16]);
     assert_eq!(*tx, 300);
-    assert!(ops.is_empty());
+    assert_eq!(
+        serde_json::to_value(ops).unwrap(),
+        serde_json::json!([
+            {"Delete": {"table": "notes", "row": vec![0x66_u8;16], "target": "Root", "at": 42}}
+        ])
+    );
     assert_eq!(
         serde_json::to_value(kind).unwrap(),
         serde_json::json!("Mergeable")
@@ -848,7 +870,7 @@ fn owner_input_wire_v1_matches_independent_byte_fixtures() {
         Some(fixture["subject"].as_str().unwrap())
     );
     assert_eq!(session, &Some(BTreeMap::new()));
-    assert_eq!(*updated_at, Some(42));
+    assert!(expect.is_empty());
     assert_eq!(postcard::to_allocvec(&decoded).unwrap(), commit);
     let message = SyncMessage::OwnerInputsV1 {
         schema: [0x22; 16],
@@ -878,12 +900,12 @@ fn owner_input_wire_v1_matches_independent_byte_fixtures() {
         ],
         units: vec![(fixture["position"].as_u64().unwrap(), commit)],
     };
-    let encoded = postcard::to_allocvec(&message).unwrap();
+    let encoded = jazz::db::encode_message(&message).unwrap();
     assert_eq!(
         hex::encode(&encoded),
         fixture["inputsHex"].as_str().unwrap()
     );
-    let decoded: SyncMessage = postcard::from_bytes(&encoded).unwrap();
+    let decoded = jazz::sync_codec::decode_sync_message(&encoded).unwrap();
     assert_eq!(
         serde_json::to_value(decoded).unwrap(),
         serde_json::to_value(message).unwrap()
@@ -964,6 +986,9 @@ fn pending_read_grant_cannot_authorise_an_accepted_recovery_base() {
     peer.send(SyncMessage::OwnerProjectionV1 { known: Vec::new() })
         .unwrap();
     peer.send(SyncMessage::Fetch {
+        view: jazz::protocol::ReadViewSourceSpec::Current,
+        tier: jazz::db::ReadTier::LocalOnly,
+        wait: None,
         id: 7,
         query: Query::from("notes"),
         binding: BTreeMap::new(),
@@ -1051,7 +1076,7 @@ fn a_pending_draft_recovers_its_unqueried_inherited_base() {
     .unwrap();
     turns(&[&writer, &owner]);
     let tab = opened(2);
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     connect(&tab, &owner);
     let mut stream = subscribe(
         &tab,
@@ -1066,7 +1091,7 @@ fn a_pending_draft_recovers_its_unqueried_inherited_base() {
     // The dependency is directional: reading the base does not fetch every
     // unrelated draft that happens to inherit from it.
     let base_tab = opened(3);
-    base_tab.set_non_durable_client();
+    base_tab.set_private_owner_client().unwrap();
     connect(&base_tab, &owner);
     let mut base_stream = subscribe(
         &base_tab,
@@ -1332,6 +1357,9 @@ fn owner_input_requires_its_exact_accepted_base_and_evidence() {
     peer.send(SyncMessage::OwnerProjectionV1 { known: Vec::new() })
         .unwrap();
     peer.send(SyncMessage::Fetch {
+        view: jazz::protocol::ReadViewSourceSpec::Current,
+        tier: jazz::db::ReadTier::LocalOnly,
+        wait: None,
         id: 7,
         query: Query::from("notes"),
         binding: BTreeMap::new(),
@@ -1400,4 +1428,318 @@ fn owner_input_requires_its_exact_accepted_base_and_evidence() {
             "{mode}"
         );
     }
+}
+
+/// Alice receives authority provenance and row images one frame per turn while
+/// the write's actual receipt is held. Her private foreground must not replay
+/// the accepted insert/update/delete twice or claim Global durability early.
+#[test]
+fn fragmented_accepted_images_do_not_replay_a_pending_owner_unit_twice() {
+    use jazz::db::{SyncMessage, Transport, TransportError};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+        rc::Rc,
+    };
+    // Transport control is necessary to separate accepted row evidence from
+    // its later real receipt; application writes cannot choose that delivery.
+    struct Fragmented {
+        wire: Box<dyn Transport>,
+        allow: Rc<Cell<bool>>,
+        hold: Rc<Cell<bool>>,
+        receipts: Rc<RefCell<VecDeque<SyncMessage>>>,
+    }
+    impl Transport for Fragmented {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.wire.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            if !self.allow.get() {
+                return None;
+            }
+            if !self.hold.get()
+                && let Some(receipt) = self.receipts.borrow_mut().pop_front()
+            {
+                self.allow.set(false);
+                return Some(receipt);
+            }
+            while let Some(message) = self.wire.try_recv() {
+                if self.hold.get()
+                    && matches!(
+                        &message,
+                        SyncMessage::OriginFateV2 { .. }
+                            | SyncMessage::FateV1 { .. }
+                            | SyncMessage::Fate { .. }
+                    )
+                {
+                    self.receipts.borrow_mut().push_back(message);
+                    continue;
+                }
+                self.allow.set(false);
+                return Some(message);
+            }
+            None
+        }
+    }
+    let authority = open(90, None);
+    authority.set_authority();
+    authority.initialize_authority_catalogue().unwrap();
+    let owner = owner(None);
+    let writer = foreground(1);
+    let (up, down) = duplex_transport::duplex();
+    let allow = Rc::new(Cell::new(false));
+    let hold = Rc::new(Cell::new(false));
+    let receipts = Rc::new(RefCell::new(VecDeque::new()));
+    block_on(owner.connect_upstream(Box::new(Fragmented {
+        wire: up,
+        allow: allow.clone(),
+        hold: hold.clone(),
+        receipts: receipts.clone(),
+    })));
+    owner.set_remote_link_hint(RemoteLinkHint::Live);
+    authority.accept_subscriber(down, alice());
+    connect(&writer, &owner);
+    let stream = RefCell::new(subscribe(
+        &writer,
+        Query::from("notes"),
+        ReadOpts::default(),
+    ));
+    let pump = || {
+        for _ in 0..160 {
+            allow.set(true);
+            for db in [&writer, &owner, &authority] {
+                block_on(db.tick()).unwrap();
+            }
+            while let Some(event) = stream.borrow_mut().try_next_event() {
+                assert!(
+                    !matches!(
+                        event,
+                        SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed
+                    ),
+                    "{event:?}"
+                );
+            }
+        }
+    };
+    pump();
+    let mut row = None;
+    for action in ["insert", "update", "delete"] {
+        hold.set(true);
+        let tx = match action {
+            "insert" => {
+                let (id, tx) = insert(&writer, "original", true);
+                row = Some(id);
+                tx
+            }
+            "update" => block_on(writer.update(
+                "notes",
+                row.unwrap(),
+                BTreeMap::from([("text".into(), Value::String("updated".into()))]),
+                Default::default(),
+            ))
+            .unwrap()
+            .mergeable_tx_id(),
+            "delete" => block_on(writer.delete("notes", row.unwrap(), Default::default()))
+                .unwrap()
+                .mergeable_tx_id(),
+            _ => unreachable!(),
+        };
+        pump();
+        assert!(
+            !receipts.borrow().is_empty(),
+            "authority receipt was held for {action}"
+        );
+        assert_wait_pending(writer.wait_for_transaction(tx, DurabilityTier::Global));
+        match action {
+            "insert" => assert_eq!(values(&writer), ["original"]),
+            "update" => assert_eq!(values(&writer), ["updated"]),
+            "delete" => assert!(values(&writer).is_empty()),
+            _ => unreachable!(),
+        }
+        hold.set(false);
+        pump();
+        assert_eq!(writer.write_state(tx).unwrap().fate, Fate::Accepted);
+        assert_wait_ready(async {
+            writer
+                .wait_for_transaction(tx, DurabilityTier::Global)
+                .await
+                .map(|_| ())
+        });
+    }
+}
+
+/// Alice's reopened tab recovers accepted history from its offline owner even
+/// when no pending input units remain. The cached opening stays Local, and a
+/// snapshot begun before hydration cannot acquire the newly received evidence.
+///
+/// authority -> durable owner -> close/reopen offline -> Alice's fresh tab
+#[test]
+fn reopened_foreground_recovers_accepted_cut_without_pending_inputs() {
+    use jazz::tools::OpenTransactionId;
+    let authority = open(90, None);
+    authority.set_authority();
+    authority.initialize_authority_catalogue().unwrap();
+    let (_, accepted_tx) = insert(&authority, "retained", true);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("accepted-owner.sqlite");
+    {
+        let owner = owner(Some(&path));
+        connect(&owner, &authority);
+        let mut read = subscribe(
+            &owner,
+            Query::from("notes"),
+            ReadOpts::for_read_tier(ReadTier::Remote),
+        );
+        assert_eq!(
+            opening(&mut read, &[&owner, &authority]),
+            (vec!["retained".into()], DurabilityTier::Global),
+        );
+        drop(read);
+        block_on(owner.close()).unwrap();
+    }
+    let owner = owner(Some(&path));
+    let tab = foreground(2);
+    connect(&tab, &owner);
+    turns(&[&tab, &owner]);
+    block_on(tab.wait_for_storage_owner()).unwrap();
+    let before = OpenTransactionId::new();
+    block_on(tab.begin_serializable(before)).unwrap();
+    let mut read = subscribe(&tab, Query::from("notes"), ReadOpts::default());
+    assert_eq!(
+        opening(&mut read, &[&tab, &owner]),
+        (vec!["retained".into()], DurabilityTier::Local),
+    );
+    let observe = |id| {
+        block_on(
+            tab.all_settled(
+                tab.prepare_query(&Query::from("notes")).unwrap(),
+                ReadOpts::for_read_tier(ReadTier::LocalOnly),
+                id,
+                true,
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    assert!(observe(before).rows.is_empty());
+    let after = OpenTransactionId::new();
+    block_on(tab.begin_serializable(after)).unwrap();
+    let accepted = observe(after);
+    assert_eq!(accepted.rows.len(), 1);
+    assert_eq!(accepted.settlements.len(), 1);
+    assert_eq!(
+        accepted.settlements[0].0.node,
+        NodeUuid::from_bytes([90; 16])
+    );
+    assert_eq!(accepted.settlements[0].0.time.0, accepted_tx);
+}
+
+/// Alice's transaction in a fresh tab reads Bob's cached row through the
+/// admitted owner while the authority is offline. Mergeable preparation must
+/// not mistake empty foreground memory for a missing row.
+#[test]
+fn foreground_transaction_preparation_reads_its_offline_owner() {
+    use jazz::tools::OpenTransactionId;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    let authority = open(90, None);
+    authority.set_authority();
+    authority.initialize_authority_catalogue().unwrap();
+    insert(&authority, "retained", true);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transaction-owner.sqlite");
+    {
+        let owner = owner(Some(&path));
+        connect(&owner, &authority);
+        let mut read = subscribe(
+            &owner,
+            Query::from("notes"),
+            ReadOpts::for_read_tier(ReadTier::Remote),
+        );
+        assert_eq!(
+            opening(&mut read, &[&owner, &authority]).0,
+            vec!["retained"]
+        );
+        drop(read);
+        block_on(owner.close()).unwrap();
+    }
+    let owner = owner(Some(&path));
+    {
+        let tab = foreground(2);
+        tab.set_remote_link_hint(RemoteLinkHint::Failed);
+        connect(&tab, &owner);
+        turns(&[&tab, &owner]);
+        block_on(tab.wait_for_storage_owner()).unwrap();
+        let tx = OpenTransactionId::new();
+        block_on(tab.begin_mergeable(tx)).unwrap();
+        let query = tab.prepare_query(&Query::from("notes")).unwrap();
+        let handle = tab.mergeable_tx_ref(tx);
+        let mut read = pin!(handle.all_prepared(&query));
+        let mut result = None;
+        for _ in 0..100 {
+            if let Poll::Ready(rows) = read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+                result = Some(rows.unwrap());
+                break;
+            }
+            for db in [&tab, &owner] {
+                block_on(db.tick()).unwrap();
+            }
+        }
+        let rows = result.expect("the offline owner answers the transaction read");
+        assert_eq!(rows.len(), 1);
+    }
+}
+
+/// Alice seeds a new offline owner with Bob's structural catalogue capture.
+/// The capture contains no read policies; Alice's pending inputs must remain
+/// readable to her sibling and after restart without claiming acceptance.
+#[test]
+fn cached_catalogue_keeps_cold_owner_pending_previews() {
+    let authority = open(90, None);
+    authority.set_authority();
+    authority.initialize_authority_catalogue().unwrap();
+    let capture = authority
+        .take_authenticated_catalogue_state()
+        .unwrap()
+        .capture
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cached-cold-owner.sqlite");
+    let open_owner = || {
+        let db = cold_owner(Some(&path));
+        // SAFETY: this capture came from this fixture's own authority and
+        // application scope, before the owner admits any foreground.
+        unsafe { db.install_cached_catalogue(&capture) }.unwrap();
+        db
+    };
+    {
+        let owner = open_owner();
+        let writer = cold_foreground(1);
+        connect(&writer, &owner);
+        turns(&[&writer, &owner]);
+        let (_, tx) = insert(&writer, "offline with catalogue", true);
+        turns(&[&writer, &owner]);
+        let sibling = cold_foreground(2);
+        connect(&sibling, &owner);
+        let mut stream = subscribe(&sibling, Query::from("notes"), ReadOpts::default());
+        assert_eq!(
+            opening(&mut stream, &[&sibling, &owner]),
+            (vec!["offline with catalogue".into()], DurabilityTier::Local)
+        );
+        assert_wait_pending(writer.wait_for_transaction(tx, DurabilityTier::Global));
+        block_on(writer.close()).unwrap();
+        block_on(sibling.close()).unwrap();
+        block_on(owner.close()).unwrap();
+    }
+    let owner = open_owner();
+    let reopened = cold_foreground(3);
+    connect(&reopened, &owner);
+    let mut stream = subscribe(&reopened, Query::from("notes"), ReadOpts::default());
+    assert_eq!(
+        opening(&mut stream, &[&reopened, &owner]),
+        (vec!["offline with catalogue".into()], DurabilityTier::Local)
+    );
+    assert_eq!(values(&reopened), vec!["offline with catalogue"]);
 }

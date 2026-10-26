@@ -22,6 +22,9 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 fn open(node: u8, authority: bool) -> Db {
+    open_as(node, authority, AuthorSubject::SYSTEM)
+}
+fn open_as(node: u8, authority: bool, author: AuthorSubject) -> Db {
     let schema = common::compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -35,7 +38,7 @@ fn open(node: u8, authority: bool) -> Db {
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
+            author,
         },
     )))
     .unwrap();
@@ -626,11 +629,15 @@ fn attempting_foreground_has_a_bounded_host_wake() {
 }
 
 /// Alice's foreground cannot claim local durability for an in-memory mutation.
-/// Standalone and staged writes fail until worker upload forwarding is ported.
+/// Standalone and staged writes fail until its private owner is admitted.
 #[test]
 fn foreground_writes_fail_without_publishing_or_claiming_durability() {
-    let tab = open(1, false);
-    tab.set_non_durable_client();
+    let tab = open_as(
+        1,
+        false,
+        AuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
+    );
+    tab.set_private_owner_client().unwrap();
     let cells = || BTreeMap::from([("text".into(), Value::String("unsaved".into()))]);
     let error = block_on(tab.insert("notes", cells(), Default::default())).unwrap_err();
     assert_eq!(error.code, jazz::db::ErrorCode::Query);

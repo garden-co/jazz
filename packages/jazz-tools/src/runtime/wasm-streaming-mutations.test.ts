@@ -369,6 +369,7 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
       );
       await withWatchdog(opening.promise, "concurrent subscription during flush");
       expect(openingError).toBeUndefined();
+      await withWatchdog(push, "upload push");
       expect(cancelledCallbacks).toBe(0);
       expect(flushSettled).toBe(false);
       await expect(upload.abort()).resolves.toBe(true);
@@ -435,8 +436,8 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     ).rejects.toThrow(/rate limit/i);
     const abort = upload.abort();
     await pushRejected;
-    // The failed synchronous push already consumed the upload and released it.
-    await expect(abort).resolves.toBe(false);
+    // A failed push leaves its upload explicitly abortable; abort releases its earlier chunks.
+    await expect(abort).resolves.toBe(true);
     await expect(upload.abort()).resolves.toBe(false);
     await expect(upload.finish()).rejects.toThrow(/closed/i);
     await expect(upload.push(Uint8Array.of(65))).rejects.toThrow(/closed/i);

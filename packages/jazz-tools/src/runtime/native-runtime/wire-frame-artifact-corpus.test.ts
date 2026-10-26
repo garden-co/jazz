@@ -7,26 +7,27 @@ import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-u
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import {
   FEATURE_PAYLOAD_ZSTD,
-  decodeWireError,
   decodeWebSocketFrameBatch,
+  decodeWireError,
   encodeWebSocketFrameBatch,
 } from "./websocket.js";
 
-type FrameFixture = { name: string; frame_hex: string };
-type ArtifactCorpus = {
+type Batch = { name: string; reader: Reader; batch_hex: string };
+type Reader = "server-opening" | "server" | "client";
+type SyncWireCorpus = {
   format: string;
-  error_frames: Array<{
-    name: string;
-    frame_hex: string;
-    code: string;
-    retry: string;
-    message: string;
-  }>;
-  rejections: Array<{ name: string; frame_hex: string; negotiated_features: string }>;
+  messages: Array<{ variant: string; reader: Reader; frame_hex: string }>;
+  examples: Array<{ name: string; variant: string; reader: Reader; frame_hex: string }>;
+  frames: Batch[];
+  rejections: Batch[];
 };
 
 type ArtifactFrameValidator = {
-  __testValidateWireFrameBatchCorpus(frame: Uint8Array, negotiatedFeatures: string): void;
+  __testValidateWireFrameBatchCorpus(
+    batch: Uint8Array,
+    reader: Reader,
+    negotiatedFeatures: string,
+  ): void;
   __testWireFrameCorpusFeatures(): string;
   __testValidateSqliteSyncFrameCorpus(frame: Uint8Array): void;
 };
@@ -35,44 +36,42 @@ type WasmArtifactFrameValidator = ArtifactFrameValidator & {
   WasmDb: { prototype: { wireFeatures?: () => number } };
 };
 
-// Control-frame fixtures still use the shared v6 carrier. SQLite semantics use
-// their own exact decoder; retired Groove frames must not become current input.
-// Both paths execute Rust in the freshly sealed generated artifacts.
+// `crates/jazz/fixtures/sqlite_sync_wire_v2.json` pins one independently assembled
+// frame of every SQLite sync message variant plus extended forms (see
+// crates/jazz/tests/sync_wire_corpus.rs), plus Hello and Error frames and
+// batches a reader must reject. Every one runs through both freshly generated
+// artifacts, not a JavaScript mirror of the Rust decoders.
 describe("wire frame artifact corpus", () => {
-  it("decodes every exact structured v1 error and rejects planted field drift", () => {
-    const corpus = artifactCorpus();
-    for (const error of corpus.error_frames) {
-      expect(decodeWireError(hexToBytes(error.frame_hex)), error.name).toEqual({
-        code: error.code,
-        retry: error.retry,
-        message: error.message,
-      });
-    }
-    const bootstrap = corpus.error_frames.find(
-      (error) => error.name === "runtime bootstrap not ready",
-    );
-    expect(bootstrap).toBeDefined();
-    expect(decodeWireError(hexToBytes(bootstrap!.frame_hex))).not.toEqual({
+  it("decodes the pinned structured error and the frames around it", () => {
+    const corpus = syncWireCorpus();
+    const error = corpus.frames.find((frame) => frame.name === "structured error");
+    expect(error).toBeDefined();
+    const [frame] = decodeWebSocketFrameBatch(hexToBytes(error!.batch_hex));
+    expect(decodeWireError(frame!)).toEqual({
       code: "malformed_frame",
-      retry: bootstrap!.retry,
-      message: bootstrap!.message,
-    });
-    expect(decodeWireError(hexToBytes(bootstrap!.frame_hex))).not.toEqual({
-      code: bootstrap!.code,
       retry: "never",
-      message: bootstrap!.message,
+      message: "malformed frame",
     });
   });
 
   it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
-    "executes current SQLite messages and shared control frames while refusing retired and malformed input through NAPI and WASM",
+    "executes every pinned sync message and frame and rejects malformed input through NAPI and WASM",
     async () => {
-      const corpus = artifactCorpus();
-      expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v6");
-      const accepted = [...rustHelloFixtures(), ...corpus.error_frames].map((frame) => ({
-        name: frame.name,
-        batch: encodeWebSocketFrameBatch([hexToBytes(frame.frame_hex)]),
-      }));
+      const corpus = syncWireCorpus();
+      expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v2");
+      expect(corpus.messages.map((message) => message.variant)).toHaveLength(47);
+      const accepted = [
+        ...[...corpus.messages, ...corpus.examples].map((message) => ({
+          name: message.variant,
+          reader: message.reader,
+          batch: encodeWebSocketFrameBatch([hexToBytes(message.frame_hex)]),
+        })),
+        ...corpus.frames.map((frame) => ({
+          name: frame.name,
+          reader: frame.reader,
+          batch: hexToBytes(frame.batch_hex),
+        })),
+      ];
       const [napi, wasm] = await Promise.all([
         // This is a deliberately test-only export (`skip_typescript` in
         // napi-rs), so production declarations must not advertise it.
@@ -98,18 +97,62 @@ describe("wire frame artifact corpus", () => {
         const negotiatedFeatures = artifact.__testWireFrameCorpusFeatures();
         for (const frame of accepted) {
           expect(
-            () => artifact.__testValidateWireFrameBatchCorpus(frame.batch, negotiatedFeatures),
+            () =>
+              artifact.__testValidateWireFrameBatchCorpus(
+                frame.batch,
+                frame.reader,
+                negotiatedFeatures,
+              ),
             frame.name,
           ).not.toThrow();
         }
-        // Retain every old complete semantic case as an explicit incompatibility
-        // check, at both its retired decoder and the actual SQLite boundary.
-        for (const retired of rustMessageFixtures()) {
-          const batch = hexToBytes(retired.batch_hex);
+        for (const fixture of [...corpus.messages, ...corpus.examples]) {
+          const frame = hexToBytes(fixture.frame_hex);
           expect(
-            () => artifact.__testValidateWireFrameBatchCorpus(batch, negotiatedFeatures),
-            retired.name,
+            () => artifact.__testValidateSqliteSyncFrameCorpus(frame),
+            fixture.variant,
+          ).not.toThrow();
+          for (const invalid of [
+            new Uint8Array([...frame, 0]),
+            frame.slice(0, -1),
+            new Uint8Array([...frame.slice(0, 5), frame[5]! | 0x80, 0, ...frame.slice(6)]),
+          ]) {
+            expect(
+              () => artifact.__testValidateSqliteSyncFrameCorpus(invalid),
+              fixture.variant,
+            ).toThrow();
+          }
+        }
+        const oldUpstream = readJson("sqlite_sync_wire_v1.json") as SyncWireCorpus;
+        for (const retired of [...oldUpstream.messages, ...sqliteMessageFixtures()]) {
+          const frame = hexToBytes(retired.frame_hex);
+          expect(
+            () => artifact.__testValidateSqliteSyncFrameCorpus(frame),
+            retired.variant,
           ).toThrow();
+          for (const reader of ["client", "server"] as const) {
+            expect(
+              () =>
+                artifact.__testValidateWireFrameBatchCorpus(
+                  encodeWebSocketFrameBatch([frame]),
+                  reader,
+                  negotiatedFeatures,
+                ),
+              retired.variant,
+            ).toThrow();
+          }
+        }
+        const retiredGroove = readJson("wire_message_frames_v6.json") as {
+          fixtures: Array<{ name: string; batch_hex: string }>;
+        };
+        for (const retired of retiredGroove.fixtures) {
+          const batch = hexToBytes(retired.batch_hex);
+          for (const reader of ["client", "server"] as const) {
+            expect(
+              () => artifact.__testValidateWireFrameBatchCorpus(batch, reader, negotiatedFeatures),
+              retired.name,
+            ).toThrow();
+          }
           for (const frame of decodeWebSocketFrameBatch(batch)) {
             expect(
               () => artifact.__testValidateSqliteSyncFrameCorpus(frame),
@@ -117,31 +160,41 @@ describe("wire frame artifact corpus", () => {
             ).toThrow();
           }
         }
-        for (const fixture of sqliteMessageFixtures()) {
-          const frame = hexToBytes(fixture.frame_hex);
+        const carrier = readJson("wire_frame_artifact_corpus_v6.json") as {
+          error_frames: Array<{ name: string; frame_hex: string }>;
+          rejections: Array<{ name: string; frame_hex: string; negotiated_features: string }>;
+        };
+        for (const frame of carrier.error_frames) {
           expect(
-            () => artifact.__testValidateSqliteSyncFrameCorpus(frame),
-            fixture.name,
+            () =>
+              artifact.__testValidateWireFrameBatchCorpus(
+                encodeWebSocketFrameBatch([hexToBytes(frame.frame_hex)]),
+                "client",
+                negotiatedFeatures,
+              ),
+            frame.name,
           ).not.toThrow();
-          for (const invalid of [
-            new Uint8Array([...frame, 0]),
-            frame.slice(0, -1),
-            new Uint8Array([frame[0]! | 0x80, 0, ...frame.slice(1)]),
-          ]) {
-            expect(
-              () => artifact.__testValidateSqliteSyncFrameCorpus(invalid),
-              fixture.name,
-            ).toThrow();
-          }
+        }
+        for (const rejection of carrier.rejections) {
+          expect(
+            () =>
+              artifact.__testValidateWireFrameBatchCorpus(
+                encodeWebSocketFrameBatch([hexToBytes(rejection.frame_hex)]),
+                "client",
+                rejection.negotiated_features,
+              ),
+            rejection.name,
+          ).toThrow();
         }
         for (const rejection of corpus.rejections) {
           expect(
             () =>
               artifact.__testValidateWireFrameBatchCorpus(
-                encodeWebSocketFrameBatch([hexToBytes(rejection.frame_hex)]),
-                rejection.negotiated_features,
+                hexToBytes(rejection.batch_hex),
+                rejection.reader,
+                negotiatedFeatures,
               ),
-            rejection.name,
+            `${rejection.reader}: ${rejection.name}`,
           ).toThrow();
         }
       }
@@ -149,26 +202,13 @@ describe("wire frame artifact corpus", () => {
   );
 });
 
-function artifactCorpus(): ArtifactCorpus {
-  return readJson("wire_frame_artifact_corpus_v6.json") as ArtifactCorpus;
-}
-
-function rustHelloFixtures(): FrameFixture[] {
-  return (readJson("wire_hello_frames_v6.json") as { fixtures: FrameFixture[] }).fixtures;
-}
-
-function rustMessageFixtures(): Array<{ name: string; batch_hex: string }> {
-  return (
-    readJson("wire_message_frames_v6.json") as {
-      fixtures: Array<{ name: string; batch_hex: string }>;
-    }
-  ).fixtures;
-}
-
-function readJson(name: string): unknown {
+function syncWireCorpus(): SyncWireCorpus {
   return JSON.parse(
-    readFileSync(new URL(`../../../../../crates/jazz/fixtures/${name}`, import.meta.url), "utf8"),
-  );
+    readFileSync(
+      new URL("../../../../../crates/jazz/fixtures/sqlite_sync_wire_v2.json", import.meta.url),
+      "utf8",
+    ),
+  ) as SyncWireCorpus;
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -177,6 +217,12 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
+}
+
+function readJson(name: string): unknown {
+  return JSON.parse(
+    readFileSync(new URL(`../../../../../crates/jazz/fixtures/${name}`, import.meta.url), "utf8"),
+  );
 }
 
 function sqliteMessageFixtures(): Array<{ name: string; variant: string; frame_hex: string }> {

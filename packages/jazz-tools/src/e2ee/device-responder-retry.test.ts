@@ -113,7 +113,7 @@ it("retries a conflicted background response from fresh authority without hiding
     approval.catch(() => {});
     const conflict = await failedResponse;
     expect(conflict).toBeInstanceOf(PersistedWriteRejectedError);
-    expect(conflict).toMatchObject({ code: "transaction_conflict" });
+    expect(conflict).toMatchObject({ code: "serialization_conflict" });
     expect(invalidate).toBe(0);
     // The background catch runs after the observed rejection.
     await Promise.resolve();

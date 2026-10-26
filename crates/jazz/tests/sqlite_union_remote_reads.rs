@@ -1,4 +1,4 @@
-//! Remote UNION receipts preserve semantic occurrences without loading arm prefixes.
+//! Ordinary UNIONs hydrate bounded prefixes; scoped reads also pair permission evidence.
 mod common;
 use common::{compile_schema, read_and_allow_all_writes, session_eq};
 use jazz::db::{
@@ -20,6 +20,17 @@ fn open(node: u8) -> Db {
     open_with_permissions(node, true)
 }
 fn open_with_permissions(node: u8, permissions: bool) -> Db {
+    open_as(
+        node,
+        permissions,
+        if node == 0 {
+            AuthorSubject::SYSTEM
+        } else {
+            alice()
+        },
+    )
+}
+fn open_as(node: u8, permissions: bool, author: AuthorSubject) -> Db {
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -52,11 +63,7 @@ fn open_with_permissions(node: u8, permissions: bool) -> Db {
         },
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: if node == 0 {
-                AuthorSubject::SYSTEM
-            } else {
-                alice()
-            },
+            author,
         },
     );
     if node == 0 {
@@ -289,6 +296,113 @@ fn nested_and_leaf_windows_do_not_require_cold_predecessors() {
     assert_eq!(rows.len(), 2);
 }
 
+/// Alice reads a nested page directly, through a relay, and through a private
+/// foreground. Only its bounded predecessors are cached; Bob's earlier row and
+/// an unrelated tail never become page support. A later reorder stays correct.
+#[test]
+fn nested_union_prefixes_are_bounded_and_policy_checked_on_each_hop() {
+    for path in ["direct", "relay", "foreground"] {
+        let server = open(0);
+        insert(&server, "000 private", false, 0, "bob");
+        insert(&server, "alpha", false, 0, "alice");
+        let beta = insert(&server, "beta", false, 0, "alice");
+        insert(&server, "gamma", false, 0, "alice");
+        insert(&server, "omega", false, 0, "alice");
+        for n in 0..40 {
+            insert(&server, &format!("tail {n:03}"), false, n, "alice");
+        }
+        let owner = open(2);
+        let client = open(1);
+        if path == "foreground" {
+            owner.set_scope_isolated_storage_owner().unwrap();
+            client.set_private_owner_client().unwrap();
+        }
+        if path == "direct" {
+            connect(&client, &server);
+        } else {
+            connect(&owner, &server);
+            connect(&client, &owner);
+        }
+        let nodes = [&client, &owner, &server];
+        let q = query(window(
+            union(vec![(
+                "nested",
+                window(union(vec![("leaf", window(arm(None), 1, 2))]), 1, 1),
+            )]),
+            0,
+            1,
+        ));
+        let rows = fetch(&client, &nodes, &q);
+        assert_eq!(visible(&rows), expected(&server, &q), "{path}");
+        assert_eq!(titles(&rows), ["gamma"], "{path}");
+        let cached = block_on(client.all(
+            &client.prepare_query(&Query::from("todos")).unwrap(),
+            ReadOpts::for_read_tier(ReadTier::LocalOnly),
+        ))
+        .unwrap();
+        let mut cached = titles(&cached);
+        cached.sort();
+        assert_eq!(cached, ["alpha", "beta", "gamma"], "{path}");
+        block_on(server.update(
+            "todos",
+            beta,
+            BTreeMap::from([("title".into(), Cell::String("zeta".into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            visible(&fetch(&client, &nodes, &q)),
+            expected(&server, &q),
+            "{path}"
+        );
+    }
+}
+
+/// Alice's ordinary remote read cannot turn an outer page into an unbounded
+/// inner-prefix load. Both durable replicas and foregrounds receive an explicit
+/// unsupported-pattern error, including when the authority has no rows.
+#[test]
+fn unbounded_inner_union_prefixes_refuse_instead_of_returning_empty_pages() {
+    for foreground in [false, true] {
+        let server = open(0);
+        let client = open(1);
+        if foreground {
+            client.set_non_durable_client();
+        }
+        connect(&client, &server);
+        let q = query(window(
+            union(vec![(
+                "leaf",
+                RelationExpr::Offset {
+                    input: Box::new(arm(None)),
+                    offset: 1,
+                },
+            )]),
+            0,
+            1,
+        ));
+        let bytes = postcard::to_allocvec(&q).unwrap();
+        let error = drive(
+            &[&client, &server],
+            client.all_serialized_query(
+                &bytes,
+                ReadOpts::for_read_tier(ReadTier::Remote),
+                None,
+                None,
+                None,
+                false,
+                || false,
+                |_| {},
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("inner offset without a limit"),
+            "{error}"
+        );
+    }
+}
+
 /// Alice's cold ordinary relay forwards the exact UNION occurrences, then a
 /// second read observes Bob changing one arm without duplicating the root.
 #[test]
@@ -469,18 +583,18 @@ impl jazz::db::Transport for Tamper {
     }
 }
 
-/// Mallory substitutes unknown arms, duplicate occurrences or a legacy row-ID
-/// reply. Transport mutation is needed to test receipt admission; none can turn
+/// Mallory substitutes unknown arms, duplicate occurrences or an ordinary row-ID
+/// reply to Alice's scoped backend read. Transport mutation tests receipt admission; none can turn
 /// an incomplete or differently shaped answer into covered UNION output.
 #[test]
 fn malformed_or_downgraded_union_receipts_are_rejected() {
     for mode in ["unknown", "duplicate", "downgrade"] {
         let server = open(0);
         insert(&server, "alpha", false, 0, "alice");
-        let client = open(1);
+        let client = open_as(1, true, AuthorSubject::SYSTEM);
         let (up, down) = duplex();
         block_on(client.connect_upstream(Box::new(Tamper { link: up, mode })));
-        server.accept_subscriber(down, alice());
+        server.accept_subscriber(down, AuthorSubject::SYSTEM);
         let bytes = postcard::to_allocvec(&query(both())).unwrap();
         let error = drive(
             &[&client, &server],
@@ -488,8 +602,8 @@ fn malformed_or_downgraded_union_receipts_are_rejected() {
                 &bytes,
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,
-                None,
-                None,
+                Some((alice(), BTreeMap::new())),
+                Some(alice()),
                 false,
                 || false,
                 |_| {},
@@ -513,7 +627,7 @@ fn malformed_or_downgraded_union_receipts_are_rejected() {
 fn union_answer_v1_has_fixed_complete_bytes() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_union_answer_v1.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/union-answer.json")).unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.union-answer.v1");
     for (key, id, through, occurrences) in [
         (
@@ -526,7 +640,7 @@ fn union_answer_v1_has_fixed_complete_bytes() {
     ] {
         let message:SyncMessage=serde_json::from_value(serde_json::json!({"UnionAnswerV1":{"id":id,"through":through,"occurrences":occurrences}})).unwrap();
         let bytes = hex::decode(fixture[key].as_str().unwrap()).unwrap();
-        assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
+        assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
         let decoded = jazz::sync_codec::decode_sync_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
@@ -534,8 +648,10 @@ fn union_answer_v1_has_fixed_complete_bytes() {
         );
         let mut trailing = bytes.clone();
         trailing.push(0);
-        let mut overlong = vec![bytes[0] | 128, 0];
-        overlong.extend_from_slice(&bytes[1..]);
+        let tag = jazz::db::SYNC_ENCODING_PREFIX.len();
+        let mut overlong = bytes[..tag].to_vec();
+        overlong.extend([bytes[tag] | 128, 0]);
+        overlong.extend_from_slice(&bytes[tag + 1..]);
         for invalid in [trailing, overlong, bytes[..bytes.len() - 1].to_vec()] {
             assert_eq!(
                 jazz::sync_codec::decode_sync_message(&invalid)
@@ -565,18 +681,21 @@ fn empty_union_receipt_excludes_warm_cache_occurrences() {
     assert_eq!(fetch(&client, &nodes, &query(both())).len(), 2);
 }
 
-/// Alice's raw subscription receives exact semantic occurrences followed by a
-/// settlement at the same cut. This wire-level test is needed to pin ordering,
-/// which the public stream deliberately hides from callers.
+/// Alice's ordinary UNION receives prefix row IDs in the upstream settlement.
+/// The rows arrive before that coverage, and duplicate output occurrences keep
+/// duplicate IDs. Scoped occurrence receipts are reserved for scoped reads.
+/// Raw transport is required to check that wire ordering and request contract.
 #[test]
-fn raw_union_subscription_pairs_occurrences_with_settlement() {
+fn raw_union_subscription_lists_prefix_roots_with_settlement() {
     use jazz::db::SyncMessage;
     let server = open(0);
-    insert(&server, "alpha", false, 0, "alice");
+    let row = insert(&server, "alpha", false, 0, "alice");
     let (mut client, down) = duplex();
     server.accept_subscriber(down, alice());
     client
         .send(SyncMessage::Subscribe {
+            tier: ReadTier::Remote,
+            wait: None,
             id: 7,
             query: query(both()),
             binding: BTreeMap::new(),
@@ -588,9 +707,9 @@ fn raw_union_subscription_pairs_occurrences_with_settlement() {
         block_on(server.tick()).unwrap();
     }
     let messages = std::iter::from_fn(|| client.try_recv()).collect::<Vec<_>>();
-    let receipt = messages
+    let images = messages
         .iter()
-        .position(|m| matches!(m, SyncMessage::UnionAnswerV1 { id: 7, .. }))
+        .position(|m| matches!(m, SyncMessage::Rows { .. }))
         .unwrap();
     let settlement = messages
         .iter()
@@ -605,20 +724,15 @@ fn raw_union_subscription_pairs_occurrences_with_settlement() {
             )
         })
         .unwrap();
-    assert!(receipt < settlement);
-    let SyncMessage::UnionAnswerV1 {
-        through,
-        occurrences,
-        ..
-    } = &messages[receipt]
-    else {
-        unreachable!()
-    };
-    assert_eq!(occurrences.len(), 2);
-    assert_eq!(occurrences[0].row, occurrences[1].row);
-    assert_ne!(occurrences[0].arm, occurrences[1].arm);
+    assert!(images < settlement);
     assert!(
-        matches!(&messages[settlement], SyncMessage::Settled { through: cut, .. } if cut == through)
+        matches!(&messages[settlement], SyncMessage::Settled { through, window: Some(roots), .. }
+        if *through == server.seq_high_water() && roots == &vec![*row.as_bytes(), *row.as_bytes()])
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, SyncMessage::UnionAnswerV1 { .. }))
     );
 }
 
@@ -740,7 +854,7 @@ fn foreground_union_reads_nested_and_empty_results() {
         owner.set_scope_isolated_storage_owner().unwrap();
         connect(&owner, &server);
         let client = open(1);
-        client.set_non_durable_client();
+        client.set_private_owner_client().unwrap();
         connect(&client, &owner);
         let q = query(window(
             union(vec![
@@ -951,7 +1065,7 @@ fn empty_union_still_validates_indexed_witness_shape() {
     );
 }
 
-/// Mallory alters live receipts without changing the authority's row images.
+/// Mallory alters Alice's scoped live receipts without changing authority row images.
 /// Unknown arms, duplicates, missing receipts and mismatched cuts must reject
 /// instead of releasing any globally settled result. Wire mutation is required
 /// because the public authority never produces these invalid combinations.
@@ -960,14 +1074,19 @@ fn live_union_refuses_malformed_and_unpaired_coverage() {
     for mode in ["unknown", "duplicate", "downgrade", "cut", "missing"] {
         let server = open(0);
         insert(&server, "alpha", false, 0, "alice");
-        let client = open(1);
+        let client = open_as(1, true, AuthorSubject::SYSTEM);
         let (up, down) = duplex();
         block_on(client.connect_upstream(Box::new(Tamper { link: up, mode })));
-        server.accept_subscriber(down, alice());
-        let mut stream = block_on(client.subscribe(
-            &client.prepare_query(&query(both())).unwrap(),
-            ReadOpts::for_read_tier(ReadTier::Remote),
-        ))
+        server.accept_subscriber(down, AuthorSubject::SYSTEM);
+        let mut stream = block_on(
+            client.subscribe(
+                &client
+                    .prepare_query(&query(both()))
+                    .unwrap()
+                    .with_identity_claims(alice(), BTreeMap::new()),
+                ReadOpts::for_read_tier(ReadTier::Remote),
+            ),
+        )
         .unwrap();
         let mut refused = false;
         for _ in 0..12 {
@@ -1028,6 +1147,14 @@ fn delayed_connect(
     server: &Db,
     kind: &'static str,
 ) -> std::rc::Rc<std::cell::RefCell<DeliveryControl>> {
+    delayed_connect_as(client, server, kind, alice())
+}
+fn delayed_connect_as(
+    client: &Db,
+    server: &Db,
+    kind: &'static str,
+    identity: AuthorSubject,
+) -> std::rc::Rc<std::cell::RefCell<DeliveryControl>> {
     let (up, down) = duplex();
     let control = std::rc::Rc::new(std::cell::RefCell::new(DeliveryControl {
         paused: true,
@@ -1039,7 +1166,7 @@ fn delayed_connect(
         kind,
         held: None,
     })));
-    server.accept_subscriber(down, alice());
+    server.accept_subscriber(down, identity);
     control
 }
 
@@ -1260,7 +1387,7 @@ fn offline_private_owner_union_previews_preserve_admitted_identity() {
     owner.set_scope_isolated_storage_owner().unwrap();
     owner.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
     let writer = open_with_permissions(1, false);
-    writer.set_non_durable_client();
+    writer.set_private_owner_client().unwrap();
     connect(&writer, &owner);
     for _ in 0..10 {
         block_on(writer.tick()).unwrap();
@@ -1272,7 +1399,7 @@ fn offline_private_owner_union_previews_preserve_admitted_identity() {
         block_on(owner.tick()).unwrap();
     }
     let sibling = open_with_permissions(3, false);
-    sibling.set_non_durable_client();
+    sibling.set_private_owner_client().unwrap();
     sibling.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
     connect(&sibling, &owner);
     let q = query(window(both(), 0, 2));
@@ -1316,6 +1443,8 @@ fn offline_private_owner_union_previews_preserve_admitted_identity() {
         AuthorSubject::authenticated("https://union-read.example", "mallory").unwrap(),
     );
     peer.send(jazz::db::SyncMessage::Subscribe {
+        tier: jazz::db::ReadTier::Remote,
+        wait: None,
         id: 7,
         query: q,
         binding: BTreeMap::new(),
@@ -1346,7 +1475,7 @@ fn accepted_union_rows_do_not_inherit_offline_preview_permission() {
     owner.set_scope_isolated_storage_owner().unwrap();
     owner.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
     let writer = open_with_permissions(1, false);
-    writer.set_non_durable_client();
+    writer.set_private_owner_client().unwrap();
     connect(&writer, &owner);
     for _ in 0..10 {
         block_on(writer.tick()).unwrap();
@@ -1358,7 +1487,7 @@ fn accepted_union_rows_do_not_inherit_offline_preview_permission() {
         block_on(owner.tick()).unwrap();
     }
     let sibling = open_with_permissions(3, false);
-    sibling.set_non_durable_client();
+    sibling.set_private_owner_client().unwrap();
     sibling.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
     connect(&sibling, &owner);
     let q = query(window(both(), 0, 2));
@@ -1408,7 +1537,7 @@ fn accepted_union_rows_do_not_inherit_offline_preview_permission() {
         "Alice's accepted read is denied"
     );
     let fresh = open_with_permissions(4, false);
-    fresh.set_non_durable_client();
+    fresh.set_private_owner_client().unwrap();
     connect(&fresh, &owner);
     assert!(fetch(&fresh, &[&fresh, &owner, &server], &q).is_empty());
 }
@@ -1437,6 +1566,8 @@ fn live_union_relay_refuses_identity_and_claim_substitution() {
         let (mut peer, down) = duplex();
         relay.accept_subscriber_with_claims(down, identity, Some(claims));
         peer.send(SyncMessage::Subscribe {
+            tier: jazz::db::ReadTier::Remote,
+            wait: None,
             id: 7,
             query: query(both()),
             binding: BTreeMap::new(),
@@ -1495,7 +1626,7 @@ fn live_union_relay_refuses_identity_and_claim_substitution() {
 fn live_union_coverage_pairs_have_fixed_bytes() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_union_answer_v1.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/union-answer.json")).unwrap();
     assert_eq!(fixture["live_role"], "jazz.sqlite.sync.union-coverage.v1");
     for (key, id, through, global) in [
         ("global_pair", 128, 300, true),
@@ -1516,7 +1647,7 @@ fn live_union_coverage_pairs_have_fixed_bytes() {
             global,
         };
         let bytes = hex::decode(pair[1].as_str().unwrap()).unwrap();
-        assert_eq!(postcard::to_allocvec(&settlement).unwrap(), bytes);
+        assert_eq!(jazz::db::encode_message(&settlement).unwrap(), bytes);
         let decoded = jazz::sync_codec::decode_sync_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
@@ -1597,7 +1728,7 @@ fn failed_union_sync_batch_cannot_publish_staged_coverage() {
     );
 }
 
-/// Alice reconnects with an unmatched receipt left from the old transport.
+/// Alice's scoped backend reconnects with an unmatched receipt from its old transport.
 /// A bare settlement on the replacement connection cannot reuse that receipt,
 /// even when its request ID and accepted cut happen to match. A synthetic peer
 /// is required to send this otherwise-invalid resumed sequence.
@@ -1606,12 +1737,17 @@ fn reconnect_discards_an_unpaired_union_receipt() {
     use jazz::db::SyncMessage;
     let server = open(0);
     insert(&server, "alpha", false, 0, "alice");
-    let client = open(1);
-    let control = delayed_connect(&client, &server, "settled");
-    let mut stream = block_on(client.subscribe(
-        &client.prepare_query(&query(both())).unwrap(),
-        ReadOpts::for_read_tier(ReadTier::Remote),
-    ))
+    let client = open_as(1, true, AuthorSubject::SYSTEM);
+    let control = delayed_connect_as(&client, &server, "settled", AuthorSubject::SYSTEM);
+    let mut stream = block_on(
+        client.subscribe(
+            &client
+                .prepare_query(&query(both()))
+                .unwrap()
+                .with_identity_claims(alice(), BTreeMap::new()),
+            ReadOpts::for_read_tier(ReadTier::Remote),
+        ),
+    )
     .unwrap();
     for _ in 0..12 {
         block_on(client.tick()).unwrap();
@@ -1624,7 +1760,7 @@ fn reconnect_discards_an_unpaired_union_receipt() {
     block_on(client.tick()).unwrap();
     let id = std::iter::from_fn(|| peer.try_recv())
         .find_map(|m| match m {
-            SyncMessage::Subscribe { id, .. } => Some(id),
+            SyncMessage::ScopedUnionSubscribeV1 { id, .. } => Some(id),
             _ => None,
         })
         .unwrap();

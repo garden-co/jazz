@@ -60,6 +60,7 @@ type FetchAnswer = (
 );
 
 use crate::schema::history::{history_source_table, is_history_table};
+use crate::values::CachedRow;
 use crate::values::query_error;
 use rusqlite::OptionalExtension;
 use std::cell::Cell as StdCell;
@@ -116,6 +117,13 @@ pub(crate) const FOREGROUND_BASE: u64 = LOCAL_BASE + (1 << 51);
 pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     fn try_recv(&mut self) -> Option<SyncMessage>;
+    /// Why this transport stopped yielding messages, once: a peer's frame
+    /// it cannot decode ends the link rather than the process. The
+    /// database then drops the link (a client detaches, a server closes
+    /// the session).
+    fn take_failure(&mut self) -> Option<TransportError> {
+        None
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -156,24 +164,306 @@ pub fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
 pub use crate::wire::WireTransport;
 
 /// Frames messages with postcard over a byte transport.
-pub struct WireTransportAdapter<W>(W);
+pub struct WireTransportAdapter<W> {
+    wire: W,
+    joiner: FrameJoiner,
+    /// A partially sent logical message resumes at its first unsent frame.
+    /// The caller retries that same message after Backpressure.
+    pending: Option<([u8; 32], VecDeque<Vec<u8>>)>,
+    /// A frame failed to decode: nothing more is read, and
+    /// [`Transport::take_failure`] reports it once.
+    failed: Option<Option<TransportError>>,
+}
+
+/// The largest encoded message one wire frame carries, leaving room for
+/// the carrier's count and length prefixes.
+const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
+
+/// `jazz.sqlite.sync.v2`: an explicit semantic codec header, independent of
+/// the websocket carrier's Hello version. V1 SQLite and pre-SQLite payloads
+/// cannot be interpreted with this enum's field layout.
+pub const SYNC_ENCODING_PREFIX: &[u8] = b"JSQL\x02";
+
+/// Encode one v2 semantic message, including its codec header. Carriers should
+/// use [`encode_frames`] to enforce frame limits and split row publications.
+pub fn encode_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
+    let mut bytes = SYNC_ENCODING_PREFIX.to_vec();
+    bytes.extend(postcard::to_allocvec(message)?);
+    if bytes.len() > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    Ok(bytes)
+}
+
+/// `message` as wire frames. A `Rows` message can outgrow one frame (a
+/// first result, or one commit's fan-out): its images travel in as many
+/// frames as it takes (a row fits one, as a large value travels as
+/// chunks), each but the last a `RowsPart`, and [`FrameJoiner`] makes
+/// them one message again.
+pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    let SyncMessage::Rows { images } = message else {
+        let frame = encode_message(&message)?;
+        if frame.len() > MAX_MESSAGE_FRAME_BYTES {
+            return Err(postcard::Error::SerializeBufferFull);
+        }
+        return Ok(vec![frame]);
+    };
+    let mut parts = Vec::new();
+    split_rows(images, &mut parts)?;
+    let last = parts.len() - 1;
+    for (i, (images, frame)) in parts.iter_mut().enumerate() {
+        if i < last {
+            *frame = encode_message(&SyncMessage::RowsPart {
+                images: std::mem::take(images),
+            })?;
+        }
+    }
+    if parts.len() > jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
+        || parts.iter().map(|(_, frame)| frame.len()).sum::<usize>()
+            > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
+    {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    Ok(parts.into_iter().map(|(_, frame)| frame).collect())
+}
+
+/// `images` halved until each half encodes as a `Rows` within one frame,
+/// in order, each with that encoding.
+fn split_rows(
+    images: Vec<Image>,
+    parts: &mut Vec<(Vec<Image>, Vec<u8>)>,
+) -> Result<(), postcard::Error> {
+    let message = SyncMessage::Rows { images };
+    let frame = encode_message(&message)?;
+    let SyncMessage::Rows { mut images } = message else {
+        unreachable!()
+    };
+    if frame.len() <= MAX_MESSAGE_FRAME_BYTES {
+        parts.push((images, frame));
+        return Ok(());
+    }
+    if images.len() <= 1 {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    let rest = images.split_off(images.len() / 2);
+    split_rows(images, parts)?;
+    split_rows(rest, parts)
+}
+
+/// One v2 frame's [`SyncMessage`], with exact canonical postcard bytes.
+/// An unknown version, overlong varint or suffix is refused before delivery.
+pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    if frame.len() > MAX_MESSAGE_FRAME_BYTES {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+    let body = frame
+        .strip_prefix(SYNC_ENCODING_PREFIX)
+        .ok_or(postcard::Error::DeserializeBadEncoding)?;
+    jazz_types::postcard_exact::decode_postcard_exact(body)
+}
+
+/// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
+/// one message they encode.
+#[derive(Default)]
+pub struct FrameJoiner {
+    /// The images of the parts received since the last whole message.
+    parts: Option<Vec<Image>>,
+    bytes: usize,
+    frames: usize,
+}
+
+impl FrameJoiner {
+    /// The message `frame` completes, if any. A frame that does not decode,
+    /// or a message other than `Rows` after a `RowsPart`, is the peer's
+    /// error.
+    pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        let result = self.push_checked(frame);
+        if result.is_err() {
+            // Drop a failed message's partial buffers immediately. The carrier
+            // closes the link; no prefix of that message reaches the database.
+            *self = Self::default();
+        }
+        result
+    }
+
+    fn push_checked(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        let bytes = self
+            .bytes
+            .checked_add(frame.len())
+            .ok_or_else(|| TransportError::Failed("sync message size overflow".into()))?;
+        if bytes > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
+            || self.frames >= jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
+        {
+            return Err(TransportError::Failed(
+                "sync message reassembly limit exceeded".into(),
+            ));
+        }
+        let message = decode_message(frame)
+            .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))?;
+        match (self.parts.take(), message) {
+            (parts, SyncMessage::RowsPart { images }) => {
+                self.bytes = bytes;
+                self.frames += 1;
+                self.parts = Some(parts.unwrap_or_default());
+                self.parts.as_mut().expect("parts").extend(images);
+                Ok(None)
+            }
+            (Some(mut joined), SyncMessage::Rows { images }) => {
+                self.bytes = 0;
+                self.frames = 0;
+                joined.extend(images);
+                Ok(Some(SyncMessage::Rows { images: joined }))
+            }
+            (Some(_), message) => Err(TransportError::Failed(format!(
+                "a Rows message's parts end with its Rows frame, not {}",
+                message_kind(&message)
+            ))),
+            (None, message) => Ok(Some(message)),
+        }
+    }
+}
+
+/// A message's variant name, for errors that must not dump its contents.
+fn message_kind(message: &SyncMessage) -> String {
+    let debug = format!("{message:?}");
+    debug
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
 
 impl<W> WireTransportAdapter<W> {
     pub fn current(wire: W) -> Self {
-        Self(wire)
+        Self {
+            wire,
+            joiner: FrameJoiner::default(),
+            pending: None,
+            failed: None,
+        }
     }
 }
 
 impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        let frame =
-            postcard::to_allocvec(&message).map_err(|e| TransportError::Failed(e.to_string()))?;
-        self.0.send_frame(frame)
+        if self.failed.is_some() {
+            return Err(TransportError::Failed(
+                "SQLite wire transport is closed".into(),
+            ));
+        }
+        let frames = encode_frames(message).map_err(|e| TransportError::Failed(e.to_string()))?;
+        let mut hash = blake3::Hasher::new();
+        for frame in &frames {
+            hash.update(&(frame.len() as u64).to_le_bytes());
+            hash.update(frame);
+        }
+        let fingerprint = *hash.finalize().as_bytes();
+        if let Some((pending, _)) = &self.pending {
+            if *pending != fingerprint {
+                // Interleaving a new message would invalidate the receiver's
+                // atomic RowsPart publication. Preserve the original retry.
+                return Err(TransportError::Backpressure);
+            }
+        } else {
+            self.pending = Some((fingerprint, frames.into()));
+        }
+        let (_, pending) = self.pending.as_mut().expect("pending frames");
+        while let Some(frame) = pending.front() {
+            match self.wire.send_frame(frame.clone()) {
+                Ok(()) => {
+                    pending.pop_front();
+                }
+                Err(TransportError::Backpressure) => return Err(TransportError::Backpressure),
+                Err(error) => {
+                    self.failed = Some(Some(error.clone()));
+                    self.pending = None;
+                    return Err(error);
+                }
+            }
+        }
+        self.pending = None;
+        Ok(())
     }
 
+    /// The next whole message: a `Rows` whose frames have not all arrived
+    /// waits for the rest.
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        let frame = self.0.try_recv_frame()?;
-        Some(postcard::from_bytes(&frame).expect("decode sync frame"))
+        if self.failed.is_some() {
+            return None;
+        }
+        loop {
+            let frame = self.wire.try_recv_frame()?;
+            match self.joiner.push(&frame) {
+                Ok(Some(message)) => return Some(message),
+                Ok(None) => {}
+                Err(error) => {
+                    self.failed = Some(Some(error));
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.failed.as_mut().and_then(Option::take)
+    }
+}
+
+/// Which end of a connection reads a frame batch, at which point, for
+/// [`validate_frame_batch_for_corpus`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CorpusReader {
+    /// The server's first batch: exactly one `Hello`.
+    ServerOpening,
+    /// The server after the `Hello`: every frame is a sync message.
+    Server,
+    /// A client: each frame is a `Hello` (tag 0), an `Error` (tag 1) or a
+    /// sync message, as its websocket reads them. No server-sent message
+    /// has tag 0 or 1.
+    Client,
+}
+
+/// Test-only: decode one websocket frame batch the way `reader` does, with
+/// the production decoders, negotiating a `Hello` against
+/// `negotiated_features`. NAPI and WASM expose it so the pinned wire corpus
+/// (`crates/jazz/fixtures/sqlite_sync_wire_v1.json`) runs through each
+/// shipped artifact. Not a host API.
+#[doc(hidden)]
+pub fn validate_frame_batch_for_corpus(
+    batch: &[u8],
+    reader: CorpusReader,
+    negotiated_features: crate::wire::WireFeatures,
+) -> Result<(), String> {
+    use crate::wire::{
+        WireFrame, decode_frame, decode_hello_frame, decode_websocket_frame_batch, negotiate_wire,
+    };
+    let hello = |frame: &[u8]| {
+        decode_hello_frame(frame)
+            .and_then(|hello| negotiate_wire(&hello, negotiated_features))
+            .map(drop)
+            .map_err(|error| format!("hello rejected: {}", error.message))
+    };
+    let message = |frame: &[u8]| {
+        decode_message(frame)
+            .map(drop)
+            .map_err(|error| format!("malformed sync message: {error}"))
+    };
+    let frames = decode_websocket_frame_batch(batch)
+        .map_err(|error| format!("malformed websocket frame batch: {error}"))?;
+    match reader {
+        CorpusReader::ServerOpening => match frames.as_slice() {
+            [frame] => hello(frame),
+            _ => Err("the opening batch must be exactly one Hello".to_owned()),
+        },
+        CorpusReader::Server => frames.iter().try_for_each(|frame| message(frame)),
+        CorpusReader::Client => frames.iter().try_for_each(|frame| match frame.first() {
+            Some(0) => hello(frame),
+            Some(1) => match decode_frame(frame) {
+                Ok(WireFrame::Error(_)) => Ok(()),
+                _ => Err("malformed WireFrame::Error".to_owned()),
+            },
+            _ => message(frame),
+        }),
     }
 }
 
@@ -213,6 +503,16 @@ impl From<&Cell> for Sql {
     }
 }
 
+/// Whether `image` is an older unsettled version of a relay's than the
+/// `held` one: a relay numbers its unsettled versions from `LOCAL_BASE` up,
+/// in its own order, and ships older ones in as-of answers. Cuts never read
+/// them (a snapshot naming another replica's unsettled commit is
+/// unavailable), and their seqs may collide with this replica's own, so the
+/// replica keeps neither as history.
+fn relay_older(held: u64, image: u64) -> bool {
+    image >= LOCAL_BASE && held > image
+}
+
 /// One stored row version: the unit of replication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Image {
@@ -240,6 +540,79 @@ pub struct ContentWitnessRef {
     pub content_seq: u64,
 }
 
+/// A row a commit writes, as the writer's replica holds it afterwards:
+/// [`echo_digest`] of its image (in the session schema's names).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Expect {
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub digest: [u8; 16],
+}
+
+/// The provenance cells the applying clock stamps: a writer's replica
+/// holds its own clock's, so the authority's travel in the Fate ([`Held`]).
+const STAMPS: [&str; 2] = ["$createdAt", "$updatedAt"];
+
+/// What a writer and the authority compare to agree on a row version
+/// without shipping it: everything in an image but its seq and
+/// [`STAMPS`].
+fn echo_digest(image: &Image) -> [u8; 16] {
+    let mut cells: Vec<&(String, Cell)> = image
+        .cells
+        .iter()
+        .filter(|(name, _)| !STAMPS.contains(&name.as_str()))
+        .collect();
+    cells.sort_by(|a, b| a.0.cmp(&b.0));
+    let bytes = postcard::to_allocvec(&(
+        &image.table,
+        &image.id,
+        &image.key,
+        image.deleted,
+        image.content,
+        cells,
+    ))
+    .expect("postcard encodes images");
+    let hash = blake3::hash(&bytes);
+    hash.as_bytes()[..16].try_into().expect("16 bytes")
+}
+
+/// A row of a commit's `expect` the server did not ship (see
+/// `SyncMessage::Fate`), with the authority's [`STAMPS`] for it: `None`
+/// where its version has no such cell.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Held {
+    pub index: u32,
+    pub created_at: Option<Cell>,
+    pub updated_at: Option<Cell>,
+}
+
+impl Held {
+    fn of(index: u32, image: &Image) -> Self {
+        let stamp = |name: &str| {
+            image
+                .cells
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, cell)| cell.clone())
+        };
+        Held {
+            index,
+            created_at: stamp(STAMPS[0]),
+            updated_at: stamp(STAMPS[1]),
+        }
+    }
+
+    /// `image` with the authority's stamps.
+    fn stamp(&self, image: &mut Image) {
+        for (name, cell) in STAMPS.iter().zip([&self.created_at, &self.updated_at]) {
+            image.cells.retain(|(n, _)| n != name);
+            if let Some(cell) = cell {
+                image.cells.push(((*name).to_owned(), cell.clone()));
+            }
+        }
+    }
+}
+
 /// Which branch a replicated write addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireTarget {
@@ -257,7 +630,8 @@ pub enum WireTarget {
     },
 }
 
-/// A replicated write.
+/// A replicated write. `at`: its explicit provenance timestamp (Unix ms),
+/// if the writer gave one; each write in a commit carries its own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireOp {
     Insert {
@@ -265,29 +639,34 @@ pub enum WireOp {
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Update {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Upsert {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Delete {
         table: String,
         row: [u8; 16],
         target: WireTarget,
+        at: Option<u64>,
     },
     Restore {
         table: String,
         row: [u8; 16],
         cells: Option<BTreeMap<String, Value>>,
         target: WireTarget,
+        at: Option<u64>,
     },
     Move {
         table: String,
@@ -433,12 +812,23 @@ pub enum SyncMessage {
     /// that seq; its opening ships only rows changed after it.
     /// `include_deleted`: the result also lists deleted rows (the root's),
     /// which ship as their deleted current versions.
+    /// `tier`: how far the subscription reaches, as for `Fetch`: a relay
+    /// serves a LocalOnly one from its store alone, without its upstream
+    /// (a non-durable foreground's LocalOnly read). An authority's store
+    /// is the answer either way.
+    /// `wait`: how long (ms) a relay waits for its upstream's answer
+    /// before it serves its own store: a LocalFirst one's first load (the
+    /// reader's `firstLoadRemoteWaitMs`). `None`: a LocalFirst one waits
+    /// while the upstream may answer, a Remote one however long it takes
+    /// (only the authority confirms a remote result).
     Subscribe {
         id: u64,
         query: Query,
         binding: BTreeMap<String, Value>,
         since: Option<u64>,
         include_deleted: bool,
+        tier: ReadTier,
+        wait: Option<u64>,
     },
     Unsubscribe {
         id: u64,
@@ -451,12 +841,28 @@ pub enum SyncMessage {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
     /// A one-shot read, at the current state or as of a server seq.
+    /// `tier` is how far it reaches past a relay: `LocalOnly` is served
+    /// from the relay's store, `LocalFirst` too while the relay asks its
+    /// upstream to refresh it, `Remote` once its upstream answered. An
+    /// authority's store answers any tier. `wait`: how long (ms) a relay
+    /// waits for its upstream's answer while it may give one, then serves
+    /// its store: a LocalFirst read's first load, or a Remote read that
+    /// takes the relay's view when the authority cannot answer (a
+    /// serializable transaction's snapshot). `None`: a LocalFirst read is
+    /// served now, a Remote one once the upstream answered. `view`: the
+    /// branch view the read observes, so its window and versions are the
+    /// view's. A view frozen at a snapshot reference is resolved by the
+    /// receiver (a reopened tab's capture, which its worker settled), which
+    /// also sends the [`SyncMessage::Origins`] of the commits it names.
     Fetch {
         id: u64,
         query: Query,
         binding: BTreeMap<String, Value>,
         at: Option<u64>,
         include_deleted: bool,
+        tier: ReadTier,
+        wait: Option<u64>,
+        view: ReadViewSourceSpec,
     },
     /// `author`: the provenance the writes carry when it is not the
     /// sender's own (a trusted session or an attribution), as a canonical
@@ -472,8 +878,10 @@ pub enum SyncMessage {
         /// trusted link acting for it): the authority checks their
         /// policies as that session. Otherwise `author` is provenance only.
         session: Option<BTreeMap<String, Value>>,
-        /// The writes' explicit provenance timestamp (Unix ms), if any.
-        updated_at: Option<u64>,
+        /// The rows as the writer's replica holds them after these writes
+        /// (see [`Expect`]): the authority skips echoing a row whose new
+        /// version is exactly that. Empty when the writer does not know.
+        expect: Vec<Expect>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -532,17 +940,28 @@ pub enum SyncMessage {
         code: ErrorCode,
         message: String,
     },
+    /// `held`: the commit's `expect` entries whose row the server did not
+    /// ship because its version at `through` is what the writer expected:
+    /// the writer installs its own, with the authority's stamps, as that
+    /// version. `global`: the fate is the global authority's (directly, or
+    /// relayed from it), not the last word of a replica with no server,
+    /// which orders its sessions' commits but cannot make them `Global`.
     Fate {
         tx: u64,
         through: u64,
         result: Result<(), WireError>,
+        held: Vec<Held>,
+        global: bool,
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
-    /// `action` right now? Never writes.
+    /// `action` right now? Never writes. `author` and `session` name the
+    /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
     Advise {
         id: u64,
         action: PermissionAdviceAction,
+        author: Option<String>,
+        session: Option<BTreeMap<String, Value>>,
     },
     // server → client
     Advice {
@@ -566,6 +985,22 @@ pub enum SyncMessage {
     Origins {
         commits: Vec<(u64, [u8; 16], u64)>,
     },
+    /// Whether the server has admitted the schema version the session
+    /// declared, sent when that changes. Until it is admitted the server
+    /// holds the session's messages (a draft awaiting its lens), so a
+    /// read that must be covered by the server fails with the reason
+    /// rather than waiting out its budget.
+    SchemaAdmission {
+        admitted: bool,
+    },
+    /// The leading images of a `Rows` message too large for one wire
+    /// frame; the message's final frame is the `Rows` itself. A receiver
+    /// joins the parts and applies them as that one message, so a
+    /// commit's rows reach readers whole (a wire framing only: never sent
+    /// as a message of its own).
+    RowsPart {
+        images: Vec<Image>,
+    },
     /// `jazz.sqlite.sync.scoped-fetch.v1`: a trusted backend's one-shot
     /// read as a served identity, with immutable request claims. Append-only
     /// tag; ordinary session connections cannot submit this request.
@@ -578,18 +1013,18 @@ pub enum SyncMessage {
         claims: BTreeMap<String, Value>,
         include_deleted: bool,
     },
-    /// Append-only tag 20, `jazz.sqlite.sync.content-witness.v1`. Sent with
+    /// Append-only tag 22, `jazz.sqlite.sync.content-witness.v1`. Sent with
     /// ordinary Rows/Origins; the receiver persists the exact retained-content
     /// link. This is provenance, not a Global coverage or acceptance receipt.
     ContentWitnessesV1 {
         witnesses: Vec<ContentWitnessRef>,
     },
-    /// Append-only tag 21: authority-qualified row evidence, separate from
+    /// Append-only tag 23: authority-qualified row evidence, separate from
     /// ordinary Origins and from query-completeness answers.
     AcceptedRowsV1 {
         rows: Vec<AcceptedRow>,
     },
-    /// Tag 22, `jazz.sqlite.sync.accepted-fetch.v1`: require a complete
+    /// Tag 24, `jazz.sqlite.sync.accepted-fetch.v1`: require a complete
     /// authority answer at one cut. Scope must match the authenticated session,
     /// unless a trusted backend link vouches for a delegated request.
     AcceptedFetchV1 {
@@ -600,20 +1035,20 @@ pub enum SyncMessage {
         include_deleted: bool,
         scope: Option<(String, BTreeMap<String, Value>)>,
     },
-    /// Tag 23: exact root ids at the authority cut requested above. Ordinary
+    /// Tag 25: exact root ids at the authority cut requested above. Ordinary
     /// cache answers cannot satisfy this request, even on an otherwise live link.
     AcceptedAnswerV1 {
         id: u64,
         through: u64,
         rows: Vec<[u8; 16]>,
     },
-    /// Tag 24, jazz.sqlite.sync.catalogue-metadata.v1. Cached authority
+    /// Tag 26, jazz.sqlite.sync.catalogue-metadata.v1. Cached authority
     /// metadata is useful offline but never asserts fresh query coverage.
     CatalogueMetadataV1 {
         head: CatalogueHeadV1,
         schemas: Vec<CatalogueSchemaV1>,
     },
-    /// Tag 25, jazz.sqlite.sync.catalogue-fetch.v1. Evaluate the opened
+    /// Tag 27, jazz.sqlite.sync.catalogue-fetch.v1. Evaluate the opened
     /// schema's zero-row query under this authenticated or trusted scope.
     CatalogueFetchV1 {
         id: u64,
@@ -621,14 +1056,14 @@ pub enum SyncMessage {
         opened: crate::ids::SchemaVersionId,
         scope: Option<(String, BTreeMap<String, Value>)>,
     },
-    /// Tag 26, jazz.sqlite.sync.catalogue-covered.v1. The metadata must be
+    /// Tag 28, jazz.sqlite.sync.catalogue-covered.v1. The metadata must be
     /// admitted before this fresh authority answer can complete its request.
     CatalogueCoveredV1 {
         id: u64,
         head: CatalogueHeadV1,
         opened: crate::ids::SchemaVersionId,
     },
-    /// Tag 27, jazz.sqlite.sync.origin-write-fate.v1. A relay multiplexes writers,
+    /// Tag 29, jazz.sqlite.sync.origin-write-fate.v1. A relay multiplexes writers,
     /// so the complete original transaction identity is mandatory.
     FateV1 {
         node: [u8; 16],
@@ -636,19 +1071,19 @@ pub enum SyncMessage {
         through: u64,
         result: Result<(), WireError>,
     },
-    /// Tag 28, jazz.sqlite.sync.owner-stored.v1. The immediate durable owner
+    /// Tag 30, jazz.sqlite.sync.owner-stored.v1. The immediate durable owner
     /// has retained this complete original upload; this is not a terminal fate.
     OwnerStoredV1 {
         node: [u8; 16],
         tx: u64,
     },
-    /// Tag 29, jazz.sqlite.sync.owner-projection.v1. A foreground advertises
+    /// Tag 31, jazz.sqlite.sync.owner-projection.v1. A foreground advertises
     /// qualified-input support and only the pending identities it already holds.
     /// This is a format declaration, never an identity or trust grant.
     OwnerProjectionV1 {
         known: Vec<([u8; 16], u64)>,
     },
-    /// Tag 30, jazz.sqlite.sync.owner-inputs.v1. Complete original Commit bytes
+    /// Tag 32, jazz.sqlite.sync.owner-inputs.v1. Complete original Commit bytes
     /// paired with stable owner publication positions, in publication order.
     /// Accepted bases precede this envelope through the ordinary row protocol.
     OwnerInputsV1 {
@@ -658,7 +1093,7 @@ pub enum SyncMessage {
         frozen: Vec<OwnerFrozenBaseV1>,
         units: Vec<(u64, Vec<u8>)>,
     },
-    /// Tag 31, jazz.sqlite.sync.owner-ready.v1. The immediate private owner
+    /// Tag 33, jazz.sqlite.sync.owner-ready.v1. The immediate private owner
     /// supports recovery for this subject and schema. This is neither a flush
     /// receipt nor authority acceptance; the host authenticates the transport.
     OwnerReadyV1 {
@@ -666,30 +1101,30 @@ pub enum SyncMessage {
         subject: String,
         node: [u8; 16],
     },
-    /// Tag 32, jazz.sqlite.sync.policy-descriptor.v1. Authority-issued policies
+    /// Tag 34, jazz.sqlite.sync.policy-descriptor.v1. Authority-issued policies
     /// for the exact accepted catalogue head; this never grants session trust.
     PolicyDescriptorV1(PolicyDescriptorV1),
-    /// Tag 33, jazz.sqlite.sync.owner-initialization-reserve.v1.
+    /// Tag 35, jazz.sqlite.sync.owner-initialization-reserve.v1.
     OwnerInitializationReserveV1 {
         id: u64,
         nonce: [u8; 16],
         node: [u8; 16],
         minimum: u64,
     },
-    /// Tag 34, jazz.sqlite.sync.owner-initialization-reserved.v1. Success is
+    /// Tag 36, jazz.sqlite.sync.owner-initialization-reserved.v1. Success is
     /// emitted only after the private owner's real backing-store flush.
     OwnerInitializationReservedV1 {
         id: u64,
         nonce: [u8; 16],
         result: Result<([u8; 16], u64), WireError>,
     },
-    /// Tag 35, jazz.sqlite.sync.owner-initialization-publish.v1. The private
+    /// Tag 37, jazz.sqlite.sync.owner-initialization-publish.v1. The private
     /// owner validates the capability and forwards the unchanged normal Commit.
     OwnerInitializationPublishV1 {
         nonce: [u8; 16],
         commit: Vec<u8>,
     },
-    /// Tag 36, jazz.sqlite.sync.scoped-evidence-answer.v1. Exact versions of
+    /// Tag 38, jazz.sqlite.sync.scoped-evidence-answer.v1. Exact versions of
     /// the bounded permission closure, only for trusted backend scoped reads.
     /// Row contents still arrive through ordinary Rows/chunk synchronization.
     ScopedEvidenceAnswerV1 {
@@ -698,7 +1133,7 @@ pub enum SyncMessage {
         rows: Vec<[u8; 16]>,
         evidence: Vec<ScopedReadRowV1>,
     },
-    /// Tag 37, jazz.sqlite.sync.accepted-scoped-evidence-answer.v1.
+    /// Tag 39, jazz.sqlite.sync.accepted-scoped-evidence-answer.v1.
     /// Accepted query coverage plus exact permission inputs at the requested cut.
     AcceptedScopedEvidenceAnswerV1 {
         id: u64,
@@ -706,7 +1141,7 @@ pub enum SyncMessage {
         rows: Vec<[u8; 16]>,
         evidence: Vec<ScopedReadRowV1>,
     },
-    /// Tag 38, jazz.sqlite.sync.accepted-overlay-check.v1. A trusted backend
+    /// Tag 40, jazz.sqlite.sync.accepted-overlay-check.v1. A trusted backend
     /// asks whether its staged writes preserve an accepted query at one cut.
     AcceptedOverlayCheckV1 {
         id: u64,
@@ -718,13 +1153,13 @@ pub enum SyncMessage {
         claims: BTreeMap<String, Value>,
         ops: Vec<WireOp>,
     },
-    /// Tag 39, jazz.sqlite.sync.accepted-overlay-checked.v1. No rows or writes
+    /// Tag 41, jazz.sqlite.sync.accepted-overlay-checked.v1. No rows or writes
     /// are published; the matching request's staged projection was unchanged.
     AcceptedOverlayCheckedV1 {
         id: u64,
         through: u64,
     },
-    /// Tag 40, jazz.sqlite.sync.readable-policy-subscribe.v1. An ordinary
+    /// Tag 42, jazz.sqlite.sync.readable-policy-subscribe.v1. An ordinary
     /// session requests the readable permission inputs of its result as normal
     /// row images. Unreadable or unbounded inputs refuse this subscription.
     SubscribeReadablePolicyV1 {
@@ -734,14 +1169,14 @@ pub enum SyncMessage {
         since: Option<u64>,
         include_deleted: bool,
     },
-    /// Tag 41, jazz.sqlite.sync.union-answer.v1. An ordinary fetch's exact
+    /// Tag 43, jazz.sqlite.sync.union-answer.v1. An ordinary fetch's exact
     /// ordered semantic occurrences, after every UNION and arm window.
     UnionAnswerV1 {
         id: u64,
         through: u64,
         occurrences: Vec<UnionOccurrenceV1>,
     },
-    /// Tag 42, jazz.sqlite.sync.scoped-union-subscribe.v1. Only a trusted
+    /// Tag 44, jazz.sqlite.sync.scoped-union-subscribe.v1. Only a trusted
     /// backend can maintain this immutable request scope. Every update carries
     /// occurrence coverage, permission evidence and matching Global settlement.
     ScopedUnionSubscribeV1 {
@@ -752,17 +1187,31 @@ pub enum SyncMessage {
         claims: BTreeMap<String, Value>,
         include_deleted: bool,
     },
+    /// Tag 45, jazz.sqlite.sync.origin-fate.v2: upstream echo acknowledgements
+    /// and Local/Global distinction with the complete original writer identity.
+    OriginFateV2 {
+        node: [u8; 16],
+        tx: u64,
+        through: u64,
+        result: Result<(), WireError>,
+        held: Vec<Held>,
+        global: bool,
+    },
+    /// Tag 46: an ordinary worker retained this foreground's upload locally.
+    /// Private owners use the qualified OwnerStoredV1 receipt instead.
+    Stored {
+        tx: u64,
+    },
 }
 
-fn subscription_message(
-    readable_policy: bool,
-    id: u64,
-    query: Query,
-    binding: BTreeMap<String, Value>,
-    since: Option<u64>,
-    include_deleted: bool,
-    scope: RemoteScope,
-) -> SyncMessage {
+fn subscription_message(readable_policy: bool, remote: &Remote) -> SyncMessage {
+    let id = remote.id;
+    let query = remote.query.clone();
+    let binding = remote.binding.clone();
+    let since = remote.through;
+    let include_deleted = remote.include_deleted;
+    let scope = remote.scope.clone();
+    let reach = remote.reach;
     if let Some((author, claims)) = scope {
         SyncMessage::ScopedUnionSubscribeV1 {
             id,
@@ -782,6 +1231,8 @@ fn subscription_message(
         }
     } else {
         SyncMessage::Subscribe {
+            tier: reach.tier,
+            wait: reach.wait,
             id,
             query,
             binding,
@@ -837,6 +1288,21 @@ struct Pending {
     node: [u8; 16],
     ops: Vec<StagedOp>,
     rows: Vec<(String, RowUuid, Vec<u8>)>,
+    /// The commit's `expect` rows as stored here, in its order: the server
+    /// may name them `held` instead of shipping them.
+    expected: Vec<Image>,
+}
+
+/// A row an accepted commit wrote that the writer said it holds.
+struct Echo {
+    node: [u8; 16],
+    tx: u64,
+    index: u32,
+    table: String,
+    row: RowUuid,
+    key: Vec<u8>,
+    seq: u64,
+    digest: [u8; 16],
 }
 
 /// One remote attachment: a client query the server maintains.
@@ -847,6 +1313,8 @@ pub(crate) struct Remote {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
+    /// How far it reaches (see `SyncMessage::Subscribe`).
+    reach: RemoteReach,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// Whether the last answer was the global authority's.
     pub(crate) global: Rc<StdCell<bool>>,
@@ -858,6 +1326,18 @@ pub(crate) struct Remote {
     /// replica lacks (rows that became visible without changing).
     resumed: bool,
     union: Option<Rc<UnionLive>>,
+}
+
+/// The snapshot reference a read view is frozen at, if any.
+fn frozen_at(source: &ReadViewSourceSpec) -> Option<&SnapshotRef> {
+    match source {
+        ReadViewSourceSpec::BranchView {
+            base: Some(BranchViewBase::Snapshot { snapshot, .. }),
+            ..
+        }
+        | ReadViewSourceSpec::Snapshot { snapshot } => Some(snapshot),
+        _ => None,
+    }
 }
 
 /// What a client knows about its path to the server.
@@ -908,6 +1388,9 @@ pub(crate) struct Client {
     owner_ready: Option<crate::ids::SchemaVersionId>,
     /// Ordered semantic frames held while an owner input fetches its chunks.
     owner_inbound: VecDeque<SyncMessage>,
+    /// Accepted fates from a replica with no server: they order the
+    /// commit, but it never becomes `Global`.
+    local_fates: HashSet<UploadId>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
@@ -933,6 +1416,21 @@ pub(crate) struct Client {
     unavailable: BTreeSet<ChunkRequest>,
     /// Chunks arrived this tick: results waiting for them run again.
     arrived: bool,
+    /// As a relay: sessions' commits this store accepted and uploads as
+    /// its own, by upload tx. Each session gets its fate once the
+    /// upstream's arrives (`(session, session tx, rows it wrote)`); a
+    /// refused one also gets the rows as this store reverted them.
+    relayed_fates: HashMap<u64, Vec<RelayedFate>>,
+    /// As a relay: sessions' one-shot reads asked of the upstream, served
+    /// from this store once it answers.
+    relayed_fetches: Vec<RelayedFetch>,
+    /// A relayed fate or read became ready: the serving half runs again.
+    relay_ready: bool,
+    /// The server said it has not admitted this client's schema version.
+    unadmitted: bool,
+    /// A new session has not yet been told which rows this replica holds:
+    /// the next send reads them and puts the `Hold` right after `Schema`.
+    hold_owed: bool,
 }
 
 pub(crate) type RemoteScope = Option<(AuthorSubject, BTreeMap<String, Value>)>;
@@ -943,16 +1441,75 @@ fn scoped_remote_key(
     binding: &BTreeMap<String, Value>,
     include_deleted: bool,
     scope: &RemoteScope,
+    reach: RemoteReach,
 ) -> String {
-    let key = remote_key(query, binding, include_deleted);
+    let key = remote_key(query, binding, include_deleted, reach);
     match scope {
         Some(scope) => format!("scoped:{key}{scope:?}"),
         None => key,
     }
 }
+/// A session's commit a relay uploads as its own: (session, the session's
+/// tx, the rows it wrote).
+type RelayedFate = (usize, UploadId, Vec<(String, RowUuid, Vec<u8>)>);
 
-fn remote_key(query: &Query, binding: &BTreeMap<String, Value>, include_deleted: bool) -> String {
-    format!("{query:?}{binding:?}{include_deleted}")
+/// A session's `Fetch` a relay asked its upstream for.
+/// A relayed read's upstream answer: its query, binding, whether it read
+/// deleted rows, and the rows it listed.
+type RelayedAnswer = (Query, BTreeMap<String, Value>, bool, Vec<[u8; 16]>, u64);
+
+struct RelayedFetch {
+    /// The relay's own fetch id upstream.
+    upstream: u64,
+    /// What it asked its upstream: asked again on a new connection, since
+    /// an answer the last one owed is lost with it.
+    ask: SyncMessage,
+    /// A Remote read with no wait: served only once the upstream answered.
+    strict: bool,
+    /// Otherwise it is served from this store once the upstream can no
+    /// longer answer, or its wait runs out (`None`: never).
+    until: Option<Instant>,
+    session: usize,
+    /// The session's `Fetch`, served locally once the upstream answered.
+    message: SyncMessage,
+}
+
+fn remote_key(
+    query: &Query,
+    binding: &BTreeMap<String, Value>,
+    include_deleted: bool,
+    reach: RemoteReach,
+) -> String {
+    format!("{query:?}{binding:?}{include_deleted}{reach:?}")
+}
+
+/// How far a read reaches past a relay: its tier, and how long the relay
+/// waits for its upstream (see `SyncMessage::Subscribe` and `Fetch`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteReach {
+    pub(crate) tier: ReadTier,
+    pub(crate) wait: Option<u64>,
+}
+
+impl RemoteReach {
+    /// What the authority lists, once it answers.
+    pub(crate) const REMOTE: RemoteReach = RemoteReach {
+        tier: ReadTier::Remote,
+        wait: None,
+    };
+
+    /// What the authority lists while it can answer, else the relay's
+    /// view: a serializable transaction's snapshot read, which pins
+    /// offline at the cut the replica knows.
+    pub(crate) const BEST_EFFORT: RemoteReach = RemoteReach {
+        tier: ReadTier::Remote,
+        wait: Some(u64::MAX),
+    };
+}
+
+/// When a wait of `ms` from now runs out; `None` if never.
+fn wait_until(ms: u64) -> Option<Instant> {
+    Instant::now().checked_add(std::time::Duration::from_millis(ms))
 }
 
 /// Whether a read may wait for the server: a live link needs the own
@@ -982,12 +1539,19 @@ pub(crate) struct Gate {
     pub(crate) require_global: bool,
     pub(crate) _wake: Option<Rc<Instant>>,
     pub(crate) _attempt_wake: Option<Rc<Instant>>,
+    /// A non-durable foreground's local read: its relay answers from its
+    /// store whatever the relay's own path to the server, so it waits
+    /// while the link to the relay is attached.
+    pub(crate) relay_view: bool,
 }
 
 impl Gate {
     /// Whether the read may keep waiting: its deadline has not passed and
     /// the link may still answer.
     pub(crate) fn may_still_wait(&self) -> bool {
+        if self.relay_view {
+            return !self.hint.get().detached;
+        }
         self.deadline
             .is_none_or(|deadline| Instant::now() < deadline)
             && may_wait(self.hint.get())
@@ -997,10 +1561,15 @@ impl Gate {
         if self.wait_for_owner && !self.answered.get() {
             return false;
         }
-        if self.answered.get() && (!self.require_global || self.global.get()) {
+        if self.answered.get()
+            && (self.global.get() || (!self.require_global && !self.wait_for_owner))
+        {
             return true;
         }
         let link = self.hint.get();
+        if self.relay_view {
+            return link.detached;
+        }
         match self.deadline {
             None => false,
             Some(deadline) => {
@@ -1024,6 +1593,12 @@ pub(crate) enum SettledBy {
     /// The relay can answer from its cache immediately, but global settlement
     /// still requires the upstream authority's answer.
     Relay(Rc<StdCell<bool>>, Rc<StdCell<bool>>),
+    /// Ordinary UNION previews use prefix delivery, but pending inputs must
+    /// still prevent an older authority answer from settling the preview.
+    Preview {
+        upstream: Box<SettledBy>,
+        pending: Rc<StdCell<bool>>,
+    },
     Union {
         answered: Rc<StdCell<bool>>,
         global: Rc<StdCell<bool>>,
@@ -1038,6 +1613,16 @@ impl SettledBy {
             SettledBy::Always(_) | SettledBy::Relay(..) => true,
             SettledBy::Never => false,
             SettledBy::Remote(answered, _) => answered.get(),
+            SettledBy::Preview { upstream, pending } => {
+                // An owner can finish a LocalFirst cache response containing
+                // pending inputs. That is local completion, never Global.
+                upstream.get()
+                    && (!pending.get()
+                        || matches!(
+                            upstream.as_ref(),
+                            SettledBy::Always(false) | SettledBy::Relay(..)
+                        ))
+            }
             SettledBy::Union {
                 answered,
                 live,
@@ -1054,6 +1639,9 @@ impl SettledBy {
             SettledBy::Never => false,
             SettledBy::Remote(answered, global) | SettledBy::Relay(answered, global) => {
                 answered.get() && global.get()
+            }
+            SettledBy::Preview { upstream, pending } => {
+                !pending.get() && upstream.tier() == DurabilityTier::Global
             }
             SettledBy::Union {
                 answered,
@@ -1089,6 +1677,7 @@ struct ForwardedFetch {
     overlay: bool,
     /// Uses the upstream connection's admitted identity, with no delegation.
     ordinary: bool,
+    view: ReadViewSourceSpec,
     // Retain the timer so missing content cannot leave a relay request open forever.
     deadline: Option<Rc<Instant>>,
 }
@@ -1097,7 +1686,7 @@ struct ForwardedCatalogue {
     upstream: u64,
     connection: u64,
     opened: crate::ids::SchemaVersionId,
-    owner: Rc<Schema>,
+    owner_schema: crate::ids::SchemaVersionId,
     deadline: Rc<Instant>,
 }
 
@@ -1113,10 +1702,18 @@ pub(crate) struct Session {
     /// different claims (two tokens), so its reads and writes evaluate
     /// policies with these, not the identity's latest.
     claims: Option<BTreeMap<String, Value>>,
+    /// Host-admitted private relays retain their upload's original author.
+    /// Ordinary sessions keep connection-based attribution normalization.
+    bound_write_author: bool,
     /// Per client subscription: its queue, its group, whether it is
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
     outbox: Vec<SyncMessage>,
+    /// Local host carriers may retain a bounded delivery prefix on temporary
+    /// pressure. Socket subscribers retain the default disconnect behaviour.
+    output_retry_limits: Option<(usize, usize)>,
+    deferred_output: VecDeque<(SyncMessage, usize)>,
+    deferred_output_bytes: usize,
     /// Evictions answering a `Hold`: they describe the state the client
     /// declared, so they go out before any row this tick ships (a resumed
     /// subscription may ship a row's newer version).
@@ -1134,6 +1731,9 @@ pub(crate) struct Session {
     /// supersedes it, so the replica holds every state its own commits
     /// produced (a snapshot naming one reads it there).
     committed: Vec<(String, RowUuid, Vec<u8>, u64)>,
+    /// This tick's accepted commits' `expect` rows: the image of each is
+    /// not shipped while it is the row's current version and matches.
+    echoes: Vec<Echo>,
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     readable_policy: BTreeMap<u64, PreparedQuery>,
@@ -1157,10 +1757,16 @@ pub(crate) struct Session {
     /// Pushed chunk bytes admitted in the current staging-policy window,
     /// and when it started (the ingress rate limit).
     ingress: (Instant, usize),
-    /// Inbound messages held back by the rate limit, in order.
+    /// Inbound messages held back by the rate limit, or reads waiting for
+    /// large-value chunks from this relay's upstream, in order.
     backlog: VecDeque<SyncMessage>,
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
+    /// Fetches whose upstream answer arrived, or that this relay already
+    /// asked its upstream to refresh: served from this store.
+    fetched_upstream: BTreeSet<u64>,
+    /// The client was told its declared version is not admitted.
+    told_unadmitted: bool,
     /// On a relay, the upstream subscription each of the client's
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
@@ -1176,6 +1782,18 @@ pub(crate) struct Session {
     /// That version's schema, governed by the current schema's policies,
     /// as built for the current schema it holds.
     schema: Option<(Rc<Schema>, Rc<Schema>)>,
+    /// On a relay, LocalFirst subscriptions waiting for the upstream's
+    /// first answer for at most their first-load wait.
+    first_load: BTreeMap<u64, FirstLoadWait>,
+}
+
+/// A relayed LocalFirst subscription's first-load wait: once `until`
+/// passes unanswered, its result is this store's (see
+/// [`Db::serve_due_first_loads`]).
+struct FirstLoadWait {
+    until: Instant,
+    prepared: PreparedQuery,
+    include_deleted: bool,
 }
 
 impl Session {
@@ -1190,13 +1808,18 @@ impl Session {
             transport,
             identity,
             claims: None,
+            bound_write_author: false,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
+            output_retry_limits: None,
+            deferred_output: VecDeque::new(),
+            deferred_output_bytes: 0,
             stale: Vec::new(),
             touched: BTreeSet::new(),
             probed: BTreeSet::new(),
             revalidate: false,
             committed: Vec::new(),
+            echoes: Vec::new(),
             support: BTreeMap::new(),
             readable_policy: BTreeMap::new(),
             query_support: BTreeMap::new(),
@@ -1208,6 +1831,8 @@ impl Session {
             ingress: (Instant::now(), 0),
             backlog: VecDeque::new(),
             version: None,
+            fetched_upstream: BTreeSet::new(),
+            told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
             forwarded: BTreeMap::new(),
@@ -1218,7 +1843,54 @@ impl Session {
             owner_projection: false,
             owner_observed: BTreeSet::new(),
             catalogue_pending: false,
+            first_load: BTreeMap::new(),
         }
+    }
+
+    /// Retry exactly the unsent prefix before any later message. The wire
+    /// adapter may already have sent part of its first logical message.
+    fn flush_deferred_output(&mut self) -> Result<(), TransportError> {
+        while let Some((message, bytes)) = self.deferred_output.front() {
+            match self.transport.send(message.clone()) {
+                Ok(()) => {
+                    self.deferred_output_bytes -= bytes;
+                    self.deferred_output.pop_front();
+                }
+                Err(TransportError::Backpressure) => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn send_output(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if self.output_retry_limits.is_none() {
+            return self.transport.send(message);
+        }
+        if self.deferred_output.is_empty() {
+            match self.transport.send(message.clone()) {
+                Ok(()) => return Ok(()),
+                Err(TransportError::Backpressure) if self.output_retry_limits.is_some() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let Some((messages, bytes)) = self.output_retry_limits else {
+            return Err(TransportError::Backpressure);
+        };
+        if self.deferred_output.len() >= messages {
+            return Err(TransportError::Backpressure);
+        }
+        // Only pressured local carriers pay this accounting cost. Use the
+        // actual semantic encoding, which already enforces its message bound.
+        let size = encode_message(&message)
+            .map_err(|error| TransportError::Failed(error.to_string()))?
+            .len();
+        if size > bytes.saturating_sub(self.deferred_output_bytes) {
+            return Err(TransportError::Backpressure);
+        }
+        self.deferred_output_bytes += size;
+        self.deferred_output.push_back((message, size));
+        Ok(())
     }
 
     /// Release everything the session holds; its shared results are swept
@@ -1310,27 +1982,40 @@ fn snapshot_unavailable(why: &str) -> Error {
 }
 
 /// Whether a reachability traversal is a gather the replica can evaluate
-/// from the result and its edges ([`Support::Reach`]): seeded by rows of
-/// the root table that are themselves in the result (no filter after the
-/// gather), reaching root rows by id.
-fn gather_from_root(query: &Query, via: &crate::query::ReachableVia) -> bool {
+/// from the result and its edges ([`Support::Reach`]), reaching root rows
+/// by id: seeded by root rows themselves, or by rows that reference root
+/// rows (a hop), which ship as [`Support::Array`] children of what they
+/// reference. Filters after the gather apply on the replica
+/// ([`remote_query`]).
+fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
     via.seed.as_ref().is_some_and(|seed| {
-        seed.table == query.table && seed.user_column.is_none() && seed.team_column == "id"
+        seed.user_column.is_none() && (seed.team_column != "id" || seed.table == query.table)
     }) && via.access_table == query.table
         && via.access_row_column == "id"
         && via.access_team_column == "id"
-}
-
-fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
-    gather_from_root(query, via) && via.access_filters.is_empty() && query.filters.is_empty()
+        && via.access_filters.is_empty()
 }
 
 /// What a remote read of `query` subscribes to: the query itself, or for
 /// an aggregate its input rows (its filters and traversals, every column,
 /// no window), which the client aggregates as it would local rows.
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
-    if crate::db::relation::is_union(query) {
-        return std::borrow::Cow::Borrowed(query);
+    if let Some(prefix) = crate::db::union_prefix(query) {
+        return std::borrow::Cow::Owned(prefix);
+    }
+    // A gather's closure runs through rows its later filters (or window)
+    // leave out: the replica holds the whole closure and narrows it itself.
+    if !query.reachable.is_empty()
+        && (!query.filters.is_empty() || query.limit.is_some() || query.offset > 0)
+    {
+        let mut closure = query.clone();
+        closure.filters.clear();
+        closure.aggregate = None;
+        closure.select = None;
+        closure.order_by.clear();
+        closure.limit = None;
+        closure.offset = 0;
+        return std::borrow::Cow::Owned(closure);
     }
     let mut input = crate::db::relation::input(query);
     // A window past an offset is only right over the rows before it too:
@@ -1474,29 +2159,34 @@ fn to_wire(op: &StagedOp) -> Result<WireOp, Error> {
             row: bytes(&opts.row_id.expect("inserts carry their row id")),
             cells: cells.clone(),
             target: exact_target(&opts.target),
+            at: opts.updated_at_ms,
         },
         StagedOp::Update(table, row, cells, opts) => WireOp::Update {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Upsert(table, row, cells, opts) => WireOp::Upsert {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Delete(table, row, opts) => WireOp::Delete {
             table: table.clone(),
             row: bytes(row),
             target: wire_target(&opts.target)?,
+            at: opts.updated_at_ms,
         },
         StagedOp::Restore(table, row, cells, opts) => WireOp::Restore {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: exact_target(&opts.target),
+            at: opts.updated_at_ms,
         },
         StagedOp::Move(table, from, to, row) => WireOp::Move {
             table: table.clone(),
@@ -1543,12 +2233,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Insert(
             table,
             cells,
             InsertOptions {
                 row_id: Some(id(row)),
                 target: exact(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1557,12 +2249,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Update(
             table,
             id(row),
             cells,
             UpdateOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1571,20 +2265,28 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Upsert(
             table,
             id(row),
             cells,
             UpsertOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
-        WireOp::Delete { table, row, target } => StagedOp::Delete(
+        WireOp::Delete {
+            table,
+            row,
+            target,
+            at,
+        } => StagedOp::Delete(
             table,
             id(row),
             DeleteOptions {
                 target: view_target(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1593,12 +2295,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             row,
             cells,
             target,
+            at,
         } => StagedOp::Restore(
             table,
             id(row),
             cells,
             RestoreOptions {
                 target: exact(target),
+                updated_at_ms: at,
                 ..Default::default()
             },
         ),
@@ -1623,6 +2327,14 @@ impl Inner {
         if is_history_table(&query.table) {
             return Ok(Vec::new());
         }
+        // A union's rows are read through every arm: each arm's support.
+        if let Some(plan) = crate::db::union_plan(query, &self.schema)? {
+            let mut support = Vec::new();
+            for (_, arm) in &plan.arms {
+                support.extend(self.support_of(arm)?);
+            }
+            return Ok(support);
+        }
         let table = self.schema.table(&query.table)?;
         let mut support = Vec::new();
         for include in &query.includes {
@@ -1637,11 +2349,24 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
+        support.extend(self.inherited_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
         for via in query
             .reachable
             .iter()
             .filter(|via| gather_shaped(query, via))
         {
+            // Seed rows that reference the rows the walk starts from.
+            if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
+                let seeds = self.schema.table(&seed.table)?;
+                support.push(Support::Array {
+                    table: seeds.stored.clone(),
+                    inner: seeds.stored_name(&seed.team_column).to_owned(),
+                    outer: "id".to_owned(),
+                    outer_array: false,
+                    inner_array: crate::compile::is_array(seeds, &seed.team_column),
+                    nested: Vec::new(),
+                });
+            }
             let edges = self.schema.table(&via.edge_table)?;
             support.push(Support::Reach {
                 frontier: table.stored_name(&via.access_team_column).to_owned(),
@@ -1675,6 +2400,57 @@ impl Inner {
         Ok(support)
     }
 
+    /// The parents whose read permission rows of `table` inherit, `depth`
+    /// hops up: a replica holds the row its read rests on, as it would
+    /// had it read that row itself.
+    fn inherited_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+    ) -> Result<Vec<Support>, Error> {
+        use crate::tools::{Operation, PolicyExpr};
+        fn hops<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, Option<usize>)>) {
+            match policy {
+                PolicyExpr::Inherits {
+                    operation: Operation::Select,
+                    via_column,
+                    max_depth,
+                } => out.push((via_column, *max_depth)),
+                PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+                    parts.iter().for_each(|part| hops(part, out))
+                }
+                _ => {}
+            }
+        }
+        let mut support = Vec::new();
+        if depth == 0 {
+            return Ok(support);
+        }
+        let mut via = Vec::new();
+        if let Some(policy) = table.policy(Operation::Select) {
+            hops(policy, &mut via);
+        }
+        for (column, max_depth) in via {
+            let Some(target) = table.references.get(column) else {
+                continue;
+            };
+            let parent = self.schema.table(target)?;
+            let depth = max_depth.map_or(depth, |bound| bound.min(depth));
+            if depth == 0 {
+                continue;
+            }
+            support.push(Support::Array {
+                table: parent.stored.clone(),
+                inner: "id".to_owned(),
+                outer: table.stored_name(column).to_owned(),
+                outer_array: crate::compile::is_array(table, column),
+                inner_array: false,
+                nested: self.inherited_support(parent, depth - 1)?,
+            });
+        }
+        Ok(support)
+    }
+
     /// The support of junction traversals from rows of `parent`: every
     /// readable row of the joined table correlated with the parent row
     /// (the client applies the join's filters), and its nested joins'.
@@ -1686,14 +2462,13 @@ impl Inner {
         let mut support = Vec::with_capacity(joins.len());
         for join in joins {
             let target = self.schema.table(&join.table)?;
+            let source = join.source_column.as_deref().unwrap_or("id");
             support.push(Support::Array {
                 table: target.stored.clone(),
                 inner: target.stored_name(&join.on_column).to_owned(),
-                outer: parent
-                    .stored_name(join.source_column.as_deref().unwrap_or("id"))
-                    .to_owned(),
-                outer_array: false,
-                inner_array: false,
+                outer: parent.stored_name(source).to_owned(),
+                outer_array: crate::compile::is_array(parent, source),
+                inner_array: crate::compile::is_array(target, &join.on_column),
                 nested: self.join_support(target, &join.nested_joins)?,
             });
         }
@@ -1815,6 +2590,9 @@ impl Inner {
                 )?
                 .pop();
             if let Some(witness) = witness {
+                // A qualified tombstone has its own accepted origin as well
+                // as the older content witness. Replay needs both identities.
+                seqs.insert(image.seq);
                 seqs.insert(witness.seq);
                 refs.push(ContentWitnessRef {
                     table: image.table.clone(),
@@ -2147,6 +2925,35 @@ impl Inner {
     /// Every settled row version in the replica (pending local versions sit
     /// above `LOCAL_BASE`; their settled images are in the shadow), by
     /// stored table.
+    /// The `Hold` a new session starts with: every settled row the replica
+    /// holds, whether or not a live query still reads it. The session
+    /// watches them, so a later change (a deletion, lost access) still
+    /// reaches the cached copy.
+    fn hold(&self) -> Result<Option<SyncMessage>, Error> {
+        let client = self.client.as_ref().expect("client");
+        let mut rows: Vec<(String, [u8; 16], Vec<u8>, u64)> = client
+            .shadow
+            .iter()
+            .filter_map(|((table, row, key), image)| {
+                image
+                    .as_ref()
+                    .map(|image| (table.clone(), *row.0.as_bytes(), key.clone(), image.seq))
+            })
+            .collect();
+        rows.extend(self.held_versions()?);
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        // Held rows name tables as this store's schema does.
+        let rows = rows
+            .into_iter()
+            .filter_map(|(table, id, key, seq)| {
+                Some((self.owner.by_stored(&table)?.name.clone(), id, key, seq))
+            })
+            .collect();
+        Ok(Some(SyncMessage::Hold { rows }))
+    }
+
     fn held_versions(&self) -> Result<Vec<(String, [u8; 16], Vec<u8>, u64)>, Error> {
         let mut out = Vec::new();
         for table in self.owner.tables.values().map(|table| &table.stored) {
@@ -2456,11 +3263,23 @@ impl Inner {
                     .push((image.table.clone(), row, image.key.clone()));
             }
             Some(current) if current.seq == image.seq => {}
+            Some(current) if relay_older(current.seq, image.seq) => {
+                if self.non_durable {
+                    self.put_image(image, true)?;
+                    self.changed
+                        .borrow_mut()
+                        .push((image.table.clone(), row, image.key.clone()));
+                }
+            }
             Some(current) if current.seq < image.seq || current.seq >= LOCAL_BASE => {
-                if current.seq < LOCAL_BASE {
+                // A relay's newer version: its older one stays as history.
+                let relay_newer = self.non_durable && current.seq >= LOCAL_BASE;
+                let relay_newer = relay_newer && current.seq < image.seq;
+                if current.seq < LOCAL_BASE || relay_newer {
                     self.put_image(&current, true)?;
                 }
-                self.drop_row(&image.table, row, &image.key, LOCAL_BASE)?;
+                let floor = if relay_newer { image.seq } else { LOCAL_BASE };
+                self.drop_row(&image.table, row, &image.key, floor)?;
                 self.put_image(image, false)?;
             }
             // An older version: history reads of the row change.
@@ -2492,7 +3311,7 @@ impl Inner {
         for (table, row, key) in rows {
             let unlisted = self
                 .conn
-                .query_row(
+                .cached_row(
                     "SELECT 1 FROM _jazz_revoked WHERE t = ?1 AND id = ?2 AND k = ?3",
                     rusqlite::params![table, row.0.as_bytes().to_vec(), key],
                     |_| Ok(()),
@@ -2530,6 +3349,32 @@ impl Inner {
                 let client = self.client.as_mut().expect("client");
                 client.shadow.insert((table, row, key), Some(image));
             }
+        }
+        Ok(())
+    }
+
+    /// The rows of own commit `tx` the server did not ship (`held`): its
+    /// version at `through` is the one this replica wrote, so that becomes
+    /// the settled image. A newer image already received stays.
+    fn install_held(&mut self, id: UploadId, through: u64, held: &[Held]) -> Result<(), Error> {
+        if held.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.as_mut().expect("client");
+        let Some(pending) = client.pending.iter_mut().find(|p| (p.node, p.tx) == id) else {
+            return Ok(());
+        };
+        let expected = std::mem::take(&mut pending.expected);
+        for held in held {
+            let Some(mut image) = expected.get(held.index as usize).cloned() else {
+                return Err(unsupported(format!(
+                    "fate of commit {id:?} holds row {} it did not expect",
+                    held.index
+                )));
+            };
+            held.stamp(&mut image);
+            image.seq = through;
+            self.receive_image(image)?;
         }
         Ok(())
     }
@@ -2670,18 +3515,43 @@ impl Inner {
             return Ok(WriteState::rejected(&error, DurabilityTier::None));
         }
         let origin = self.local_origin(tx)?;
-        if let Some(Some(seq)) = self.settled(*origin.node.as_bytes(), origin.time.0)? {
+        let id = (*origin.node.as_bytes(), origin.time.0);
+        let pending = self.client.as_ref().is_some_and(|client| {
+            client
+                .pending
+                .iter()
+                .any(|pending| (pending.node, pending.tx) == id)
+        });
+        // Origins qualify row history, not a write's terminal receipt. An
+        // ordinary worker can also have a local applied fate while its upload
+        // still awaits the authority's qualified receipt.
+        if let Some(Some(seq)) = self.settled(id.0, id.1)? {
             if seq >= LOCAL_BASE {
+                if !self.private_owner_required
+                    && !self.scope_isolated_owner
+                    && matches!(
+                        self.applied_fate(*origin.node.as_bytes(), origin.time.0)?,
+                        Some(Ok(()))
+                    )
+                {
+                    return Ok(WriteState {
+                        fate: Fate::Pending,
+                        global_time: None,
+                        durability: DurabilityTier::Local,
+                    });
+                }
                 return Err(Error::new(
                     ErrorCode::NotObserved,
                     "upstream write receipt is not an authority sequence",
                 ));
             }
-            return Ok(WriteState {
-                fate: Fate::Accepted,
-                global_time: Some(GlobalTime(seq)),
-                durability: DurabilityTier::Global,
-            });
+            if !pending && matches!(self.applied_fate(id.0, id.1)?, Some(Ok(()))) {
+                return Ok(WriteState {
+                    fate: Fate::Accepted,
+                    global_time: Some(GlobalTime(seq)),
+                    durability: DurabilityTier::Global,
+                });
+            }
         }
         if tx > self.seq {
             return Err(Error::new(
@@ -2718,7 +3588,7 @@ impl Inner {
     ) -> Result<InitializationTransactionStatus, Error> {
         let origin = self.local_origin(position)?;
         if self
-            .settled(*origin.node.as_bytes(), origin.time.0)?
+            .applied_fate(*origin.node.as_bytes(), origin.time.0)?
             .is_some()
             || self.client.is_none()
         {
@@ -2921,7 +3791,10 @@ impl Inner {
         let Some(client) = &self.client else {
             return Ok(());
         };
-        self.exec("DELETE FROM _jazz_shadow", []).map_err(storage)?;
+        // SQLite's unqualified DELETE can dirty even an empty table. Reopening
+        // an owner with no overlay must leave its durable file unchanged.
+        self.exec("DELETE FROM _jazz_shadow WHERE true", [])
+            .map_err(storage)?;
         for ((table, row, key), image) in &client.shadow {
             self.exec(
                 "INSERT INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
@@ -3014,7 +3887,7 @@ impl Inner {
     fn meta(&self, key: &str) -> Result<Option<u64>, Error> {
         match self
             .conn
-            .query_row("SELECT v FROM _jazz_meta WHERE k = ?1", [key], |r| {
+            .cached_row("SELECT v FROM _jazz_meta WHERE k = ?1", [key], |r| {
                 r.get::<_, Vec<u8>>(0)
             }) {
             Ok(bytes) => Ok(postcard::from_bytes(&bytes).ok()),
@@ -3028,7 +3901,7 @@ impl Inner {
         node: [u8; 16],
         tx: u64,
     ) -> Result<Option<Result<(), WireError>>, Error> {
-        match self.conn.query_row(
+        match self.conn.cached_row(
             "SELECT result FROM _jazz_applied WHERE node = ?1 AND tx = ?2",
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
@@ -3063,11 +3936,7 @@ impl Inner {
     /// upload and by a replica for its own, so snapshots that name
     /// individual commits stay readable after they settle.
     fn record_settled(&self, node: [u8; 16], tx: u64, seq: Option<u64>) -> Result<(), Error> {
-        self.exec(
-            "INSERT OR REPLACE INTO _jazz_settled (node, tx, seq) VALUES (?1, ?2, ?3)",
-            rusqlite::params![node.to_vec(), tx as i64, seq.map(|s| s as i64)],
-        )
-        .map_err(storage)?;
+        self.record_origin(node, tx, seq)?;
         self.exec(
             "UPDATE _jazz_local_commits_v1 SET pending=0 WHERE node=?1 AND tx=?2",
             rusqlite::params![node.to_vec(), tx as i64],
@@ -3076,8 +3945,113 @@ impl Inner {
         Ok(())
     }
 
+    /// Accepted row provenance may precede a qualified write receipt. Retain
+    /// its history mapping without retiring any local publication or upload.
+    fn record_origin(&self, node: [u8; 16], tx: u64, seq: Option<u64>) -> Result<(), Error> {
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_settled (node, tx, seq) VALUES (?1, ?2, ?3)",
+            rusqlite::params![node.to_vec(), tx as i64, seq.map(|s| s as i64)],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// The sessions' commits this store's own commit `seq` carries, as it
+    /// accepted them through a relay.
+    fn relayed_origins(&self, seq: u64) -> Result<Vec<([u8; 16], u64)>, Error> {
+        let me = self.identity.node.as_bytes().to_vec();
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1 AND node != ?2")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(rusqlite::params![seq as i64, me], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(storage)?;
+        let mut origins = Vec::new();
+        for row in rows {
+            let (node, tx) = row.map_err(storage)?;
+            let node: [u8; 16] = node.try_into().map_err(|_| {
+                Error::new(
+                    ErrorCode::Storage,
+                    "a settled commit's node is not 16 bytes",
+                )
+            })?;
+            origins.push((node, tx as u64));
+        }
+        Ok(origins)
+    }
+
+    /// Translate an ordinary tab's dependencies to the worker uploads that
+    /// carry them. Private owners forward the original units and never use this.
+    fn ordinary_worker_upload(&self, kind: &WireKind, writer: [u8; 16]) -> Result<Kind, Error> {
+        let (snapshot, reads, own, content) = match kind {
+            WireKind::Mergeable => return Ok(Kind::Mergeable),
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } => (
+                *snapshot,
+                reads,
+                own.iter().map(|&tx| (tx, writer, tx)).collect::<Vec<_>>(),
+                Vec::new(),
+            ),
+            WireKind::SerializableOriginsV1 {
+                snapshot,
+                reads,
+                own,
+            } => (*snapshot, reads, own.clone(), Vec::new()),
+            WireKind::SerializableObservedV1 {
+                snapshot,
+                reads,
+                own,
+                content,
+            }
+            | WireKind::SerializableUnionObservedV1 {
+                snapshot,
+                reads,
+                own,
+                content,
+            } => (*snapshot, reads, own.clone(), content.clone()),
+        };
+        if content.len() != reads.len() {
+            return Err(unsupported(
+                "ordinary worker serializable reads without content evidence",
+            ));
+        }
+        let mut carried = BTreeMap::new();
+        for (position, node, tx) in own {
+            if node != writer {
+                return Err(rejected(
+                    "ordinary worker dependency belongs to another foreground",
+                ));
+            }
+            if let Some(Some(seq)) = self.settled(node, tx)? {
+                carried.insert(position, seq);
+            }
+        }
+        let reads = reads
+            .iter()
+            .cloned()
+            .map(|mut read| {
+                for (_, seq) in &mut read.rows {
+                    *seq = carried.get(seq).copied().unwrap_or(*seq);
+                }
+                read
+            })
+            .collect();
+        Ok(Kind::Serializable {
+            snapshot,
+            reads,
+            own: carried.into_values().collect(),
+            content,
+        })
+    }
+
     fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<u64>>, Error> {
-        match self.conn.query_row(
+        match self.conn.cached_row(
             "SELECT seq FROM _jazz_settled WHERE node = ?1 AND tx = ?2",
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Option<i64>>(0),
@@ -3120,6 +4094,27 @@ impl Inner {
         Ok(cut)
     }
 
+    /// Whether this store answers to an upstream it relays for: a replica,
+    /// unless its host says it has no server (then it is the last word on
+    /// what its sessions commit).
+    fn relays_upstream(&self) -> bool {
+        self.client.as_ref().is_some_and(|client| {
+            let link = client.hint.get();
+            !(link.reported && link.hint == RemoteLinkHint::NoServer)
+        })
+    }
+
+    /// The seq this store tells its sessions it is complete through. A
+    /// relay tells them the authority's seq it knows (its own local seqs
+    /// number nothing the authority can check), so a session's snapshot
+    /// is one the authority validates against as it is.
+    fn served_through(&self) -> u64 {
+        match &self.client {
+            Some(client) if self.relays_upstream() => client.known,
+            _ => self.seq,
+        }
+    }
+
     /// The own commits a replica's serializable transaction began over:
     /// those still unsettled (none on the authority).
     pub(crate) fn unsettled_own(&self) -> Vec<u64> {
@@ -3140,7 +4135,17 @@ impl Inner {
         }
         // A replica reads snapshots from its own store: it must already hold
         // the authority state the reference was captured at.
-        let horizon = self.client.as_ref().map_or(self.seq, |client| client.known);
+        // One with no server is the last word on its store's seqs.
+        let horizon = match &self.client {
+            Some(client)
+                if self.scope_isolated_owner
+                    || self.private_owner_required
+                    || !client.no_server() =>
+            {
+                client.known
+            }
+            _ => self.seq,
+        };
         if snapshot.global_base.0 > horizon {
             return Err(snapshot_unavailable(
                 "it was captured past the authority state this store has synced",
@@ -3182,6 +4187,8 @@ impl Inner {
         if self.meta("client")?.is_none() {
             return Ok(());
         }
+        // restore_issued_seq below also covers settled original transaction
+        // IDs, together with pending and applied records.
         let mut client = Client::new(*self.identity.node.as_bytes());
         client.known = self.meta("known")?.unwrap_or(0);
         client.persisted_known = client.known;
@@ -3202,8 +4209,13 @@ impl Inner {
             .map_err(storage)?;
         drop(statement);
         for (tx, commit, rows) in pending {
-            let commit: SyncMessage = postcard::from_bytes(&commit)
+            let mut commit: SyncMessage = postcard::from_bytes(&commit)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+            // The rows it expected are not kept across a reopen: the
+            // server ships them.
+            if let SyncMessage::Commit { expect, .. } = &mut commit {
+                expect.clear();
+            }
             let rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
             let SyncMessage::Commit {
@@ -3211,7 +4223,6 @@ impl Inner {
                 ops,
                 author,
                 session,
-                updated_at,
                 ..
             } = &commit
             else {
@@ -3226,9 +4237,6 @@ impl Inner {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
                 ops.iter_mut()
                     .for_each(|op| op.attribute(author, session.is_some()));
-            }
-            if let Some(at) = *updated_at {
-                ops.iter_mut().for_each(|op| op.stamp_at(at));
             }
             let seq = self
                 .local_position(TxId::new(TxTime(tx), NodeUuid::from_bytes(*node)))?
@@ -3249,6 +4257,7 @@ impl Inner {
                     .into_iter()
                     .map(|(t, r, k)| (t, RowUuid::from_bytes(r), k))
                     .collect(),
+                expected: Vec::new(),
             });
             client.unsent.push(commit);
         }
@@ -3341,6 +4350,12 @@ impl Client {
         });
     }
 
+    /// Its host says there is no server: it is the last word on its store.
+    fn no_server(&self) -> bool {
+        let link = self.hint.get();
+        link.reported && link.hint == RemoteLinkHint::NoServer
+    }
+
     fn new(node: [u8; 16]) -> Self {
         Client {
             initialization_recovery_error: None,
@@ -3372,6 +4387,7 @@ impl Client {
             owner_node: None,
             owner_ready: None,
             owner_inbound: VecDeque::new(),
+            local_fates: HashSet::new(),
             shadow: HashMap::new(),
             known: 0,
             persisted_known: 0,
@@ -3388,6 +4404,11 @@ impl Client {
             pushed: HashMap::new(),
             unavailable: BTreeSet::new(),
             arrived: false,
+            relayed_fates: HashMap::new(),
+            relayed_fetches: Vec::new(),
+            relay_ready: false,
+            unadmitted: false,
+            hold_owed: false,
         }
     }
 }
@@ -3398,7 +4419,7 @@ impl Db {
     /// Connect this database to its server. Writes from now on upload, and
     /// subscriptions attach remotely.
     pub async fn connect_upstream(&self, transport: Box<dyn Transport>) -> Upstream {
-        self.ensure_client();
+        self.become_replica();
         let mut inner = self.inner.borrow_mut();
         let readable_policy = inner.scope_isolated_owner;
         let client = inner.client.as_mut().expect("client");
@@ -3423,24 +4444,7 @@ impl Db {
                     live.retire_pending();
                 }
                 r.resumed = r.through.is_some();
-                subscription_message(
-                    readable_policy,
-                    r.id,
-                    r.query.clone(),
-                    r.binding.clone(),
-                    r.through,
-                    r.include_deleted,
-                    r.scope.clone(),
-                )
-            })
-            .collect();
-        let shadowed: Vec<(String, [u8; 16], Vec<u8>, u64)> = client
-            .shadow
-            .iter()
-            .filter_map(|((table, row, key), image)| {
-                image
-                    .as_ref()
-                    .map(|image| (table.clone(), *row.0.as_bytes(), key.clone(), image.seq))
+                subscription_message(readable_policy, r)
             })
             .collect();
         // Commits, their chunk pushes and chunk requests a full queue held
@@ -3474,35 +4478,29 @@ impl Db {
                 version: *version.as_bytes(),
             },
         );
-        if inner.non_durable {
+        if inner.private_owner_required {
             let client = inner.client.as_mut().expect("client");
             let known = client.owner_inputs.keys().copied().collect();
             client
                 .outbox
                 .insert(1, SyncMessage::OwnerProjectionV1 { known });
         }
-        // Every settled row the replica holds, whether or not a live query
-        // still reads it: the new session watches them, so a later change
-        // (a deletion, lost access) still reaches the cached copy.
-        let mut rows = shadowed;
-        match inner.held_versions() {
-            Ok(held) => rows.extend(held),
-            Err(_) => rows.clear(),
-        }
-        if !rows.is_empty() {
-            // Held rows name tables as this store's schema does.
-            let names = inner.owner.clone();
-            let rows = rows
-                .into_iter()
-                .filter_map(|(table, id, key, seq)| {
-                    Some((names.by_stored(&table)?.name.clone(), id, key, seq))
-                })
-                .collect();
-            let client = inner.client.as_mut().expect("client");
-            client.outbox.push(SyncMessage::Hold { rows });
-        }
         let client = inner.client.as_mut().expect("client");
+        client.hold_owed = true;
         client.outbox.extend(resubscribe);
+        // Relayed reads still waiting are asked again: the old session's
+        // answers are lost with it.
+        let reask: Vec<SyncMessage> = client
+            .relayed_fetches
+            .iter()
+            .filter(|fetch| matches!(client.answers.get(&fetch.upstream), Some(None)))
+            .map(|fetch| fetch.ask.clone())
+            .collect();
+        let relayed: HashSet<u64> = client.relayed_fetches.iter().map(|f| f.upstream).collect();
+        client
+            .outbox
+            .retain(|m| !matches!(m, SyncMessage::Fetch { id, .. } if relayed.contains(id)));
+        client.outbox.extend(reask);
         // Sent-but-unsettled commits go first, in their original order.
         let mut resend = client.sent.clone();
         resend.append(&mut client.unsent);
@@ -3516,8 +4514,82 @@ impl Db {
         for upload in client.relay_uploads.values_mut() {
             upload.sent = false;
         }
+        client.unadmitted = false;
         client.connection += 1;
         Upstream(client.connection)
+    }
+
+    /// Unlist the cached rows of a remote query's settled view that its
+    /// answer, listing `listed`, left out. Each pass reads the view again,
+    /// so rows that move up into a window are checked too.
+    fn unlist_unanswered(
+        &self,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        listed: &[[u8; 16]],
+        through: u64,
+    ) -> Result<(), Error> {
+        // A history read lists versions and a flat join tuples, not the
+        // rows a replica caches.
+        if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
+            return Ok(());
+        }
+        let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
+        // Only which rows the view holds matters: ids, not values (whose
+        // large chunks may not be here yet), nor included rows.
+        let mut query = remote_query(&query).into_owned();
+        if !crate::db::relation::is_union(&query) {
+            query.select = Some(Vec::new());
+            query.includes.clear();
+            query.array_subqueries.clear();
+        }
+        let prepared = PreparedQuery {
+            query,
+            binding,
+            shape: Shape([0; 16]),
+            binding_id: Binding([0; 16]),
+            authority_policies: false,
+            request_claims: None,
+            schema: self.view.clone(),
+        };
+        // The answer lists the result as of `through`: rows that arrived
+        // after it (later in the same batch) are not its to judge.
+        let read = ReadSpec {
+            members_only: true,
+            settled_only: true,
+            include_deleted,
+            cut: Some(crate::compile::Cut::at(through)),
+            ..ReadSpec::default()
+        };
+        let inner = self.inner.borrow();
+        let table = inner.schema.stored_table(&prepared.query.table)?.to_owned();
+        let mut previous = Vec::new();
+        loop {
+            // Ordering by a value whose chunks are not here yet: the rows
+            // are reconciled by a later answer.
+            let rows = match inner.run(&prepared, None, &read) {
+                Err(error) if crate::large::is_missing(&error) => return Ok(()),
+                rows => rows?,
+            };
+            let stale: Vec<RowUuid> = rows
+                .into_iter()
+                .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
+                .map(|row| row.id)
+                .collect();
+            if stale.is_empty() || stale == previous {
+                return Ok(());
+            }
+            for &row in &stale {
+                let id = row.0.as_bytes().to_vec();
+                for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
+                    if image.seq <= through {
+                        inner.unlist(&table, row, &image.key)?;
+                    }
+                }
+            }
+            previous = stale;
+        }
     }
 
     /// Drop the upstream: reads stop waiting, writes queue.
@@ -3529,18 +4601,14 @@ impl Db {
         if client.connection != upstream.0 || client.transport.is_none() {
             return false;
         }
-        client.transport = None;
         client.owner_ready = None;
-        let mut link = client.hint.get();
-        link.detached = true;
-        client.hint.set(link);
-        // Nothing settles at the server's tier while detached: a
-        // subscription (or one opened meanwhile) is held until the next
-        // upstream answers it again.
-        for remote in client.remote.values() {
-            remote.answered.set(false);
-        }
+        inner.detach_upstream();
         true
+    }
+
+    /// Admit this store as a replica before it makes optimistic writes.
+    pub fn become_replica(&self) {
+        self.ensure_client();
     }
 
     /// Become a replica through the ordinary role/admission path.
@@ -3583,7 +4651,7 @@ impl Db {
     }
 
     pub fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
-        self.ensure_client();
+        self.become_replica();
         let inner = self.inner.borrow();
         let client = inner.client.as_ref().expect("client");
         let link = client.hint.get();
@@ -3604,6 +4672,9 @@ impl Db {
 
     /// Record a local commit for upload (client only). Inside an open
     /// transaction the ops join it.
+    /// Record a local commit's upload. It reads and writes the store, so
+    /// it runs inside the commit's SQLite transaction: an error leaves the
+    /// replica's sync state as it was, and the caller rolls the commit back.
     pub(crate) fn record_upload(
         &self,
         ops: Vec<StagedOp>,
@@ -3650,7 +4721,7 @@ impl Db {
         } else {
             None
         };
-        let rows = if inner.scope_isolated_owner || inner.non_durable {
+        let rows = if inner.scope_isolated_owner || inner.private_owner_required {
             inner.owner_input_coordinates(&ops)?
         } else {
             inner.written_rows(&ops, seq)?
@@ -3677,6 +4748,24 @@ impl Db {
             .iter()
             .map(to_wire)
             .collect::<Result<Vec<WireOp>, Error>>()?;
+        // Each written row as this replica now holds it, so the authority
+        // can skip echoing a version that is exactly this.
+        let mut expected = Vec::new();
+        let mut expect = Vec::new();
+        for (table, row, key) in &rows {
+            let Some(image) = inner.current_image(table, *row, key)? else {
+                continue;
+            };
+            let Some(named) = image_out(&inner.owner, image.clone()) else {
+                continue;
+            };
+            expect.push(Expect {
+                id: image.id,
+                key: image.key.clone(),
+                digest: echo_digest(&named),
+            });
+            expected.push(image);
+        }
         let kind = match kind {
             Kind::Mergeable => WireKind::Mergeable,
             Kind::Serializable {
@@ -3734,7 +4823,7 @@ impl Db {
             ops: wire,
             author: author.map(|a| a.canonical().to_owned()),
             session: session_claims,
-            updated_at: ops.iter().find_map(StagedOp::updated_at_ms),
+            expect,
         };
         inner.persist_pending(origin.time.0, &commit, &rows)?;
         inner.retain_upload_roots(&commit)?;
@@ -3764,6 +4853,7 @@ impl Db {
             node: *origin.node.as_bytes(),
             ops,
             rows,
+            expected,
         });
         // Standalone writes notify before their upload is recorded. Refresh
         // only affected UNION groups once the pending status is available.
@@ -3773,16 +4863,18 @@ impl Db {
 
     /// Remote reads ship the query's rows plus its supporting rows (single
     /// hop includes, array subqueries, junction traversals, gathers), and
-    /// an aggregate's input rows ([`remote_query`]); the client evaluates
-    /// locally. Other shapes that read further tables
-    /// (uncorrelated traversals or ones through a referenced row, gathers
-    /// filtered after the gather, multi-hop includes) would see a partial
-    /// replica, so they are refused explicitly.
-    pub(crate) fn remote_shape(query: &Query) -> Result<(), Error> {
-        if crate::db::relation::is_union(query) {
-            return Err(crate::values::unsupported(
-                "remote union reads and subscriptions (union-arm coverage)",
-            ));
+    /// an aggregate's input rows or a gather's whole closure
+    /// ([`remote_query`]); the client evaluates locally. Other shapes that
+    /// read further tables (uncorrelated traversals or ones through a
+    /// referenced row, gathers seeded by a claim, multi-hop includes) would
+    /// see a partial replica, so they are refused explicitly.
+    pub(crate) fn remote_shape(&self, query: &Query) -> Result<(), Error> {
+        let schema = self.inner().schema.clone();
+        if let Some(plan) = crate::db::union_plan(query, &schema)? {
+            return plan
+                .arms
+                .iter()
+                .try_for_each(|(_, arm)| self.remote_shape(arm));
         }
         let query = &*remote_query(query);
         if query.relation.is_some() {
@@ -3792,16 +4884,12 @@ impl Db {
         }
         let other_tables = !query.joins.iter().all(join_followable)
             || query
-                .reachable
-                .iter()
-                .any(|via| gather_from_root(query, via) && !gather_shaped(query, via))
-            || query
                 .includes
                 .iter()
                 .any(|include| include.path.contains('.'));
         if other_tables {
             return Err(crate::values::unsupported(format!(
-                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, filtered gathers or multi-hop includes)",
+                "a synced read of `{}` that reads further tables (uncorrelated joins, joins through a referenced row, claim-seeded gathers or multi-hop includes)",
                 query.table
             )));
         }
@@ -3815,6 +4903,7 @@ impl Db {
         prepared: &PreparedQuery,
         include_deleted: bool,
         scope: RemoteScope,
+        reach: RemoteReach,
     ) -> Option<(
         Rc<StdCell<bool>>,
         Rc<RefCell<Option<Error>>>,
@@ -3824,7 +4913,7 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let readable_policy = inner.scope_isolated_owner;
         let client = inner.client.as_mut()?;
-        let key = scoped_remote_key(&query, &prepared.binding, include_deleted, &scope);
+        let key = scoped_remote_key(&query, &prepared.binding, include_deleted, &scope, reach);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             // A new attachment is a new read. Its authority wait cannot reuse
@@ -3848,15 +4937,9 @@ impl Db {
             client
                 .outbox
                 .push(SyncMessage::Unsubscribe { id: previous });
-            client.outbox.push(subscription_message(
-                readable_policy,
-                id,
-                query.clone().into_owned(),
-                prepared.binding.clone(),
-                None,
-                include_deleted,
-                scope.clone(),
-            ));
+            client
+                .outbox
+                .push(subscription_message(readable_policy, remote));
             return Some((
                 remote.answered.clone(),
                 remote.refused.clone(),
@@ -3868,33 +4951,26 @@ impl Db {
         let answered = Rc::new(StdCell::new(false));
         let refused = Rc::new(RefCell::new(None));
         let global = Rc::new(StdCell::new(false));
-        client.outbox.push(subscription_message(
-            readable_policy,
+        let remote = Remote {
             id,
-            query.clone().into_owned(),
-            prepared.binding.clone(),
-            None,
+            scope: scope.clone(),
+            refs: 1,
+            query: query.into_owned(),
+            binding: prepared.binding.clone(),
             include_deleted,
-            scope.clone(),
-        ));
-        client.remote.insert(
-            key.clone(),
-            Remote {
-                id,
-                scope: scope.clone(),
-                refs: 1,
-                query: query.into_owned(),
-                binding: prepared.binding.clone(),
-                include_deleted,
-                answered: answered.clone(),
-                refused: refused.clone(),
-                global: global.clone(),
-                through: None,
-                resumed: false,
-                union: crate::db::relation::is_union(&prepared.query)
-                    .then(|| Rc::new(UnionLive::new(scope.is_some()))),
-            },
-        );
+            reach,
+            answered: answered.clone(),
+            refused: refused.clone(),
+            global: global.clone(),
+            through: None,
+            resumed: false,
+            union: (scope.is_some() && crate::db::relation::is_union(&prepared.query))
+                .then(|| Rc::new(UnionLive::new(true))),
+        };
+        client
+            .outbox
+            .push(subscription_message(readable_policy, &remote));
+        client.remote.insert(key.clone(), remote);
         client.remote_ids.insert(id, key);
         Some((answered, refused, global))
     }
@@ -3905,10 +4981,11 @@ impl Db {
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
         scope: &RemoteScope,
+        reach: RemoteReach,
     ) {
         self.inner
             .borrow_mut()
-            .release_remote(query, binding, include_deleted, scope);
+            .release_remote(query, binding, include_deleted, scope, reach);
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -3925,11 +5002,12 @@ impl Inner {
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
         scope: &RemoteScope,
+        reach: RemoteReach,
     ) {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = scoped_remote_key(&remote_query(query), binding, include_deleted, scope);
+        let key = scoped_remote_key(&remote_query(query), binding, include_deleted, scope, reach);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -3941,6 +5019,13 @@ impl Inner {
             client.outbox.push(SyncMessage::Unsubscribe { id });
         }
     }
+}
+
+fn schema_admission_error() -> Error {
+    Error::new(
+        ErrorCode::Schema,
+        "schema version is awaiting published catalogue admission; deploy it to the server",
+    )
 }
 
 struct FetchRequest {
@@ -3961,25 +5046,47 @@ impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
     /// answer is complete through, if it answered, or why it refused.
+    /// `strict` (a Remote read): the read waits for an answer while the
+    /// link is down or there is no server, asking again on each new
+    /// connection, since an answer the last one owed is lost with it.
+    /// `coverage`: the read must be covered by the server. It fails once
+    /// the check says the caller's budget is spent (`NotObserved`), or as
+    /// soon as the server says it has not admitted this client's schema
+    /// version.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
         at: Option<u64>,
         include_deleted: bool,
+        reach: RemoteReach,
         deadline: Option<Instant>,
+        coverage: Option<&dyn Fn() -> bool>,
+        strict: bool,
+        view: &ReadViewSourceSpec,
     ) -> Result<Option<u64>, Error> {
-        self.fetch_answer(prepared, at, include_deleted, deadline, None, false)
-            .await
-            .map(|answer| answer.map(|(through, _, _, _)| through))
+        self.fetch_qualified(
+            prepared,
+            at,
+            include_deleted,
+            reach,
+            deadline,
+            coverage,
+            strict,
+            None,
+            false,
+            view,
+        )
+        .await
+        .map(|answer| answer.map(|(through, _, _, _)| through))
     }
 
-    /// Strict transaction reads wait while offline before issuing a request.
-    /// The caller retains its read guard and coverage deadline during this wait.
+    /// Strict transaction reads retain their read guard while waiting for a
+    /// transport admitted by the normal host handshake.
     pub(super) async fn wait_for_read_transport(&self) {
         poll_fn(|_| {
-            if self
-                .inner
-                .borrow()
+            let inner = self.inner.borrow();
+            if inner
                 .client
                 .as_ref()
                 .is_some_and(|client| client.transport.is_some() && may_wait(client.hint.get()))
@@ -3998,118 +5105,178 @@ impl Db {
         at: Option<u64>,
         include_deleted: bool,
         deadline: Option<Instant>,
-        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        scope: RemoteScope,
         accepted: bool,
     ) -> Result<Option<FetchAnswer>, Error> {
+        self.fetch_qualified(
+            prepared,
+            at,
+            include_deleted,
+            RemoteReach::REMOTE,
+            deadline,
+            None,
+            false,
+            scope,
+            accepted,
+            &ReadViewSourceSpec::Current,
+        )
+        .await
+    }
+
+    /// Use upstream's reach and reconnect lifecycle while retaining immutable
+    /// request scope and the stronger accepted-answer contract.
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_qualified(
+        &self,
+        prepared: &PreparedQuery,
+        at: Option<u64>,
+        include_deleted: bool,
+        reach: RemoteReach,
+        deadline: Option<Instant>,
+        coverage: Option<&dyn Fn() -> bool>,
+        strict: bool,
+        scope: RemoteScope,
+        accepted: bool,
+        view: &ReadViewSourceSpec,
+    ) -> Result<Option<FetchAnswer>, Error> {
         let _deadline = self.read_deadline(deadline);
-        let _attempt_deadline = self.read_attempt_deadline();
-        // An in-flight host handshake is not an admitted transport. Wait before
-        // assigning this request to a connection: connect_upstream retires old
-        // requests, including any incorrectly queued before the first connect.
-        let available = poll_fn(|_| {
-            let inner = self.inner.borrow();
-            let Some(client) = &inner.client else {
-                return Poll::Ready(false);
-            };
-            if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
-                Poll::Ready(false)
-            } else if client.transport.is_some() {
-                Poll::Ready(true)
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-        if !available {
+        let _attempt = self.read_attempt_deadline();
+        let qualified = scope.is_some() || accepted;
+        let answerable = |inner: &Inner| {
+            inner.client.as_ref().is_some_and(|client| {
+                may_wait(client.hint.get())
+                    || (!qualified
+                        && inner.non_durable
+                        && reach.tier != ReadTier::Remote
+                        && client.transport.is_some())
+            })
+        };
+        if self.inner().client.is_none() {
             return Ok(None);
         }
-        let (id, connection) = {
-            let mut inner = self.inner.borrow_mut();
-            let Some(client) = inner.client.as_mut() else {
-                return Ok(None);
-            };
-            if !may_wait(client.hint.get()) {
-                return Ok(None);
-            }
-            let id = client.next_id;
-            client.next_id += 1;
-            client.answers.insert(id, None);
-            if crate::db::relation::is_union(&prepared.query) {
-                client.union_answers.insert(id);
-            }
-            if scope.is_some() {
-                client.scoped_answers.insert(id);
-            }
-            if accepted {
-                client.accepted_answers.insert(id);
-            }
-            // A paired read hydrates the prefix so local re-evaluation of its
-            // original offset/window has the same predecessors as the authority.
-            // Scoped ordinary answers retain their exact-window contract.
-            let query = if !accepted && scope.is_some() {
-                prepared.query.clone()
-            } else {
-                remote_query(&prepared.query).into_owned()
-            };
+        let query = remote_query(&prepared.query).into_owned();
+        let message = |id| {
             let binding = prepared.binding.clone();
-            let message = if accepted {
+            if accepted {
                 SyncMessage::AcceptedFetchV1 {
                     id,
-                    query,
+                    query: query.clone(),
                     binding,
                     at,
                     include_deleted,
-                    scope: scope.map(|(author, claims)| (author.canonical().to_owned(), claims)),
+                    scope: scope
+                        .as_ref()
+                        .map(|(author, claims)| (author.canonical().to_owned(), claims.clone())),
+                }
+            } else if let Some((author, claims)) = &scope {
+                SyncMessage::ScopedFetchV1 {
+                    id,
+                    query: query.clone(),
+                    binding,
+                    author: author.canonical().to_owned(),
+                    claims: claims.clone(),
+                    include_deleted,
                 }
             } else {
-                match scope {
-                    Some((author, claims)) => SyncMessage::ScopedFetchV1 {
-                        id,
-                        query,
-                        binding,
-                        author: author.canonical().to_owned(),
-                        claims,
-                        include_deleted,
-                    },
-                    None => SyncMessage::Fetch {
-                        id,
-                        query,
-                        binding,
-                        at,
-                        include_deleted,
-                    },
+                SyncMessage::Fetch {
+                    id,
+                    query: query.clone(),
+                    binding,
+                    at,
+                    include_deleted,
+                    tier: reach.tier,
+                    wait: reach.wait,
+                    view: view.clone(),
                 }
-            };
-            client.outbox.push(message);
-            (id, client.connection)
+            }
         };
-        if accepted {
-            self.schedule_pending_tick();
-        }
-        let _request = FetchRequest {
-            inner: self.inner.clone(),
-            id,
-        };
-        poll_fn(|_| {
+        let mut asked: Option<(u64, u64, bool)> = None;
+        // The guard also removes requests abandoned by cancellation. Its id is
+        // updated in place on reconnect, avoiding a drop while Inner is borrowed.
+        let mut request: Option<FetchRequest> = None;
+        let answer = poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
+            let available = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
-            if client.connection != connection {
+            if let Some((id, connection, was_available)) = asked {
+                if (qualified || reach.tier == ReadTier::Remote)
+                    && (connection != client.connection
+                        || ((qualified || was_available) && !available)
+                        || client.transport.is_none())
+                {
+                    return Poll::Ready(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "issued read interrupted by an upstream disconnect or reconnect",
+                    )));
+                }
+                if let Some(Some(_)) = client.answers.get(&id) {
+                    let answer = client.answers.remove(&id).flatten().expect("answered");
+                    return Poll::Ready(answer.map(Some));
+                }
+            }
+            if deadline.is_some_and(|d| Instant::now() >= d) || (!strict && !available) {
+                return Poll::Ready(Ok(None));
+            }
+            if client.unadmitted {
+                return Poll::Ready(Err(schema_admission_error()));
+            }
+            if let Some(expired) = coverage
+                && expired()
+            {
                 return Poll::Ready(Err(Error::new(
                     ErrorCode::NotObserved,
-                    "one-shot read interrupted by an upstream reconnect",
+                    "Timed out waiting for query coverage",
                 )));
             }
-            if let Some(Some(_)) = client.answers.get(&id) {
-                let answer = client.answers.remove(&id).flatten().expect("answered");
-                return Poll::Ready(answer.map(Some));
-            }
-            if !may_wait(client.hint.get()) || deadline.is_some_and(|d| Instant::now() >= d) {
-                client.answers.remove(&id);
-                return Poll::Ready(Ok(None));
+            // An attempted connection is not an admitted transport. Do not
+            // enqueue this read until connect_upstream has installed one.
+            if client.transport.is_some()
+                && asked.is_none_or(|(_, connection, _)| connection != client.connection)
+            {
+                if let Some((id, _, _)) = asked {
+                    client.cancel_fetch(id);
+                }
+                let id = client.next_id;
+                client.next_id += 1;
+                client.answers.insert(id, None);
+                if qualified && crate::db::relation::is_union(&prepared.query) {
+                    client.union_answers.insert(id);
+                }
+                if scope.is_some() {
+                    client.scoped_answers.insert(id);
+                }
+                if accepted {
+                    client.accepted_answers.insert(id);
+                }
+                client.outbox.push(message(id));
+                asked = Some((id, client.connection, available));
+                if let Some(request) = &mut request {
+                    request.id = id;
+                } else {
+                    request = Some(FetchRequest {
+                        inner: self.inner.clone(),
+                        id,
+                    });
+                }
+                drop(inner);
+                self.schedule_pending_tick();
             }
             Poll::Pending
         })
-        .await
+        .await?;
+        if !qualified
+            && at.is_none()
+            && let Some((through, listed, _, _)) = &answer
+        {
+            self.unlist_unanswered(
+                prepared.query.clone(),
+                prepared.binding.clone(),
+                include_deleted,
+                listed,
+                *through,
+            )?;
+        }
+        Ok(answer)
     }
 
     /// A remote one-shot must not overtake its preceding uploads, including
@@ -4234,9 +5401,12 @@ impl Db {
             let origin = inner.local_origin(tx)?;
             if inner.client.as_ref().is_some_and(|client| {
                 client
-                    .pending
-                    .iter()
-                    .any(|p| p.node == *origin.node.as_bytes() && p.tx == origin.time.0)
+                    .local_fates
+                    .contains(&(*origin.node.as_bytes(), origin.time.0))
+                    || client
+                        .pending
+                        .iter()
+                        .any(|p| p.node == *origin.node.as_bytes() && p.tx == origin.time.0)
             }) {
                 return Poll::Pending;
             }
@@ -4277,21 +5447,46 @@ impl Db {
     }
 
     /// Whether chunks this replica requested may still arrive: it is
-    /// connected to an upstream that may answer, with requests outstanding.
+    /// connected to an upstream that may answer, with requests outstanding
+    /// (sent, or recorded by a read for the next send). A non-durable
+    /// foreground's relay answers from its store whatever its own path to
+    /// the server. Chunks the upstream answered missing are not waited for
+    /// again.
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
         inner.client.as_ref().is_some_and(|client| {
+            let unavailable = |request: &ChunkRequest| client.unavailable.contains(request);
             client.transport.is_some()
-                && may_wait(client.hint.get())
-                && !(client.requested.is_empty() && client.wanted.is_empty())
+                && (may_wait(client.hint.get()) || inner.non_durable)
+                && (!client.requested.is_empty()
+                    || client.wanted.iter().any(|request| !unavailable(request))
+                    || inner.chunks.has_demand_beyond(unavailable))
+        })
+    }
+
+    /// Whether a read recorded chunk requests that only the next send
+    /// carries upstream: a host that ticks when asked should tick.
+    pub fn owes_chunk_requests(&self) -> bool {
+        let inner = self.inner.borrow();
+        inner.client.as_ref().is_some_and(|client| {
+            client.transport.is_some()
+                && inner.chunks.has_demand_beyond(|request| {
+                    client.requested.contains(request) || client.unavailable.contains(request)
+                })
         })
     }
 
     /// Ask the upstream authority whether `action` would be allowed for
-    /// this replica's session; wait with [`Db::permission_advice`]. Without
-    /// a connected upstream the answer is `Unknown`: a replica's own policy
-    /// evidence may be incomplete, so it never decides locally.
-    pub fn request_permission_advice(&self, action: PermissionAdviceAction) -> u64 {
+    /// this replica's session, or for `session` (an identity a trusted
+    /// backend acts for, with its claims); wait with
+    /// [`Db::permission_advice`]. Without a connected upstream the answer
+    /// is `Unknown`: a replica's own policy evidence may be incomplete, so
+    /// it never decides locally.
+    pub fn request_permission_advice(
+        &self,
+        action: PermissionAdviceAction,
+        session: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> u64 {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return 0;
@@ -4300,7 +5495,16 @@ impl Db {
         client.next_id += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
-            client.outbox.push(SyncMessage::Advise { id, action });
+            let (author, session) = match session {
+                Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
+                None => (None, None),
+            };
+            client.outbox.push(SyncMessage::Advise {
+                id,
+                action,
+                author,
+                session,
+            });
         } else {
             client.advice.insert(id, Some(PermissionAdvice::Unknown));
         }
@@ -4371,30 +5575,17 @@ impl Db {
                     Err(_) => PermissionAdvice::Unknown,
                 };
             }
-            PermissionAdviceAction::Insert { table, cells } => {
-                let owner = self.inner.borrow().owner.clone();
-                // The candidate has no id yet: a policy that looks at it
-                // cannot be decided.
-                match owner.table(&table) {
-                    Ok(schema) => {
-                        if schema
-                            .policy(crate::tools::Operation::Insert)
-                            .is_some_and(depends_on_row_id)
-                        {
-                            return PermissionAdvice::Unknown;
-                        }
-                    }
-                    Err(_) => return PermissionAdvice::Unknown,
-                }
-                StagedOp::Insert(
-                    table,
-                    cells,
-                    InsertOptions {
-                        row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
-                        ..Default::default()
-                    },
-                )
-            }
+            // The candidate gets a fresh id, as the insert it previews will:
+            // no other row can reference it yet, so the dry run decides what
+            // the authority would.
+            PermissionAdviceAction::Insert { table, cells } => StagedOp::Insert(
+                table,
+                cells,
+                InsertOptions {
+                    row_id: Some(RowUuid::from_bytes(*uuid::Uuid::new_v4().as_bytes())),
+                    ..Default::default()
+                },
+            ),
             PermissionAdviceAction::Update { table, row, patch } => {
                 StagedOp::Update(table, row, patch, Default::default())
             }
@@ -4456,7 +5647,7 @@ impl Db {
         let ready = {
             let mut inner = self.inner.borrow_mut();
             if let Err(error) = &applied {
-                if inner.scope_isolated_owner || inner.non_durable {
+                if inner.scope_isolated_owner || inner.private_owner_required {
                     inner.owner_projection_error = Some(Error::new(
                         ErrorCode::Storage,
                         format!(
@@ -4505,7 +5696,9 @@ impl Db {
             self.inner.borrow().retry_awaiting();
         }
         self.flush_settled();
-        if ready {
+        if ready || (arrived && self.inner().sessions.iter().any(|session| session.open)) {
+            // Hydrated subscription rows can now answer a downstream peer.
+            // Deliver them in this drive turn instead of waiting for unrelated traffic.
             self.server_tick()?;
         }
         self.client_send()
@@ -4531,10 +5724,17 @@ impl Db {
                 return Ok((answers, union_updates));
             };
             let mut inbound = Vec::new();
+            let mut failed = false;
             if let Some(transport) = client.transport.as_mut() {
                 while let Some(message) = transport.try_recv() {
                     inbound.push(message);
                 }
+                failed = transport.take_failure().is_some();
+            }
+            // An upstream that sent what this client cannot decode is
+            // dropped like a lost link; what arrived before it applies.
+            if failed {
+                inner.detach_upstream();
             }
             // Chunks are not ordered with rows; everything else is applied
             // in arrival order.
@@ -4575,6 +5775,8 @@ impl Db {
                         tx,
                         through,
                         result,
+                        held,
+                        global,
                     } => {
                         let client = inner.client.as_ref().expect("client");
                         if client.relay_uploads.keys().any(|(_, time)| *time == tx) {
@@ -4591,13 +5793,28 @@ impl Db {
                                 "unqualified write fate is ambiguous across original writers",
                             ));
                         }
-                        SyncMessage::FateV1 {
+                        SyncMessage::OriginFateV2 {
                             node,
                             tx,
                             through,
                             result,
+                            held,
+                            global,
                         }
                     }
+                    SyncMessage::FateV1 {
+                        node,
+                        tx,
+                        through,
+                        result,
+                    } => SyncMessage::OriginFateV2 {
+                        node,
+                        tx,
+                        through,
+                        result,
+                        held: Vec::new(),
+                        global: true,
+                    },
                     other => other,
                 };
                 match message {
@@ -4636,7 +5853,9 @@ impl Db {
                         }
                     }
                     SyncMessage::Rows { images } => {
-                        if inner.non_durable && images.iter().any(|image| image.seq >= LOCAL_BASE) {
+                        if inner.private_owner_required
+                            && images.iter().any(|image| image.seq >= LOCAL_BASE)
+                        {
                             return Err(Error::new(
                                 ErrorCode::Protocol,
                                 "foreground received an unqualified pending row",
@@ -4692,7 +5911,9 @@ impl Db {
                                 "read settlement carries an optimistic sequence",
                             ));
                         }
-                        client.known = client.known.max(through);
+                        if global {
+                            client.known = client.known.max(through);
+                        }
                         let Some(key) = client.remote_ids.get(&id).cloned() else {
                             continue;
                         };
@@ -4705,18 +5926,25 @@ impl Db {
                             });
                             continue;
                         }
-                        remote.answered.set(true);
-                        remote.global.set(global);
-                        remote.through = Some(through);
-                        let resumed = std::mem::take(&mut remote.resumed);
+                        // Publish ordinary settlement only after its evidence
+                        // rows commit, just like scoped UNION coverage. A later
+                        // invalid frame must not open the read's runtime gate.
+                        union_updates.push(unions::LiveUpdate::OrdinarySettled {
+                            id,
+                            through,
+                            global,
+                        });
+                        let resumed = remote.resumed;
                         // Cached rows the server's result lacks are stale;
                         // after a resume, result rows the replica lacks are fetched.
                         if let Some(ids) = window {
                             answered_remotes.push((
                                 remote.query.clone(),
                                 remote.binding.clone(),
+                                remote.include_deleted,
                                 Some(ids),
                                 resumed,
+                                through,
                             ));
                         }
                     }
@@ -4786,7 +6014,7 @@ impl Db {
                     }
                     SyncMessage::Origins { commits } => {
                         for (seq, node, tx) in commits {
-                            inner.record_settled(node, tx, Some(seq))?;
+                            inner.record_origin(node, tx, Some(seq))?;
                         }
                     }
                     SyncMessage::Advice { id, advice } => {
@@ -4820,10 +6048,14 @@ impl Db {
                             .map(|remote| remote.scope.is_some());
                         if let Some(scoped) = live_scope {
                             if !scoped || accepted_evidence {
-                                return Err(Error::new(
-                                    ErrorCode::Protocol,
-                                    "scoped evidence answered a different live request kind",
-                                ));
+                                union_updates.push(unions::LiveUpdate::Rejected {
+                                    id,
+                                    error: Error::new(
+                                        ErrorCode::Protocol,
+                                        "scoped evidence answered a different live request kind",
+                                    ),
+                                });
+                                continue;
                             }
                             scoped_reads::validate_evidence(through, &evidence)?;
                             for row in &mut evidence {
@@ -4888,7 +6120,9 @@ impl Db {
                         if client.accepted_answers.contains(&id)
                             && !client.overlay_answers.contains(&id)
                         {
-                            client.known = client.known.max(through);
+                            if through < LOCAL_BASE {
+                                client.known = client.known.max(through);
+                            }
                             if client.answers.contains_key(&id) {
                                 answers.push((id, Ok((through, rows, None, None))));
                             }
@@ -4896,6 +6130,8 @@ impl Db {
                     }
                     SyncMessage::Answer { id, through, rows } => {
                         let client = inner.client.as_mut().expect("client");
+                        client.relay_ready |=
+                            client.relayed_fetches.iter().any(|f| f.upstream == id);
                         if client.union_answers.contains(&id) {
                             answers.push((
                                 id,
@@ -4920,7 +6156,9 @@ impl Db {
                             }
                             continue;
                         }
-                        client.known = client.known.max(through);
+                        if through < LOCAL_BASE {
+                            client.known = client.known.max(through);
+                        }
                         if client.answers.contains_key(&id) {
                             answers.push((id, Ok((through, rows, None, None))));
                         }
@@ -4958,6 +6196,7 @@ impl Db {
                         }
                         if !client.scoped_answers.contains(&id)
                             && !client.accepted_answers.contains(&id)
+                            && through < LOCAL_BASE
                         {
                             client.known = client.known.max(through);
                         }
@@ -4967,9 +6206,14 @@ impl Db {
                             .collect();
                         answers.push((id, Ok((through, rows, None, Some(occurrences)))));
                     }
+                    SyncMessage::SchemaAdmission { admitted } => {
+                        inner.client.as_mut().expect("client").unadmitted = !admitted;
+                    }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
                         let error = Error::new(code, message);
+                        client.relay_ready |=
+                            client.relayed_fetches.iter().any(|f| f.upstream == id);
                         if let Some(slot) = client.catalogue_answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if client.answers.contains_key(&id) {
@@ -4980,13 +6224,30 @@ impl Db {
                             *remote.refused.borrow_mut() = Some(error);
                         }
                     }
-                    SyncMessage::FateV1 {
+                    SyncMessage::Stored { tx } => {
+                        // This unqualified receipt belongs only to an ordinary
+                        // foreground's own node. Private owners require their
+                        // complete (node, tx) durability receipt.
+                        if inner.non_durable && !inner.private_owner_required {
+                            let client = inner.client.as_mut().expect("client");
+                            if client
+                                .pending
+                                .iter()
+                                .any(|pending| pending.node == client.node && pending.tx == tx)
+                            {
+                                client.owner_stored.insert((client.node, tx));
+                            }
+                        }
+                    }
+                    SyncMessage::OriginFateV2 {
                         node,
                         tx,
                         through,
                         result,
+                        held,
+                        global,
                     } => {
-                        if through >= LOCAL_BASE {
+                        if global && through >= LOCAL_BASE {
                             return Err(Error::new(
                                 ErrorCode::Protocol,
                                 "write fate has an optimistic authority sequence",
@@ -5003,14 +6264,42 @@ impl Db {
                             .iter()
                             .find(|pending| pending.node == node && pending.tx == tx);
                         let own = pending.is_some();
+                        let ordinary_carrier = !inner.scope_isolated_owner
+                            && !inner.private_owner_required
+                            && node == *inner.identity.node.as_bytes();
+                        let worker_origins = if ordinary_carrier {
+                            inner.relayed_origins(tx)?
+                        } else {
+                            Vec::new()
+                        };
                         let owner_managed = pending.is_some_and(|pending| pending.owner_managed);
+                        let pending_serializable = client.sent.iter().any(|message| {
+                            relay::upload_id(message) == Some(id)
+                                && matches!(message, SyncMessage::Commit { kind, .. }
+                                    if !matches!(kind, WireKind::Mergeable))
+                        });
                         // Unknown or repeated receipts cannot manufacture a write.
                         if !relayed && !own {
                             continue;
                         }
                         let accepted = result.is_ok();
+                        if accepted && !global {
+                            // An immediate relay receipt cannot retire the upload
+                            // or establish accepted history. Its real authority
+                            // receipt still owns that transition.
+                            inner
+                                .client
+                                .as_mut()
+                                .expect("client")
+                                .local_fates
+                                .insert(id);
+                            if inner.private_owner_required || inner.scope_isolated_owner {
+                                continue;
+                            }
+                        }
                         if own && accepted {
                             inner.keep_unlisted_own(id, through)?;
+                            inner.install_held(id, through, &held)?;
                         }
                         if relayed {
                             // Track attempted receipts too: a storage failure before
@@ -5030,6 +6319,17 @@ impl Db {
                             .record_fate(node, tx, &result)
                             .and_then(|()| {
                                 inner.record_settled(node, tx, accepted.then_some(through))
+                            })
+                            .and_then(|()| {
+                                for &(writer, issued) in &worker_origins {
+                                    inner.record_fate(writer, issued, &result)?;
+                                    inner.record_settled(
+                                        writer,
+                                        issued,
+                                        accepted.then_some(through),
+                                    )?;
+                                }
+                                Ok(())
                             })
                             .and_then(|()| {
                                 if own && (inner.scope_isolated_owner || inner.non_durable) {
@@ -5053,8 +6353,12 @@ impl Db {
                             .conn
                             .execute_batch("RELEASE jazz_write_fate")
                             .map_err(storage)?;
+                        if global || (!inner.private_owner_required && !inner.scope_isolated_owner)
+                        {
+                            let client = inner.client.as_mut().expect("client");
+                            client.known = client.known.max(through);
+                        }
                         let client = inner.client.as_mut().expect("client");
-                        client.known = client.known.max(through);
                         if own {
                             client.owner_stored.remove(&id);
                             client.initialization_uploads.remove(&id);
@@ -5065,7 +6369,51 @@ impl Db {
                             client
                                 .sent
                                 .retain(|message| relay::upload_id(message) != Some(id));
-                            client.fates.insert(id, result.map_err(from_wire_error));
+                            let serializable = pending_serializable;
+                            let result = result.map_err(from_wire_error);
+                            if let Err(error) = &result
+                                && !relayed
+                                && let Some(rejections) = inner.upstream_rejections.as_mut()
+                            {
+                                let origins = if worker_origins.is_empty() {
+                                    vec![id]
+                                } else {
+                                    worker_origins.clone()
+                                };
+                                for (writer, seq) in origins {
+                                    rejections.push(crate::db::UpstreamRejection {
+                                        writer,
+                                        seq,
+                                        error: error.clone(),
+                                        serializable,
+                                    });
+                                }
+                            }
+                            let client = inner.client.as_mut().expect("client");
+                            client.fates.insert(id, result.clone());
+                            if let Some(sessions) = client.relayed_fates.remove(&tx) {
+                                client.relay_ready = true;
+                                for (index, (writer, issued), rows) in sessions {
+                                    if let Some(session) =
+                                        inner.sessions.get_mut(index).filter(|session| session.open)
+                                    {
+                                        if result.is_err() {
+                                            session.touched.extend(rows);
+                                        }
+                                        session.outbox.push(SyncMessage::OriginFateV2 {
+                                            node: writer,
+                                            tx: issued,
+                                            through,
+                                            result: result
+                                                .clone()
+                                                .map_err(|error| wire_error(&error)),
+                                            held: Vec::new(),
+                                            global,
+                                        });
+                                    }
+                                }
+                            }
+                            let client = inner.client.as_mut().expect("client");
                             if let Some(locators) = client.pushed.remove(&id) {
                                 crate::large::mark_pushed(&inner.conn, &locators)?;
                             }
@@ -5081,9 +6429,16 @@ impl Db {
         } else if shadow_changed {
             self.inner.borrow().persist_shadow()?;
         }
+        // A settled answer lists its result's rows: cached rows the
+        // replica's view of that result holds and the server's lacks lost
+        // their listing (INV-SYNC-14), as rows a commit took away do.
         // Nothing to reconcile after a resume: the client declared what it
         // holds (`Hold`), so the server ships what is missing or stale.
-        drop(answered_remotes);
+        for (query, binding, include_deleted, listed, resumed, through) in answered_remotes {
+            if let (Some(listed), false) = (listed, resumed) {
+                self.unlist_unanswered(query, binding, include_deleted, &listed, through)?;
+            }
+        }
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
@@ -5111,11 +6466,23 @@ impl Db {
         if client.transport.is_none() {
             return Ok(());
         }
+        if client.hold_owed {
+            let hold = inner.hold()?;
+            let client = inner.client.as_mut().expect("client");
+            if let Some(hold) = hold {
+                let at = client
+                    .outbox
+                    .iter()
+                    .position(|m| !matches!(m, SyncMessage::Schema { .. }))
+                    .unwrap_or(client.outbox.len());
+                client.outbox.insert(at, hold);
+            }
+            client.hold_owed = false;
+        }
         let client = inner.client.as_ref().expect("client");
         // Once this foreground has admitted a private owner, a reconnect must
         // acknowledge that owner before any retry payload leaves the tab.
-        let uploads_ready = !inner.non_durable
-            || client.owner_node.is_none()
+        let uploads_ready = !inner.private_owner_required
             || (client.owner_ready == Some(inner.owner.jazz.version_id())
                 && client.upstream_schema == client.owner_ready);
         let mut relayed = client
@@ -5196,6 +6563,21 @@ impl Db {
                 }
             });
         }
+        // Commits staged since the last send go ahead of the one-shot reads
+        // asked since, so a read sees the writer's own earlier writes.
+        let first_fetch = out
+            .iter()
+            .position(|m| {
+                matches!(
+                    m,
+                    SyncMessage::Fetch { .. }
+                        | SyncMessage::ScopedFetchV1 { .. }
+                        | SyncMessage::AcceptedFetchV1 { .. }
+                        | SyncMessage::AcceptedOverlayCheckV1 { .. }
+                )
+            })
+            .unwrap_or(out.len());
+        let fetches = out.split_off(first_fetch);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -5245,6 +6627,7 @@ impl Db {
         } else {
             out.extend(forwarded);
         }
+        out.extend(fetches);
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
         let mut out = out.into_iter();
@@ -5293,10 +6676,10 @@ impl Inner {
             return Ok(());
         };
         let shadow = std::mem::take(&mut client.shadow);
-        let pending: Vec<(UploadId, u64, Vec<StagedOp>)> = client
+        let pending: Vec<_> = client
             .pending
             .iter()
-            .map(|p| ((p.node, p.tx), p.seq, p.ops.clone()))
+            .map(|p| ((p.node, p.tx), p.seq, p.ops.clone(), p.rows.clone()))
             .collect();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
@@ -5312,7 +6695,22 @@ impl Inner {
                 None => self.drop_row(table, *row, key, 0)?,
             }
         }
-        for (id, tx, ops) in pending {
+        for (id, tx, ops, rows) in pending {
+            // Row provenance can arrive before the qualified write receipt.
+            // Once every written coordinate has its accepted image, replaying
+            // that same unit would apply it twice. Keep its pending receipt and
+            // journal intact until OriginFateV2 arrives; only skip the overlay.
+            if let Some(Some(accepted)) = self.settled(id.0, id.1)?
+                && !rows.is_empty()
+                && rows.iter().all(|row| {
+                    shadow
+                        .get(row)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|image| image.seq >= accepted && image.seq < LOCAL_BASE)
+                })
+            {
+                continue;
+            }
             self.conn
                 .execute_batch("SAVEPOINT replay")
                 .map_err(storage)?;
@@ -5348,7 +6746,13 @@ impl Inner {
 
     fn release_session_reads(&mut self, released: ReleasedReads) {
         for (query, binding, include_deleted, scope) in released.subscriptions {
-            self.release_remote(&query, &binding, include_deleted, &scope);
+            self.release_remote(
+                &query,
+                &binding,
+                include_deleted,
+                &scope,
+                RemoteReach::REMOTE,
+            );
         }
         if let Some(client) = self.client.as_mut() {
             for id in released.fetches {
@@ -5361,15 +6765,144 @@ impl Inner {
     /// admitted version other than the current one: that version's names,
     /// governed by the current schema's policies. `None` is the current
     /// schema (also for a version this store has not admitted).
+    /// Drop the upstream link: reads stop waiting, writes queue.
+    fn detach_upstream(&mut self) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        client.transport = None;
+        let mut link = client.hint.get();
+        link.detached = true;
+        client.hint.set(link);
+        // Nothing settles at the server's tier while detached: a
+        // subscription (or one opened meanwhile) is held until the next
+        // upstream answers it again.
+        for remote in client.remote.values() {
+            remote.answered.set(false);
+        }
+    }
+
+    /// Session `index` closed: what this relay owed it is dropped, so a
+    /// later session in its slot is not handed it.
+    fn forget_relayed(&mut self, index: usize) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        let answers = &mut client.answers;
+        client.relayed_fetches.retain(|fetch| {
+            let keep = fetch.session != index;
+            if !keep {
+                answers.remove(&fetch.upstream);
+            }
+            keep
+        });
+        for sessions in client.relayed_fates.values_mut() {
+            sessions.retain(|(session, _, _)| *session != index);
+        }
+        client
+            .relayed_fates
+            .retain(|_, sessions| !sessions.is_empty());
+    }
+
+    /// Session `index`'s relayed reads that are ready to serve from this
+    /// store: the upstream answered, or a first-load wait ran out or can no
+    /// longer be answered. A refusal goes to the session as its own.
+    fn relayed_fetches_ready(&mut self, index: usize) -> (Vec<SyncMessage>, Vec<RelayedAnswer>) {
+        let Some(client) = self.client.as_mut() else {
+            return (Vec::new(), Vec::new());
+        };
+        let mut answers = Vec::new();
+        let can_wait = may_wait(client.hint.get());
+        let now = Instant::now();
+        let mut ready = Vec::new();
+        let mut refused = Vec::new();
+        let mut kept = Vec::new();
+        for fetch in std::mem::take(&mut client.relayed_fetches) {
+            let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
+            let given_up =
+                !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
+            if fetch.session != index || !answered && !given_up {
+                kept.push(fetch);
+                continue;
+            }
+            let answer = client.answers.remove(&fetch.upstream).flatten();
+            let SyncMessage::Fetch { id, .. } = &fetch.message else {
+                continue;
+            };
+            match answer {
+                Some(Err(error)) => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: error.code,
+                    message: error.message,
+                }),
+                Some(Ok((through, listed, None, None))) => {
+                    if let SyncMessage::Fetch {
+                        query,
+                        binding,
+                        at: None,
+                        include_deleted,
+                        ..
+                    } = &fetch.ask
+                    {
+                        answers.push((
+                            query.clone(),
+                            binding.clone(),
+                            *include_deleted,
+                            listed,
+                            through,
+                        ));
+                    }
+                    ready.push((*id, fetch.message));
+                }
+                Some(Ok(_)) => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::Protocol,
+                    message: "qualified response cannot answer an ordinary relay fetch".to_owned(),
+                }),
+                None => ready.push((*id, fetch.message)),
+            }
+        }
+        client.relayed_fetches = kept;
+        let session = &mut self.sessions[index];
+        session.outbox.extend(refused);
+        let ready = ready
+            .into_iter()
+            .map(|(id, message)| {
+                session.fetched_upstream.insert(id);
+                message
+            })
+            .collect();
+        (ready, answers)
+    }
+
+    /// Only a trusted SYSTEM connection omits session policies. Same-owner
+    /// offline previews are admitted by the bounded owner-preview path; they
+    /// never exempt accepted rows from their read policies.
+    pub(crate) fn session_policy(&self, index: usize) -> Option<AuthorSubject> {
+        let identity = self.sessions[index].identity;
+        (identity != AuthorSubject::SYSTEM).then_some(identity)
+    }
+
+    /// Ordinary worker foregrounds read their own worker cache as the worker
+    /// does. Private owners retain policy checks even for their own subject;
+    /// only their bounded pending-input preview path can precede the catalogue.
+    fn session_read_policy(&self, index: usize) -> Option<AuthorSubject> {
+        let own_worker = self.client.is_some()
+            && !self.scope_isolated_owner
+            && !self.private_owner_required
+            && self.sessions[index].identity == self.identity.author;
+        if own_worker {
+            None
+        } else {
+            self.session_policy(index)
+        }
+    }
+
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
         self.sessions[index].version.is_some_and(|version| {
-            version != self.owner.jazz.version_id()
-                && !self
-                    .admitted
-                    .iter()
-                    .any(|admitted| admitted.version_id() == version)
+            version != self.owner_version && !self.admitted.iter().any(|(id, _)| *id == version)
         })
     }
 
@@ -5392,16 +6925,13 @@ impl Inner {
     /// Admitted `version` under its stored names, governed by the current
     /// schema's policies.
     pub(crate) fn governed(&self, version: crate::ids::SchemaVersionId) -> Option<Rc<Schema>> {
-        let jazz = if version == self.owner.jazz.version_id() {
+        let jazz = if version == self.owner_version {
             &self.owner.jazz
         } else {
-            self.admitted
-                .iter()
-                .find(|admitted| admitted.version_id() == version)?
+            &self.admitted.iter().find(|(id, _)| *id == version)?.1
         };
-        Some(Rc::new(
-            self.named(jazz).with_policies_of(self.owner.clone()),
-        ))
+        let governor = self.owner.policies_from.as_ref().unwrap_or(&self.owner);
+        Some(Rc::new(self.named(jazz).with_policies_of(governor.clone())))
     }
 
     /// Apply one server image; returns whether a rebase is needed (the row
@@ -5416,14 +6946,26 @@ impl Inner {
             .get_mut(&(image.table.clone(), row, image.key.clone()))
         {
             match shadow {
-                Some(old) if old.seq >= image.seq => {
+                Some(old) if old.seq >= image.seq && old.seq < LOCAL_BASE => {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
-                // The replaced server version stays as history.
+                // A relay's older unsettled version (an as-of answer).
+                Some(old) if relay_older(old.seq, image.seq) => {
+                    if self.non_durable {
+                        self.put_image(&image, true)?;
+                    }
+                    return Ok(false);
+                }
+                // The replaced server version stays as history. A relay's
+                // unsettled version gives way to a settled one, as the
+                // relay's store moved on from it.
                 Some(old) => {
+                    let relay_newer = old.seq >= LOCAL_BASE && old.seq < image.seq;
                     let older = std::mem::replace(old, image);
-                    self.put_image(&older, true)?;
+                    if older.seq < LOCAL_BASE || self.non_durable && relay_newer {
+                        self.put_image(&older, true)?;
+                    }
                 }
                 None => *shadow = Some(image),
             }
@@ -5437,6 +6979,36 @@ impl Inner {
 // ---- server ---------------------------------------------------------------
 
 impl Db {
+    /// Allow a local host carrier to retry temporary pressure within a bounded
+    /// logical-message budget. Ordinary network subscribers do not opt in.
+    pub(crate) fn bound_subscriber_output(
+        &self,
+        id: SubscriberId,
+        messages: usize,
+        bytes: usize,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.borrow_mut();
+        let session = inner
+            .sessions
+            .get_mut(id.0)
+            .filter(|session| session.open)
+            .ok_or_else(|| Error::new(ErrorCode::Protocol, "subscriber is closed"))?;
+        if messages == 0 || bytes < jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
+            return Err(Error::new(
+                ErrorCode::Backpressure,
+                "local retry budget must admit a maximum message",
+            ));
+        }
+        if session.deferred_output.len() > messages || session.deferred_output_bytes > bytes {
+            return Err(Error::new(
+                ErrorCode::Backpressure,
+                "local retry queue exceeds requested limits",
+            ));
+        }
+        session.output_retry_limits = Some((messages, bytes));
+        Ok(())
+    }
+
     /// Serve a client over `transport` as `identity`.
     pub fn accept_subscriber(
         &self,
@@ -5465,6 +7037,29 @@ impl Db {
         SubscriberId(inner.sessions.len() - 1)
     }
 
+    /// Serve a host-admitted private relay under one immutable session scope.
+    /// A forwarded upload must name this exact author. Authentication supplies
+    /// its claims; payload metadata cannot replace them. Ordinary subscriber
+    /// attribution normalization does not apply to this link.
+    pub fn accept_scope_isolated_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<SubscriberId, Error> {
+        if matches!(
+            identity.principal_parts().0.as_str(),
+            AuthorSubject::SYSTEM_ISSUER | AuthorSubject::ANONYMOUS_ISSUER
+        ) {
+            return Err(rejected(
+                "a private relay requires an authenticated session",
+            ));
+        }
+        let id = self.accept_subscriber_with_claims(transport, identity, Some(claims));
+        self.inner.borrow_mut().sessions[id.0].bound_write_author = true;
+        Ok(id)
+    }
+
     /// The client went away: drop its subscriptions, watches and pending
     /// replies now. A reconnect is a new subscriber that resumes from its
     /// last settled seq.
@@ -5474,6 +7069,7 @@ impl Db {
         if let Some(session) = inner.sessions.get_mut(subscriber.0) {
             let released = session.close(&dropped);
             inner.release_session_reads(released);
+            inner.forget_relayed(subscriber.0);
         }
     }
 
@@ -5519,17 +7115,42 @@ impl Db {
             if self.inner.borrow().sessions[index].catalogue_pending {
                 self.queue_catalogue_metadata(index)?;
             }
-            let inbound: Vec<SyncMessage> = {
+            let (inbound, failed): (Vec<SyncMessage>, bool) = {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 if !session.open {
                     continue;
                 }
+                if session.flush_deferred_output().is_err() {
+                    let dropped = inner.fan.dropped.clone();
+                    let released = inner.sessions[index].close(&dropped);
+                    inner.release_session_reads(released);
+                    continue;
+                }
                 let mut inbound = std::mem::take(&mut session.backlog);
                 inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
-                inbound.into()
+                let failed = session.transport.take_failure().is_some();
+                (inbound.into(), failed)
             };
+            // A client that sent what this server cannot decode is
+            // disconnected; nothing it sent is served.
+            if failed {
+                self.disconnect_subscriber(SubscriberId(index));
+                continue;
+            }
             let mut inbound: VecDeque<SyncMessage> = inbound.into();
+            self.serve_due_first_loads(index)?;
+            // Relayed reads the upstream answered (or can no longer answer)
+            // are served from this store first, in the order they came.
+            let (relayed, answers) = self.inner.borrow_mut().relayed_fetches_ready(index);
+            // The upstream's answers list their results' rows: cached rows
+            // they left out are not served as the reader's (INV-SYNC-14).
+            for (query, binding, include_deleted, listed, through) in answers {
+                self.unlist_unanswered(query, binding, include_deleted, &listed, through)?;
+            }
+            for message in relayed.into_iter().rev() {
+                inbound.push_front(message);
+            }
             // Writes held back by the ingress limit, in order. Reads and
             // other messages that change no rows overtake them, so a client
             // uploading a large value can still read.
@@ -5587,8 +7208,22 @@ impl Db {
                     | SyncMessage::CatalogueFetchV1 { id, .. } => Some(*id),
                     _ => None,
                 };
+                let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
                 match (self.serve(index, message), read) {
                     (Ok(()), _) => {}
+                    // A relay's read whose large values it is still fetching
+                    // from its upstream is served again once they arrive,
+                    // from its store: the upstream is not asked again.
+                    (Err(error), Some(id))
+                        if crate::large::is_missing(&error)
+                            && fetch.is_some()
+                            && self.awaiting_chunks() =>
+                    {
+                        self.inner.borrow_mut().sessions[index]
+                            .fetched_upstream
+                            .insert(id);
+                        held.push_back(fetch.expect("a fetch"));
+                    }
                     (Err(error), Some(id)) => {
                         self.inner.borrow_mut().sessions[index]
                             .outbox
@@ -5601,8 +7236,18 @@ impl Db {
                     (Err(error), None) => return Err(error),
                 }
             }
+            let mut inner = self.inner.borrow_mut();
             if !held.is_empty() {
-                self.inner.borrow_mut().sessions[index].backlog = held;
+                inner.sessions[index].backlog = held;
+            }
+            // Tell the client when its declared version's admission changes.
+            let unadmitted = inner.session_unadmitted(index);
+            let session = &mut inner.sessions[index];
+            if session.open && session.told_unadmitted != unadmitted {
+                session.told_unadmitted = unadmitted;
+                session.outbox.push(SyncMessage::SchemaAdmission {
+                    admitted: !unadmitted,
+                });
             }
         }
         self.progress_scoped_fetches();
@@ -5702,7 +7347,8 @@ impl Db {
                     .relayed
                     .iter()
                     .filter_map(|(id, (query, binding, deleted, scope))| {
-                        let key = scoped_remote_key(query, binding, *deleted, scope);
+                        let key =
+                            scoped_remote_key(query, binding, *deleted, scope, RemoteReach::REMOTE);
                         let error = inner
                             .client
                             .as_ref()?
@@ -5725,8 +7371,7 @@ impl Db {
                 {
                     return Ok(());
                 }
-                let identity = inner.sessions[index].identity;
-                let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
+                let policy = inner.session_read_policy(index);
                 let names = inner
                     .session_schema(index)
                     .unwrap_or_else(|| inner.owner.clone());
@@ -5734,6 +7379,7 @@ impl Db {
                 let probed = std::mem::take(&mut inner.sessions[index].probed);
                 let revalidate = std::mem::take(&mut inner.sessions[index].revalidate);
                 let committed = std::mem::take(&mut inner.sessions[index].committed);
+                let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
                 let mut watch = std::mem::take(&mut inner.sessions[index].watch);
                 let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
                 for (table, row, key) in recheck {
@@ -6005,12 +7651,27 @@ impl Db {
                             .map(|group| group.borrow().rows.clone())
                             .unwrap_or_default();
                         let inputs = if union {
-                            inner.union_inputs(
-                                &prepared,
-                                policy,
-                                &roots,
-                                if global { coverage_through } else { inner.seq },
-                            )
+                            inner
+                                .union_inputs(
+                                    &prepared,
+                                    policy,
+                                    &roots,
+                                    if global { coverage_through } else { inner.seq },
+                                )
+                                .and_then(|mut inputs| {
+                                    inputs.extend(inner.union_predecessor_inputs(
+                                        &prepared,
+                                        policy,
+                                        &ReadSpec {
+                                            cut: global.then(|| Cut::at(coverage_through)),
+                                            include_deleted: group.upgrade().is_some_and(|group| {
+                                                group.borrow().includes_deleted()
+                                            }),
+                                            ..ReadSpec::default()
+                                        },
+                                    )?);
+                                    Ok(inputs)
+                                })
                         } else {
                             inner
                                 .inheritance_inputs(&prepared, policy, &roots, &ReadSpec::default())
@@ -6074,30 +7735,15 @@ impl Db {
                     }
                     // The opening and every window delta list the result's
                     // rows, so the client can drop stale cached ones.
-                    let window = (list && !union)
-                        .then(|| group.upgrade())
-                        .flatten()
-                        .map(|group| {
-                            group
-                                .borrow()
-                                .rows
-                                .iter()
-                                .map(|row| *row.id.0.as_bytes())
-                                .collect()
-                        });
+                    let window = list.then(|| group.upgrade()).flatten().map(|group| {
+                        group
+                            .borrow()
+                            .rows
+                            .iter()
+                            .map(|row| *row.id.0.as_bytes())
+                            .collect()
+                    });
                     if answered {
-                        if union {
-                            let occurrences = group
-                                .upgrade()
-                                .map(|group| unions::occurrences(&group.borrow().rows))
-                                .transpose()?
-                                .unwrap_or_default();
-                            settled.push(SyncMessage::UnionAnswerV1 {
-                                id,
-                                through: coverage_through,
-                                occurrences,
-                            });
-                        }
                         settled.push(SyncMessage::Settled {
                             id,
                             through: coverage_through,
@@ -6150,6 +7796,9 @@ impl Db {
                             .insert((row, key.clone()), can);
                     }
                     let superseded = current.is_some_and(|current| current.seq != seq);
+                    if superseded {
+                        echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
+                    }
                     if superseded && readable(&inner, &table, row, &key, policy)? {
                         let id = row.0.as_bytes().to_vec();
                         images.extend(inner.images_where(
@@ -6185,26 +7834,7 @@ impl Db {
                             // This peer cannot hold a coherent projection. Refuse its
                             // reads and release its interests; do not poison the owner
                             // or publish partial input frames to another reader.
-                            let session = &mut inner.sessions[index];
-                            let mut ids = session.subs.keys().copied().collect::<BTreeSet<_>>();
-                            ids.extend(session.outbox.iter().filter_map(|message| match message {
-                                SyncMessage::Answer { id, .. }
-                                | SyncMessage::AcceptedAnswerV1 { id, .. }
-                                | SyncMessage::ScopedEvidenceAnswerV1 { id, .. }
-                                | SyncMessage::AcceptedScopedEvidenceAnswerV1 { id, .. } => {
-                                    Some(*id)
-                                }
-                                _ => None,
-                            }));
-                            for id in ids {
-                                let _ = session.transport.send(SyncMessage::Refused {
-                                    id,
-                                    code: error.code,
-                                    message: error.message.clone(),
-                                });
-                            }
-                            let released = session.close(&dropped);
-                            inner.release_session_reads(released);
+                            inner.refuse_session_reads(index, error);
                             return Ok(());
                         }
                     };
@@ -6216,10 +7846,20 @@ impl Db {
                     )));
                     held_rows.entry(table).or_default().insert((row, key), true);
                 }
-                let witnesses = inner.content_witnesses(&mut images, &mut history_seqs)?;
-                let accepted_rows = inner.accepted_images(&images)?;
+                let evidence = (|| {
+                    let witnesses = inner.content_witnesses(&mut images, &mut history_seqs)?;
+                    let accepted_rows = inner.accepted_images(&images)?;
+                    let origins = inner.origins(&history_seqs)?;
+                    Ok((witnesses, accepted_rows, origins))
+                })();
+                let (witnesses, accepted_rows, origins) = match evidence {
+                    Ok(evidence) => evidence,
+                    Err(error) => {
+                        inner.refuse_session_reads(index, error);
+                        return Ok(());
+                    }
+                };
                 let mut out = std::mem::take(&mut inner.sessions[index].stale);
-                let origins = inner.origins(&history_seqs)?;
                 if !origins.is_empty() {
                     out.push(SyncMessage::Origins { commits: origins });
                 }
@@ -6234,6 +7874,58 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
                 session.held = held_rows;
+                let mut seen = HashSet::new();
+                images.retain(|image| {
+                    seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
+                });
+                // The writer's own rows, still at the version its commit
+                // produced and exactly as it holds them, settle by its Fate.
+                let mut held: BTreeMap<UploadId, Vec<Held>> = BTreeMap::new();
+                let fated: HashSet<UploadId> = session
+                    .outbox
+                    .iter()
+                    .filter_map(|message| match message {
+                        SyncMessage::OriginFateV2 {
+                            node,
+                            tx,
+                            result: Ok(()),
+                            ..
+                        } => Some((*node, *tx)),
+                        _ => None,
+                    })
+                    .collect();
+                echoes.retain(|echo| fated.contains(&(echo.node, echo.tx)));
+                if !echoes.is_empty() {
+                    images.retain(|image| {
+                        let Some(at) = echoes.iter().position(|e| {
+                            e.table == image.table
+                                && *e.row.0.as_bytes() == image.id
+                                && e.key == image.key
+                                && e.seq == image.seq
+                        }) else {
+                            return true;
+                        };
+                        let echo = echoes.swap_remove(at);
+                        let same = image_out(&names, image.clone())
+                            .is_some_and(|named| echo_digest(&named) == echo.digest);
+                        if same {
+                            held.entry((echo.node, echo.tx))
+                                .or_default()
+                                .push(Held::of(echo.index, image));
+                        }
+                        !same
+                    });
+                    for message in &mut session.outbox {
+                        if let SyncMessage::OriginFateV2 {
+                            node, tx, held: h, ..
+                        } = message
+                            && let Some(mut rows) = held.remove(&(*node, *tx))
+                        {
+                            rows.sort_unstable_by_key(|held| held.index);
+                            *h = rows;
+                        }
+                    }
+                }
                 if !images.is_empty() {
                     out.push(SyncMessage::Rows { images });
                 }
@@ -6245,11 +7937,10 @@ impl Db {
                     let Some(message) = message_out(&names, message) else {
                         continue;
                     };
-                    // A failed or backed-up client is dropped, never waited
-                    // on: one slow client must not stall the others, and its
-                    // replica is coherent only with every message. It
-                    // reconnects and resumes from its last settled seq.
-                    if session.transport.send(message).is_err() {
+                    // Socket subscribers still disconnect on pressure. Local
+                    // carriers retain a bounded prefix for a later drain;
+                    // transport failure or budget exhaustion still closes it.
+                    if session.send_output(message).is_err() {
                         let released = session.close(&dropped);
                         inner.release_session_reads(released);
                         break;
@@ -6286,12 +7977,15 @@ impl Db {
         accepted: bool,
         expected: Option<&[[u8; 16]]>,
         evidence: Option<ScopedEvidence>,
+        view: &ReadViewSourceSpec,
     ) -> Result<(), Error> {
-        let mut inner = self.inner();
         // A history read ships versions of its source table.
         let union = crate::db::relation::is_union(&prepared.query);
         if union {
-            Self::remote_fetch_shape(&prepared.query)?;
+            self.remote_fetch_shape(&prepared.query)?;
+        }
+        let mut inner = self.inner();
+        if union {
             inner.check_union_shape(prepared)?;
         }
         let history = history_source_table(&query.table);
@@ -6299,8 +7993,29 @@ impl Db {
             .schema
             .stored_table(history.unwrap_or(&query.table))?
             .to_owned();
+        let viewed = ReadSpec::of(
+            &ReadOpts {
+                read_view: crate::protocol::ReadViewSpec {
+                    source: view.clone(),
+                    include_deleted,
+                },
+                ..ReadOpts::default()
+            },
+            &inner,
+        )?;
+        let mut named_origins = Vec::new();
+        for dot in frozen_at(view)
+            .into_iter()
+            .flat_map(|snapshot| &snapshot.dots)
+        {
+            let (node, tx) = (*dot.node.as_bytes(), dot.time.0);
+            if let Some(Some(seq)) = inner.settled(node, tx)? {
+                named_origins.push((seq, node, tx));
+            }
+        }
         let read = ReadSpec {
-            cut: at.map(Cut::at),
+            cut: viewed.cut.or(at.map(Cut::at)),
+            view: viewed.view,
             permission_cut: matches!(&evidence, Some(ScopedEvidence::Collect))
                 .then_some(at.unwrap_or(inner.seq)),
             include_deleted,
@@ -6413,6 +8128,10 @@ impl Db {
                 &rows,
                 at.unwrap_or(inner.seq),
             )?);
+            if !accepted {
+                reachability_inputs
+                    .extend(inner.union_predecessor_inputs(prepared, policy, &read)?);
+            }
         }
         // Scoped evidence already contains the exact query and policy inputs.
         // Re-following them against the current cache would mix cuts and claims.
@@ -6452,7 +8171,7 @@ impl Db {
                 watch_key(&Sql::Blob(image.id.to_vec())),
             )));
         }
-        let (owner_inputs, input_rows) = if at.is_none() && history.is_none() && !accepted {
+        let (owner_inputs, input_rows) = if !read.frozen() && history.is_none() && !accepted {
             match inner.owner_query_inputs(index, &mut images, &mut Vec::new()) {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -6477,14 +8196,23 @@ impl Db {
         }
         let witnesses = inner.content_witnesses(&mut images, &mut seqs)?;
         let accepted_rows = inner.accepted_images(&images)?;
-        let origins = inner.origins(&seqs)?;
+        let mut origins = inner.origins(&seqs)?;
+        origins.extend(named_origins);
         // An owner's local publication aliases never qualify an authority
         // snapshot, including for a current (non-historical) fetch response.
         let through = at.unwrap_or_else(|| {
-            inner
-                .client
-                .as_ref()
-                .map_or(inner.seq, |client| client.known)
+            if !inner.scope_isolated_owner
+                && !inner.private_owner_required
+                && !accepted
+                && scoped_evidence.is_none()
+            {
+                inner.served_through()
+            } else {
+                inner
+                    .client
+                    .as_ref()
+                    .map_or(inner.seq, |client| client.known)
+            }
         });
         let session = &mut inner.sessions[index];
         session.watch = watch;
@@ -6508,7 +8236,9 @@ impl Db {
             session.outbox.push(SyncMessage::Rows { images });
         }
         session.outbox.extend(owner_inputs);
-        let occurrences = union.then(|| unions::occurrences(&rows)).transpose()?;
+        let occurrences = (union && (accepted || scoped_evidence.is_some()))
+            .then(|| unions::occurrences(&rows))
+            .transpose()?;
         let rows = rows.iter().map(|r| *r.id.0.as_bytes()).collect();
         if let Some(occurrences) = occurrences {
             session.outbox.push(SyncMessage::UnionAnswerV1 {
@@ -6554,6 +8284,7 @@ impl Db {
         scoped_evidence: bool,
         overlay_ops: Option<Vec<WireOp>>,
         ordinary: bool,
+        view: ReadViewSourceSpec,
     ) -> Result<(), Error> {
         let deadline = self.read_deadline(
             (accepted || ordinary).then(|| Instant::now() + std::time::Duration::from_secs(15)),
@@ -6591,7 +8322,7 @@ impl Db {
             .1
             .clone();
         client.answers.insert(upstream, None);
-        if overlay_ops.is_none() && crate::db::relation::is_union(&prepared.query) {
+        if overlay_ops.is_none() && !ordinary && crate::db::relation::is_union(&prepared.query) {
             client.union_answers.insert(upstream);
         }
         if !ordinary {
@@ -6603,11 +8334,14 @@ impl Db {
         let overlay = overlay_ops.is_some();
         let message = if ordinary {
             SyncMessage::Fetch {
+                tier: ReadTier::Remote,
+                wait: None,
                 id: upstream,
                 query: prepared.query.clone(),
                 binding: prepared.binding.clone(),
                 at,
                 include_deleted,
+                view: view.clone(),
             }
         } else if let Some(ops) = overlay_ops {
             client.overlay_answers.insert(upstream);
@@ -6655,6 +8389,7 @@ impl Db {
                 scoped_evidence,
                 overlay,
                 ordinary,
+                view,
                 deadline,
             },
         );
@@ -6733,26 +8468,34 @@ impl Db {
                         {
                             // Rows can precede their chunks. Keep the request alive while
                             // normal chunk demand hydrates this exact authority result.
-                            let mut exact = match exact_fetch_query(
-                                &request.prepared,
-                                rows.clone(),
-                                union.as_deref(),
-                            ) {
+                            let materialized = if request.ordinary
+                                && union.is_none()
+                                && crate::db::relation::is_union(&request.prepared.query)
+                            {
+                                unions::prefix_roots(&request.prepared, rows)
+                            } else {
+                                exact_fetch_query(&request.prepared, rows.clone(), union.as_deref())
+                            };
+                            let mut exact = match materialized {
                                 Ok(exact) => exact,
                                 Err(error) => {
                                     completed.push((id, Err(error)));
                                     continue;
                                 }
                             };
-                            exact.authority_policies = match inner
-                                .needs_authority_policies(&exact, Some(request.identity))
-                            {
-                                Ok(needed) => needed,
-                                Err(error) => {
-                                    completed.push((id, Err(error)));
-                                    continue;
-                                }
+                            let policy = if request.ordinary {
+                                inner.session_read_policy(index)
+                            } else {
+                                Some(request.identity)
                             };
+                            exact.authority_policies =
+                                match inner.needs_authority_policies(&exact, policy) {
+                                    Ok(needed) => needed,
+                                    Err(error) => {
+                                        completed.push((id, Err(error)));
+                                        continue;
+                                    }
+                                };
                             let read = ReadSpec {
                                 cut: Some(Cut::at(*through)),
                                 include_deleted: request.include_deleted,
@@ -6772,7 +8515,7 @@ impl Db {
                                     )),
                                 }
                             } else {
-                                inner.run(&exact, Some(request.identity), &read)
+                                inner.run(&exact, policy, &read)
                             };
                             let evaluated = evaluated.and_then(|rows| {
                                 if let Some(occurrences) = union {
@@ -6817,10 +8560,20 @@ impl Db {
                     || request.scoped_evidence
                     || evidence.is_some())
                 .then_some(rows.clone());
-                let mut exact = exact_fetch_query(&request.prepared, rows, union.as_deref())?;
-                exact.authority_policies = self
-                    .inner()
-                    .needs_authority_policies(&exact, Some(request.identity))?;
+                let mut exact = if request.ordinary
+                    && union.is_none()
+                    && crate::db::relation::is_union(&request.prepared.query)
+                {
+                    unions::prefix_roots(&request.prepared, &rows)?
+                } else {
+                    exact_fetch_query(&request.prepared, rows, union.as_deref())?
+                };
+                let policy = if request.ordinary {
+                    self.inner().session_read_policy(index)
+                } else {
+                    Some(request.identity)
+                };
+                exact.authority_policies = self.inner().needs_authority_policies(&exact, policy)?;
                 // Forwarding may request scoped proof upstream even when the
                 // downstream SYSTEM read was unscoped. Keep its original reply
                 // contract; it does not need permission witnesses to materialize.
@@ -6837,12 +8590,13 @@ impl Db {
                     id,
                     &exact.query,
                     &exact,
-                    Some(request.identity),
+                    policy,
                     Some(through),
                     request.include_deleted,
                     request.accepted,
                     expected.as_deref(),
                     evidence.map(ScopedEvidence::Supplied),
+                    &request.view,
                 )
             });
             if let Err(error) = result {
@@ -6858,6 +8612,57 @@ impl Db {
     }
 
     /// A handle that reads and writes through session `index`'s schema.
+    /// Session `index`'s relayed LocalFirst subscriptions whose first-load
+    /// wait ran out before the upstream answered: from now on each is this
+    /// store's result, settled at once, as when the upstream cannot answer.
+    /// The upstream subscription it keeps fills the store when it answers.
+    fn serve_due_first_loads(&self, index: usize) -> Result<(), Error> {
+        let now = Instant::now();
+        let due: Vec<(u64, FirstLoadWait)> = {
+            let mut inner = self.inner.borrow_mut();
+            let session = &mut inner.sessions[index];
+            let ids: Vec<u64> = session
+                .first_load
+                .iter()
+                .filter(|(_, wait)| wait.until <= now)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| session.first_load.remove(&id).map(|wait| (id, wait)))
+                .collect()
+        };
+        for (id, wait) in due {
+            let policy = {
+                let inner = self.inner.borrow();
+                // Answered and sent meanwhile: it already lists the
+                // upstream's result.
+                if !matches!(inner.sessions[index].subs.get(&id), Some((.., false))) {
+                    continue;
+                }
+                inner.session_read_policy(index)
+            };
+            let db = self.session_db(index);
+            let mut inner = db.inner();
+            let authority = inner.authority;
+            let (queue, group) = inner.subscribe_member(
+                &wait.prepared,
+                policy,
+                ReadSpec {
+                    include_deleted: wait.include_deleted,
+                    ..ReadSpec::default()
+                },
+                SettledBy::Always(authority),
+            )?;
+            let session = &mut inner.sessions[index];
+            if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
+                session.subs.insert(id, (queue, group, windowed, false));
+                let dropped = inner.fan.dropped.clone();
+                dropped.set(dropped.get() + 1);
+            }
+        }
+        Ok(())
+    }
+
     fn session_db(&self, index: usize) -> Db {
         let view = self.inner.borrow_mut().session_schema(index);
         Db {
@@ -6903,6 +8708,25 @@ impl Db {
         match previous {
             Some(previous) => inner.claims.insert(identity, previous),
             None => inner.claims.remove(&identity),
+        };
+        result
+    }
+
+    /// Run `f` with a vouched session's claims standing for its identity's.
+    fn with_claims<R>(
+        &self,
+        vouched: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let Some((author, claims)) = vouched else {
+            return f();
+        };
+        let previous = self.inner.borrow_mut().claims.insert(author, claims);
+        let result = f();
+        let mut inner = self.inner.borrow_mut();
+        match previous {
+            Some(previous) => inner.claims.insert(author, previous),
+            None => inner.claims.remove(&author),
         };
         result
     }
@@ -6956,6 +8780,7 @@ impl Db {
                     false,
                     Some(ops.clone()),
                     false,
+                    ReadViewSourceSpec::Current,
                 );
             }
             db.validate_accepted_overlay(&prepared, author, *through, *include_deleted, ops)?;
@@ -7005,11 +8830,14 @@ impl Db {
                 };
                 (
                     SyncMessage::Fetch {
+                        tier: ReadTier::Remote,
+                        wait: None,
                         id,
                         query,
                         binding,
                         at,
                         include_deleted,
+                        view: ReadViewSourceSpec::Current,
                     },
                     identity,
                     claims,
@@ -7033,6 +8861,8 @@ impl Db {
                     .map_err(|e| query_error(e.to_string()))?;
                 (
                     SyncMessage::Subscribe {
+                        tier: ReadTier::Remote,
+                        wait: None,
                         id,
                         query,
                         binding,
@@ -7062,11 +8892,14 @@ impl Db {
                     .map_err(|error| Error::new(ErrorCode::Query, error.to_string()))?;
                 (
                     SyncMessage::Fetch {
+                        tier: ReadTier::Remote,
+                        wait: None,
                         id,
                         query,
                         binding,
                         at: None,
                         include_deleted,
+                        view: ReadViewSourceSpec::Current,
                     },
                     author,
                     Some(claims),
@@ -7081,11 +8914,33 @@ impl Db {
             None => prepared,
         };
         self.inner().require_owner_subject(identity)?;
-        let policy = (identity != AuthorSubject::SYSTEM).then_some(identity);
+        let policy = if scoped {
+            (identity != AuthorSubject::SYSTEM).then_some(identity)
+        } else {
+            self.inner.borrow().session_policy(index)
+        };
         // Queries, writes and held rows name tables and columns as the
         // client's schema version does.
         let db = self.session_db(index);
         let readable_policy = matches!(&message, SyncMessage::SubscribeReadablePolicyV1 { .. });
+        let message = match message {
+            SyncMessage::SubscribeReadablePolicyV1 {
+                id,
+                query,
+                binding,
+                since,
+                include_deleted,
+            } => SyncMessage::Subscribe {
+                id,
+                query,
+                binding,
+                since,
+                include_deleted,
+                tier: ReadTier::Remote,
+                wait: None,
+            },
+            message => message,
+        };
         match message {
             SyncMessage::OwnerInitializationReserveV1 {
                 id,
@@ -7187,14 +9042,15 @@ impl Db {
                 binding,
                 since,
                 include_deleted,
-            }
-            | SyncMessage::SubscribeReadablePolicyV1 {
-                id,
-                query,
-                binding,
-                since,
-                include_deleted,
+                tier,
+                wait,
             } => {
+                let policy = if scoped {
+                    policy
+                } else {
+                    self.inner().session_read_policy(index)
+                };
+                let local = tier == ReadTier::LocalOnly;
                 if readable_policy {
                     let inner = db.inner();
                     if !inner.authority || inner.client.is_some() {
@@ -7229,7 +9085,7 @@ impl Db {
                 let scope =
                     scoped.then(|| prepared.request_claims.clone().expect("bound live scope"));
                 if union {
-                    Self::remote_fetch_shape(&prepared.query)?;
+                    self.remote_fetch_shape(&prepared.query)?;
                     db.inner().check_union_shape(&prepared)?;
                     if self.is_client() && !scoped {
                         let inner = db.inner();
@@ -7256,14 +9112,44 @@ impl Db {
                 if readable_policy {
                     db.inner().check_readable_policy_shape(&prepared, policy)?;
                 }
-                let windowed = query.limit.is_some() || query.offset > 0;
-                // A relay serves what its upstream lists, settled once the
-                // upstream answers: its own store may be cold.
-                let relayed = db.attach_remote(&prepared, include_deleted, scope.clone());
+                let windowed = crate::db::is_windowed(&query);
+                let upstream = db
+                    .inner()
+                    .client
+                    .as_ref()
+                    .map(|client| may_wait(client.hint.get()));
+                let attached = if upstream.is_some() && !local {
+                    db.attach_remote(
+                        &prepared,
+                        include_deleted,
+                        scope.clone(),
+                        RemoteReach::REMOTE,
+                    )
+                } else {
+                    None
+                };
+                let strict = tier == ReadTier::Remote && wait.is_none();
+                let relayed = attached
+                    .as_ref()
+                    .filter(|_| upstream == Some(true) || strict);
+                if relayed.is_some()
+                    && let Some(until) = wait.and_then(wait_until)
+                {
+                    self.inner.borrow_mut().sessions[index].first_load.insert(
+                        id,
+                        FirstLoadWait {
+                            until,
+                            prepared: prepared.clone(),
+                            include_deleted,
+                        },
+                    );
+                }
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
-                let union_live = inner.live_union(&prepared, include_deleted, &scope);
+                let union_live = scope
+                    .as_ref()
+                    .and_then(|_| inner.live_union(&prepared, include_deleted, &scope));
                 let subscribed = inner.subscribe_member(
                     &prepared,
                     policy,
@@ -7272,23 +9158,30 @@ impl Db {
                         union_preview: !scoped,
                         scoped_live: scoped,
                         include_deleted,
-                        members_only: relayed.is_some(),
+                        members_only: relayed.is_some()
+                            && (tier == ReadTier::Remote || wait.is_some()),
+                        // A Remote one leaves out this replica's pending
+                        // versions: only the authority confirms them.
+                        settled_only: relayed.is_some() && tier == ReadTier::Remote,
                         ..ReadSpec::default()
                     },
-                    match &relayed {
+                    match relayed {
                         Some((answered, _, global)) => match &union_live {
                             Some(live) => SettledBy::Union {
                                 answered: answered.clone(),
                                 global: global.clone(),
                                 live: live.clone(),
-                                relay: true,
+                                relay: false,
                             },
-                            None => SettledBy::Relay(answered.clone(), global.clone()),
+                            None if tier == ReadTier::LocalFirst && wait.is_none() => {
+                                SettledBy::Relay(answered.clone(), global.clone())
+                            }
+                            None => SettledBy::Remote(answered.clone(), global.clone()),
                         },
                         None => SettledBy::Always(authority),
                     },
                 );
-                if relayed.is_some() {
+                if attached.is_some() {
                     match &subscribed {
                         Ok(_) => {
                             let read = (
@@ -7304,6 +9197,7 @@ impl Db {
                             &prepared.binding,
                             include_deleted,
                             &scope,
+                            RemoteReach::REMOTE,
                         ),
                     }
                 }
@@ -7402,13 +9296,20 @@ impl Db {
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
+                inner.sessions[index].first_load.remove(&id);
                 inner.sessions[index].readable_policy.remove(&id);
                 inner.sessions[index].query_support.remove(&id);
                 inner.sessions[index].scoped_unions.remove(&id);
                 if let Some((query, binding, include_deleted, scope)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
-                    inner.release_remote(&query, &binding, include_deleted, &scope);
+                    inner.release_remote(
+                        &query,
+                        &binding,
+                        include_deleted,
+                        &scope,
+                        RemoteReach::REMOTE,
+                    );
                 }
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
@@ -7459,8 +9360,25 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::Advise { id, action } => {
-                let advice = self.advise(policy, action);
+            SyncMessage::Advise {
+                id,
+                action,
+                author,
+                session,
+            } => {
+                // As for a commit: a trusted link may ask for a session it
+                // vouches for; a session link only for its own.
+                let advice = match commit_who(policy, author.as_deref(), session.is_some()) {
+                    Ok(who) => {
+                        let identity = match who {
+                            Who::Session(author) => Some(author),
+                            _ => policy,
+                        };
+                        let vouched = vouched(policy, who, session);
+                        self.with_claims(vouched, || self.advise(identity, action))
+                    }
+                    Err(_) => PermissionAdvice::Denied,
+                };
                 self.inner.borrow_mut().sessions[index]
                     .outbox
                     .push(SyncMessage::Advice { id, advice });
@@ -7471,19 +9389,146 @@ impl Db {
                 binding,
                 at,
                 include_deleted,
+                tier,
+                wait,
+                view,
             } => {
-                let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
+                let policy = if scoped || accepted {
+                    policy
+                } else {
+                    self.inner().session_read_policy(index)
+                };
+                // A host may bind claims to the served identity rather than
+                // snapshotting them on this connection. Use the same fallback
+                // as ordinary subscriptions and writes; explicit per-session
+                // claims must still take precedence, even when empty.
+                let request_claims = claims.clone().unwrap_or_else(|| {
+                    db.inner()
+                        .claims
+                        .get(&identity)
+                        .cloned()
+                        .unwrap_or_default()
+                });
+                let prepared = db
+                    .prepare_query_bound(&query, binding.clone())?
+                    .with_identity_claims(identity, request_claims);
                 let upstream_identity = db.inner().identity.author;
                 let ordinary = !scoped
                     && !accepted
                     && (upstream_identity != AuthorSubject::SYSTEM
                         || identity == AuthorSubject::SYSTEM);
+                let available = db.inner().client.as_ref().is_some_and(|client| {
+                    client.transport.is_some() && may_wait(client.hint.get())
+                });
+                // Admission must precede every upstream request, including
+                // background refreshes and reads with a first-load deadline.
+                if self.is_client() && ordinary && tier != ReadTier::LocalOnly {
+                    if identity != upstream_identity {
+                        return Err(rejected(
+                            "ordinary relay read identity differs from its upstream identity",
+                        ));
+                    }
+                    if identity != AuthorSubject::SYSTEM
+                        && prepared.request_claims.as_ref().map(|(_, claims)| claims)
+                            != upstream_claims.as_ref()
+                    {
+                        return Err(rejected(
+                            "ordinary relay read claims differ from its upstream claims",
+                        ));
+                    }
+                }
+                let answered = self.inner.borrow_mut().sessions[index]
+                    .fetched_upstream
+                    .remove(&id);
+                let snapshot = frozen_at(&view).cloned();
                 let forward = self.is_client()
+                    && !answered
+                    && snapshot.is_none()
                     && (scoped
                         || accepted
-                        || db.inner().client.as_ref().is_some_and(|client| {
-                            client.transport.is_some() && may_wait(client.hint.get())
-                        }));
+                        || (available && tier == ReadTier::Remote && wait.is_none())
+                        || (available && !ordinary && tier != ReadTier::LocalOnly));
+                // A relay asks its upstream first for a Remote read, then
+                // serves it from its store once the answer's rows are in
+                // it; the read waits for that answer while the link is down
+                // or there is no server, since only the authority confirms
+                // a remote result. A read with a wait is asked the same way
+                // while the upstream may answer, and served once it does or
+                // the wait runs out. Any other LocalFirst read is served
+                // now, and its upstream's answer refreshes the store for
+                // the next. A snapshot reference is resolved by this store,
+                // which may be the owner that settled its named commits.
+                // Qualified requests retain their scope and paired receipt
+                // contract through forward_fetch below. The ordinary tier
+                // helper would turn them into a plain upstream Fetch.
+                let (relay, refresh) =
+                    if snapshot.is_some() || scoped || accepted || forward || !ordinary {
+                        (None, false)
+                    } else {
+                        let inner = self.inner.borrow();
+                        let client = inner.client.as_ref();
+                        let upstream = client.is_some_and(|client| may_wait(client.hint.get()));
+                        let waits = upstream && tier != ReadTier::LocalOnly && wait.is_some();
+                        let strict = client.is_some() && tier == ReadTier::Remote && wait.is_none();
+                        (
+                            (!answered && (strict || waits)).then_some(strict),
+                            upstream && !answered && tier == ReadTier::LocalFirst && !waits,
+                        )
+                    };
+                if refresh {
+                    let prepared = db.prepare_query_bound(&query, binding.clone())?;
+                    let mut inner = self.inner.borrow_mut();
+                    let client = inner.client.as_mut().expect("client");
+                    let upstream = client.next_id;
+                    client.next_id += 1;
+                    client.outbox.push(SyncMessage::Fetch {
+                        id: upstream,
+                        query: remote_query(&prepared.query).into_owned(),
+                        binding: prepared.binding.clone(),
+                        at,
+                        include_deleted,
+                        tier: ReadTier::Remote,
+                        wait: None,
+                        view: view.clone(),
+                    });
+                }
+                if let Some(strict) = relay {
+                    let prepared = db.prepare_query_bound(&query, binding.clone())?;
+                    let mut inner = self.inner.borrow_mut();
+                    let client = inner.client.as_mut().expect("client");
+                    let upstream = client.next_id;
+                    client.next_id += 1;
+                    client.answers.insert(upstream, None);
+                    let ask = SyncMessage::Fetch {
+                        id: upstream,
+                        query: remote_query(&prepared.query).into_owned(),
+                        binding: prepared.binding.clone(),
+                        at,
+                        include_deleted,
+                        tier: ReadTier::Remote,
+                        wait: None,
+                        view: view.clone(),
+                    };
+                    client.outbox.push(ask.clone());
+                    client.relayed_fetches.push(RelayedFetch {
+                        upstream,
+                        session: index,
+                        ask,
+                        strict,
+                        until: wait.and_then(wait_until),
+                        message: SyncMessage::Fetch {
+                            id,
+                            query,
+                            binding,
+                            at,
+                            include_deleted,
+                            tier,
+                            wait,
+                            view,
+                        },
+                    });
+                    return Ok(());
+                }
                 let delegated = scoped || (forward && !ordinary && !accepted);
                 let scoped_evidence = if accepted {
                     db.check_accepted_query(&prepared)?;
@@ -7492,6 +9537,7 @@ impl Db {
                         && db.check_scoped_fetch(&prepared)?
                 } else if delegated {
                     db.check_scoped_fetch(&prepared)?
+                        || crate::db::relation::is_union(&prepared.query)
                 } else {
                     false
                 };
@@ -7525,7 +9571,7 @@ impl Db {
                                 "ordinary relay read claims differ from its upstream claims",
                             ));
                         }
-                        Self::remote_fetch_shape(&prepared.query)?;
+                        self.remote_fetch_shape(&prepared.query)?;
                     }
                     db.forward_fetch(
                         index,
@@ -7538,6 +9584,7 @@ impl Db {
                         scoped_evidence,
                         None,
                         ordinary,
+                        view,
                     )?;
                 } else {
                     if accepted {
@@ -7562,6 +9609,7 @@ impl Db {
                         accepted,
                         None,
                         scoped_evidence.then_some(ScopedEvidence::Collect),
+                        &view,
                     )?;
                 }
             }
@@ -7572,9 +9620,50 @@ impl Db {
                 ops,
                 author,
                 session,
-                updated_at,
+                expect,
             } => {
-                if self.is_client() {
+                let invalid_scope = {
+                    let inner = self.inner();
+                    let admitted = &inner.sessions[index];
+                    admitted.bound_write_author
+                        && author.as_deref() != Some(admitted.identity.canonical())
+                };
+                if invalid_scope {
+                    let mut inner = self.inner();
+                    let through = inner.served_through();
+                    let global = inner.authority;
+                    // Refuse the inadmissible frame before deduplication. It
+                    // cannot replace a valid original upload's durable fate.
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::OriginFateV2 {
+                            node,
+                            tx,
+                            through,
+                            result: Err(wire_error(&denied(
+                                "private relay upload differs from its authenticated scope",
+                            ))),
+                            held: Vec::new(),
+                            global,
+                        });
+                    return Ok(());
+                }
+                let ordinary_worker = {
+                    let inner = self.inner();
+                    inner.client.is_some()
+                        && !inner.sessions[index].bound_write_author
+                        && !inner.scope_isolated_owner
+                        && !inner.non_durable
+                        && identity == inner.identity.author
+                        // SYSTEM links carry delegated transaction scopes and
+                        // preserve their original unit and permission evidence.
+                        // An ordinary session is authenticated as this worker's
+                        // own identity above. commit_who normalizes its payload
+                        // author to that identity before applying any operation.
+                        && identity != AuthorSubject::SYSTEM
+                        && session.is_some()
+                };
+                if self.is_client() && !ordinary_worker {
                     let request = SyncMessage::Commit {
                         node,
                         tx,
@@ -7582,7 +9671,7 @@ impl Db {
                         ops,
                         author,
                         session,
-                        updated_at,
+                        expect,
                     };
                     if let Err(error) = db.forward_upload(index, policy, request, None) {
                         let mut inner = self.inner.borrow_mut();
@@ -7608,33 +9697,10 @@ impl Db {
                     None => match commit_who(policy, author.as_deref(), session.is_some())
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
-                            // A trusted link's session write is checked
-                            // with the claims the link vouches for.
-                            let vouched = match (who, session) {
-                                (Who::Session(author), Some(claims)) if policy.is_none() => {
-                                    Some((author, claims))
-                                }
-                                _ => None,
-                            };
-                            let previous = vouched.as_ref().map(|(author, claims)| {
-                                (
-                                    *author,
-                                    self.inner
-                                        .borrow_mut()
-                                        .claims
-                                        .insert(*author, claims.clone()),
-                                )
-                            });
-                            let result =
-                                db.authorize_commit(who, kind, ops, updated_at, (node, tx));
-                            if let Some((author, previous)) = previous {
-                                let mut inner = self.inner.borrow_mut();
-                                match previous {
-                                    Some(previous) => inner.claims.insert(author, previous),
-                                    None => inner.claims.remove(&author),
-                                };
-                            }
-                            result
+                            let vouched = vouched(policy, who, session);
+                            self.with_claims(vouched, || {
+                                db.authorize_commit(who, kind, ops, (node, tx), ordinary_worker)
+                            })
                         }) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
@@ -7652,7 +9718,7 @@ impl Db {
                 // resend gets the recorded one), so the replica learns it.
                 let through = match (&result, inner.settled(node, tx)?) {
                     (Ok(()), Some(Some(seq))) => seq,
-                    _ => inner.seq,
+                    _ => inner.served_through(),
                 };
                 let session = &mut inner.sessions[index];
                 if result.is_ok() {
@@ -7661,13 +9727,57 @@ impl Db {
                             .map(|(table, row, key)| (table.clone(), *row, key.clone(), through)),
                     );
                 }
-                session.touched.extend(rows);
-                session.outbox.push(SyncMessage::FateV1 {
-                    node,
-                    tx,
-                    through,
-                    result,
-                });
+                session.touched.extend(rows.iter().cloned());
+                let upload = ordinary_worker
+                    && result.is_ok()
+                    && inner.relays_upstream()
+                    && inner
+                        .client
+                        .as_ref()
+                        .is_some_and(|client| client.pending.iter().any(|p| p.seq == through));
+                if upload {
+                    inner
+                        .client
+                        .as_mut()
+                        .expect("ordinary worker")
+                        .relayed_fates
+                        .entry(through)
+                        .or_default()
+                        .push((index, (node, tx), rows));
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::Stored { tx });
+                    return Ok(());
+                }
+                if result.is_ok() {
+                    let echoes = expect.into_iter().enumerate().filter_map(|(i, expect)| {
+                        let (table, row, key) = rows.iter().find(|(_, row, key)| {
+                            *row.0.as_bytes() == expect.id && *key == expect.key
+                        })?;
+                        Some(Echo {
+                            node,
+                            tx,
+                            index: i as u32,
+                            table: table.clone(),
+                            row: *row,
+                            key: key.clone(),
+                            seq: through,
+                            digest: expect.digest,
+                        })
+                    });
+                    inner.sessions[index].echoes.extend(echoes);
+                }
+                let global = inner.client.is_none() || through < LOCAL_BASE;
+                inner.sessions[index]
+                    .outbox
+                    .push(SyncMessage::OriginFateV2 {
+                        node,
+                        tx,
+                        through,
+                        result,
+                        held: Vec::new(),
+                        global,
+                    });
             }
             SyncMessage::ChunkRequests { requests } => {
                 let mut inner = self.inner.borrow_mut();
@@ -7706,16 +9816,23 @@ impl Db {
                     .conn
                     .execute_batch("SAVEPOINT jazz_lv_push")
                     .map_err(storage)?;
+                // A relay pushes what its sessions push on to its upstream,
+                // ahead of the commits that name it.
+                let relay = inner.client.is_some();
                 for node in nodes {
                     // A node that fails authentication is dropped; a commit
                     // that needs it is then rejected for missing chunks.
-                    let _ = crate::large::receive_pushed(
+                    let request = node.request();
+                    let received = crate::large::receive_pushed(
                         &inner.conn,
                         &inner.chunks,
-                        &node.request(),
+                        &request,
                         node.bytes,
                         expires,
                     );
+                    if relay && received.is_ok() {
+                        crate::large::mark_unpushed(&inner.conn, &request.locator)?;
+                    }
                 }
                 inner
                     .conn
@@ -7734,31 +9851,40 @@ impl Db {
     fn authorize_commit(
         &self,
         who: Who,
-        kind: WireKind,
+        mut kind: WireKind,
         ops: Vec<WireOp>,
-        updated_at: Option<u64>,
         origin: ([u8; 16], u64),
+        ordinary_worker: bool,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
-        if self.is_client() {
+        if self.is_client() && !ordinary_worker {
             return Err((
                 unsupported("write uploads through a SQLite relay"),
                 Vec::new(),
             ));
         }
+        let upload = if ordinary_worker && self.inner().relays_upstream() {
+            let upload = self
+                .inner()
+                .ordinary_worker_upload(&kind, origin.0)
+                .map_err(|error| (error, Vec::new()))?;
+            kind = WireKind::Mergeable;
+            upload
+        } else {
+            Kind::Mergeable
+        };
+        // Ordinary workers stage their own foregrounds just like their own
+        // writes; the authority still normalizes identity and checks policy.
+        let who = if ordinary_worker { Who::Local } else { who };
         // A trusted backend's session batch validates reads under the same
         // session as its writes, not under the transport's SYSTEM privilege.
         let identity = match who {
             Who::Session(author) => Some(author),
             Who::Local | Who::Attributed(_) => None,
         };
-        let mut ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>()
-        {
+        let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
-        if let Some(at) = updated_at {
-            ops.iter_mut().for_each(|op| op.stamp_at(at));
-        }
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
             for op in &ops {
@@ -7806,7 +9932,7 @@ impl Db {
             } => {
                 let mut positions = BTreeSet::new();
                 let mut origins = BTreeSet::new();
-                if *snapshot >= LOCAL_BASE
+                if (*snapshot >= LOCAL_BASE && !ordinary_worker)
                     || own.iter().any(|(position, node, tx)| {
                         *position < LOCAL_BASE
                             || *position >= i64::MAX as u64
@@ -7885,10 +10011,7 @@ impl Db {
                         .is_some_and(|seq| !in_snapshot(seq))
                 {
                     let rows = mentioned(&inner);
-                    return Err((
-                        conflict("row visible parent changed since transaction write was staged"),
-                        rows,
-                    ));
+                    return Err((Error::serialization_conflict(), rows));
                 }
             }
             for (index, read) in reads.iter().enumerate() {
@@ -7928,14 +10051,11 @@ impl Db {
                     .collect();
                 if now != then || content_changed {
                     let rows = mentioned(&inner);
-                    return Err((
-                        conflict("a row read by the transaction changed since its snapshot"),
-                        rows,
-                    ));
+                    return Err((Error::serialization_conflict(), rows));
                 }
             }
         }
-        let seq = {
+        let (seq, mark) = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
             inner
@@ -7980,16 +10100,38 @@ impl Db {
                 inner.changed.borrow_mut().truncate(mark);
                 return Err((error, Vec::new()));
             }
-            inner
-                .conn
-                .execute_batch("RELEASE upload")
-                .map_err(|e| (storage(e), Vec::new()))?;
             inner.seq = seq;
-            seq
+            (seq, mark)
         };
-        self.notify().map_err(|error| (error, Vec::new()))?;
-        let inner = self.inner.borrow();
-        Ok(inner.written_rows(&ops, seq).unwrap_or_default())
+        // Read the affected rows before releasing the savepoint: failure
+        // must reject the entire upload, including its receipt.
+        let finished = if ordinary_worker {
+            self.record_upload(ops.clone(), seq, None, upload)
+        } else {
+            Ok(())
+        }
+        .and_then(|()| self.inner.borrow().written_rows(&ops, seq));
+        let mut inner = self.inner();
+        match finished {
+            Ok(rows) => {
+                inner
+                    .conn
+                    .execute_batch("RELEASE upload")
+                    .map_err(|e| (storage(e), Vec::new()))?;
+                drop(inner);
+                self.notify().map_err(|error| (error, Vec::new()))?;
+                Ok(rows)
+            }
+            Err(error) => {
+                inner
+                    .conn
+                    .execute_batch("ROLLBACK TO upload; RELEASE upload")
+                    .map_err(|e| (storage(e), Vec::new()))?;
+                inner.seq = seq - 1;
+                inner.changed.borrow_mut().truncate(mark);
+                Err((error, Vec::new()))
+            }
+        }
     }
 
     /// One tick for both roles.
@@ -7999,14 +10141,43 @@ impl Db {
             inner.require_owner_subject(inner.identity.author)?;
         }
         self.server_tick()?;
-        self.client_tick()
+        self.client_tick()?;
+        // Relayed fates and reads the upstream just answered go out now.
+        let ready = self
+            .inner
+            .borrow_mut()
+            .client
+            .as_mut()
+            .is_some_and(|client| std::mem::take(&mut client.relay_ready));
+        if ready {
+            self.server_tick()?;
+            // Chunks a relayed read found missing go upstream now.
+            if self.owes_chunk_requests() {
+                self.client_send()?;
+            }
+        }
+        Ok(())
     }
 }
 
 /// Who an uploaded commit is applied as. A session link writes under its
-/// own identity and may not name another author; a trusted link (no policy
-/// identity) writes as the session it names (checked as it), or unchecked,
-/// attributed to the author it names.
+/// own identity (a session it names is checked as the link) and may not
+/// attribute to another author; a trusted link (no policy identity) writes
+/// as the session it names (impersonation: checked as it), or unchecked,
+/// attributed to the author it names or as itself.
+/// The session and claims a trusted link (no `policy` of its own) vouches
+/// for: its session writes and preflights are checked with them.
+fn vouched(
+    policy: Option<AuthorSubject>,
+    who: Who,
+    session: Option<BTreeMap<String, Value>>,
+) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
+    match (who, session) {
+        (Who::Session(author), Some(claims)) if policy.is_none() => Some((author, claims)),
+        _ => None,
+    }
+}
+
 fn commit_who(
     policy: Option<AuthorSubject>,
     author: Option<&str>,
@@ -8020,6 +10191,10 @@ fn commit_who(
         // A node's own writes (it names itself as the system at that node)
         // over a session link are that session's: the link decides.
         (Some(session), Some(AuthorSubject::SystemAt(_))) => Ok(Who::Session(session)),
+        // Ordinary session writes use the connection's admitted identity.
+        // Durable private-owner publications check their original identity
+        // separately, before they can be journalled or replayed.
+        (Some(link), Some(_)) if session => Ok(Who::Session(link)),
         (Some(session), Some(author)) if author != session => Err(Error::new(
             ErrorCode::WriteRejected,
             "attribution requires a trusted serving node",
@@ -8030,33 +10205,6 @@ fn commit_who(
         }
         (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
         (None, _) => Ok(Who::Local),
-    }
-}
-
-/// Whether a policy can look at the row's own id (subqueries count: they
-/// may correlate on it).
-fn depends_on_row_id(policy: &PolicyExpr) -> bool {
-    match policy {
-        PolicyExpr::Cmp { column, .. }
-        | PolicyExpr::IsNull { column }
-        | PolicyExpr::IsNotNull { column }
-        | PolicyExpr::Contains { column, .. }
-        | PolicyExpr::In { column, .. }
-        | PolicyExpr::InList { column, .. } => column == "id",
-        PolicyExpr::Inherits { via_column, .. } => via_column == "id",
-        PolicyExpr::InheritsReferencing { .. }
-        | PolicyExpr::Exists { .. }
-        | PolicyExpr::ExistsIncludingCreated { .. }
-        | PolicyExpr::ExistsRel { .. } => true,
-        PolicyExpr::And(items) | PolicyExpr::Or(items) => items.iter().any(depends_on_row_id),
-        PolicyExpr::Not(item) => depends_on_row_id(item),
-        PolicyExpr::SessionCmp { .. }
-        | PolicyExpr::SessionIsNull { .. }
-        | PolicyExpr::SessionIsNotNull { .. }
-        | PolicyExpr::SessionContains { .. }
-        | PolicyExpr::SessionInList { .. }
-        | PolicyExpr::True
-        | PolicyExpr::False => false,
     }
 }
 
@@ -8309,7 +10457,7 @@ impl Db {
     pub(super) fn check_scoped_fetch(&self, prepared: &PreparedQuery) -> Result<bool, Error> {
         let query = &prepared.query;
         if crate::db::relation::is_union(query) {
-            Self::remote_fetch_shape(query)?;
+            self.remote_fetch_shape(query)?;
             for (_, query) in unions::leaves(query)? {
                 let mut leaf = prepared.clone();
                 leaf.query = self.prepare_query(&query)?.query;
@@ -8393,7 +10541,7 @@ impl Db {
     {
         if open_tx.is_none()
             && opts.tier == ReadTier::Remote
-            && !ReadSpec::of(&opts, &self.inner())?.frozen()
+            && frozen_at(&opts.read_view.source).is_none()
         {
             // This is upload ordering, not query coverage. In particular, a
             // large upload cannot consume the binding's coverage deadline.
@@ -8448,7 +10596,7 @@ impl Db {
             }
             _ => None,
         };
-        let frozen = open_tx.is_none() && ReadSpec::of(&opts, &self.inner())?.frozen();
+        let frozen = open_tx.is_none() && frozen_at(&opts.read_view.source).is_some();
         if open_tx.is_none()
             && !frozen
             && self.is_client()
@@ -8512,6 +10660,34 @@ impl Db {
                 .await?;
             return Ok(result(rows));
         }
+        if frozen && self.inner().non_durable && self.is_client() {
+            if prepared.request_claims.is_some()
+                || author.is_some_and(|id| {
+                    id != self.inner().identity.author && id != AuthorSubject::SYSTEM
+                })
+            {
+                return Err(unsupported(
+                    "request-scoped foreground snapshots through a storage owner",
+                ));
+            }
+            self.remote_fetch_shape(&prepared.query)?;
+            self.fetch_qualified(
+                &prepared,
+                None,
+                opts.read_view.include_deleted,
+                RemoteReach {
+                    tier: opts.tier,
+                    wait: None,
+                },
+                None,
+                None,
+                opts.tier == ReadTier::Remote,
+                None,
+                false,
+                &opts.read_view.source,
+            )
+            .await?;
+        }
         if (self.inner().non_durable
             || (crate::db::relation::is_union(&prepared.query)
                 && opts.tier == ReadTier::LocalFirst
@@ -8519,7 +10695,7 @@ impl Db {
                 && prepared.request_claims.is_none()
                 && author.is_none_or(|id| id == self.inner().identity.author)))
             && self.is_client()
-            && opts.tier != ReadTier::LocalOnly
+            && (opts.tier != ReadTier::LocalOnly || self.inner().non_durable)
             && !frozen
         {
             if prepared.request_claims.is_some()
@@ -8657,8 +10833,14 @@ impl Db {
                     }
                     if let Some(occurrences) = union {
                         unions::check(&rows, &occurrences)?;
+                        return Ok(result(union_page(&prepared.query, rows)));
                     }
-                    return Ok(result(rows));
+                    return Ok(result(
+                        rows.into_iter()
+                            .skip(prepared.query.offset)
+                            .take(prepared.query.limit.unwrap_or(usize::MAX))
+                            .collect(),
+                    ));
                 }
                 if opts.tier == ReadTier::Remote {
                     return Err(Error::new(
@@ -8669,15 +10851,19 @@ impl Db {
                 // A local-first deadline may return the locally permitted
                 // cache; it never promotes it to an authoritative answer.
             } else {
-                Self::remote_fetch_shape(&prepared.query)?;
+                self.remote_fetch_shape(&prepared.query)?;
                 let answer = self
-                    .fetch_answer(
+                    .fetch_qualified(
                         &prepared,
                         None,
                         opts.read_view.include_deleted,
+                        RemoteReach::REMOTE,
                         deadline,
                         None,
+                        opts.tier == ReadTier::Remote,
+                        None,
                         false,
+                        &opts.read_view.source,
                     )
                     .await?;
                 if opts.tier == ReadTier::Remote
@@ -8700,7 +10886,7 @@ impl Db {
                             })
                             .await?;
                         unions::check(&rows, &occurrences)?;
-                        return Ok(result(rows));
+                        return Ok(result(union_page(&prepared.query, rows)));
                     }
                     // The answer names this read's roots, including an empty
                     // result. Own cached writes need not have been subscribed
@@ -8716,19 +10902,47 @@ impl Db {
                             )
                         },
                     );
-                    prepared.query.filters.push(crate::query::in_list(
-                        crate::query::col(root_id),
-                        rows.into_iter()
-                            .map(|row| crate::query::lit(Value::Uuid(RowUuid::from_bytes(row).0))),
-                    ));
+                    if crate::db::relation::is_union(&prepared.query) {
+                        let mut prefix = prepared.clone();
+                        prefix.query = remote_query(&prefix.query).into_owned();
+                        let exact = unions::prefix_roots(&prefix, &rows)?;
+                        let read = ReadSpec {
+                            cut: Some(Cut::at(through)),
+                            include_deleted: opts.read_view.include_deleted,
+                            ..ReadSpec::default()
+                        };
+                        let materialized = self
+                            .hydrate_one_shot(wait, || self.inner().run(&exact, author, &read))
+                            .await?;
+                        if materialized
+                            .iter()
+                            .map(|row| *row.id.as_bytes())
+                            .collect::<Vec<_>>()
+                            != rows
+                        {
+                            return Err(Error::new(
+                                ErrorCode::NotObserved,
+                                "UNION prefix does not reproduce the authority result",
+                            ));
+                        }
+                        return Ok(result(union_page(&prepared.query, materialized)));
+                    } else {
+                        prepared.query.filters.push(crate::query::in_list(
+                            crate::query::col(root_id),
+                            rows.into_iter().map(|row| {
+                                crate::query::lit(Value::Uuid(RowUuid::from_bytes(row).0))
+                            }),
+                        ));
+                    }
                 }
             }
         }
         let rows = self
             .hydrate_one_shot(wait.filter(|_| !frozen), || {
                 let inner = self.inner();
-                let roots = inner.run(&prepared, author, &ReadSpec::of(&opts, &inner)?)?;
-                inner.nest_relations(&prepared, author, roots)
+                let read = ReadSpec::of(&opts, &inner)?;
+                let roots = inner.run(&prepared, author, &read)?;
+                inner.nest_relations(&prepared, author, &read, roots)
             })
             .await?;
         Ok(result(rows))
@@ -8776,7 +10990,7 @@ impl Db {
 }
 
 impl Db {
-    /// Whether this runtime relies on an admitted owner for durable storage.
+    /// Whether this runtime relies on a worker for durable storage.
     pub fn is_non_durable_client(&self) -> bool {
         self.inner().non_durable
     }
@@ -8784,8 +10998,8 @@ impl Db {
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
     /// unless explicitly LocalOnly, waits for its storage owner's answer.
-    /// Authority waits separately require global settlement. New writes require
-    /// the current connection's subject- and schema-bound private-owner reply.
+    /// Authority waits separately require global settlement. E2EE account
+    /// foregrounds must select [`Db::set_private_owner_client`] before connecting.
     pub fn set_non_durable_client(&self) {
         self.ensure_client();
         let mut inner = self.inner.borrow_mut();
@@ -8796,7 +11010,53 @@ impl Db {
             return;
         }
         inner.non_durable = true;
+    }
+
+    /// Require an admitted E2EE storage owner before staging any write. This
+    /// is a host role, selected before attaching to an owner; peer messages
+    /// cannot select it. Calling ordinary mode later never removes this fence.
+    pub fn set_private_owner_client(&self) -> Result<(), Error> {
+        {
+            let inner = self.inner();
+            if inner.private_owner_required {
+                return inner.require_owner_subject(inner.identity.author);
+            }
+            if inner.scope_isolated_owner
+                || inner.authority
+                || inner.retired
+                || inner.mutation_admission_closed
+                || !matches!(inner.identity.author, AuthorSubject::Authenticated(_))
+                || inner
+                    .client
+                    .as_ref()
+                    .is_some_and(|client| client.connection != 0 || !client.pending.is_empty())
+                || !inner.sessions.is_empty()
+                || !inner.batches.is_empty()
+                || inner.tx.is_some()
+            {
+                return Err(unsupported(
+                    "selecting private foreground mode after connection or writes, or for another role",
+                ));
+            }
+            let issued: bool = inner
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _jazz_meta WHERE k='issued-seq-v1')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            if issued {
+                return Err(unsupported(
+                    "selecting private foreground mode after issuing transactions",
+                ));
+            }
+        }
+        self.set_non_durable_client();
+        let mut inner = self.inner.borrow_mut();
+        inner.private_owner_required = true;
         inner.seq = inner.seq.max(FOREGROUND_BASE);
+        Ok(())
     }
 
     /// Distinct maintained upstream queries and their attachment references.
@@ -8963,6 +11223,9 @@ impl Db {
         let (id, connection) = {
             let mut inner = self.inner();
             let client = inner.client.as_mut().expect("client");
+            if client.unadmitted {
+                return Err(schema_admission_error());
+            }
             if client.transport.is_none() || !may_wait(client.hint.get()) {
                 return Err(Error::new(
                     ErrorCode::NotObserved,
@@ -8993,6 +11256,9 @@ impl Db {
                     ErrorCode::NotObserved,
                     "catalogue coverage interrupted by reconnect",
                 )));
+            }
+            if client.unadmitted {
+                return Poll::Ready(Err(schema_admission_error()));
             }
             if let Some(Some(answer)) = client.catalogue_answers.remove(&id) {
                 return Poll::Ready(answer.and_then(|(head, version)| {
@@ -9076,7 +11342,7 @@ impl Db {
         {
             return Err(query_error("duplicate forwarded request ID"));
         }
-        let owner = inner.owner.clone();
+        let owner_schema = inner.owner.jazz.version_id();
         let client = inner.client.as_mut().expect("relay");
         if client.transport.is_none() || !may_wait(client.hint.get()) {
             return Err(Error::new(
@@ -9100,7 +11366,7 @@ impl Db {
                 upstream,
                 connection,
                 opened,
-                owner,
+                owner_schema,
                 deadline,
             },
         );
@@ -9111,7 +11377,10 @@ impl Db {
         for index in 0..inner.sessions.len() {
             let mut ready = Vec::new();
             for (&id, request) in &inner.sessions[index].forwarded_catalogue {
-                let answer = if !Rc::ptr_eq(&request.owner, &inner.owner)
+                // Receiving the requested catalogue can install its policies and
+                // replace the owner's Schema allocation. Keep the structural
+                // schema and connection guards, not that allocation's address.
+                let answer = if request.owner_schema != inner.owner.jazz.version_id()
                     || Instant::now() >= *request.deadline
                     || inner.client.as_ref().is_none_or(|c| {
                         c.connection != request.connection

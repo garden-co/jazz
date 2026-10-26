@@ -1,3 +1,5 @@
+//! Account catalogue observations and owner-bound initialization use the shared
+//! Binding registry; Node only supplies pollable results and close admission.
 use super::*;
 
 #[napi(object)]
@@ -12,115 +14,96 @@ pub struct NativeCatalogueState {
     pub ready: bool,
 }
 
-/// A single owner observation, retained on the JavaScript thread until ready.
 #[napi]
 pub struct PendingNativeCatalogueState {
-    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<NativeCatalogueState>>>>,
-    lifecycle: Rc<StreamingOwnerLifecycle>,
-    view_id: u64,
+    future: RefCell<Option<HostFuture<NativeCatalogueState>>>,
+    inner: Inner,
 }
 
 #[napi]
 impl PendingNativeCatalogueState {
     #[napi]
     pub fn poll(&self) -> js::Result<Option<NativeCatalogueState>> {
-        self.poll_once().map_err(BindingError::from)
-    }
-
-    fn poll_once(&self) -> napi::Result<Option<NativeCatalogueState>> {
-        if let Err(error) = self.lifecycle.ensure_admitted(self.view_id) {
+        if self.inner.host.closed.get() || self.inner.host.closing.get() || !self.inner.live.get() {
             self.cancel();
-            return Err(error);
+            return Err(closed().into());
         }
         let Some(mut future) = self.future.borrow_mut().take() else {
             return Err(napi::Error::from_reason(
                 "native catalogue observation is complete or cancelled",
-            ));
+            )
+            .into());
         };
-        let mut context = Context::from_waker(Waker::noop());
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result.map(Some),
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => Ok(Some(result.map_err(host_error)?)),
             Poll::Pending => {
                 *self.future.borrow_mut() = Some(future);
                 Ok(None)
             }
         }
     }
-
     #[napi]
     pub fn cancel(&self) {
         self.future.borrow_mut().take();
     }
 }
 
-impl Drop for PendingNativeCatalogueState {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
-/// Thread-affine initialization preparation, driven by the owner's normal ticks.
 #[napi]
 pub struct PendingNativeInitializationSeal {
-    future: RefCell<Option<LocalBoxFuture<'static, napi::Result<NativeInitializationSeal>>>>,
-    cleanup: RefCell<Option<Box<dyn FnOnce()>>>,
+    future: lifecycle::Resource<HostFuture<NativeInitializationSeal>>,
+    inner: Inner,
+}
+
+impl PendingNativeInitializationSeal {
+    fn poll_once(&self) -> napi::Result<Option<NativeInitializationSeal>> {
+        if self.inner.host.closed.get() || self.inner.host.closing.get() || !self.inner.live.get() {
+            self.cancel();
+            return Err(closed());
+        }
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native initialization seal is complete or cancelled",
+            ));
+        };
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(result) => match result {
+                Ok(seal) => {
+                    self.future.complete();
+                    Ok(Some(seal))
+                }
+                Err(error) => {
+                    self.cancel();
+                    Err(host_error(error))
+                }
+            },
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[napi]
 impl PendingNativeInitializationSeal {
     #[napi]
     pub fn poll(&self) -> js::Result<Option<NativeInitializationSeal>> {
-        self.poll_once().map_err(BindingError::from)
+        Ok(self.poll_once()?)
     }
-
-    fn poll_once(&self) -> napi::Result<Option<NativeInitializationSeal>> {
-        let Some(mut future) = self.future.borrow_mut().take() else {
-            return Err(napi::Error::from_reason(
-                "native initialization seal is complete or cancelled",
-            ));
-        };
-        let mut context = Context::from_waker(Waker::noop());
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => {
-                if result.is_err() {
-                    self.cancel();
-                } else {
-                    self.cleanup.borrow_mut().take();
-                }
-                result.map(Some)
-            }
-            Poll::Pending => {
-                *self.future.borrow_mut() = Some(future);
-                Ok(None)
-            }
-        }
-    }
-
     #[napi]
     pub fn cancel(&self) {
-        // Dropping the pending owner operation retires any undelivered reservation.
-        self.future.borrow_mut().take();
-        if let Some(cleanup) = self.cleanup.borrow_mut().take() {
-            cleanup();
-        }
+        self.future.cancel();
     }
 }
-
 impl Drop for PendingNativeInitializationSeal {
     fn drop(&mut self) {
         self.cancel();
-    }
-}
-
-impl NapiDb {
-    fn take_initialization_token(&self, token: &str) -> napi::Result<()> {
-        self.streaming.ensure_admitted(self.view_id)?;
-        if !self.initialization_seals.borrow_mut().remove(token) {
-            return Err(napi::Error::from_reason(
-                "initialization seal is unknown, consumed, or belongs to another runtime",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -132,193 +115,118 @@ impl NapiDb {
         previous: Uint8Array,
         next: Uint8Array,
     ) -> js::Result<()> {
-        self.streaming.ensure_admitted(self.view_id)?;
+        self.open_inner()?;
         jazz::db::validate_catalogue_capture_replacement(&previous, &next)
-            .map_err(napi_error)
-            .map_err(BindingError::from)
+            .map_err(|error| napi_core_error(&error))?;
+        Ok(())
     }
-
     #[napi(js_name = "mergeCatalogueCaptures")]
     pub fn merge_catalogue_captures(
         &self,
         previous: Uint8Array,
         next: Uint8Array,
     ) -> js::Result<Uint8Array> {
-        self.streaming.ensure_admitted(self.view_id)?;
-        jazz::db::merge_catalogue_captures(&previous, &next)
-            .map(Uint8Array::new)
-            .map_err(napi_error)
-            .map_err(BindingError::from)
+        self.open_inner()?;
+        Ok(jazz::db::merge_catalogue_captures(&previous, &next)
+            .map_err(|error| napi_core_error(&error))?
+            .into())
     }
-
     #[napi(js_name = "hasAuthenticatedCatalogue")]
     pub fn has_authenticated_catalogue(
         &self,
     ) -> js::Result<Either<bool, PendingNativeCatalogueState>> {
-        self.streaming.ensure_admitted(self.view_id)?;
-        let inner = self.inner.borrow();
-        let inner = inner
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        macro_rules! observe {
-            ($db:expr) => {{
-                let db = Rc::clone($db);
-                Box::pin(async move {
-                    let ready = db.has_authenticated_catalogue().map_err(napi_error)?;
-                    Ok(NativeCatalogueState {
-                        capture: None,
-                        ready,
-                    })
-                }) as LocalBoxFuture<'static, napi::Result<NativeCatalogueState>>
-            }};
-        }
-        let future = observe!(&inner.core);
-        let pending = PendingNativeCatalogueState {
-            future: RefCell::new(Some(future)),
-            lifecycle: Rc::clone(&self.streaming),
-            view_id: self.view_id,
-        };
-        match pending.poll_once()? {
-            Some(state) => Ok(Either::A(state.ready)),
-            None => Ok(Either::B(pending)),
-        }
+        Ok(Either::A(
+            self.binding()?
+                .db
+                .has_authenticated_catalogue()
+                .map_err(|error| napi_core_error(&error))?,
+        ))
     }
-
     #[napi(js_name = "takeAuthenticatedCatalogueState")]
     pub fn take_authenticated_catalogue_state(
         &self,
     ) -> js::Result<Either<NativeCatalogueState, PendingNativeCatalogueState>> {
-        self.streaming.ensure_admitted(self.view_id)?;
         if !self.owns_runtime {
             return Err(napi::Error::from_reason(
                 "only the runtime owner can take authenticated catalogue state",
             )
             .into());
         }
-        let inner = self.inner.borrow();
-        let inner = inner
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        macro_rules! observe {
-            ($db:expr) => {{
-                let db = Rc::clone($db);
-                Box::pin(async move {
-                    let state = db
-                        .take_authenticated_catalogue_state()
-                        .map_err(napi_error)?;
-                    Ok(NativeCatalogueState {
-                        capture: state.capture.map(Uint8Array::new),
-                        ready: state.ready,
-                    })
-                }) as LocalBoxFuture<'static, napi::Result<NativeCatalogueState>>
-            }};
-        }
-        let future = observe!(&inner.core);
-        let pending = PendingNativeCatalogueState {
-            future: RefCell::new(Some(future)),
-            lifecycle: Rc::clone(&self.streaming),
-            view_id: self.view_id,
-        };
-        match pending.poll_once()? {
-            Some(state) => Ok(Either::A(state)),
-            None => Ok(Either::B(pending)),
-        }
+        let state = self
+            .binding()?
+            .db
+            .take_authenticated_catalogue_state()
+            .map_err(|error| napi_core_error(&error))?;
+        Ok(Either::A(NativeCatalogueState {
+            capture: state.capture.map(Uint8Array::new),
+            ready: state.ready,
+        }))
     }
-
     #[napi(js_name = "sealInitializationTransaction")]
     pub fn seal_initialization_transaction(
         &self,
         open_id: String,
     ) -> js::Result<Either<NativeInitializationSeal, PendingNativeInitializationSeal>> {
-        self.streaming.ensure_admitted(self.view_id)?;
-        let open_id = open_id
-            .parse::<CoreOpenTransactionId>()
-            .map_err(napi::Error::from_reason)?;
-        let inner = self.inner.borrow();
-        let inner = inner
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let db = Rc::clone(&inner.core);
-        let owner = Rc::clone(&db);
-        let non_durable = self.non_durable_client.get();
-        let cleanup: Box<dyn FnOnce()> = Box::new(move || {
-            // The foreground reservation future retires its request on drop.
-            // Abandon any batch which had not yet frozen when cancellation won.
-            let _ = owner.binding.rollback_transaction(&open_id.to_string());
+        let inner = self.open_inner()?;
+        let rollback = inner.binding.clone();
+        let rollback_id = open_id.clone();
+        let binding = inner.binding.clone();
+        let live = inner.live.clone();
+        let host = inner.host.clone();
+        let view = inner.view.clone();
+        let future: HostFuture<NativeInitializationSeal> = Box::pin(async move {
+            let seal = if binding.db.is_non_durable_client() {
+                binding
+                    .seal_initialization_transaction_with_owner(&open_id)
+                    .await
+            } else {
+                binding.seal_initialization_transaction(&open_id)
+            }?;
+            if host.closed.get() || host.closing.get() || !live.get() {
+                let _ = binding.cancel_initialization_transaction(&seal.token);
+                return Err(HostError::Argument("database is closed".into()));
+            }
+            binding.check_initialization_token(&seal.token)?;
+            view.track_initialization(&seal.token, &binding);
+            Ok(NativeInitializationSeal {
+                token: seal.token,
+                reserved_tx_id: seal.reserved_tx_id,
+            })
         });
-        let seals = Rc::clone(&self.initialization_seals);
-        let streaming = Rc::clone(&self.streaming);
-        let view_id = self.view_id;
         let pending = PendingNativeInitializationSeal {
-            future: RefCell::new(Some(Box::pin(async move {
-                let id = open_id.to_string();
-                let seal = if non_durable {
-                    db.binding
-                        .seal_initialization_transaction_with_owner(&id)
-                        .await
-                } else {
-                    db.binding.seal_initialization_transaction(&id)
-                }
-                .map_err(napi_error)?;
-                if let Err(error) = streaming.ensure_admitted(view_id) {
-                    let _ = db.binding.cancel_initialization_transaction(&seal.token);
-                    return Err(error);
-                }
-                seals.borrow_mut().insert(seal.token.clone());
-                Ok(NativeInitializationSeal {
-                    token: seal.token,
-                    reserved_tx_id: seal.reserved_tx_id,
-                })
-            }))),
-            cleanup: RefCell::new(Some(cleanup)),
+            inner: inner.clone(),
+            future: lifecycle::Resource::new(Some(&inner.view), future).on_cancel(move || {
+                let _ = rollback.rollback_transaction(&rollback_id);
+            }),
         };
-        // Keep the persistent owner's cancellation boundary even though SQLite
-        // commits synchronously. Returning the pending operation lets its
-        // caller cancel or close before the first storage turn; dropping it
-        // rolls back the unpublished transaction through the cleanup guard.
-        if inner.core.is_persistent() {
+        // Preserve the persistent owner's cancellation turn before sealing.
+        if inner.host.file_lock.borrow().is_some() {
             return Ok(Either::B(pending));
         }
-        match pending.poll_once()? {
-            Some(seal) => Ok(Either::A(seal)),
-            None => Ok(Either::B(pending)),
-        }
+        Ok(match pending.poll_once()? {
+            Some(seal) => Either::A(seal),
+            None => Either::B(pending),
+        })
     }
-
     #[napi(js_name = "publishInitializationTransaction")]
-    pub fn publish_initialization_transaction(&self, token: String) -> js::Result<Write> {
-        self.take_initialization_token(&token)?;
-        let inner = self.inner.borrow();
-        let inner = inner
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let write = inner
-            .core
-            .binding
-            .publish_initialization_transaction(&token)
-            .map_err(napi_error)?;
-        Ok(host_write_with_kind(
-            Rc::clone(&inner.core),
-            write,
-            "serializable",
-        ))
+    pub fn publish_initialization_transaction(&self, env: Env, token: String) -> js::Result<Write> {
+        let inner = self.open_inner()?;
+        let result = inner.binding.publish_initialization_transaction(&token);
+        if inner.binding.check_initialization_token(&token).is_err() {
+            inner.view.forget_initialization(&token);
+        }
+        Ok(inner.write(&env, result)?)
     }
-
     #[napi(js_name = "cancelInitializationTransaction")]
     pub fn cancel_initialization_transaction(&self, token: String) -> js::Result<()> {
-        self.take_initialization_token(&token)?;
-        let inner = self.inner.borrow();
-        let inner = inner
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        inner
-            .core
-            .binding
-            .cancel_initialization_transaction(&token)
-            .map_err(napi_error)
-            .map_err(BindingError::from)
+        let inner = self.open_inner()?;
+        let result = inner.binding.cancel_initialization_transaction(&token);
+        if inner.binding.check_initialization_token(&token).is_err() {
+            inner.view.forget_initialization(&token);
+        }
+        result.map_err(host_error)?;
+        Ok(())
     }
-
     #[napi(js_name = "recordInitializationInsertAbsence")]
     pub fn record_initialization_insert_absence(
         &self,
@@ -326,89 +234,20 @@ impl NapiDb {
         table: String,
         row_id: Uint8Array,
     ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
-        self.streaming.ensure_admitted(self.view_id)?;
-        let open_id = open_id
-            .parse::<CoreOpenTransactionId>()
-            .map_err(napi::Error::from_reason)?;
-        let row_id = core_row_uuid_from_bytes(&row_id)?;
-        let inner = self.inner.borrow();
-        let inner = inner
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        inner
-            .core
-            .binding
-            .record_initialization_insert_absence(&open_id.to_string(), &table, &row_id.to_bytes())
-            .map_err(napi_error)?;
-        Ok(Either::A(Uint8Array::new(Vec::new())))
+        self.binding()?
+            .record_initialization_insert_absence(&open_id, &table, &row_id)
+            .map_err(host_error)?;
+        Ok(Either::A(Vec::new().into()))
     }
-
     #[napi(js_name = "initializationTransactionStatus")]
     pub fn initialization_transaction_status(
         &self,
         ids: Vec<String>,
     ) -> js::Result<Either<String, PendingNativePermissionAdvice>> {
-        self.streaming.ensure_admitted(self.view_id)?;
-        if ids.len() > 64 {
-            return Err(napi::Error::from_reason(
-                "initialization status accepts at most 64 identities",
-            )
-            .into());
-        }
-        let inner = self.inner.borrow();
-        let inner = inner
-            .as_ref()
-            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let status = inner
-            .core
-            .binding
-            .initialization_transaction_status(&ids)
-            .map_err(napi_error)?;
-        Ok(Either::A(status))
+        Ok(Either::A(
+            self.binding()?
+                .initialization_transaction_status(&ids)
+                .map_err(host_error)?,
+        ))
     }
-}
-
-pub(super) fn open_cached_db(
-    schema: JazzSchema,
-    storage: NativeStorage,
-    config: CoreOpenDbConfig,
-    identity: CoreDbIdentity,
-    cached: Option<&[u8]>,
-) -> napi::Result<CoreDb> {
-    open_cached_db_inner(schema, storage, config, identity, cached, None)
-}
-
-pub(super) fn open_cached_account_owner_db(
-    schema: JazzSchema,
-    storage: NativeStorage,
-    config: CoreOpenDbConfig,
-    identity: CoreDbIdentity,
-    cached: Option<&[u8]>,
-    admission: &account_owner::AdmittedAccountOwner,
-) -> napi::Result<CoreDb> {
-    open_cached_db_inner(schema, storage, config, identity, cached, Some(admission))
-}
-
-fn open_cached_db_inner(
-    schema: JazzSchema,
-    storage: NativeStorage,
-    config: CoreOpenDbConfig,
-    identity: CoreDbIdentity,
-    cached: Option<&[u8]>,
-    admission: Option<&account_owner::AdmittedAccountOwner>,
-) -> napi::Result<CoreDb> {
-    if cached.is_some() && config.history_complete {
-        return Err(napi::Error::from_reason(
-            "cached catalogue cannot establish history completeness",
-        ));
-    }
-    let db = match admission {
-        Some(admission) => CoreDb::open_account_owner(schema, storage, config, identity, admission),
-        None => open_core_db(schema, storage, config, identity, false),
-    }?;
-    if let Some(cached) = cached {
-        // SAFETY: the host owns and validates this app/environment cache.
-        unsafe { db.install_cached_catalogue(cached) }.map_err(napi_error)?;
-    }
-    Ok(db)
 }

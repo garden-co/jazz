@@ -106,7 +106,7 @@ function unpackPublishedAlpha54Root(): {
 } {
   const base64 = readFileSync(
     new URL(
-      "../../../../crates/jazz/fixtures/published-alpha54-native-rocksdb.tar.gz.base64",
+      "../../../../crates/jazz/fixtures/pre-sqlite/published-alpha54-native-rocksdb.tar.gz.base64",
       import.meta.url,
     ),
     "utf8",

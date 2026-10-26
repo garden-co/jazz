@@ -126,11 +126,13 @@ fn an_own_echo_does_not_create_a_serializable_read_conflict() {
     let owner = owner();
     let tab = open(1);
     tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    tab.set_private_owner_client().unwrap();
+    connect(&tab, &owner);
+    turns(&[&tab, &owner]);
     tab.seed_seq_floor((1u64 << 52) + (1u64 << 51));
     insert(&tab);
     add(&tab, 2);
     let tx = begin_read(&tab, 2);
-    tab.set_non_durable_client();
     connect(&tab, &owner);
     let _query = subscribe(&tab);
     turns(&[&tab, &owner]);
@@ -336,10 +338,10 @@ fn malformed_read_content_or_origins_cannot_bypass_authority_validation() {
 fn read_content_and_commit_kind_match_independent_versioned_fixtures() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_owner_read_content_v1.json"
+        "../fixtures/sqlite-sync-v2/owner-read-content.json"
     ))
     .unwrap();
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     assert_eq!(fixture["wireRole"], "jazz.sqlite.serializable-observed.v1");
     assert_eq!(
         fixture["contentRole"],
@@ -370,12 +372,11 @@ fn read_content_and_commit_kind_match_independent_versioned_fixtures() {
     let message: SyncMessage = serde_json::from_value(serde_json::json!({"Commit":{
         "node":vec![0x22u8;16],"tx":128,
         "kind":{"SerializableObservedV1":{"snapshot":127,"reads":[],"own":[[(1u64<<52)+1,vec![0x11u8;16],300]],"content":[]}},
-        "ops":[],"author":null,"session":null,"updated_at":null
+        "ops":[],"author":null,"session":null,"expect":[]
     }})).unwrap();
     let bytes = hex::decode(fixture["commitHex"].as_str().unwrap()).unwrap();
-    assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
-    let (decoded, tail): (SyncMessage, _) = postcard::take_from_bytes(&bytes).unwrap();
-    assert!(tail.is_empty());
+    assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
+    let decoded = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(
         serde_json::to_value(decoded).unwrap(),
         serde_json::to_value(message).unwrap()
@@ -393,12 +394,12 @@ fn promotion_cannot_hide_a_foreign_counter_change() {
     let owner = owner();
     hydrate(&owner, &server);
     let tab = open(1);
-    hydrate(&tab, &server);
+    tab.set_private_owner_client().unwrap();
+    hydrate(&tab, &owner);
     tab.seed_seq_floor((1u64 << 52) + (1u64 << 51));
     add(&tab, 2);
     let tx = begin_read(&tab, 2);
     add(&owner, 3);
-    tab.set_non_durable_client();
     connect(&tab, &owner);
     let _query = subscribe(&tab);
     turns(&[&tab, &owner]);
@@ -430,6 +431,9 @@ fn a_missing_pending_predecessor_cannot_produce_a_successful_partial_replay() {
     peer.send(SyncMessage::OwnerProjectionV1 { known: Vec::new() })
         .unwrap();
     peer.send(SyncMessage::Fetch {
+        view: jazz::protocol::ReadViewSourceSpec::Current,
+        tier: jazz::db::ReadTier::LocalOnly,
+        wait: None,
         id: 7,
         query: query(),
         binding: BTreeMap::new(),
@@ -441,7 +445,7 @@ fn a_missing_pending_predecessor_cannot_produce_a_successful_partial_replay() {
     let messages = std::iter::from_fn(|| peer.try_recv()).collect::<Vec<_>>();
     for omit in [false, true] {
         let tab = open(2);
-        tab.set_non_durable_client();
+        tab.set_private_owner_client().unwrap();
         let (link, mut source) = duplex_transport::duplex();
         block_on(tab.connect_upstream(link));
         for mut message in messages.clone() {

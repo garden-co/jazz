@@ -1,5 +1,10 @@
 use super::*;
+use jazz::db::Db;
 use rusqlite::{Connection, OptionalExtension};
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context, Poll};
 
 const MAGIC: &[u8] = b"JNC\x02";
 
@@ -60,7 +65,8 @@ impl CatalogueCache {
 
     fn open(&self) -> Result<Connection, RelayError> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(RelayError::Storage)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         if let Ok(meta) = std::fs::symlink_metadata(&self.path)
             && !meta.file_type().is_file()
@@ -87,7 +93,7 @@ impl CatalogueCache {
             tx.execute_batch("CREATE TABLE _jazz_native_catalogue_v2(slot INTEGER PRIMARY KEY CHECK(slot=1),capture BLOB NOT NULL)").map_err(sql_error)?;
         }
         tx.commit().map_err(sql_error)?;
-        engine::sync_parent(&self.path)?;
+        storage::sync_parent(&self.path)?;
         Ok(conn)
     }
 
@@ -151,7 +157,8 @@ impl CatalogueCache {
 
     fn lock(&self) -> Result<std::fs::File, RelayError> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(RelayError::Storage)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| RelayError::Storage(error.to_string()))?;
         }
         let path = self.path.with_extension("lock");
         if let Ok(meta) = std::fs::symlink_metadata(&path)
@@ -165,8 +172,9 @@ impl CatalogueCache {
             .create(true)
             .truncate(false)
             .open(path)
-            .map_err(RelayError::Storage)?;
-        lock.lock().map_err(RelayError::Storage)?;
+            .map_err(|error| RelayError::Storage(error.to_string()))?;
+        lock.lock()
+            .map_err(|error| RelayError::Storage(error.to_string()))?;
         Ok(lock)
     }
 
@@ -198,7 +206,7 @@ impl CatalogueCache {
         envelope.extend_from_slice(&capture);
         storage.execute("INSERT INTO _jazz_native_catalogue_v2 VALUES(1,?1) ON CONFLICT(slot) DO UPDATE SET capture=excluded.capture",[envelope]).map_err(sql_error)?;
         storage.close().map_err(|(_, e)| sql_error(e))?;
-        engine::sync_parent(&self.path)?;
+        storage::sync_parent(&self.path)?;
         Ok(capture)
     }
 }

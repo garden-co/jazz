@@ -2,7 +2,8 @@
 #[path = "sqlite_relay/account_handoff.rs"]
 mod account_handoff;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, SyncMessage, Transport, TransportError, block_on,
+    Db, DbConfig, DbIdentity, FrameJoiner, ReadOpts, SyncMessage, Transport, TransportError,
+    block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
@@ -202,6 +203,7 @@ impl Transport for Queues {
 }
 struct Authority {
     db: Db,
+    frames: RefCell<FrameJoiner>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
 }
@@ -220,6 +222,7 @@ impl Authority {
         .unwrap();
         let this = Self {
             db,
+            frames: RefCell::default(),
             inbound: Rc::default(),
             outbound: Rc::default(),
         };
@@ -241,16 +244,18 @@ impl Authority {
                 panic!("frames")
             };
             for frame in frames {
-                self.inbound
-                    .borrow_mut()
-                    .push_back(postcard::from_bytes(&frame).unwrap());
+                if let Some(message) = self.frames.borrow_mut().push(&frame).unwrap() {
+                    self.inbound.borrow_mut().push_back(message);
+                }
             }
             block_on(self.db.tick()).unwrap();
             for message in self.outbound.borrow_mut().drain(..) {
-                host.relay_command(RelayCommandRequest::SendRelayFrame {
-                    relay: host.relay,
-                    frame: postcard::to_allocvec(&message).unwrap(),
-                });
+                for frame in encode_frames(message).unwrap() {
+                    host.relay_command(RelayCommandRequest::SendRelayFrame {
+                        relay: host.relay,
+                        frame,
+                    });
+                }
             }
         }
     }
@@ -2896,8 +2901,8 @@ fn linked_generic_handoff_refuses_pending_forwarded_uploads() {
     let alice = linked_generic_config(&path, "alice");
     drop(registry.open(alice.clone()).unwrap());
     registry.close(&alice.scope).unwrap();
-    // A generic relay accepts durable replicas. Non-durable foregrounds need
-    // a private-owner admission and deliberately cannot populate this fixture.
+    // A trusted backend link forwards the original attributed upload. Ordinary
+    // same-user workers use upstream's restamped journal instead.
     let relay = block_on(Db::open_at(
         DbConfig::new(schema(), alice.identity),
         &path,
@@ -2924,7 +2929,7 @@ fn linked_generic_handoff_refuses_pending_forwarded_uploads() {
             inbound: to_relay,
             outbound: to_sender,
         }),
-        alice.identity.author,
+        AuthorSubject::SYSTEM,
     );
     block_on(sender.insert(
         "notes",
@@ -2965,7 +2970,12 @@ fn linked_generic_handoff_refuses_pending_forwarded_uploads() {
     };
     let before = uploads();
     assert_eq!(before.len(), 1);
-    assert_eq!(before[0].0, alice.identity.author.canonical());
+    assert_eq!(before[0].0, AuthorSubject::SYSTEM.canonical());
+    let message: SyncMessage =
+        postcard::from_bytes(before[0].1.strip_prefix(b"JRU\x02").unwrap()).unwrap();
+    assert!(
+        matches!(message, SyncMessage::Commit { author: Some(author), .. } if author == alice.identity.author.canonical())
+    );
     assert!(before[0].2);
     let marker = generic_marker_bytes(&path);
     assert!(matches!(

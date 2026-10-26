@@ -118,7 +118,7 @@ fn account_provenance_policy_survives_private_owner_sync() {
     let owner = block_on(Db::open_at(config(50), &path, Default::default())).unwrap();
     owner.set_scope_isolated_storage_owner().unwrap();
     let tab = open(1);
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     connect(&owner, &server);
     connect(&tab, &owner);
     drive(&[&tab, &owner, &server], tab.wait_for_storage_owner()).unwrap();
@@ -372,4 +372,90 @@ fn mismatched_policy_metadata_rolls_back_with_its_catalogue() {
             "{case}: metadata escaped rollback"
         );
     }
+}
+
+/// Alice's own pending row is visible under the admitted read policy. A newer
+/// catalogue head must revoke it before the replacement policy arrives; a
+/// stale descriptor cannot re-enable cold-owner previews, including on reopen.
+#[test]
+fn pending_previews_stay_revoked_during_split_policy_update() {
+    use jazz::protocol::{
+        CatalogueSnapshot, CurrentWriteSchema, PhysicalIdentityManifest, SchemaVersion,
+    };
+    let allowed = schema();
+    let mut snapshot = CatalogueSnapshot {
+        genesis_physical_identities: PhysicalIdentityManifest::allocate(&allowed),
+        schemas: vec![SchemaVersion::new(allowed.clone())],
+        lineages: vec![],
+        current_write_schema: CurrentWriteSchema {
+            revision: 1,
+            schema: allowed.version_id(),
+        },
+    };
+    let server = open(90);
+    server.set_authority();
+    server.install_authority_catalogue(&snapshot).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending-policy.sqlite");
+    let owner = block_on(Db::open_at(config(50), &path, Default::default())).unwrap();
+    owner.set_scope_isolated_storage_owner().unwrap();
+    let (up, down) = duplex();
+    let connection = block_on(owner.connect_upstream(up));
+    server.accept_subscriber(down, alice());
+    for _ in 0..12 {
+        block_on(server.tick()).unwrap();
+        block_on(owner.tick()).unwrap();
+    }
+    assert!(owner.detach_connection(&connection));
+    owner.set_remote_link_hint(RemoteLinkHint::Failed);
+    let write = block_on(owner.insert(
+        "identities",
+        BTreeMap::from([("name".into(), Value::String("Alice pending".into()))]),
+        InsertOptions {
+            row_id: Some(RowUuid(alice().account_id().unwrap().0)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(local_count(&owner), 1);
+    let denied = allowed.without_permissions();
+    snapshot.schemas = vec![SchemaVersion::new(denied.clone())];
+    snapshot.current_write_schema.revision += 1;
+    block_on(server.activate_schema(denied)).unwrap();
+    server.install_authority_catalogue(&snapshot).unwrap();
+    let (up, down) = duplex();
+    let delayed = Rc::new(RefCell::new(VecDeque::new()));
+    block_on(owner.connect_upstream(Box::new(MetadataGate {
+        inner: up,
+        hold: Rc::new(Cell::new(true)),
+        delayed: delayed.clone(),
+    })));
+    server.accept_subscriber(down, alice());
+    for _ in 0..12 {
+        block_on(server.tick()).unwrap();
+        block_on(owner.tick()).unwrap();
+    }
+    assert!(
+        delayed
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::PolicyDescriptorV1(_)))
+    );
+    assert_eq!(
+        owner.write_state(write.mergeable_tx_id()).unwrap().fate,
+        jazz::tx::Fate::Pending
+    );
+    assert_eq!(local_count(&owner), 0);
+    let query = owner.prepare_query(&Query::from("identities")).unwrap();
+    assert_eq!(
+        owner.read(&query).unwrap().len(),
+        1,
+        "the pending row remains physically present"
+    );
+    block_on(owner.close()).unwrap();
+    drop(owner);
+    let owner = block_on(Db::open_at(config(50), &path, Default::default())).unwrap();
+    owner.set_scope_isolated_storage_owner().unwrap();
+    owner.set_remote_link_hint(RemoteLinkHint::Failed);
+    assert_eq!(local_count(&owner), 0);
 }

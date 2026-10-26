@@ -129,7 +129,7 @@ async fn ws_frames(socket: &mut Socket) -> Vec<Vec<u8>> {
 async fn ws_send(socket: &mut Socket, messages: Vec<SyncMessage>) {
     let frames: Vec<_> = messages
         .iter()
-        .map(|message| postcard::to_allocvec(message).unwrap())
+        .map(|message| jazz::db::encode_message(message).unwrap())
         .collect();
     socket
         .send(Message::Binary(
@@ -143,7 +143,7 @@ async fn ws_messages(socket: &mut Socket) -> Vec<SyncMessage> {
     ws_frames(socket)
         .await
         .iter()
-        .map(|frame| postcard::from_bytes(frame).unwrap())
+        .map(|frame| jazz::sync_codec::decode_sync_message(frame).unwrap())
         .collect()
 }
 
@@ -230,7 +230,7 @@ fn send(runtime: &ServerRuntimeHandle, session: ServerSession, messages: Vec<Syn
             session,
             messages
                 .iter()
-                .map(|m| postcard::to_allocvec(m).unwrap())
+                .map(|m| jazz::db::encode_message(m).unwrap())
                 .collect(),
         )
         .unwrap();
@@ -242,7 +242,7 @@ async fn receive(stream: &mut ServerRuntimeFrameStream) -> Vec<SyncMessage> {
         .unwrap()
         .unwrap()
         .iter()
-        .map(|m| postcard::from_bytes(m).unwrap())
+        .map(|m| jazz::sync_codec::decode_sync_message(m).unwrap())
         .collect()
 }
 
@@ -297,7 +297,7 @@ async fn private_relay_keeps_origin_receipts_and_session_write_checks() {
     let mut fates = BTreeMap::new();
     while fates.len() < 5 {
         for message in receive(&mut stream).await {
-            if let SyncMessage::FateV1 {
+            if let SyncMessage::OriginFateV2 {
                 node, tx, result, ..
             } = message
             {
@@ -511,7 +511,7 @@ async fn websocket_private_owner_keeps_session_permissions_and_origin_receipts()
     tokio::time::timeout(Duration::from_secs(5), async {
         while fates.len() < 4 {
             for message in ws_messages(&mut alice_socket).await {
-                if let SyncMessage::FateV1 {
+                if let SyncMessage::OriginFateV2 {
                     node, tx, result, ..
                 } = message
                 {
@@ -532,7 +532,7 @@ async fn websocket_private_owner_keeps_session_permissions_and_origin_receipts()
     ws_send(&mut bob_socket, vec![upload(24, bob(), "bob")]).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if ws_messages(&mut bob_socket).await.iter().any(|message| matches!(message, SyncMessage::FateV1 {node,result:Ok(_),..} if node[0]==24)) { break; }
+            if ws_messages(&mut bob_socket).await.iter().any(|message| matches!(message, SyncMessage::OriginFateV2 {node,result:Ok(_),..} if node[0]==24)) { break; }
         }
     }).await.unwrap();
     for (socket, expected) in [(&mut alice_socket, 2), (&mut bob_socket, 1)] {
@@ -651,13 +651,25 @@ async fn websocket_private_owner_replays_original_receipts_after_authority_resta
         let mut receipts = BTreeMap::new();
         tokio::time::timeout(Duration::from_secs(5), async {
             while receipts.len() < 2 {
-                for message in ws_messages(&mut socket).await {
-                    if let SyncMessage::FateV1 {
-                        node, ref result, ..
+                for mut message in ws_messages(&mut socket).await {
+                    if let SyncMessage::OriginFateV2 {
+                        node,
+                        ref result,
+                        ref mut held,
+                        ..
                     } = message
                     {
-                        assert!(result.is_ok(), "{message:?}");
-                        receipts.insert(node, postcard::to_allocvec(&message).unwrap());
+                        assert!(result.is_ok(), "{result:?}");
+                        if round == 1 {
+                            assert!(
+                                held.is_empty(),
+                                "a new connection has no previous echo hints"
+                            );
+                        }
+                        // Echo hints belong to the current connection. Every
+                        // other authority receipt byte must survive restart.
+                        held.clear();
+                        receipts.insert(node, jazz::db::encode_message(&message).unwrap());
                     }
                 }
             }

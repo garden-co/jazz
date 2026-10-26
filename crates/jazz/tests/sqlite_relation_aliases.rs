@@ -471,7 +471,9 @@ fn paired_aliases_keep_attribution_and_read_only_validation() {
             client.wait_for_transaction(receipt.0, DurabilityTier::Global),
         );
         if changed {
-            assert_eq!(result.unwrap_err().code, ErrorCode::TransactionConflict);
+            let error = result.unwrap_err();
+            assert!(error.is_serialization_conflict(), "{error}");
+            assert!(error.is_conflict(), "authority conflicts remain retryable");
         } else {
             result.unwrap();
         }
@@ -709,7 +711,7 @@ fn tampered_alias_evidence_and_envelopes_are_rejected() {
 #[test]
 fn alias_evidence_uses_existing_versioned_bytes() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_relation_alias_evidence_v1.json"
+        "../fixtures/sqlite-sync-v2/alias-evidence.json"
     ))
     .unwrap();
     let client = open(1);
@@ -775,12 +777,11 @@ fn alias_evidence_uses_existing_versioned_bytes() {
         "kind": {"SerializableUnionObservedV1": {"snapshot": 127,
             "reads": [{"query": q, "binding": {}, "include_deleted": false, "rows": [[vec![1_u8;16], 1]]}],
             "own": [], "content": [vec![content.to_vec()]]}},
-        "ops": [], "author": null, "session": null, "updated_at": null
+        "ops": [], "author": null, "session": null, "expect": []
     }})).unwrap();
     let bytes = hex::decode(fixture["commitHex"].as_str().unwrap()).unwrap();
-    assert_eq!(postcard::to_allocvec(&wire).unwrap(), bytes);
-    let (decoded, tail): (SyncMessage, _) = postcard::take_from_bytes(&bytes).unwrap();
-    assert!(tail.is_empty());
+    assert_eq!(jazz::db::encode_message(&wire).unwrap(), bytes);
+    let decoded = jazz::sync_codec::decode_sync_message(&bytes).unwrap();
     assert_eq!(
         serde_json::to_value(decoded).unwrap(),
         serde_json::to_value(wire).unwrap()

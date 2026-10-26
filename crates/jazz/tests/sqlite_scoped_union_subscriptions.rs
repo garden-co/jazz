@@ -342,10 +342,12 @@ fn scoped_live_cold_pages_and_private_witness_revocation() {
             ReadOpts::for_read_tier(ReadTier::LocalOnly),
         ))
         .unwrap();
+        let mut cached_ids = cached.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+        cached_ids.sort();
         assert_eq!(
-            cached.len(),
-            2,
-            "only the selected roots should be hydrated"
+            cached_ids,
+            [id(9), id(10), id(12)],
+            "hydrate the permitted prefix and page, excluding Bob's private root"
         );
         block_on(server.delete("access", id(30), Default::default())).unwrap();
         let mut removed = Vec::new();

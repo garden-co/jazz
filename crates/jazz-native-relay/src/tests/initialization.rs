@@ -319,15 +319,11 @@ fn native_catalogue_readiness_is_immediate_and_survives_read_cancellation() {
         )))
         .unwrap(),
     );
-    let (_, wire) = relay.run(|worker| worker.begin_socket_upstream()).unwrap();
-    let reverse_wire = NativeRelayWire {
-        inbound: Arc::clone(&wire.outbound),
-        outbound: Arc::clone(&wire.inbound),
-        liveness: wire.liveness.clone(),
-        connection_liveness: wire.connection_liveness.clone(),
-    };
+    let (_, wire) = relay
+        .run(|worker| Ok(worker.begin_socket_upstream()))
+        .unwrap();
     authority.accept_subscriber(
-        Box::new(QueueTransport { wire: reverse_wire }),
+        Box::new(WireTransportAdapter::current(AuthorityWire::new(wire))),
         AuthorSubject::for_test_bytes([0xe7; 16]),
     );
     let mut read_complete = false;
@@ -450,9 +446,20 @@ fn admitted_owner_restart_replays_exact_pending_leased_foreground_unit() {
             ));
         }
         let mut uploaded = None;
+        let mut frames = jazz::db::FrameJoiner::default();
         for _ in 0..128 {
             fixture.tick(foreground);
-            for message in client.relay.wire().take_outbound().unwrap() {
+            for frame in client
+                .relay
+                .wire()
+                .unwrap()
+                .take_outbound_encoded()
+                .unwrap()
+            {
+                let Some(message) = frames.push(&frame).expect("versioned native wire frame")
+                else {
+                    continue;
+                };
                 if let SyncMessage::Commit {
                     node,
                     ops,

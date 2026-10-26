@@ -292,33 +292,38 @@ fn open_owner(
     validate_storage_owner(&storage_owner, identity.author)?;
     let expected = encode_marker(&storage_owner, identity.author.canonical())?;
     let root = Path::new(&data_path);
-    let storage = open_persistent_core_storage(data_path.clone(), &schema)?;
-    // The adapter is exclusively open, but no Db/schema/cache/replay exists yet.
+    let NativeStorage::File { path, lock } = native_storage::persistent_storage(&data_path)?;
     let admission = admit_marker(root, &storage_owner, identity.author, &expected)?;
-    let db = initialization::open_cached_account_owner_db(
-        schema,
-        storage,
-        config,
-        identity,
-        cached_catalogue.as_deref(),
-        &admission,
-    )?;
-    // SAFETY: this host-only path has durably admitted the exact configured
-    // account author under the existing root lock before exposing any runtime.
-    db.set_scope_isolated_storage_owner().map_err(napi_error)?;
-    admission.finish(root, &expected)?;
-    Ok(NapiDb {
-        inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::persistent(Rc::new(
-            db,
-        ))))),
-        owns_runtime: true,
-        non_durable_client: Rc::new(Cell::new(false)),
-        view_id: 0,
-        streaming: StreamingOwnerLifecycle::new(),
-        trusted_backend: false,
-        author_admissions: NativeAuthorAdmissions::default(),
-        initialization_seals: Rc::default(),
+    if cached_catalogue.is_some() && config.history_complete {
+        return Err(napi::Error::from_reason(
+            "cached catalogue cannot establish history completeness",
+        )
+        .into());
+    }
+    // SAFETY: only this host path creates the admission; the exclusive root
+    // lock remains held through durable handoff, marker completion and close.
+    let db = block_on(unsafe {
+        jazz::db::Db::open_at_as_account_owner(
+            binding_host::db_config(schema, &config, identity),
+            &path,
+            FileOptions {
+                synchronous_full: true,
+                ..Default::default()
+            },
+        )
     })
+    .map_err(|error| napi_core_error(&error))?;
+    if let Some(capture) = cached_catalogue {
+        // SAFETY: the caller is the admitted app/environment account host.
+        unsafe { db.install_cached_catalogue(&capture) }
+            .map_err(|error| napi_core_error(&error))?;
+    }
+    db.set_scope_isolated_storage_owner()
+        .map_err(|error| napi_core_error(&error))?;
+    admission.finish(root, &expected)?;
+    let runtime = NapiDb::runtime_owner(Binding::new(db, identity, false));
+    *runtime.open_inner()?.host.file_lock.borrow_mut() = Some(lock);
+    Ok(runtime)
 }
 
 #[napi]

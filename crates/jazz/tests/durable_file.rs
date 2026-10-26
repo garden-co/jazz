@@ -139,6 +139,43 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
     db.abandon_serializable_handle(open).unwrap();
 }
 
+/// The page size in a SQLite file's header (bytes 16-17; 1 means 65536).
+fn header_page_size(path: &Path) -> u32 {
+    let header = std::fs::read(path).unwrap();
+    match u16::from_be_bytes([header[16], header[17]]) {
+        1 => 65536,
+        size => u32::from(size),
+    }
+}
+
+#[test]
+fn a_new_file_takes_the_page_size_and_an_existing_one_keeps_its_own() {
+    let large = FileOptions {
+        page_size: Some(65536),
+        ..FileOptions::default()
+    };
+    let path = scratch("page-size");
+    {
+        let db = block_on(Db::open_at(config(1), &path, large.clone())).unwrap();
+        block_on(db.insert("items", item(1), Default::default())).unwrap();
+    }
+    assert_eq!(header_page_size(&path), 65536);
+
+    // A file created at the default size keeps it when reopened with another.
+    let path = scratch("page-size-existing");
+    {
+        let db = open_file(&path, 1);
+        block_on(db.insert("items", item(1), Default::default())).unwrap();
+    }
+    let default_size = header_page_size(&path);
+    assert_ne!(default_size, 65536);
+    let db = block_on(Db::open_at(config(1), &path, large)).unwrap();
+    assert_eq!(count(&db), 1);
+    block_on(db.insert("items", item(2), Default::default())).unwrap();
+    drop(db);
+    assert_eq!(header_page_size(&path), default_size);
+}
+
 const CHILD: &str = "JAZZ_SQLITE_CRASH_CHILD";
 
 /// Child process body: commit `committed` single writes, then open a Jazz
@@ -286,6 +323,51 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
         client.sync_debug().starts_with("pending [] "),
         "{}",
         client.sync_debug()
+    );
+}
+
+/// A replica whose uploads all settled holds only server seqs; reopened, it
+/// must still continue after the local seqs it handed out, or its next write
+/// reuses a transaction id the authority already applied and is dropped as a
+/// resend.
+#[test]
+fn a_reopened_replica_whose_uploads_settled_continues_after_its_own_seqs() {
+    let path = scratch("settled-replica");
+    let server = block_on(Db::open_history_complete(config(0xec))).unwrap();
+    let connect = |client: &Db| {
+        let (client_side, server_side) = duplex();
+        block_on(client.connect_upstream(client_side));
+        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    };
+    let insert = |db: &Db, n: u64| {
+        let options = InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        };
+        let tx = block_on(db.insert("items", item(n), options))
+            .unwrap()
+            .mergeable_tx_id();
+        drive(
+            &[db, &server, db],
+            db.wait_for_transaction(tx, DurabilityTier::Global),
+        )
+        .unwrap();
+        tx
+    };
+    let last = {
+        let client = open_file(&path, 5);
+        connect(&client);
+        insert(&client, 0);
+        insert(&client, 1)
+    };
+    let client = open_file(&path, 5);
+    connect(&client);
+    assert!(insert(&client, 2) > last, "the commit seq continues");
+    assert_eq!(
+        count(&server),
+        3,
+        "the new write was applied, not deduplicated"
     );
 }
 
@@ -448,4 +530,193 @@ fn memory_stays_bounded_by_the_page_cache() {
         (end - start) / 1024
     );
     assert!(file > 16 << 20, "the data really is on disk");
+}
+
+/// Closing a store checkpoints its WAL into the file and removes it, also
+/// after the store read large-value chunks back through its read-only
+/// connection (here: chunks a replica fetched from the server).
+#[test]
+fn closing_a_store_that_read_large_values_back_checkpoints_its_wal() {
+    let path = scratch("large-close");
+    let server = block_on(Db::open_history_complete(config(0xef))).unwrap();
+    block_on(server.insert(
+        "items",
+        BTreeMap::from([
+            ("label".to_owned(), Value::String("x".repeat(300 * 1024))),
+            ("n".to_owned(), Value::I64(1)),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    {
+        let client = open_file(&path, 4);
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        let query = client.prepare_query(&Query::from("items")).unwrap();
+        let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        for _ in 0..5 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(count(&client), 1);
+    }
+    let wal = PathBuf::from(format!("{}-wal", path.display()));
+    assert!(!wal.exists(), "the closed store left its WAL behind");
+}
+
+/// A replica that wrote a large value and synced it reads it back offline
+/// after a restart: its own chunks stay in its file once the server's
+/// version replaces the optimistic one.
+#[test]
+fn a_replica_reads_its_own_synced_large_value_offline_after_a_restart() {
+    let path = scratch("large-own");
+    let server = block_on(Db::open_history_complete(config(0xed))).unwrap();
+    let label = "y".repeat(300 * 1024);
+    {
+        let client = open_file(&path, 5);
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        let query = client.prepare_query(&Query::from("items")).unwrap();
+        let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        let handle = block_on(client.insert(
+            "items",
+            BTreeMap::from([
+                ("label".to_owned(), Value::String(label.clone())),
+                ("n".to_owned(), Value::I64(1)),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        drive(
+            &[&client, &server, &client],
+            client.wait_for_transaction(handle.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        let update = block_on(client.update(
+            "items",
+            row(1),
+            BTreeMap::from([("n".to_owned(), Value::I64(2))]),
+            Default::default(),
+        ))
+        .unwrap();
+        drive(
+            &[&client, &server, &client],
+            client.wait_for_transaction(update.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        for _ in 0..5 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+    }
+    let client = open_file(&path, 5);
+    let query = client.prepare_query(&Query::from("items")).unwrap();
+    let rows = block_on(client.all(&query, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .cells()
+            .find(|(name, _)| *name == "label")
+            .and_then(|(_, v)| v.cloned()),
+        Some(Value::String(label)),
+        "the replica's own large value is readable offline"
+    );
+}
+
+/// A durable relay (a browser's worker) keeps the large value a client
+/// below it wrote, so it reads the value offline after a restart.
+#[test]
+fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart() {
+    let path = scratch("large-relay");
+    let server = block_on(Db::open_history_complete(config(0xec))).unwrap();
+    let label = "z".repeat(300 * 1024);
+    {
+        let relay = open_file(&path, 6);
+        let (relay_side, server_side) = duplex();
+        let _upstream = block_on(relay.connect_upstream(relay_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        let client = block_on(Db::open(config(7))).unwrap();
+        let (client_side, relay_down) = duplex();
+        let _relay_link = block_on(client.connect_upstream(client_side));
+        relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM);
+        let query = client.prepare_query(&Query::from("items")).unwrap();
+        let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        let handle = block_on(client.insert(
+            "items",
+            BTreeMap::from([
+                ("label".to_owned(), Value::String(label.clone())),
+                ("n".to_owned(), Value::I64(1)),
+            ]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        drive(
+            &[&client, &relay, &server, &relay, &client],
+            client.wait_for_transaction(handle.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
+        for _ in 0..5 {
+            block_on(client.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+    }
+    let relay = open_file(&path, 6);
+    let query = relay.prepare_query(&Query::from("items")).unwrap();
+    let rows = block_on(relay.all(&query, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .cells()
+            .find(|(name, _)| *name == "label")
+            .and_then(|(_, v)| v.cloned()),
+        Some(Value::String(label.clone())),
+        "the relay holds the large value its client wrote"
+    );
+
+    // A reloaded tab: a fresh non-durable foreground over the relay, still
+    // offline (and disconnected from the server, as the app asked). Its one-shot read gets the row from the relay and waits for
+    // the value's chunks instead of failing on them.
+    let tab = block_on(Db::open(config(8))).unwrap();
+    tab.set_non_durable_client();
+    let (tab_side, relay_down) = duplex();
+    let _tab_link = block_on(tab.connect_upstream(tab_side));
+    relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM);
+    // The app disconnected from the server; the worker still answers.
+    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
+    let read = postcard::to_allocvec(&Query::from("items")).unwrap();
+    let result = drive(
+        &[&tab, &relay, &tab],
+        tab.all_serialized_query(
+            &read,
+            ReadOpts::default(),
+            None,
+            None,
+            None,
+            false,
+            || false,
+            |_| {},
+        ),
+    )
+    .unwrap();
+    let jazz::db::SerializedReadResult::Rows(rows) = result else {
+        panic!("a flat read answers rows");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .cells()
+            .find(|(name, _)| *name == "label")
+            .and_then(|(_, v)| v.cloned()),
+        Some(Value::String(label)),
+        "the tab reads the large value through its relay"
+    );
 }

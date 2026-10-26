@@ -76,19 +76,18 @@ fn messages() -> Vec<(&'static str, SyncMessage)> {
 #[test]
 fn accepted_v1_pins_wire_and_storage_bytes() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_accepted_v1.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/accepted.json")).unwrap();
     let generated = serde_json::json!({
-        "version":1,
+        "version":2,"encoding":"jazz.sqlite.sync.v2",
         "roles":["jazz.sqlite.sync.accepted-row.v1","jazz.sqlite.sync.accepted-fetch.v1","jazz.sqlite.sync.accepted-answer.v1","jazz.sqlite.accepted-row.v1"],
-        "messages": messages().iter().map(|(name,message)| ((*name).to_owned(),hex::encode(postcard::to_allocvec(message).unwrap()))).collect::<BTreeMap<_,_>>(),
+        "messages": messages().iter().map(|(name,message)| ((*name).to_owned(),hex::encode(jazz::db::encode_message(message).unwrap()))).collect::<BTreeMap<_,_>>(),
         "durableContent":hex::encode(postcard::to_allocvec(&content()).unwrap()),
         "emptySettledRowsFrame":"020000005b5d00"
     });
     assert_eq!(generated, fixture);
     for (name, message) in messages() {
         let bytes = hex::decode(fixture["messages"][name].as_str().unwrap()).unwrap();
-        let (decoded, rest) = postcard::take_from_bytes::<SyncMessage>(&bytes).unwrap();
-        assert!(rest.is_empty());
+        let decoded = jazz::db::decode_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
             serde_json::to_value(message).unwrap()

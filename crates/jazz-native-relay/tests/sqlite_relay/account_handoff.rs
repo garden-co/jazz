@@ -108,6 +108,7 @@ fn login_path(root: &Path, subject: &str) -> std::path::PathBuf {
 }
 
 fn bind(authority: &mut Authority, subject: &str) {
+    authority.frames = RefCell::default();
     authority.inbound = Rc::default();
     authority.outbound = Rc::default();
     authority.db.accept_subscriber(
@@ -130,24 +131,44 @@ fn settle(host: &Host, authority: &Authority, tx: [u8; 16]) {
     );
 }
 
-fn pending_units(host: &Host) -> Vec<Vec<u8>> {
+fn pending_units(host: &Host, authority: &mut Authority) -> Vec<Vec<u8>> {
+    // Complete the real schema handshake but withhold every write from the
+    // authority. No receipt or acceptance is manufactured by this fixture.
+    let ForegroundDbCommandResponse::NativeSessionMetadata { user_id, .. } =
+        host.command(ForegroundDbCommandRequest::NativeSessionMetadata)
+    else {
+        panic!("session metadata");
+    };
+    bind(authority, &user_id);
+    let mut units = Vec::new();
     for _ in 0..20 {
         host.pump();
-    }
-    let RelayCommandResponse::Frames { frames } =
-        host.relay_command(RelayCommandRequest::ReceiveRelayFrames { relay: host.relay })
-    else {
-        panic!("frames")
-    };
-    frames
-        .into_iter()
-        .filter(|frame| {
-            matches!(
-                postcard::from_bytes::<SyncMessage>(frame).unwrap(),
+        let RelayCommandResponse::Frames { frames } =
+            host.relay_command(RelayCommandRequest::ReceiveRelayFrames { relay: host.relay })
+        else {
+            panic!("frames");
+        };
+        for frame in frames {
+            if matches!(
+                jazz::db::decode_message(&frame).unwrap(),
                 SyncMessage::Commit { .. }
-            )
-        })
-        .collect()
+            ) {
+                units.push(frame);
+            } else if let Some(message) = authority.frames.borrow_mut().push(&frame).unwrap() {
+                authority.inbound.borrow_mut().push_back(message);
+            }
+        }
+        block_on(authority.db.tick()).unwrap();
+        for message in authority.outbound.borrow_mut().drain(..) {
+            for frame in encode_frames(message).unwrap() {
+                host.relay_command(RelayCommandRequest::SendRelayFrame {
+                    relay: host.relay,
+                    frame,
+                });
+            }
+        }
+    }
+    units
 }
 
 fn local_texts(host: &Host) -> Vec<String> {
@@ -266,18 +287,20 @@ fn native_private_account_handoff_preserves_history_and_exclusivity() {
 #[test]
 fn native_private_account_handoff_preserves_pending_foreground_upload() {
     let directory = tempfile::tempdir().unwrap();
+    // Reconnect to the same authority catalogue across every login and reopen.
+    let mut authority = Authority::new();
     let alice = open(directory.path(), "alice").unwrap();
     alice.insert(83, "pending alice");
-    let units = pending_units(&alice);
+    let units = pending_units(&alice, &mut authority);
     assert_eq!(units.len(), 1);
     let path = path(directory.path());
     drop(alice);
     let marker = generic_marker_bytes(&path);
     let bob = open(directory.path(), "bob").unwrap();
     assert!(local_texts(&bob).is_empty());
-    assert!(pending_units(&bob).is_empty());
+    assert!(pending_units(&bob, &mut authority).is_empty());
     bob.insert(84, "pending bob");
-    let bob_units = pending_units(&bob);
+    let bob_units = pending_units(&bob, &mut authority);
     assert_eq!(bob_units.len(), 1);
     assert_ne!(bob_units, units);
     expect_local_texts(&bob, &["pending bob"]);
@@ -285,16 +308,15 @@ fn native_private_account_handoff_preserves_pending_foreground_upload() {
     assert_eq!(generic_marker_bytes(&path), marker);
     let reopened = open(directory.path(), "alice").unwrap();
     expect_local_texts(&reopened, &["pending alice"]);
-    assert_eq!(pending_units(&reopened), units);
+    assert_eq!(pending_units(&reopened, &mut authority), units);
     // The capture consumed this connection's initial handshake and upload.
     // Reopen to give the real authority a complete new transport stream.
     drop(reopened);
     let bob = open(directory.path(), "bob").unwrap();
     expect_local_texts(&bob, &["pending bob"]);
-    assert_eq!(pending_units(&bob), bob_units);
+    assert_eq!(pending_units(&bob, &mut authority), bob_units);
     drop(bob);
     let reopened = open(directory.path(), "alice").unwrap();
-    let mut authority = Authority::new();
     bind(&mut authority, "alice");
     authority.drive(&reopened);
     assert_eq!(authority.texts(), ["pending alice"]);

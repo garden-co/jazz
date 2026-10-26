@@ -101,8 +101,7 @@ pub enum ServerLinkAdmission {
     #[default]
     OrdinarySession,
     /// Host-verified SYSTEM authority credential permitting scoped query
-    /// delegation. On SQLite it is served as a trusted SYSTEM link; the sync
-    /// protocol cannot express a delegated scope yet.
+    /// delegation. It is served as a trusted SYSTEM link.
     AuthorityQueryDelegate,
     /// A durable relay for exactly the one session authenticated by this
     /// connection. It retains ordinary session policy and attribution checks;
@@ -305,9 +304,10 @@ impl ServerRuntimeHandle {
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
     ) -> Result<ServerSession, String> {
+        // A private relay serves tabs of its authenticated account. Keep that
+        // admission distinct from an ordinary session through the core carrier:
+        // its original upload author and claims must match on every reconnect.
         match link_admission {
-            // The SQLite sync protocol has no per-query delegated scope yet,
-            // so an authority link is served as the trusted SYSTEM link it is.
             ServerLinkAdmission::OrdinarySession | ServerLinkAdmission::AuthorityQueryDelegate => {}
             ServerLinkAdmission::ScopeIsolatedClientRelay { admission_epoch } => {
                 if trust != CommitUnitTrust::Session
@@ -345,8 +345,7 @@ impl ServerRuntimeHandle {
         );
         let opened = self
             .run(move |owner| {
-                owner.open_session(session, served_as, claims, output, egress);
-                Ok(())
+                owner.open_session(session, served_as, claims, link_admission, output, egress)
             })
             .await;
         if opened.is_err() {
@@ -980,19 +979,30 @@ impl Owner {
         session: ServerSession,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        admission: ServerLinkAdmission,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) {
+    ) -> Result<(), String> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
         });
         let queues = Rc::new(SessionQueues::default());
-        let subscriber = self.db.accept_subscriber_with_claims(
-            Box::new(SessionTransport(Rc::clone(&queues))),
-            identity,
-            claims,
-        );
+        let transport = Box::new(SessionTransport(Rc::clone(&queues)));
+        let subscriber = match admission {
+            ServerLinkAdmission::ScopeIsolatedClientRelay { .. } => self
+                .db
+                .accept_scope_isolated_subscriber(
+                    transport,
+                    identity,
+                    claims.expect("private relay admission requires a session"),
+                )
+                .map_err(|error| error.to_string())?,
+            ServerLinkAdmission::OrdinarySession | ServerLinkAdmission::AuthorityQueryDelegate => {
+                self.db
+                    .accept_subscriber_with_claims(transport, identity, claims)
+            }
+        };
         self.sessions.insert(
             session,
             OwnerSession {
@@ -1004,6 +1014,7 @@ impl Owner {
                 egress,
             },
         );
+        Ok(())
     }
 
     fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
@@ -1018,11 +1029,8 @@ impl Owner {
         for frame in frames {
             match jazz::sync_codec::decode_sync_message(&frame) {
                 Ok(SyncMessage::Commit { node, tx, .. }) if gated => {
-                    owner_session
-                        .queues
-                        .outbound
-                        .borrow_mut()
-                        .push_back(SyncMessage::FateV1 {
+                    owner_session.queues.outbound.borrow_mut().push_back(
+                        SyncMessage::OriginFateV2 {
                             node,
                             tx,
                             through: self.db.seq_high_water(),
@@ -1030,7 +1038,10 @@ impl Owner {
                                 "permissions_head_missing: no published permissions head"
                                     .to_owned(),
                             )),
-                        });
+                            held: Vec::new(),
+                            global: true,
+                        },
+                    );
                 }
                 Ok(
                     message @ (SyncMessage::Subscribe { .. }
@@ -1097,10 +1108,10 @@ impl Owner {
             while session.egress.load(Ordering::Acquire) + bytes < SESSION_QUEUE_BUDGET
                 && let Some(message) = outbound.pop_front()
             {
-                match postcard::to_allocvec(&message) {
-                    Ok(frame) => {
-                        bytes += frame.len();
-                        frames.push(frame);
+                match jazz::db::encode_frames(message) {
+                    Ok(encoded) => {
+                        bytes += encoded.iter().map(Vec::len).sum::<usize>();
+                        frames.extend(encoded);
                     }
                     Err(error) => {
                         tracing::error!(%error, "encode outbound sync message");

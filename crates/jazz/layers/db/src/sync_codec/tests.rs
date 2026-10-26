@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 fn corpus() -> serde_json::Value {
     serde_json::from_str(include_str!(
-        "../../../../fixtures/sqlite_sync_artifact_corpus_v1.json"
+        "../../../../fixtures/sqlite_sync_artifact_corpus_v2.json"
     ))
     .unwrap()
 }
@@ -62,6 +62,12 @@ fn variant(message: &SyncMessage) -> &'static str {
         SyncMessage::AcceptedOverlayCheckV1 { .. } => "AcceptedOverlayCheckV1",
         SyncMessage::AcceptedOverlayCheckedV1 { .. } => "AcceptedOverlayCheckedV1",
         SyncMessage::SubscribeReadablePolicyV1 { .. } => "SubscribeReadablePolicyV1",
+        SyncMessage::SchemaAdmission { .. } => "SchemaAdmission",
+        SyncMessage::RowsPart { .. } => "RowsPart",
+        SyncMessage::UnionAnswerV1 { .. } => "UnionAnswerV1",
+        SyncMessage::ScopedUnionSubscribeV1 { .. } => "ScopedUnionSubscribeV1",
+        SyncMessage::OriginFateV2 { .. } => "OriginFateV2",
+        SyncMessage::Stored { .. } => "Stored",
     }
 }
 fn source(name: &str) -> serde_json::Value {
@@ -175,7 +181,7 @@ fn base_messages() -> Vec<(&'static str, SyncMessage)> {
                 ops: vec![],
                 author: None,
                 session: None,
-                updated_at: None,
+                expect: Vec::new(),
             },
         ),
         (
@@ -261,6 +267,8 @@ fn base_messages() -> Vec<(&'static str, SyncMessage)> {
                 tx: 128,
                 through: 256,
                 result: Ok(()),
+                held: Vec::new(),
+                global: true,
             },
         ),
         (
@@ -269,11 +277,15 @@ fn base_messages() -> Vec<(&'static str, SyncMessage)> {
                 tx: 128,
                 through: 256,
                 result: Err(WireError::Conflict("conflict".into())),
+                held: Vec::new(),
+                global: true,
             },
         ),
         (
             "advise_insert",
             SyncMessage::Advise {
+                author: None,
+                session: None,
                 id: 128,
                 action: PermissionAdviceAction::Insert {
                     table: "notes".into(),
@@ -318,7 +330,7 @@ fn base_message_constructors_match_independent_pins() {
         let expected = cases.iter().find(|case| case["name"] == name).unwrap();
         assert_eq!(variant(&message), expected["variant"].as_str().unwrap());
         assert_eq!(
-            postcard::to_allocvec(&message).unwrap(),
+            crate::db::encode_message(&message).unwrap(),
             bytes(expected["frame_hex"].as_str().unwrap()),
             "{name}"
         );
@@ -351,11 +363,12 @@ fn every_variant_has_canonical_complete_input_coverage() {
         let message = decode_sync_message(&frame).unwrap();
         assert_eq!(variant(&message), case["variant"].as_str().unwrap());
         seen.insert(variant(&message));
-        assert_eq!(postcard::to_allocvec(&message).unwrap(), frame);
+        assert_eq!(crate::db::encode_message(&message).unwrap(), frame);
         let mut trailing = frame.clone();
         trailing.push(0);
-        let mut overlong = vec![frame[0] | 128, 0];
-        overlong.extend_from_slice(&frame[1..]);
+        let mut overlong = frame[..5].to_vec();
+        overlong.extend_from_slice(&[frame[5] | 128, 0]);
+        overlong.extend_from_slice(&frame[6..]);
         for invalid in [trailing, frame[..frame.len() - 1].to_vec(), overlong] {
             assert_eq!(
                 decode_sync_message(&invalid).unwrap_err().code,
@@ -370,5 +383,37 @@ fn every_variant_has_canonical_complete_input_coverage() {
         .map(|v| v.as_str().unwrap())
         .collect::<BTreeSet<_>>();
     assert_eq!(seen, expected);
-    assert_eq!(seen.len(), 41);
+    assert_eq!(seen.len(), 47);
+}
+
+/// Alice's old corpus remains byte-for-byte useful as rejected input. A host
+/// must refuse those unversioned bodies before interpreting their old fields.
+#[test]
+fn historical_artifact_corpus_is_refused_without_rewriting_its_sources() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../fixtures/sqlite_sync_artifact_corpus_v1.json"
+    ))
+    .unwrap();
+    for case in fixture["base_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(fixture["existing_messages"].as_array().unwrap())
+    {
+        let hex = case["frame_hex"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                source(case["source"].as_str().unwrap())
+                    .pointer(case["pointer"].as_str().unwrap())
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            });
+        assert_eq!(
+            decode_sync_message(&bytes(&hex)).unwrap_err().code,
+            ErrorCode::Protocol
+        );
+    }
 }

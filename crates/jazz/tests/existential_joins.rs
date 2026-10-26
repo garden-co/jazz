@@ -3,7 +3,7 @@
 //! when the reader may read it. Synced, the server ships each level's
 //! correlated rows with the result. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -292,4 +292,100 @@ fn a_joined_row_the_reader_cannot_read_does_not_match() {
             "the other org is reachable only through the other user's membership"
         );
     }
+}
+
+/// Bundles hold their parts in an array of references.
+fn bundles_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("parts")
+                    .column("label", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("bundles")
+                    .column(
+                        "items",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Uuid),
+                        },
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn open_bundles(node: u8) -> Db {
+    let config = DbConfig::new(
+        bundles_schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    );
+    if node == 0 {
+        block_on(Db::open_history_complete(config))
+    } else {
+        block_on(Db::open(config))
+    }
+    .unwrap()
+}
+
+fn bundles() -> Db {
+    let db = open_bundles(0);
+    for (n, label) in [(1, "A"), (2, "B"), (3, "C")] {
+        seed(&db, "parts", id(4, n), &[("label", text(label))]);
+    }
+    let holding =
+        |parts: &[u8]| Value::Array(parts.iter().map(|&n| Value::Uuid(id(4, n).0)).collect());
+    seed(&db, "bundles", id(5, 1), &[("items", holding(&[2, 1]))]);
+    seed(&db, "bundles", id(5, 2), &[("items", holding(&[3]))]);
+    db
+}
+
+fn parts_of_bundle_one() -> Query {
+    Query::from("parts").join_via(
+        "bundles",
+        "items",
+        [eq(col("id"), lit(Value::Uuid(id(5, 1).0)))],
+    )
+}
+
+#[test]
+fn a_join_through_an_array_of_references_matches_the_rows_it_holds() {
+    let db = bundles();
+    // Parts some bundle holds (a reverse hop): the parts of bundle 1.
+    assert_eq!(
+        ids(&db, &parts_of_bundle_one(), ReadTier::LocalOnly),
+        [id(4, 1), id(4, 2)]
+    );
+    // Bundles holding a part (a forward hop through the array).
+    let bundles = Query::from("bundles").join_via_column(
+        "parts",
+        "id",
+        "items",
+        [eq(col("label"), lit("C"))],
+    );
+    assert_eq!(ids(&db, &bundles, ReadTier::LocalOnly), [id(5, 2)]);
+}
+
+#[test]
+fn a_synced_join_through_an_array_ships_the_rows_holding_the_result() {
+    let server = bundles();
+    let client = open_bundles(9);
+    let (client_side, server_side) = duplex();
+    let _ = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let prepared = client.prepare_query(&parts_of_bundle_one()).unwrap();
+    let subscription = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    drop(subscription);
+    // The replica holds the bundle the join goes through, so it answers
+    // the read itself.
+    assert_eq!(
+        ids(&client, &parts_of_bundle_one(), ReadTier::LocalOnly),
+        [id(4, 1), id(4, 2)]
+    );
 }

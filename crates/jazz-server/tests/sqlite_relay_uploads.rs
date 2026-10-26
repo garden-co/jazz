@@ -35,11 +35,16 @@ async fn permissions_gate_rejects_each_original_writer_explicitly() {
     let mut stream = runtime.open_wire_stream(session).unwrap();
     // Frozen public Commit bytes avoid depending on private wire-kind types.
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../jazz/fixtures/sqlite_relay_upload_v1.json"
+        "../../jazz/fixtures/sqlite-sync-v2/relay-upload.json"
     ))
     .unwrap();
     let bytes = hex::decode(fixture["request"].as_str().unwrap()).unwrap();
-    let request: SyncMessage = postcard::from_bytes(&bytes[4..]).unwrap();
+    assert_eq!(&bytes[..4], b"JRU\x02");
+    // The pinned journal has its own envelope; send its canonical Commit body
+    // through the current semantic envelope and public decoder.
+    let mut frame = b"JSQL\x02".to_vec();
+    frame.extend_from_slice(&bytes[4..]);
+    let request = jazz::sync_codec::decode_sync_message(&frame).unwrap();
     let mut other = request.clone();
     if let SyncMessage::Commit { node, .. } = &mut other {
         *node = [18; 16];
@@ -49,7 +54,7 @@ async fn permissions_gate_rejects_each_original_writer_explicitly() {
             session,
             [request, other]
                 .iter()
-                .map(|m| postcard::to_allocvec(m).unwrap())
+                .map(|m| jazz::db::encode_message(m).unwrap())
                 .collect(),
         )
         .unwrap();
@@ -58,7 +63,7 @@ async fn permissions_gate_rejects_each_original_writer_explicitly() {
         while nodes.len()<2 {
             let frames=stream.recv().await.unwrap().unwrap();
             for frame in frames {
-                if let SyncMessage::FateV1 {node,tx,through,result}=postcard::from_bytes(&frame).unwrap() {
+                if let SyncMessage::OriginFateV2 {node,tx,through,result,..}=jazz::sync_codec::decode_sync_message(&frame).unwrap() {
                     assert_eq!(tx,127);assert_eq!(through,0);
                     assert!(matches!(result,Err(WireError::Rejected(ref m)) if m.contains("permissions_head_missing")));
                     nodes.push(node);

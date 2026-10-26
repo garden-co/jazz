@@ -12,6 +12,7 @@ const root = path.resolve(import.meta.dirname, "../../..");
 // own there, so a new flat file that nobody lists would silently never compile
 // or run. Every flat file must be a declared [[test]] target or be included by
 // exactly one declared target's `#[path = "../<file>.rs"]` module.
+const MERGED_TEST_CRATES = ["crates/jazz", "crates/jazz-testkit"];
 
 function declaredTestPaths(manifest) {
   // A [[test]] without `path` is inferred from its name, as Cargo does.

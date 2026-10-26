@@ -127,6 +127,9 @@ fn scope_owner_keeps_pending_rows_private() {
     owner.accept_subscriber(link, bob());
     intruder
         .send(jazz::db::SyncMessage::Fetch {
+            view: jazz::protocol::ReadViewSourceSpec::Current,
+            tier: jazz::db::ReadTier::LocalOnly,
+            wait: None,
             id: 7,
             query: Query::from("notes"),
             binding: BTreeMap::new(),
@@ -198,7 +201,7 @@ fn owner_capability_requires_an_unshared_ordinary_replica() {
             .is_err()
     );
     let tab = open(1, alice(), None);
-    tab.set_non_durable_client();
+    tab.set_private_owner_client().unwrap();
     assert!(tab.set_scope_isolated_storage_owner().is_err());
     let owner = open(50, alice(), None);
     let (_, link) = duplex_transport::duplex();
@@ -346,10 +349,10 @@ fn projection_failure_never_rejects_an_already_journalled_upload() {
         owner.set_remote_link_hint(RemoteLinkHint::Failed);
         let tab = open(1, alice(), None);
         tab.set_remote_link_hint(RemoteLinkHint::Failed);
-        let tx = insert(&tab, "recover me", true);
-        // Receipt test fixture: mutation admission remains guarded in foreground mode.
-        tab.set_non_durable_client();
+        tab.set_private_owner_client().unwrap();
         connect(&tab, &owner, alice());
+        turns(&[&tab, &owner]);
+        let tx = insert(&tab, "recover me", true);
         let sql = rusqlite::Connection::open(&path).unwrap();
         sql.execute_batch(&format!("CREATE TRIGGER fail_projection BEFORE INSERT ON {table} {condition} BEGIN SELECT RAISE(ABORT,'injected projection failure'); END")).unwrap();
         block_on(tab.tick()).unwrap();

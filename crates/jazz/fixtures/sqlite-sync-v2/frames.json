@@ -1,0 +1,111 @@
+{
+  "encoding": "jazz.sqlite.sync.v2",
+  "prefix_hex": "4a53514c02",
+  "cases": [
+    {
+      "name": "unsubscribe-128",
+      "frame_hex": "4a53514c02018001",
+      "message": {
+        "Unsubscribe": {
+          "id": 128
+        }
+      }
+    },
+    {
+      "name": "schema-admission",
+      "frame_hex": "4a53514c021301",
+      "message": {
+        "SchemaAdmission": {
+          "admitted": true
+        }
+      }
+    },
+    {
+      "name": "rows-part-empty",
+      "frame_hex": "4a53514c021400",
+      "message": {
+        "RowsPart": {
+          "images": []
+        }
+      }
+    },
+    {
+      "name": "rows-empty",
+      "frame_hex": "4a53514c020800",
+      "message": {
+        "Rows": {
+          "images": []
+        }
+      }
+    },
+    {
+      "name": "origin-fate-global",
+      "frame_hex": "4a53514c022d222222222222222222222222222222228001ac02000001",
+      "message": {
+        "OriginFateV2": {
+          "node": [34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34],
+          "tx": 128,
+          "through": 300,
+          "result": {
+            "Ok": null
+          },
+          "held": [],
+          "global": true
+        }
+      }
+    },
+    {
+      "name": "union-prefix-coverage",
+      "frame_hex": "4a53514c022b8001ac02021111111111111111111111111111111103616c6c11111111111111111111111111111111066c696e6b6564",
+      "message": {
+        "UnionAnswerV1": {
+          "id": 128,
+          "through": 300,
+          "occurrences": [
+            {
+              "row": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17],
+              "arm": "all"
+            },
+            {
+              "row": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17],
+              "arm": "linked"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "commit-per-operation-time",
+      "frame_hex": "4a53514c02042222222222222222222222222222222280010002000174111111111111111111111111111111110000010c030174121212121212121212121212121212120001ac02000000",
+      "message": {
+        "Commit": {
+          "node": [34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34],
+          "tx": 128,
+          "kind": "Mergeable",
+          "ops": [
+            {
+              "Insert": {
+                "table": "t",
+                "row": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17],
+                "cells": {},
+                "target": "Root",
+                "at": 12
+              }
+            },
+            {
+              "Delete": {
+                "table": "t",
+                "row": [18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18],
+                "target": "Root",
+                "at": 300
+              }
+            }
+          ],
+          "author": null,
+          "session": null,
+          "expect": []
+        }
+      }
+    }
+  ]
+}

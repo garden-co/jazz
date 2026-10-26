@@ -439,7 +439,7 @@ fn pending_union_read_evidence_survives_reopen() {
 #[test]
 fn union_read_content_and_wire_kind_match_versioned_fixtures() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_union_read_content_v1.json"
+        "../fixtures/sqlite-sync-v2/union-read-content.json"
     ))
     .unwrap();
     let client = block_on(Db::open(config(1))).unwrap();
@@ -493,11 +493,10 @@ fn union_read_content_and_wire_kind_match_versioned_fixtures() {
         commit["Commit"]["kind"]["SerializableUnionObservedV1"]["content"],
         serde_json::json!([[ordinary_digest.to_vec()], expected])
     );
-    let message:SyncMessage=serde_json::from_value(serde_json::json!({"Commit":{"node":vec![0x22u8;16],"tx":128,"kind":{"SerializableUnionObservedV1":{"snapshot":127,"reads":[],"own":[[(1u64<<52)+1,vec![0x11u8;16],300]],"content":[]}},"ops":[],"author":null,"session":null,"updated_at":null}})).unwrap();
+    let message:SyncMessage=serde_json::from_value(serde_json::json!({"Commit":{"node":vec![0x22u8;16],"tx":128,"kind":{"SerializableUnionObservedV1":{"snapshot":127,"reads":[],"own":[[(1u64<<52)+1,vec![0x11u8;16],300]],"content":[]}},"ops":[],"author":null,"session":null,"expect":[]}})).unwrap();
     let bytes = hex::decode(fixture["commitHex"].as_str().unwrap()).unwrap();
-    assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
-    let (decoded, tail): (SyncMessage, _) = postcard::take_from_bytes(&bytes).unwrap();
-    assert!(tail.is_empty());
+    assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
+    let decoded = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(
         serde_json::to_value(decoded).unwrap(),
         serde_json::to_value(message).unwrap()

@@ -32,6 +32,9 @@ struct GroupKey {
     renames: String,
     sql: String,
     params: String,
+    /// The SQL selects stored columns; output aliases and types also belong
+    /// to a shared result's identity.
+    projection: String,
     /// Set only when the SQL depends on the identity's session (array
     /// relations, read as the identity, always may).
     identity: Option<String>,
@@ -60,6 +63,9 @@ pub(super) struct Group {
     root: String,
     identity: Option<AuthorSubject>,
     read: ReadSpec,
+    /// Pending-state tracking for ordinary UNION previews, independent of
+    /// the occurrence/evidence coverage used by scoped UNIONs.
+    preview_pending: Option<(BTreeSet<String>, Rc<std::cell::Cell<bool>>)>,
     pub(super) rows: Vec<CurrentRow>,
     members: Vec<Member>,
     watches: Vec<Watch>,
@@ -164,6 +170,10 @@ pub struct FanoutStats {
     pub shared_joins: u64,
     pub woken: u64,
     pub skipped: u64,
+    /// Woken groups that applied their root rows by re-checking ids.
+    pub rechecked: u64,
+    /// Woken groups that re-ran their query and diffed the whole result.
+    pub reran: u64,
 }
 
 #[derive(Default)]
@@ -371,6 +381,7 @@ impl Inner {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
+            projection: format!("{:?}", compiled.projection),
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
                 .then(|| format!("{identity:?}")),
             relations: format!(
@@ -381,6 +392,39 @@ impl Inner {
                     .as_ref()
                     .map(|live| (Rc::as_ptr(live) as usize, read.union_preview))
             ),
+        };
+        let existing = self
+            .fan
+            .by_key
+            .get(&key)
+            .and_then(|gid| self.fan.groups.get(gid))
+            .cloned();
+        let preview_pending = if compiled.union
+            && read.union_preview
+            && !read.settled_only
+            && read.union_live.is_none()
+            && self.client.is_some()
+        {
+            let pending = existing
+                .as_ref()
+                .and_then(|group| group.borrow().preview_pending.clone())
+                .unwrap_or_else(|| {
+                    (
+                        compiled.tables.clone(),
+                        Rc::new(std::cell::Cell::new(false)),
+                    )
+                });
+            pending.1.set(self.union_has_pending_inputs(&pending.0)?);
+            Some(pending)
+        } else {
+            None
+        };
+        let settled = match &preview_pending {
+            Some((_, pending)) => sync::SettledBy::Preview {
+                upstream: Box::new(settled),
+                pending: pending.clone(),
+            },
+            None => settled,
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -404,13 +448,7 @@ impl Inner {
             }
             event
         };
-        if let Some(handle) = self
-            .fan
-            .by_key
-            .get(&key)
-            .and_then(|gid| self.fan.groups.get(gid))
-            .cloned()
-        {
+        if let Some(handle) = existing {
             let mut group = handle.borrow_mut();
             let queue: Queue = Rc::new(RefCell::new(if group.opened {
                 VecDeque::from([open(&group.rows)])
@@ -428,7 +466,7 @@ impl Inner {
             self.execute(&compiled, &prepared.query.table)
         };
         let (rows, awaiting) =
-            match initial.and_then(|rows| self.nest_relations(prepared, identity, rows)) {
+            match initial.and_then(|rows| self.nest_relations(prepared, identity, &read, rows)) {
                 Ok(rows) => (rows, false),
                 Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
                     (Vec::new(), true)
@@ -462,6 +500,7 @@ impl Inner {
             root,
             identity,
             read,
+            preview_pending,
             rows,
             members: vec![member(&queue)],
             watches,
@@ -534,6 +573,7 @@ impl Inner {
             .with_catalogue(self)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone())
+            .with_settled_only(read.settled_only)
             .with_history_origin(self.history_origin())
             .with_members_only(read.members_only)
             .compile_query(&prepared.query, read.include_deleted)?;
@@ -640,13 +680,23 @@ impl Inner {
             })
             .and_then(|(column, value)| {
                 let governing = policies.by_stored(&root.stored)?;
-                Some((governing.stored_name(&column).to_owned(), value))
+                // As for a query key: only an application column is in a
+                // changed row's image (`$createdBy.account` is not).
+                governing
+                    .columns
+                    .iter()
+                    .any(|c| c.name == column)
+                    .then(|| (governing.stored_name(&column).to_owned(), value))
             });
         let mut watches = Vec::new();
         let root_key = if structural.contains(&root.stored) {
             None
         } else {
             root_key(query, &prepared.binding)
+                // Only an application column is in a changed row's image;
+                // a key on anything else (`$createdBy.identity.subject`,
+                // `id`) would never be hit.
+                .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
                 .map(|(column, value)| (root.stored_name(&column).to_owned(), value))
                 .or(policy_root_key)
         }
@@ -757,7 +807,11 @@ impl Inner {
             let mut group = group.borrow_mut();
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
-                self.refresh_group(&mut group, ids.as_ref());
+                if self.refresh_group(&mut group, ids.as_ref()) {
+                    self.fan.stats.reran += 1;
+                } else {
+                    self.fan.stats.rechecked += 1;
+                }
             }
             if let Some(changed) = targets.remove(&gid) {
                 refresh_includes(&mut group, &changed);
@@ -1014,11 +1068,13 @@ impl Inner {
                     previous_index: None,
                     index,
                 }),
-                // A row whose order key moved is reported even when its
-                // shown cells did not change: it changed place.
+                // A row whose order key moved, or that a same-value write
+                // gave a newer version, is reported even when its shown
+                // cells did not change.
                 Some((previous, prior, prior_key))
                     if prior.cells != row.cells
                         || prior.deleted != row.deleted
+                        || new_version(prior, row)
                         || prior_key != key =>
                 {
                     updated.push(SubscriptionOutputRow {
@@ -1078,7 +1134,13 @@ impl Inner {
         projected: bool,
         rows: &[CurrentRow],
     ) -> Option<Result<Vec<SortKey>, Error>> {
-        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), false);
+        // Same tie-break as the compiled ORDER BY: id in the last key's
+        // direction.
+        let tie_desc = matches!(
+            order.last().map(|by| by.direction),
+            Some(crate::query::OrderDirection::Desc)
+        );
+        let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
         if projected {
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
@@ -1202,8 +1264,11 @@ impl Inner {
 
     /// A group's rows, with array relations nested in their cells.
     fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
+        if let Some((tables, pending)) = &group.preview_pending {
+            pending.set(self.union_has_pending_inputs(tables)?);
+        }
         let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, rows)
+        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -1229,7 +1294,7 @@ impl Inner {
                             row_uuid: row.id,
                             joined: row.joined.to_vec(),
                             version: row.version,
-                            union_arm: row.union_arm().map(str::to_owned),
+                            union_arm: row.union_arm.clone(),
                             index,
                         })
                         .collect();
@@ -1249,17 +1314,22 @@ impl Inner {
         }
     }
 
-    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) {
+    /// Bring a group's result up to date; true when it re-ran the query.
+    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
-                Some(Ok(Some(event))) => return group.push(event),
-                Some(Ok(None)) => return,
+                Some(Ok(Some(event))) => {
+                    group.push(event);
+                    return false;
+                }
+                Some(Ok(None)) => return false,
                 // Missing chunks: the full run below decides to wait.
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
-                    return group.push(SubscriptionEvent::Rejected {
+                    group.push(SubscriptionEvent::Rejected {
                         reason: error.to_string(),
                     });
+                    return false;
                 }
                 None => {}
             }
@@ -1268,14 +1338,14 @@ impl Inner {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
                 group.awaiting = true;
-                return;
+                return true;
             }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
                     reason: error.to_string(),
                 };
                 group.push(event);
-                return;
+                return true;
             }
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
@@ -1290,6 +1360,7 @@ impl Inner {
         group.rows = rows;
         group.keys.clear();
         self.read_keys(group);
+        true
     }
 
     /// An upload recorded after row notifications changes preview settlement.
@@ -1307,8 +1378,22 @@ impl Inner {
                 continue;
             };
             let mut group = group.borrow_mut();
-            if group.read.union_live.is_some() {
+            if group.read.union_live.is_some() || group.preview_pending.is_some() {
                 self.refresh_group(&mut group, None);
+                // Standalone writes can enqueue their row delta before the
+                // upload journal records pending status. Correct those queued
+                // previews before the caller can observe the completed write.
+                for member in &group.members {
+                    if let Some(queue) = member.queue.upgrade() {
+                        for event in queue.borrow_mut().iter_mut() {
+                            if let SubscriptionEvent::Delta { settled, tier, .. } = event {
+                                *settled = member.settled.get();
+                                *tier = member.settled.tier();
+                                member.told.set(settled.then_some(*tier));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1393,10 +1478,14 @@ impl Group {
 }
 
 /// Whether a group may apply root-only commits by re-checking ids: a
-/// single-table query, unbounded or a first page, (no joins, arrays, required includes,
-/// aggregates, windows), outside branch views and cuts, whose compiled SQL
+/// single-table query (not a union), unbounded or a first page, (no joins, arrays, required includes,
+/// aggregates, windows), outside branch views and cuts (a settled-only
+/// read is one), whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
-/// rows of the same table would let one row's change move another).
+/// rows of the same table would let one row's change move another). A
+/// synced read (`members_only`) qualifies: whether the server lists a row
+/// is a fact about that row alone, and listing or unlisting it reports the
+/// row as changed.
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
     !crate::db::relation::is_union(query)
         && !is_history_table(&query.table)
@@ -1410,7 +1499,7 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && query.includes.iter().all(|include| !include.require)
         && read.view.is_none()
         && read.cut.is_none()
-        && !read.members_only
+        && !read.settled_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
 }
@@ -1479,8 +1568,8 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 }
 
 /// What identifies a result row across runs: its id, plus its seq for a
-/// history read, whose versions share their row's id, and a flat join's
-/// joined rows (the occurrence).
+/// history read, whose versions share their row's id, a flat join's
+/// joined rows, and a union read's arm (the occurrence).
 type RowKey = (
     RowUuid,
     u64,
@@ -1546,7 +1635,7 @@ pub(super) fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<Subscr
             row_uuid: row.id,
             joined: row.joined.to_vec(),
             version: row.version,
-            union_arm: row.union_arm().map(str::to_owned),
+            union_arm: row.union_arm.clone(),
             index,
         })
         .collect();

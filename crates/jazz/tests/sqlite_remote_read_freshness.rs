@@ -126,7 +126,11 @@ fn retained_subscriptions_cannot_settle_a_new_remote_read_before_the_authority()
             owner.set_scope_isolated_storage_owner().unwrap();
         }
         let tab = open(1);
-        tab.set_non_durable_client();
+        if private {
+            tab.set_private_owner_client().unwrap();
+        } else {
+            tab.set_non_durable_client();
+        }
         connect(&owner, &server);
         connect(&tab, &owner);
         let _stream = warm(
@@ -192,7 +196,11 @@ fn reconnect_revalidates_cached_rows_at_every_owner_hop() {
             owner.set_scope_isolated_storage_owner().unwrap();
         }
         let tab = open(1);
-        tab.set_non_durable_client();
+        if private {
+            tab.set_private_owner_client().unwrap();
+        } else {
+            tab.set_non_durable_client();
+        }
         connect(&owner, &server);
         let (up, down) = duplex();
         let upstream = block_on(tab.connect_upstream(up));

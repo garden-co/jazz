@@ -129,7 +129,7 @@ it("accepts one competing rotation and distributes only its epoch to remaining a
     expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
     const rejected = outcomes.find((result) => result.status === "rejected");
     if (rejected?.status !== "rejected") throw new Error("Missing rejected rotation");
-    expect(rejected.reason).toMatchObject({ code: "transaction_conflict" });
+    expect(rejected.reason).toMatchObject({ code: "serialization_conflict" });
     const successors = await owner.all(app.__e2ee_space_successors, { tier: "remote" });
     expect(successors).toHaveLength(1);
     expect(successors[0]).toMatchObject({ spaceId: root!.id, predecessor: root!.epochId });

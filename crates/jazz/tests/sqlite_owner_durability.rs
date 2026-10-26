@@ -37,6 +37,7 @@ fn open(node: u8) -> Db {
 fn offline_owner() -> Db {
     let db = open(50);
     db.set_remote_link_hint(RemoteLinkHint::Failed);
+    db.set_scope_isolated_storage_owner().unwrap();
     db.require_owner_durability_flush();
     db
 }
@@ -240,6 +241,7 @@ fn incomplete_large_upload_has_no_storage_receipt() {
 #[test]
 fn synchronous_owner_uses_the_sqlite_commit_barrier() {
     let owner = open(50);
+    owner.set_scope_isolated_storage_owner().unwrap();
     owner.set_remote_link_hint(RemoteLinkHint::Failed);
     let mut a = peer(&owner);
     send(a.as_mut(), &upload(1, "sync"));
@@ -386,8 +388,8 @@ fn reconnect_replays_a_confirmed_local_receipt() {
 #[test]
 fn owner_receipts_have_frozen_versioned_bytes() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_owner_stored_v1.json")).unwrap();
-    assert_eq!(fixture["version"], 1);
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/owner-stored.json")).unwrap();
+    assert_eq!(fixture["version"], 2);
     assert_eq!(fixture["role"], "jazz.sqlite.sync.owner-stored.v1");
     for case in fixture["cases"].as_array().unwrap() {
         let message = SyncMessage::OwnerStoredV1 {
@@ -395,12 +397,63 @@ fn owner_receipts_have_frozen_versioned_bytes() {
             tx: case["tx"].as_u64().unwrap(),
         };
         let bytes = hex::decode(case["bytes"].as_str().unwrap()).unwrap();
-        assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
-        let (decoded, rest): (SyncMessage, _) = postcard::take_from_bytes(&bytes).unwrap();
-        assert!(rest.is_empty());
+        assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
+        let decoded = jazz::db::decode_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
             serde_json::to_value(message).unwrap()
         );
     }
+}
+
+/// Alice's private foreground cannot use Bob's ordinary-worker Stored message
+/// as a durability receipt. Only its owner's completed backing-store barrier
+/// makes the original write Local; neither receipt makes it Global.
+#[test]
+fn ordinary_stored_cannot_substitute_for_a_private_owner_barrier() {
+    let owner = offline_owner();
+    let tab = open(1);
+    tab.set_private_owner_client().unwrap();
+    let (up, mut to_tab) = duplex_transport::duplex();
+    let (mut to_owner, down) = duplex_transport::duplex();
+    block_on(tab.connect_upstream(up));
+    owner.accept_subscriber(down, alice());
+    let pump = |to_tab: &mut Box<dyn Transport>, to_owner: &mut Box<dyn Transport>| {
+        for _ in 0..12 {
+            tick(&tab);
+            while let Some(message) = to_tab.try_recv() {
+                to_owner.send(message).unwrap();
+            }
+            tick(&owner);
+            while let Some(message) = to_owner.try_recv() {
+                to_tab.send(message).unwrap();
+            }
+        }
+        tick(&tab);
+    };
+    pump(&mut to_tab, &mut to_owner);
+    let tx = insert(&tab, "Alice's pending note");
+    pump(&mut to_tab, &mut to_owner);
+    assert_eq!(
+        tab.write_state(tx).unwrap().durability,
+        DurabilityTier::None
+    );
+    to_tab.send(SyncMessage::Stored { tx }).unwrap();
+    tick(&tab);
+    assert_eq!(
+        tab.write_state(tx).unwrap().durability,
+        DurabilityTier::None
+    );
+    pending(tab.wait_for_transaction(tx, DurabilityTier::Local));
+    owner
+        .confirm_owner_durability(owner.prepare_owner_durability().unwrap().unwrap())
+        .unwrap();
+    owner.flush_owner_durability().unwrap();
+    pump(&mut to_tab, &mut to_owner);
+    assert_eq!(
+        tab.write_state(tx).unwrap().durability,
+        DurabilityTier::Local
+    );
+    assert_eq!(tab.write_state(tx).unwrap().fate, Fate::Pending);
+    pending(tab.wait_for_transaction(tx, DurabilityTier::Global));
 }

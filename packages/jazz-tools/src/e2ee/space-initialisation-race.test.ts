@@ -195,7 +195,9 @@ it.each([false, true])(
       if (rejected.status !== "rejected") throw new Error("Missing rejected initialisation");
       // Authority checks permissions before conflicts. A competing stable root
       // may therefore fail the update policy before its absence precondition.
-      expect(["transaction_conflict", "permission_denied"]).toContain(rejected.reason.code);
+      expect(["transaction_conflict", "serialization_conflict", "permission_denied"]).toContain(
+        rejected.reason.code,
+      );
       const winner = clients[winnerIndex]!;
       const loser = clients[loserIndex]!;
       const target = { scope: app.projects, identifier: project.id };

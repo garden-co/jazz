@@ -63,3 +63,11 @@ pub fn direct_subscription(
         read_view: Default::default(),
     }
 }
+
+/// The authority rejected a serializable commit because a read it made
+/// no longer holds.
+#[track_caller]
+pub fn assert_serialization_conflict(error: &jazz::db::Error) {
+    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected, "{error}");
+    assert!(error.message.contains("SerializationConflict"), "{error}");
+}

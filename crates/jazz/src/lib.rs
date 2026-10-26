@@ -26,6 +26,7 @@ pub use jazz_db::binding_codec;
 pub use jazz_db::binding_host;
 pub use jazz_db::db;
 pub use jazz_db::foreground_node_lease;
+pub use jazz_db::format;
 #[cfg(feature = "testing")]
 pub use jazz_db::full_materializations_for_test;
 pub use jazz_db::result_tree;

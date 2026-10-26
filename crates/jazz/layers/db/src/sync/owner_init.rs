@@ -52,6 +52,11 @@ impl Db {
         if !self.inner().non_durable {
             return self.seal_initialization_transaction(open);
         }
+        if !self.inner().private_owner_required {
+            return Err(unsupported(
+                "initialization reservations through an ordinary worker",
+            ));
+        }
         let (batch, id, nonce, connection) = {
             let mut inner = self.inner();
             inner.require_foreground_writes("initialization reservations")?;
@@ -415,7 +420,7 @@ impl Inner {
         result: Result<UploadId, WireError>,
     ) -> Result<(), Error> {
         self.require_foreground_writes("initialization reservation replies")?;
-        if !self.non_durable {
+        if !self.private_owner_required {
             return Err(query_error(
                 "initialization reply without a foreground request",
             ));

@@ -125,7 +125,8 @@ pub(crate) fn check_open_schema(
 
 impl Inner {
     /// Only the admitted owner's identity can recover pending previews before
-    /// an authority catalogue exists. A foreground must have acknowledged that
+    /// authority policies arrive. A structural host cache carries no policies.
+    /// A foreground must have acknowledged that
     /// same subject and schema with its private owner. Accepted images never
     /// qualify for the compiler's pending-input predicate.
     pub(in crate::db) fn owner_previews(&self, subject: Option<AuthorSubject>) -> bool {
@@ -147,7 +148,16 @@ impl Inner {
         key: &[u8],
         subject: Option<AuthorSubject>,
     ) -> Result<bool, Error> {
-        if !self.owner_previews(subject) || self.catalogue_head()?.is_some() {
+        if !self.owner_previews(subject)
+            || self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _jazz_policy_descriptor_v1 WHERE slot=1)",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage)?
+        {
             return Ok(false);
         }
         Ok(self
@@ -163,6 +173,11 @@ impl Inner {
     pub(super) fn refresh_authenticated_views(&mut self) -> Result<(), Error> {
         if !self.view_policies_dirty {
             return Ok(());
+        }
+        // Private owners also serve retained schemas. Adopt their grants only
+        // after the complete metadata batch has committed.
+        if self.scope_isolated_owner {
+            self.restore_owner_policies()?;
         }
         // Registered authority views can also belong to ordinary foregrounds.
         // Refresh their governor once per metadata change, not once per query.
@@ -185,7 +200,7 @@ impl Inner {
     /// the active descriptor admitted from its authority,
     /// including after an offline reopen; the caller's schema cannot replace it.
     pub(super) fn restore_owner_policies(&mut self) -> Result<(), Error> {
-        self.view_policies_dirty |= self.view_policy_source.is_some();
+        self.view_policies_dirty |= self.scope_isolated_owner || self.view_policy_source.is_some();
         // Revocation can happen before commit; a new grant cannot. In
         // particular, owner subscription resets must not reuse a stale view
         // governor while the new head is missing its exact policy descriptor.
@@ -201,28 +216,33 @@ impl Inner {
         if !self.scope_isolated_owner {
             return Ok(());
         }
-        let Some(head) = self.catalogue_head()? else {
-            return Ok(());
-        };
-        if head.current != self.owner.jazz.version_id() {
-            return Err(unsupported(
-                "private owner policies under another active schema",
-            ));
-        }
-        // A new head invalidates the preceding policies immediately, even when
-        // transport delivery splits the head and its policy descriptor. Keep
-        // ordinary deny-by-default policies until the exact descriptor arrives.
-        let schema = match self.policy_descriptor()? {
-            Some(descriptor) => self
-                .owner
-                .jazz
-                .with_permissions_from(&descriptor.schema.schema),
-            None => self.owner.jazz.without_permissions(),
-        };
-        if schema == self.owner.jazz {
+        if self.catalogue_head()?.is_none() {
             return Ok(());
         }
-        self.owner = Rc::new(self.named(&schema));
+        // Keep the owner's physical/opened schema. Resolve current authority
+        // policy names through accepted table/column identities, just as an
+        // authenticated retained view does. A split head/descriptor revokes
+        // the preceding governor before a replacement can grant access.
+        let descriptor = self.policy_descriptor()?;
+        if descriptor.is_some() && !self.conn.is_autocommit() {
+            // A later frame can invalidate this batch. Keep any head-triggered
+            // revocation, but publish no grant or subscription reset until
+            // refresh_authenticated_views runs after RELEASE sync_tick.
+            return Ok(());
+        }
+        let policies = descriptor.map_or_else(
+            || self.owner.jazz.without_permissions(),
+            |descriptor| descriptor.schema.schema,
+        );
+        let governor = self.named_policy_schema(&policies)?;
+        if self.owner.policies_from.as_ref().is_some_and(|previous| {
+            previous.jazz == governor.jazz && previous.names().tables == governor.names().tables
+        }) {
+            return Ok(());
+        }
+        let governor = Rc::new(governor);
+        self.view_policy_source = Some(governor.clone());
+        self.owner = Rc::new(self.named(&self.owner.jazz).with_policies_of(governor));
         self.schema = self.owner.clone();
         self.reset_everything();
         for session in &mut self.sessions {
@@ -233,7 +253,7 @@ impl Inner {
 
     pub(in crate::db) fn require_foreground_writes(&self, action: &str) -> Result<(), Error> {
         self.require_owner_subject(self.identity.author)?;
-        if self.non_durable
+        if self.private_owner_required
             && !self.client.as_ref().is_some_and(|client| {
                 client.transport.is_some()
                     && client.owner_ready == Some(self.owner.jazz.version_id())
@@ -254,7 +274,7 @@ impl Inner {
         node: [u8; 16],
     ) -> Result<(), Error> {
         let version = crate::ids::SchemaVersionId::from_bytes(schema);
-        if !self.non_durable
+        if !self.private_owner_required
             || !matches!(self.identity.author, AuthorSubject::Authenticated(_))
             || subject != self.identity.author.canonical()
             || version != self.owner.jazz.version_id()
@@ -306,7 +326,7 @@ impl Inner {
         rows: &[RowKey],
         ops: &[StagedOp],
     ) -> Result<(), Error> {
-        if !self.scope_isolated_owner && !self.non_durable {
+        if !self.scope_isolated_owner && !self.private_owner_required {
             return Ok(());
         }
         let writes = self
@@ -344,6 +364,7 @@ impl Inner {
             return Err(error.clone());
         }
         let private = self.scope_isolated_owner
+            || self.private_owner_required
             || (self.non_durable
                 && self
                     .client
@@ -519,7 +540,6 @@ impl Inner {
             ops,
             author,
             session,
-            updated_at,
             ..
         } = message
         else {
@@ -541,9 +561,6 @@ impl Inner {
             .collect::<Result<Vec<_>, _>>()?;
         for op in &mut ops {
             op.attribute(source, true);
-            if let Some(at) = updated_at {
-                op.stamp_at(*at);
-            }
         }
         let rows = self.owner_input_coordinates(&ops)?;
         let seq = self.owner_position(id)?;
@@ -567,6 +584,7 @@ impl Inner {
         let client = self.client.as_mut().expect("owner replica");
         client.shadow.extend(shadow);
         client.pending.push(Pending {
+            expected: Vec::new(),
             owner_managed: true,
             locally_durable: false,
             tx: id.1,
@@ -606,6 +624,11 @@ impl Db {
             self.inner().owner_projection_error = Some(error.clone());
         }
         result
+    }
+
+    /// Whether this runtime was admitted by its host as a private durable owner.
+    pub fn is_scope_isolated_storage_owner(&self) -> bool {
+        self.inner().scope_isolated_owner
     }
 
     /// Only a host-admitted private owner may forward claims for its one
@@ -684,7 +707,7 @@ impl Db {
         {
             let inner = self.inner();
             inner.conn.execute(
-                "INSERT INTO _jazz_owner_scope_v1(singleton,subject,schema_id) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET schema_id=excluded.schema_id",
+                "INSERT INTO _jazz_owner_scope_v1(singleton,subject,schema_id) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET schema_id=excluded.schema_id WHERE schema_id<>excluded.schema_id",
                 rusqlite::params![inner.identity.author.canonical(), inner.owner.jazz.version_id().as_bytes().as_slice()],
             ).map_err(storage)?;
         }
@@ -1190,7 +1213,13 @@ impl Inner {
         });
         units.sort_by_key(|(position, _, _)| *position);
         let mut out = Vec::new();
-        if !units.is_empty() {
+        // An admitted foreground also needs the retained authority boundary
+        // when all its inputs are accepted. A cached Settled remains Local;
+        // this owner envelope lets subsequent accepted-at-begin observations
+        // use the accompanying proofs without claiming fresh remote coverage.
+        let admitted = self.sessions[index].owner_projection
+            && self.sessions[index].version == Some(self.owner.jazz.version_id());
+        if !units.is_empty() || admitted {
             out.push(SyncMessage::OwnerInputsV1 {
                 schema: *self.owner.jazz.version_id().as_bytes(),
                 through: self.client.as_ref().expect("owner").known,
@@ -1213,7 +1242,7 @@ impl Inner {
         schema: [u8; 16],
         units: &[(u64, Vec<u8>)],
     ) -> Result<bool, Error> {
-        if !self.non_durable
+        if !self.private_owner_required
             || schema != *self.owner.jazz.version_id().as_bytes()
             || units.len() > OWNER_INPUT_LIMIT
             || units.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() > OWNER_INPUT_BUDGET
@@ -1271,7 +1300,7 @@ impl Inner {
                 "owner input accepted prefix must be an authority sequence",
             ));
         }
-        if !self.non_durable || schema != *self.owner.jazz.version_id().as_bytes() {
+        if !self.private_owner_required || schema != *self.owner.jazz.version_id().as_bytes() {
             return Err(input_error(
                 "owner inputs require a foreground with the same admitted schema",
             ));
@@ -1285,8 +1314,9 @@ impl Inner {
         {
             return Err(input_error("too many owner input units or bases"));
         }
-        // The same accepted prefix normally follows in Answer/Settled. A frozen
-        // input needs that authority boundary before its snapshot can be replayed.
+        // A cached Settled does not advance the authority boundary. This
+        // admitted owner prefix qualifies retained proofs and frozen inputs;
+        // it does not settle a remote query or acknowledge a pending write.
         let client = self.client.as_mut().expect("foreground");
         client.known = client.known.max(through);
         let mut frozen_coordinates = BTreeSet::new();
@@ -1376,7 +1406,6 @@ impl Inner {
                 ops,
                 author,
                 session,
-                updated_at,
                 ..
             } = &message
             else {
@@ -1447,9 +1476,8 @@ impl Inner {
                         tx,
                         kind,
                         ops,
-                        updated_at,
                         ..
-                    } => encode(&(node, tx, kind, ops, updated_at)),
+                    } => encode(&(node, tx, kind, ops)),
                     _ => unreachable!(),
                 };
                 if core(&original) != core(&message) {
@@ -1471,9 +1499,6 @@ impl Inner {
 
             for op in &mut ops {
                 op.attribute(self.identity.author, true);
-                if let Some(at) = updated_at {
-                    op.stamp_at(*at);
-                }
             }
             let rows = self.owner_input_coordinates(&ops)?;
             if rows
@@ -1513,6 +1538,7 @@ impl Inner {
                 client.pending[index].rows = rows;
             } else {
                 client.pending.push(Pending {
+                    expected: Vec::new(),
                     owner_managed: true,
                     locally_durable: false,
                     tx: id.1,
@@ -1541,9 +1567,9 @@ impl Db {
     pub async fn wait_for_storage_owner(&self) -> Result<(), Error> {
         let connection = {
             let inner = self.inner();
-            if !inner.non_durable {
+            if !inner.private_owner_required {
                 return Err(unsupported(
-                    "private-owner admission outside a non-durable foreground",
+                    "private-owner admission outside an explicitly private foreground",
                 ));
             }
             inner.client.as_ref().expect("foreground").connection

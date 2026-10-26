@@ -230,7 +230,7 @@ it("validates original accepted UNION witnesses and empty results at Global comm
       tx.insert(app.checks, { title: "must not publish" });
       await f.writer.delete(app.links, f.links.get("alpha")!).wait({ tier: "global" });
       await expect((async () => tx.commit().wait({ tier: "global" }))()).rejects.toMatchObject({
-        code: "transaction_conflict",
+        code: "serialization_conflict",
       });
       expect(await f.writer.all(app.checks, { tier: "remote" })).toEqual([]);
     } finally {
@@ -243,7 +243,7 @@ it("validates original accepted UNION witnesses and empty results at Global comm
         .insert(app.rooms, { title: "newly visible", code: "nobody" })
         .wait({ tier: "global" });
       await expect((async () => empty.commit().wait({ tier: "global" }))()).rejects.toMatchObject({
-        code: "transaction_conflict",
+        code: "serialization_conflict",
       });
     } finally {
       await rollbackIfOpen(empty);

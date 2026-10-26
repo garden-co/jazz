@@ -68,7 +68,7 @@ it.each(["warm", "cold", "concurrent", "immediate commit"])(
       });
       if (scenario === "concurrent") {
         await expect(read.wait({ tier: "global" })).rejects.toMatchObject({
-          code: "transaction_conflict",
+          code: "serialization_conflict",
         });
         return;
       }

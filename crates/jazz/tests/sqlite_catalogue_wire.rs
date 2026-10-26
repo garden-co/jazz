@@ -101,14 +101,13 @@ fn catalogue_v1_pins_wire_and_storage_bytes() {
             },
         ),
     ];
-    let generated = serde_json::json!({"version":1,"roles":["jazz.sqlite.catalogue-head.v1","jazz.sqlite.catalogue-schema.v1","jazz.sqlite.catalogue-table.v1","jazz.sqlite.catalogue-namespace.v1","jazz.sqlite.sync.catalogue-metadata.v1","jazz.sqlite.sync.catalogue-fetch.v1","jazz.sqlite.sync.catalogue-covered.v1"],"head":bytes(&head),"schema":bytes(&record),"table":bytes(&record.identities.tables["notes"]),"messages":messages.iter().map(|(name,message)|((*name).to_owned(),bytes(message))).collect::<BTreeMap<_,_>>()});
+    let generated = serde_json::json!({"version":2,"encoding":"jazz.sqlite.sync.v2","roles":["jazz.sqlite.catalogue-head.v1","jazz.sqlite.catalogue-schema.v1","jazz.sqlite.catalogue-table.v1","jazz.sqlite.catalogue-namespace.v1","jazz.sqlite.sync.catalogue-metadata.v1","jazz.sqlite.sync.catalogue-fetch.v1","jazz.sqlite.sync.catalogue-covered.v1"],"head":bytes(&head),"schema":bytes(&record),"table":bytes(&record.identities.tables["notes"]),"messages":messages.iter().map(|(name,message)|((*name).to_owned(),hex::encode(jazz::db::encode_message(message).unwrap()))).collect::<BTreeMap<_,_>>()});
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_catalogue_v1.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/catalogue.json")).unwrap();
     assert_eq!(generated, fixture);
     for (name, message) in messages {
         let bytes = hex::decode(fixture["messages"][name].as_str().unwrap()).unwrap();
-        let (decoded, rest) = postcard::take_from_bytes::<SyncMessage>(&bytes).unwrap();
-        assert!(rest.is_empty());
+        let decoded = jazz::db::decode_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value::<SyncMessage>(decoded).unwrap(),
             serde_json::to_value(message).unwrap()

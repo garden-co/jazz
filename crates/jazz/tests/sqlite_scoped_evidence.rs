@@ -383,17 +383,18 @@ fn scoped_evidence_v1_has_frozen_wire_bytes() {
             seq: 127,
         }],
     };
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_scoped_evidence_v1.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v2/scoped-evidence.json"
+    ))
+    .unwrap();
     assert_eq!(
         fixture["role"],
         "jazz.sqlite.sync.scoped-evidence-answer.v1"
     );
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     let bytes = hex::decode(fixture["answer"].as_str().unwrap()).unwrap();
-    assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
-    let (decoded, rest) = postcard::take_from_bytes::<SyncMessage>(&bytes).unwrap();
-    assert!(rest.is_empty());
+    assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
+    let decoded = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(
         serde_json::to_value(decoded).unwrap(),
         serde_json::to_value(message).unwrap()
@@ -563,7 +564,7 @@ fn scoped_text_ordering_preserves_large_value_ties_and_windows() {
         let nodes = [&server, &relay, &backend];
         for (direction, expected) in [
             (OrderDirection::Asc, vec![15, 12, 14, 13, 11]),
-            (OrderDirection::Desc, vec![11, 13, 12, 14, 15]),
+            (OrderDirection::Desc, vec![11, 13, 14, 12, 15]),
         ] {
             let query = Query::from("docs")
                 .select(["id"])
@@ -849,7 +850,8 @@ fn accepted_scoped_read_only_commit_detects_uncached_phantoms() {
         backend.wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
     )
     .unwrap_err();
-    assert_eq!(error.code, jazz::db::ErrorCode::TransactionConflict);
+    assert!(error.is_serialization_conflict(), "{error}");
+    assert!(error.is_conflict(), "authority conflicts remain retryable");
 }
 
 /// A byte fixture is necessary to distinguish Alice's accepted query coverage
@@ -868,18 +870,17 @@ fn accepted_scoped_evidence_v1_has_frozen_wire_bytes() {
         }],
     };
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_accepted_scoped_evidence_v1.json"
+        "../fixtures/sqlite-sync-v2/accepted-scoped-evidence.json"
     ))
     .unwrap();
     assert_eq!(
         fixture["role"],
         "jazz.sqlite.sync.accepted-scoped-evidence-answer.v1"
     );
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     let bytes = hex::decode(fixture["answer"].as_str().unwrap()).unwrap();
-    assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
-    let (decoded, rest) = postcard::take_from_bytes::<SyncMessage>(&bytes).unwrap();
-    assert!(rest.is_empty());
+    assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
+    let decoded = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(
         serde_json::to_value(decoded).unwrap(),
         serde_json::to_value(message).unwrap()

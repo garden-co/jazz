@@ -46,6 +46,7 @@ impl Db {
                 false,
                 Some(&roots),
                 Some(evidence),
+                &ReadViewSourceSpec::Current,
             ) {
                 Ok(()) => {
                     let mut inner = self.inner();
@@ -77,7 +78,7 @@ impl Db {
                 let Some(message) = message_out(&names, message) else {
                     continue;
                 };
-                if inner.sessions[index].transport.send(message).is_err() {
+                if inner.sessions[index].send_output(message).is_err() {
                     let released = inner.sessions[index].close(&dropped);
                     inner.release_session_reads(released);
                     break;

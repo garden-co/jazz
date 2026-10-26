@@ -134,7 +134,7 @@ async fn browser_owner_receipt_is_local_but_never_terminal() {
     tab.set_remote_link_hint("failed".into()).unwrap();
     let accepted = insert(&tab, "accepted later", true);
     let rejected = insert(&tab, "rejected later", false);
-    tab.set_non_durable_client().unwrap();
+    tab.set_private_owner_client().unwrap();
     assert_eq!(state(&accepted).durability, DurabilityTier::None);
     let (tu, td) = connect(&tab, &relay).await;
     tick(&tab).await;
@@ -191,7 +191,7 @@ async fn indexeddb_owner_receipt_survives_reopen_and_retry() {
     let tab = open(1, false);
     tab.set_remote_link_hint("failed".into()).unwrap();
     let write = insert(&tab, &"durable payload ".repeat(24000), true);
-    tab.set_non_durable_client().unwrap();
+    tab.set_private_owner_client().unwrap();
     {
         let relay = WasmDb::open_browser(
             storage.clone(),

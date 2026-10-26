@@ -14,7 +14,7 @@
 //! assertions disabled:
 //! `cargo test --config 'profile.dev.package.groove.debug-assertions=false' ...`.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 

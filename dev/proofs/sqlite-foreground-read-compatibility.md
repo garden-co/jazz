@@ -24,7 +24,9 @@ For example, Alice's worker holds a cached note while its authority is silent:
   or a host-reported loss of the authority link. Fallback uses the owner's cache.
 - A foreground Remote subscription still requires global settlement. A local
   reply, timeout or Failed hint cannot turn that reply into a global answer.
-- A foreground LocalOnly read retains its explicit local-memory semantics.
+- An ordinary foreground LocalOnly read asks its owner for cached data without
+  waiting for the authority. An explicit transaction-local observation keeps
+  its already established snapshot and evidence boundary.
 
 Ordinary durable clients retain their existing Remote read contract. Foreground
 subscriptions use the normal sync, query and session-policy machinery; this
@@ -36,6 +38,14 @@ owner/authority distinction, then release it. Refusal and cancellation also
 release its attachment. One-shot requests with a different served identity or
 request-scoped claims remain explicitly unsupported on this foreground path;
 trusted backend scoped reads keep their existing implementation.
+
+Transaction preparation also asks the owner before treating an unloaded row as
+absent. A mergeable foreground reads the owner's ordinary cached view while the
+authority is offline. Serializable reads retain their existing snapshot and
+local-cache contract. This lets an encrypted update resolve its
+stored space after reopening without requiring an earlier read to warm the tab.
+Strict Remote reads still require authority coverage, and accepted-only local
+observations do not acquire evidence after their begin boundary.
 
 ## Host deadlines
 
@@ -54,11 +64,11 @@ sub-millisecond deadline early.
 
 ## Wire and storage
 
-No persisted fields, tables, wire tags or payload layouts change. The existing
-response is named `jazz.sqlite.sync.read-settlement.v1`, version 1, with the
-postcard `SyncMessage::Settled` tag 11 and the existing `id`, `through`, `window`
-and `global` fields. `crates/jazz/fixtures/sqlite_read_settlement_v1.json` pins the
-local and global response bytes and checks decoding/re-encoding.
+These read changes add no persisted fields or message fields. The response
+retains `SyncMessage::Settled` tag 11 and its `id`, `through`, `window` and
+`global` fields within the current `JSQL/2` envelope. The shared
+`crates/jazz/fixtures/sqlite_sync_wire_v2.json` corpus pins its current frame;
+historical v1 fixtures remain unchanged and are refused by the versioned decoder.
 
 Relays may now send a local completion before the global completion. Every hop
 must run the matching implementation to rely on this distinction. Older readers
@@ -83,6 +93,8 @@ publication fail with an explicit `Query` error. The later
 write recovery and admission; [owner storage receipts](sqlite-owner-stored-compatibility.md)
 provide Local durability after the real flush. Global still requires the
 authority's receipt. Storage owners and direct replicas retain their write path.
+The public browser SDK queues physical write preparation behind that admission,
+so an immediate write handle can be returned while the owner handshake finishes.
 
 This note covers foreground reads. The
 [browser storage bridge](sqlite-browser-storage-compatibility.md),

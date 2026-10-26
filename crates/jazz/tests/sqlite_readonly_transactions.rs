@@ -21,6 +21,9 @@ fn author(name: &str) -> AuthorSubject {
     AuthorSubject::authenticated("https://issuer.example", name).unwrap()
 }
 fn open(node: u8, path: Option<&Path>, scoped: bool) -> Db {
+    open_as(node, path, scoped, AuthorSubject::SYSTEM)
+}
+fn open_as(node: u8, path: Option<&Path>, scoped: bool, author: AuthorSubject) -> Db {
     let policies = if scoped {
         TablePolicies::new()
             .with_select(PolicyExpr::eq_session(
@@ -45,7 +48,7 @@ fn open(node: u8, path: Option<&Path>, scoped: bool) -> Db {
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
+            author,
         },
     );
     match path {
@@ -133,7 +136,8 @@ fn read_only_commits_validate_rows_and_empty_query_phantoms() {
             client.wait_for_transaction(commit, DurabilityTier::Global),
         )
         .unwrap_err();
-        assert_eq!(error.code, ErrorCode::TransactionConflict);
+        assert!(error.is_serialization_conflict(), "{error}");
+        assert!(error.is_conflict(), "authority conflicts remain retryable");
         assert!(matches!(
             client.write_state(commit).unwrap().fate,
             Fate::Rejected(_)
@@ -272,10 +276,10 @@ fn read_only_session_batches_preserve_identity_and_claims() {
     .unwrap();
 }
 
-/// Mallory cannot hide a delegated identity in a read-only batch sent over an
-/// ordinary Alice connection: no writes is not an exemption from trust checks.
+/// Alice's ordinary session connection governs even an empty batch naming
+/// Mallory. Both commit kinds settle normally under the connection's identity.
 #[test]
-fn read_only_delegation_over_an_ordinary_connection_rejects() {
+fn empty_session_batches_follow_the_ordinary_connection_identity() {
     for serializable in [false, true] {
         let server = open(3, None, false);
         server.set_authority();
@@ -289,13 +293,12 @@ fn read_only_delegation_over_an_ordinary_connection_rejects() {
             block_on(client.begin_mergeable_for_identity(tx, author("mallory"))).unwrap();
             block_on(client.commit_mergeable_handle(tx)).unwrap().0
         };
-        let error = drive(
+        drive(
             &[&client, &server, &client],
             client.wait_for_transaction(id, DurabilityTier::Global),
         )
-        .unwrap_err();
-        assert_eq!(error.code, ErrorCode::WriteRejected);
-        assert!(error.message.contains("trusted serving node"));
+        .unwrap();
+        assert_eq!(client.write_state(id).unwrap().fate, Fate::Accepted);
     }
 }
 
@@ -393,27 +396,29 @@ fn invalid_allocator_records_fail_open_explicitly() {
 /// empty mutation list; it must still carry serializable snapshot/read fields.
 #[test]
 fn read_only_commits_keep_the_existing_wire_layout() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_readonly_commit_v1.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v2/readonly-commit.json"
+    ))
+    .unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.read-only-commit.v1");
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     let message: jazz::db::SyncMessage =
         serde_json::from_value(fixture["message"].clone()).unwrap();
-    let bytes = postcard::to_allocvec(&message).unwrap();
+    let bytes = jazz::db::encode_message(&message).unwrap();
     assert_eq!(
         bytes.iter().map(|b| format!("{b:02x}")).collect::<String>(),
         fixture["hex"].as_str().unwrap()
     );
-    let decoded: jazz::db::SyncMessage = postcard::from_bytes(&bytes).unwrap();
+    let decoded = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), fixture["message"]);
 }
 
 /// Alice's foreground can read its owner, but an empty commit still needs relay
-/// forwarding and durable acknowledgement. It must not fabricate a receipt.
+/// admission and durable acknowledgement. It must not fabricate a receipt.
 #[test]
 fn foreground_empty_commits_remain_explicitly_unsupported() {
-    let db = open(1, None, false);
-    db.set_non_durable_client();
+    let db = open_as(1, None, false, author("alice"));
+    db.set_private_owner_client().unwrap();
     for serializable in [false, true] {
         let tx = OpenTransactionId::new();
         let result = if serializable {

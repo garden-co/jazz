@@ -293,9 +293,12 @@ fn cold_scoped_windows_preserve_occurrences_through_a_relay() {
         ))
         .unwrap();
         assert_eq!(
-            cached.len(),
-            2,
-            "only selected roots, not missing page predecessors"
+            cached
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<std::collections::BTreeSet<_>>(),
+            [id(9), id(10), id(12)].into_iter().collect(),
+            "the permitted prefix is cached; Bob's row remains excluded"
         );
         let b = drive(&nodes, read(&client, &query(false), "b")).unwrap();
         assert_eq!(
@@ -634,11 +637,9 @@ fn scoped_union_partial_receipts_retire_with_the_request_and_connection() {
 #[test]
 fn scoped_union_coverage_sequence_has_fixed_bytes() {
     use jazz::db::{ScopedReadRowV1, UnionOccurrenceV1};
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_scoped_union_coverage_v1.json"
-    ))
-    .unwrap();
-    assert_eq!(fixture["role"], "jazz.sqlite.sync.scoped-union-coverage.v1");
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/scoped-union.json")).unwrap();
+    assert_eq!(fixture["role"], "jazz.sqlite.sync.scoped-union-coverage.v2");
     for (key, id, through, populated) in [("populated", 128, 300, true), ("empty", 129, 301, false)]
     {
         let occurrences = if populated {
@@ -689,7 +690,7 @@ fn scoped_union_coverage_sequence_has_fixed_bytes() {
         .zip(fixture[key].as_array().unwrap())
         {
             let bytes = hex::decode(bytes.as_str().unwrap()).unwrap();
-            assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
+            assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
             let decoded = jazz::sync_codec::decode_sync_message(&bytes).unwrap();
             assert_eq!(
                 serde_json::to_value(decoded).unwrap(),

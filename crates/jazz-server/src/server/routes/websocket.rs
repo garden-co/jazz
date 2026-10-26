@@ -2593,6 +2593,9 @@ mod tests {
             self.received.borrow_mut().push(message.clone());
             Some(message)
         }
+        fn take_failure(&mut self) -> Option<TransportError> {
+            self.adapter.take_failure()
+        }
     }
 
     /// A remote subscription held open by a test; it is covered once the
@@ -3555,8 +3558,11 @@ mod tests {
                     .borrow_mut()
                     .drain(..)
                     .filter_map(|message| {
-                        if let SyncMessage::Fate { tx, .. } | SyncMessage::FateV1 { tx, .. } =
-                            message
+                        if let SyncMessage::Fate { tx, .. }
+                        | SyncMessage::FateV1 { tx, .. }
+                        | SyncMessage::OriginFateV2 {
+                            tx, global: true, ..
+                        } = message
                         {
                             Some(tx)
                         } else {

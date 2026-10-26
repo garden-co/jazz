@@ -725,8 +725,10 @@ fn accepted_overlay_v1_has_frozen_wire_bytes() {
         id: 17,
         through: 128,
     };
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_accepted_overlay_v1.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v2/accepted-overlay.json"
+    ))
+    .unwrap();
     assert_eq!(
         fixture["request_role"],
         "jazz.sqlite.sync.accepted-overlay-check.v1"
@@ -735,13 +737,12 @@ fn accepted_overlay_v1_has_frozen_wire_bytes() {
         fixture["answer_role"],
         "jazz.sqlite.sync.accepted-overlay-checked.v1"
     );
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     for (key, message) in [("request", request), ("answer", answer)] {
-        let encoded = postcard::to_allocvec(&message).unwrap();
+        let encoded = jazz::db::encode_message(&message).unwrap();
         let bytes = hex::decode(fixture[key].as_str().unwrap()).unwrap();
         assert_eq!(encoded, bytes);
-        let (decoded, rest) = postcard::take_from_bytes::<SyncMessage>(&bytes).unwrap();
-        assert!(rest.is_empty());
+        let decoded = jazz::db::decode_message(&bytes).unwrap();
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
             serde_json::to_value(message).unwrap()

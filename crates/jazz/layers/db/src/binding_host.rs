@@ -10,11 +10,11 @@
 //! and write fates that need the server wait, and they complete on a later
 //! tick or write; [`Progress`] is how those waits learn to poll again.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use jazz_model::model::transaction::{OpenTransactionId, TransactionId};
@@ -26,6 +26,7 @@ use jazz_protocol::protocol::{
 };
 use jazz_types::ids::{AuthorSubject, AuthorSubjectError, NodeUuid, RowUuid};
 use jazz_types::records::Value;
+use jazz_types::time::TxTime;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -191,7 +192,10 @@ pub fn claims(author: AuthorSubject, claims: serde_json::Value) -> HostResult<Ce
 
 // ---- options -------------------------------------------------------------------------
 
-fn write_identity<O: HostObject>(options: &O) -> HostResult<WriteIdentity> {
+/// Resolves author bytes to the subject a write or read runs as.
+type AuthorOf<'a> = &'a dyn Fn(&[u8]) -> HostResult<AuthorSubject>;
+
+fn write_identity<O: HostObject>(options: &O, author: AuthorOf<'_>) -> HostResult<WriteIdentity> {
     match (options.get("author")?, options.get("attribution")?) {
         (Some(_), Some(_)) => {
             Err("write identity cannot contain both author and attribution".into())
@@ -233,12 +237,19 @@ fn branch_view_target<O: HostObject>(options: &O) -> HostResult<crate::db::Write
 
 /// `{ rowId?, author?, attribution?, branch?, updatedAtMs? }`.
 pub fn insert_options<O: HostObject>(options: &O) -> HostResult<InsertOptions> {
+    insert_options_as(options, &author)
+}
+
+fn insert_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<InsertOptions> {
     Ok(InsertOptions {
         row_id: options
             .get("rowId")?
             .map(|row| row_uuid(&O::bytes(&row)?))
             .transpose()?,
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -246,8 +257,15 @@ pub fn insert_options<O: HostObject>(options: &O) -> HostResult<InsertOptions> {
 
 /// `{ author?, attribution?, head?, base?, updatedAtMs? }`.
 pub fn update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
+    update_options_as(options, &author)
+}
+
+fn update_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<UpdateOptions> {
     Ok(UpdateOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: branch_view_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -256,6 +274,13 @@ pub fn update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
 /// As [`update_options`]; the removed `branch` field is rejected even when
 /// `undefined`, so untyped callers cannot write to the root by accident.
 pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
+    upsert_options_as(options, &author)
+}
+
+fn upsert_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<UpsertOptions> {
     if options.has("branch")? {
         return Err(
             "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view"
@@ -263,7 +288,7 @@ pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
         );
     }
     Ok(UpsertOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: branch_view_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -271,7 +296,14 @@ pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
 
 /// As [`update_options`].
 pub fn delete_options<O: HostObject>(options: &O) -> HostResult<DeleteOptions> {
-    let options = update_options(options)?;
+    delete_options_as(options, &author)
+}
+
+fn delete_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<DeleteOptions> {
+    let options = update_options_as(options, author)?;
     Ok(DeleteOptions {
         identity: options.identity,
         target: options.target,
@@ -281,8 +313,15 @@ pub fn delete_options<O: HostObject>(options: &O) -> HostResult<DeleteOptions> {
 
 /// As [`insert_options`] without a row id.
 pub fn restore_options<O: HostObject>(options: &O) -> HostResult<RestoreOptions> {
+    restore_options_as(options, &author)
+}
+
+fn restore_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<RestoreOptions> {
     Ok(RestoreOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -364,8 +403,8 @@ pub struct OpenConfig {
     pub identity: OpenIdentity,
     /// Seed for deterministic row ids (tests).
     pub row_id_seed: Option<u64>,
-    /// Open as an authority keeping full history. Every SQLite store keeps
-    /// full history, so this opens normally.
+    /// A Groove replica knob: keep full history. Every SQLite store keeps
+    /// full history, so this opens normally (not as an authority).
     pub history_complete: bool,
     /// A Groove persistence knob: SQLite commits each applied batch, so it
     /// is accepted and has nothing to configure.
@@ -393,8 +432,23 @@ impl From<OpenIdentity> for DbIdentity {
 /// Decode a public schema (JSON bytes) and an [`OpenConfig`] (postcard).
 pub fn decode_open(schema: &[u8], config: &[u8]) -> HostResult<(JazzSchema, OpenConfig)> {
     let schema = decode_schema(schema)?;
-    let config: OpenConfig = postcard::from_bytes(config)
+    let (config, tail): (OpenConfig, _) = postcard::take_from_bytes(config)
         .map_err(|error| HostError::Argument(format!("decode open config: {error}")))?;
+    // Older host encoders append an optional backend credential. An absent
+    // field is harmless; a supplied credential must never be silently ignored
+    // or treated as authority by either ordinary or explicit backend opens.
+    if !tail.is_empty() {
+        let (credential, rest): (Option<String>, _) = postcard::take_from_bytes(tail)
+            .map_err(|error| HostError::Argument(format!("decode open config: {error}")))?;
+        if credential.is_some() {
+            return Err(
+                "raw backend credentials are not supported; use an explicit backend runtime".into(),
+            );
+        }
+        if !rest.is_empty() {
+            return Err("trailing bytes after open config".into());
+        }
+    }
     Ok((schema, config))
 }
 
@@ -402,6 +456,10 @@ pub fn decode_open(schema: &[u8], config: &[u8]) -> HostResult<(JazzSchema, Open
 pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
     Ok(jazz_model::model::public_schema_convert::decode_public_schema_json(schema)?)
 }
+
+/// How long a Remote one-shot read waits for the server to cover it
+/// before failing with `NotObserved`.
+pub const REMOTE_READ_COVERAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// How a host opens: the caller-controlled author, the backend's SYSTEM
 /// author, or a verified self-signed author.
@@ -444,6 +502,17 @@ pub fn verify_self_signed(
     )?)
 }
 
+/// The account-bound local-first author `proof` proves `claimed_author` is.
+fn verify_local_first(proof: &SelfSignedProof, claimed_author: &str) -> HostResult<AuthorSubject> {
+    let author = verify_self_signed(&proof.token, &proof.app_id, claimed_author)?;
+    if author.principal_parts().0 != AuthorSubject::LOCAL_FIRST_ISSUER
+        || author.account_id().is_none()
+    {
+        return Err("session admission requires an account-bound local-first proof".into());
+    }
+    Ok(author)
+}
+
 /// The identity `config` opens with under `how`, checked; and whether the
 /// runtime is a trusted backend.
 pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(DbIdentity, bool)> {
@@ -484,13 +553,20 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
     }
 }
 
-/// Open an in-memory database.
-pub async fn open_memory(db_config: DbConfig, config: &OpenConfig) -> Result<Db, Error> {
-    if config.history_complete {
-        Db::open_history_complete(db_config).await
-    } else {
-        Db::open(db_config).await
-    }
+/// Open an in-memory database. `history_complete` needs nothing: every
+/// SQLite store keeps full history.
+pub async fn open_memory(db_config: DbConfig, _config: &OpenConfig) -> Result<Db, Error> {
+    Db::open(db_config).await
+}
+
+/// Open a durable store in the SQLite file at `path` (see [`open_memory`]).
+pub async fn open_file(
+    db_config: DbConfig,
+    _config: &OpenConfig,
+    path: &std::path::Path,
+    options: crate::db::FileOptions,
+) -> Result<Db, Error> {
+    Db::open_at(db_config, path, options).await
 }
 
 // ---- progress ------------------------------------------------------------------------
@@ -524,6 +600,7 @@ impl Progress {
         Parked {
             future: Box::pin(future),
             progress: self.clone(),
+            kick: None,
         }
     }
 }
@@ -532,24 +609,32 @@ impl Progress {
 pub struct Parked<F: Future> {
     future: Pin<Box<F>>,
     progress: Progress,
+    /// Asked for a tick after the future's first poll: what it queued for
+    /// the upstream (a remote read, or a local-first read's refresh) goes
+    /// out without waiting for unrelated work.
+    kick: Option<Rc<Hooks>>,
 }
 
 impl<F: Future> Future for Parked<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
-        match self.future.as_mut().poll(context) {
-            Poll::Ready(output) => Poll::Ready(output),
-            Poll::Pending => {
-                self.progress.park(context);
-                Poll::Pending
-            }
+        let poll = self.future.as_mut().poll(context);
+        if poll.is_pending() {
+            self.progress.park(context);
         }
+        if let Some(hooks) = self.kick.take() {
+            hooks.schedule_tick();
+        }
+        poll
     }
 }
 
 /// A boxed binding future.
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
+
+/// See [`Hooks::rejected`].
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>)>;
 
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
@@ -561,6 +646,16 @@ pub struct Hooks {
     /// Flush the storage owner's asynchronous backing store. Required when
     /// its Db defers owner durability; completion must cover all preceding writes.
     pub flush_owner: RefCell<Option<Box<dyn Fn() -> HostFuture<()>>>>,
+    /// Told of an upload the authority refused that no wait claimed yet,
+    /// whether it was a serializable transaction, and the write's claim
+    /// if it has one: a wait the caller makes before the host delivers the
+    /// report (the task that wrote it ends) still claims it.
+    pub rejected: RefCell<Option<RejectedHook>>,
+    /// Each uploaded write's claim, by commit seq: a wait sets it, and a
+    /// dropped receipt leaves no one to claim it.
+    claims: RefCell<BTreeMap<u64, Weak<Cell<bool>>>>,
+    /// The claim count after the last sweep of dropped receipts.
+    swept: Cell<usize>,
 }
 
 impl Hooks {
@@ -576,6 +671,68 @@ impl Hooks {
     pub fn after_write(&self) {
         self.progress.wake_all();
         self.schedule_tick();
+    }
+
+    /// Follow `write`'s fate: if the authority refuses it before a wait
+    /// sets `claimed`, [`Hooks::rejected`] is told.
+    pub fn track(&self, write: &Write, claimed: &Rc<Cell<bool>>) {
+        if write.rejected.is_some() {
+            return;
+        }
+        let mut claims = self.claims.borrow_mut();
+        claims.insert(write.seq, Rc::downgrade(claimed));
+        if claims.len() > 2 * self.swept.get().max(64) {
+            claims.retain(|_, claim| claim.strong_count() > 0);
+            self.swept.set(claims.len());
+        }
+    }
+
+    /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
+    /// A relayed session's refused commit is reported under its own id.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+        for rejection in rejections {
+            let (seq, error) = (rejection.seq, &rejection.error);
+            let writer = NodeUuid::from_bytes(rejection.writer);
+            let claim = (writer == node)
+                .then(|| self.claims.borrow_mut().remove(&seq))
+                .flatten()
+                .and_then(|claim| claim.upgrade());
+            if claim.as_ref().is_some_and(|claim| claim.get()) {
+                continue;
+            }
+            if let Some(rejected) = self.rejected.borrow().as_ref() {
+                let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
+                rejected(&tx_id, error, rejection.serializable, claim);
+            }
+        }
+    }
+}
+
+/// The public `kind` of a transaction in a mutation-error event.
+pub fn transaction_kind(serializable: bool) -> &'static str {
+    if serializable {
+        "serializable"
+    } else {
+        "mergeable"
+    }
+}
+
+/// The public code and reason of a mutation-error event for `error`; an
+/// `upstream` one is the authority's refusal of an upload.
+pub fn mutation_error_parts(error: &Error, upstream: bool) -> (&'static str, String) {
+    if error.is_serialization_conflict() {
+        return (
+            "serialization_conflict",
+            "Serializable transaction conflicted with another write".to_owned(),
+        );
+    }
+    match (error.is_authorization_denied(), upstream) {
+        (true, true) => (
+            "permission_denied",
+            "Write rejected by server authorization".to_owned(),
+        ),
+        (true, false) => ("permission_denied", error.message.clone()),
+        (false, _) => (error.code.as_str(), error.message.clone()),
     }
 }
 
@@ -602,6 +759,8 @@ pub struct Write {
     /// Why the write was refused when it applied, if it was: its waits
     /// fail with this, and nothing was committed.
     pub rejected: Option<Error>,
+    /// Whether the write commits a serializable transaction.
+    pub serializable: bool,
 }
 
 // ---- the binding ------------------------------------------------------------------
@@ -635,11 +794,30 @@ pub struct Binding {
     /// state: the transaction's commit reports the first such refusal.
     refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
     initializations: Rc<RefCell<InitializationRegistry>>,
+    /// Open transactions bound to an identity: their writes are its, and
+    /// their reads run as it.
+    bound: Rc<RefCell<BTreeMap<OpenTransactionId, WriteIdentity>>>,
+    /// Local-first accounts a backend admitted (see
+    /// [`Binding::admit_local_first_session`]), by canonical author.
+    admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+}
+
+/// A Jazz self-signed proof of a local-first account.
+#[derive(Clone)]
+struct SelfSignedProof {
+    token: String,
+    app_id: String,
 }
 
 impl Binding {
     /// Bind `db`, opened as `identity`.
+    /// Unless `db` is the authority, it is a replica from the start: what
+    /// it writes before its upstream connects is uploaded once it does.
     pub fn new(db: Db, identity: DbIdentity, trusted_backend: bool) -> Self {
+        if !db.is_authority() {
+            db.become_replica();
+        }
+        db.track_upstream_rejections();
         Self {
             db: Rc::new(db),
             hooks: Rc::default(),
@@ -649,6 +827,57 @@ impl Binding {
             owns_runtime: true,
             refused: Rc::default(),
             initializations: Rc::default(),
+            bound: Rc::default(),
+            admitted: Rc::default(),
+        }
+    }
+
+    /// `future`, parked on this binding's progress, asking for a tick
+    /// after its first poll (it may have queued a request upstream).
+    fn parked<F: Future>(&self, future: F) -> Parked<F> {
+        Parked {
+            kick: Some(Rc::clone(&self.hooks)),
+            ..self.hooks.progress.parked(future)
+        }
+    }
+
+    /// Let this backend runtime write and read as the local-first account
+    /// `claimed_author`, proven by `token`. Raw author bytes never name a
+    /// Jazz-reserved identity otherwise. The admission covers this runtime
+    /// and its schema views; the proof is checked again at every use, so an
+    /// expired one stops admitting.
+    pub fn admit_local_first_session(
+        &self,
+        token: &str,
+        app_id: &str,
+        claimed_author: &str,
+    ) -> HostResult<()> {
+        self.require_trusted_backend()?;
+        let proof = SelfSignedProof {
+            token: token.to_owned(),
+            app_id: app_id.to_owned(),
+        };
+        verify_local_first(&proof, claimed_author)?;
+        self.admitted
+            .borrow_mut()
+            .insert(claimed_author.to_owned(), proof);
+        Ok(())
+    }
+
+    /// The subject `bytes` (canonical author JSON) names: an ordinary
+    /// author, or a local-first account this backend admitted.
+    fn author_of(&self, bytes: &[u8]) -> HostResult<AuthorSubject> {
+        match author(bytes) {
+            Ok(author) => Ok(author),
+            Err(error) => {
+                let admitted = std::str::from_utf8(bytes).ok().and_then(|canonical| {
+                    Some((canonical, self.admitted.borrow().get(canonical)?.clone()))
+                });
+                match admitted {
+                    Some((canonical, proof)) => verify_local_first(&proof, canonical),
+                    None => Err(error),
+                }
+            }
         }
     }
 
@@ -694,7 +923,7 @@ impl Binding {
     /// the database's own.
     fn read_author(&self, author: Option<&[u8]>) -> HostResult<Option<AuthorSubject>> {
         match author {
-            Some(bytes) => Ok(Some(self::author(bytes)?)),
+            Some(bytes) => Ok(Some(self.author_of(bytes)?)),
             None if self.trusted_backend => Ok(Some(AuthorSubject::SYSTEM)),
             None => Ok(None),
         }
@@ -708,20 +937,21 @@ impl Binding {
     /// options through `Db`, then use this same receipt and refusal boundary.
     pub fn write(&self, write: Result<WriteHandle, Error>) -> HostResult<Write> {
         let write = match write {
-            Err(error) if error.is_apply_time_rejection() => return self.rejected(error),
+            Err(error) if error.is_apply_time_rejection() => return self.rejected(error, false),
             write => write?,
         };
         self.hooks.after_write();
         self.receipt(write.row_uuid(), write.mergeable_tx_id())
     }
 
-    fn rejected(&self, error: Error) -> HostResult<Write> {
+    fn rejected(&self, error: Error, serializable: bool) -> HostResult<Write> {
         // Rejected transactions take ids from the top of this node's range,
         // which commits (counted from the bottom) never reach.
         static REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut write = self.receipt(RowUuid::from_bytes([0; 16]), u64::MAX - n)?;
         write.rejected = Some(error);
+        write.serializable = serializable;
         Ok(write)
     }
 
@@ -735,6 +965,7 @@ impl Binding {
             tx_id: TransactionId::from_committed_tx(tx_id),
             seq,
             rejected: None,
+            serializable: false,
         })
     }
 
@@ -746,7 +977,7 @@ impl Binding {
         options: &O,
     ) -> HostResult<Write> {
         let cells = decode_cells(cells)?;
-        let mut options = insert_options(options)?;
+        let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.insert(table, cells, options)))
     }
@@ -761,7 +992,7 @@ impl Binding {
     ) -> HostResult<Write> {
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let mut options = update_options(options)?;
+        let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.update(table, row, patch, options)))
     }
@@ -796,9 +1027,11 @@ impl Binding {
         cells: &[u8],
         options: &O,
     ) -> HostResult<Write> {
+        // The removed `branch` option is refused before any payload is read,
+        // so a malformed row cannot mask it.
+        let mut options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let mut options = upsert_options(options)?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.upsert(table, row, cells, options)))
     }
@@ -806,30 +1039,31 @@ impl Binding {
     /// Delete `row`.
     pub fn delete<O: HostObject>(&self, table: &str, row: &[u8], options: &O) -> HostResult<Write> {
         let row = row_uuid(row)?;
-        let mut options = delete_options(options)?;
+        let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.delete(table, row, options)))
     }
 
-    /// Undelete `row` with `cells`.
+    /// Undelete `row`, with `cells` or (`None`) the values it was deleted with.
     pub fn restore<O: HostObject>(
         &self,
         table: &str,
         row: &[u8],
-        cells: &[u8],
+        cells: Option<&[u8]>,
         options: &O,
     ) -> HostResult<Write> {
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
-        let mut options = restore_options(options)?;
+        let cells = cells.map(decode_cells).transpose()?;
+        let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
-        self.write(block_on(self.db.restore(table, row, Some(cells), options)))
+        self.write(block_on(self.db.restore(table, row, cells, options)))
     }
 
     // ---- transactions ----
 
-    /// Begin one owner-wide transaction, optionally bound to an authenticated
-    /// session or explicit backend provenance. Replica admission stays upstream.
+    /// Begin one owner-wide transaction, bound to the session `author` or
+    /// the backend `attribution` if one is given: its writes are that
+    /// identity's, and its reads run as it.
     pub fn begin_transaction(
         &self,
         id: &str,
@@ -842,9 +1076,9 @@ impl Binding {
             return Err("transaction identity cannot contain both author and attribution".into());
         }
         let identity = match (author, attribution) {
-            (Some(bytes), None) => WriteIdentity::Session(self::author(bytes)?),
+            (Some(bytes), None) => WriteIdentity::Session(self.author_of(bytes)?),
             (None, Some(bytes)) => {
-                self.checked(WriteIdentity::Attribution(self::author(bytes)?))?
+                self.checked(WriteIdentity::Attribution(self.author_of(bytes)?))?
             }
             _ => WriteIdentity::Database,
         };
@@ -879,16 +1113,21 @@ impl Binding {
                 block_on(self.db.begin_serializable_for_attribution(id, author))?
             }
         }
+        if identity != WriteIdentity::Database {
+            self.bound.borrow_mut().insert(id, identity);
+        }
         Ok(())
     }
 
     /// Commit an owner-wide transaction (`kind` defaults to mergeable).
     pub fn commit_transaction(&self, id: &str, kind: Option<&str>) -> HostResult<Write> {
         let id = open_transaction(id)?;
+        self.bound.borrow_mut().remove(&id);
         let kind = TransactionKind::parse(kind.unwrap_or("mergeable"))?;
+        let serializable = matches!(kind, TransactionKind::Serializable);
         if let Some(error) = self.refused.borrow_mut().remove(&id) {
             self.db.abandon_transaction_handle(id)?;
-            return self.rejected(error);
+            return self.rejected(error, serializable);
         }
         let receipt = match kind {
             TransactionKind::Mergeable => block_on(self.db.commit_mergeable_handle(id)),
@@ -898,12 +1137,14 @@ impl Binding {
         // as the authority's verdict on a replica's commit is.
         let receipt = match receipt {
             Err(error) if error.code == ErrorCode::TransactionConflict => {
-                return self.rejected(error);
+                return self.rejected(error, serializable);
             }
             receipt => receipt?,
         };
         self.hooks.after_write();
-        self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)
+        let mut write = self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)?;
+        write.serializable = serializable;
+        Ok(write)
     }
 
     /// Freeze an owner-wide batch. A token is private to this runtime registry.
@@ -943,8 +1184,6 @@ impl Binding {
             return Err(error.into());
         }
         let seal = self
-            .hooks
-            .progress
             .parked(self.db.seal_initialization_transaction_with_owner(id))
             .await?;
         if self.initializations.borrow().closed {
@@ -1058,7 +1297,45 @@ impl Binding {
     pub fn rollback_transaction(&self, id: &str) -> HostResult<()> {
         let id = open_transaction(id)?;
         self.refused.borrow_mut().remove(&id);
+        self.bound.borrow_mut().remove(&id);
         Ok(self.db.abandon_transaction_handle(id)?)
+    }
+
+    /// The identity a write staged in transaction `id` runs as: the one the
+    /// transaction is bound to, if any, which the write may only repeat.
+    fn staged_identity(
+        &self,
+        id: OpenTransactionId,
+        identity: WriteIdentity,
+    ) -> HostResult<WriteIdentity> {
+        let identity = self.checked(identity)?;
+        match self.bound.borrow().get(&id) {
+            None => Ok(identity),
+            Some(bound) if identity == WriteIdentity::Database || identity == *bound => Ok(*bound),
+            Some(_) => Err(HostError::Argument(
+                "a staged write's identity must match its open transaction's bound identity".into(),
+            )),
+        }
+    }
+
+    /// The author a read in open transaction `id` runs as: the session the
+    /// transaction is bound to, which an explicit author may only repeat.
+    fn transaction_reader(
+        &self,
+        id: OpenTransactionId,
+        author: Option<&[u8]>,
+    ) -> HostResult<Option<AuthorSubject>> {
+        let bound = match self.bound.borrow().get(&id) {
+            Some(WriteIdentity::Session(bound)) => *bound,
+            _ => return Ok(None),
+        };
+        match author.map(|bytes| self.author_of(bytes)).transpose()? {
+            Some(author) if author != bound => Err(HostError::Argument(
+                "the open transaction identity does not match the transaction's bound identity"
+                    .into(),
+            )),
+            _ => Ok(Some(bound)),
+        }
     }
 
     /// A staged write's outcome. Like a direct write's (see
@@ -1069,7 +1346,10 @@ impl Binding {
     /// refusal cannot turn a partially staged transaction into a successful one.
     pub fn staged<T>(&self, id: OpenTransactionId, staged: Result<T, Error>) -> HostResult<()> {
         match staged {
-            Err(error) if error.is_apply_time_rejection() => {
+            Err(error)
+                if error.is_apply_time_rejection()
+                    || error.code == ErrorCode::TransactionConflict =>
+            {
                 self.refused.borrow_mut().entry(id).or_insert(error);
                 Ok(())
             }
@@ -1087,8 +1367,8 @@ impl Binding {
     ) -> HostResult<RowUuid> {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
-        let mut options = insert_options(options)?;
-        options.identity = self.checked(options.identity)?;
+        let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
         let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
         self.staged(id, staged)?;
@@ -1107,8 +1387,8 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let mut options = update_options(options)?;
-        options.identity = self.checked(options.identity)?;
+        let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -1126,11 +1406,11 @@ impl Binding {
         cells: &[u8],
         options: &O,
     ) -> HostResult<()> {
+        let mut options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
         let id = open_transaction(id)?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let mut options = upsert_options(options)?;
-        options.identity = self.checked(options.identity)?;
         let staged = block_on(
             self.db
                 .mergeable_tx_ref(id)
@@ -1149,8 +1429,8 @@ impl Binding {
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let mut options = delete_options(options)?;
-        options.identity = self.checked(options.identity)?;
+        let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
         self.staged(id, staged)
     }
@@ -1173,6 +1453,7 @@ impl Binding {
             updated_at_ms: updated_at_ms
                 .map(|value| checked_u64(value, "updatedAtMs"))
                 .transpose()?,
+            identity: self.staged_identity(id, WriteIdentity::Database)?,
             ..Default::default()
         };
         let staged = block_on(
@@ -1189,20 +1470,19 @@ impl Binding {
         id: &str,
         table: &str,
         row: &[u8],
-        cells: &[u8],
+        cells: Option<&[u8]>,
         options: &O,
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
-        let mut options = restore_options(options)?;
-        options.identity = self.checked(options.identity)?;
-        let staged = block_on(self.db.mergeable_tx_ref(id).restore(
-            table,
-            row,
-            Some(cells),
-            options,
-        ));
+        let cells = cells.map(decode_cells).transpose()?;
+        let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
+        let staged = block_on(
+            self.db
+                .mergeable_tx_ref(id)
+                .restore(table, row, cells, options),
+        );
         self.staged(id, staged)
     }
 
@@ -1234,8 +1514,17 @@ impl Binding {
         claims: Option<serde_json::Value>,
     ) -> HostResult<HostFuture<Vec<u8>>> {
         let opts = read_opts(opts)?;
-        let explicit = author.is_some();
-        let author = self.read_author(author)?;
+        let open_tx = open_transaction_id.map(open_transaction).transpose()?;
+        // A transaction bound to a session reads as it.
+        let bound = match open_tx {
+            Some(id) => self.transaction_reader(id, author)?,
+            None => None,
+        };
+        let explicit = author.is_some() || bound.is_some();
+        let author = match bound {
+            Some(bound) => Some(bound),
+            None => self.read_author(author)?,
+        };
         let admission = match (explicit, author) {
             (true, Some(author)) => Some((
                 author,
@@ -1243,21 +1532,42 @@ impl Binding {
             )),
             _ => None,
         };
-        let open_tx = open_transaction_id.map(open_transaction).transpose()?;
         let db = self.db.clone();
-        Ok(Box::pin(self.hooks.progress.parked(async move {
-            let result = db
-                .all_serialized_query(
-                    &query,
-                    opts,
-                    open_tx,
-                    admission,
-                    author,
-                    false,
-                    || false,
-                    |_| {},
-                )
-                .await?;
+        // A Remote read must be covered by the server; its budget runs
+        // from its first wait.
+        let require_coverage = opts.tier == crate::db::ReadTier::Remote;
+        let started = std::cell::Cell::new(None::<web_time::Instant>);
+        let expired = move || {
+            let first = started.get().unwrap_or_else(|| {
+                let now = web_time::Instant::now();
+                started.set(Some(now));
+                now
+            });
+            first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
+        };
+        let hooks = Rc::clone(&self.hooks);
+        Ok(Box::pin(self.parked(async move {
+            let mut read = std::pin::pin!(db.all_serialized_query(
+                &query,
+                opts,
+                open_tx,
+                admission,
+                author,
+                require_coverage,
+                expired,
+                |_| {},
+            ));
+            // A row whose large values are missing records their chunks for
+            // the next send; ask for the tick that sends it, or the read
+            // waits on unrelated sync traffic.
+            let result = std::future::poll_fn(|context| {
+                let poll = read.as_mut().poll(context);
+                if poll.is_pending() && db.owes_chunk_requests() {
+                    hooks.schedule_tick();
+                }
+                poll
+            })
+            .await?;
             Ok(match result {
                 SerializedReadResult::Rows(rows) => crate::binding_codec::encode_rows(&rows),
                 SerializedReadResult::Relation(snapshot) => {
@@ -1301,7 +1611,7 @@ impl Binding {
             })
             .transpose()?;
         let db = self.db.clone();
-        Ok(Box::pin(self.hooks.progress.parked(async move {
+        Ok(Box::pin(self.parked(async move {
             db.cover_catalogue(&table, scope).await?;
             Ok(Vec::new())
         })))
@@ -1348,7 +1658,7 @@ impl Binding {
                         .all_settled(prepared, opts, id, snapshot_at_begin, author)?,
                 )
             };
-        Ok(Box::pin(self.hooks.progress.parked(async move {
+        Ok(Box::pin(self.parked(async move {
             let result = read.await?;
             let metadata = result
                 .rows
@@ -1432,7 +1742,7 @@ impl Binding {
 
     /// Bind correlation claims to `author` (a served identity).
     pub fn set_identity_claims(&self, author: &[u8], claims: serde_json::Value) -> HostResult<()> {
-        let author = self::author(author)?;
+        let author = self.author_of(author)?;
         let claims = self::claims(author, claims)?;
         self.db.set_identity_claims(author, claims);
         self.hooks.progress.wake_all();
@@ -1443,11 +1753,25 @@ impl Binding {
 
     /// Ask the authority whether `action` would be allowed; the request goes
     /// out on the next tick. Resolves to `"allowed" | "denied" | "unknown"`.
+    /// Ask the authority about `action` for this database's own session,
+    /// or, on a trusted backend, for `author` with its `claims`.
     pub fn request_permission_advice(
         &self,
         action: PermissionAdviceAction,
-    ) -> (u64, HostFuture<&'static str>) {
-        let id = self.db.request_permission_advice(action);
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<(u64, HostFuture<&'static str>)> {
+        let session = match author {
+            Some(author) => {
+                let author = self.author_of(author)?;
+                Some((
+                    author,
+                    self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
+                ))
+            }
+            None => None,
+        };
+        let id = self.db.request_permission_advice(action, session);
         self.hooks.after_write();
         let db = self.db.clone();
         let progress = self.hooks.progress.clone();
@@ -1455,7 +1779,7 @@ impl Binding {
             Box::pin(
                 async move { Ok(advice_str(progress.parked(db.permission_advice(id)).await)) },
             );
-        (id, future)
+        Ok((id, future))
     }
 
     /// Drop a pending advice request; it resolves `"unknown"`.
@@ -1468,9 +1792,9 @@ impl Binding {
     pub fn capture_snapshot(&self) -> HostFuture<Vec<u8>> {
         let db = self.db.clone();
         Box::pin(
-            self.hooks.progress.parked(async move {
-                Ok(db.capture_snapshot().await?.to_persisted().into_bytes())
-            }),
+            self.parked(
+                async move { Ok(db.capture_snapshot().await?.to_persisted().into_bytes()) },
+            ),
         )
     }
 
@@ -1557,8 +1881,25 @@ impl Binding {
             Ok(())
         }
         .await;
+        self.hooks
+            .report(self.node, self.db.take_upstream_rejections());
         self.hooks.progress.wake_all();
         result
+    }
+
+    /// Make this store the optimistic, non-durable foreground of a durable
+    /// relay (a browser tab over its worker): its store starts empty, so
+    /// every subscription's opening waits for the relay's answer.
+    pub fn set_non_durable_client(&self) {
+        self.db.set_non_durable_client();
+        self.hooks.progress.wake_all();
+    }
+
+    /// Select the explicit E2EE account-owner role before connecting a foreground.
+    pub fn set_private_owner_client(&self) -> HostResult<()> {
+        self.db.set_private_owner_client()?;
+        self.hooks.progress.wake_all();
+        Ok(())
     }
 
     /// Report the path to the authoritative server (`"none" | "attempting"
@@ -1620,10 +1961,10 @@ impl Binding {
                     "streaming mutation identity cannot contain both author and attribution".into(),
                 );
             }
-            (Some(bytes), None) => WriteIdentity::Session(self::author(bytes)?),
+            (Some(bytes), None) => WriteIdentity::Session(self.author_of(bytes)?),
             (None, Some(bytes)) => {
                 self.require_trusted_backend()?;
-                WriteIdentity::Attribution(self::author(bytes)?)
+                WriteIdentity::Attribution(self.author_of(bytes)?)
             }
             (None, None) => WriteIdentity::Database,
         };
@@ -1663,6 +2004,7 @@ impl Binding {
                 head,
                 base,
             })),
+            failed: false,
         })
     }
 
@@ -1805,7 +2147,7 @@ pub enum EventChunk {
     },
     /// `{ type: "closed" }`.
     Closed,
-    /// `{ type: "rejected", reason: { type: "ServerFailure", detail } }`.
+    /// `{ type: "rejected", reason: { type: "ServerFailure", code } }`.
     Rejected {
         /// Why.
         detail: String,
@@ -1855,6 +2197,9 @@ struct StreamingState {
 /// arrives. A failed push closes the mutation.
 pub struct StreamingMutation {
     state: Option<Box<StreamingState>>,
+    /// A push failed: the upload takes no more chunks and cannot finish,
+    /// but stays for [`StreamingMutation::abort`] to release.
+    failed: bool,
 }
 
 fn closed() -> HostError {
@@ -1864,21 +2209,26 @@ fn closed() -> HostError {
 impl StreamingMutation {
     /// Upload the next chunk.
     pub fn push(&mut self, chunk: &[u8]) -> HostResult<()> {
-        let state = self.state.as_mut().ok_or_else(closed)?;
+        let state = self
+            .state
+            .as_mut()
+            .filter(|_| !self.failed)
+            .ok_or_else(closed)?;
         let pushed = block_on(
             state
                 .binding
                 .db
                 .push_streaming_value_upload(&mut state.upload, chunk),
         );
-        if pushed.is_err() {
-            self.state = None;
-        }
+        self.failed = pushed.is_err();
         Ok(pushed?)
     }
 
     /// Publish the uploaded value as the row mutation.
     pub fn finish(&mut self) -> HostResult<Write> {
+        if self.failed {
+            return Err(closed());
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let write = block_on(state.binding.db.finish_streaming_value_upload(
             state.upload,
@@ -1897,6 +2247,9 @@ impl StreamingMutation {
 
     /// Finish the upload without publishing; attach it to a serializable batch.
     pub fn stage(&mut self) -> HostResult<StagedStreamingMutation> {
+        if self.failed {
+            return Err(closed());
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let staged = block_on(state.binding.db.stage_streaming_value_upload(
             state.upload,
@@ -1963,6 +2316,8 @@ impl StagedStreamingMutation {
 pub struct WireQueues {
     inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    outbound_bytes: Rc<Cell<usize>>,
+    outbound_limits: Rc<Cell<Option<(usize, usize)>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
@@ -2008,6 +2363,10 @@ impl<T: Transport> Transport for SessionClaimTransport<T> {
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.transport.try_recv()
     }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.transport.take_failure()
+    }
 }
 
 struct QueueTransport {
@@ -2016,6 +2375,15 @@ struct QueueTransport {
 
 impl WireTransport for QueueTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        if let Some((frames, bytes)) = self.queues.outbound_limits.get()
+            && (self.queues.outbound.borrow().len() >= frames
+                || frame.len() > bytes.saturating_sub(self.queues.outbound_bytes.get()))
+        {
+            return Err(TransportError::Backpressure);
+        }
+        self.queues
+            .outbound_bytes
+            .set(self.queues.outbound_bytes.get() + frame.len());
         self.queues.outbound.borrow_mut().push_back(frame);
         if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
             ready();
@@ -2058,7 +2426,58 @@ impl Link {
 
     /// Frames to send to the peer, oldest first.
     pub fn take_outbound(&self) -> Vec<Vec<u8>> {
-        self.queues.outbound.borrow_mut().drain(..).collect()
+        self.take_outbound_with_budget(usize::MAX, usize::MAX)
+    }
+
+    /// Bound a host carrier's buffered output. Configure before driving the
+    /// link; every legal frame must fit so a blocked producer can make progress.
+    /// Subscriber links also retain an ordered retry prefix bounded by at most
+    /// `max(frames, 1024)` messages and `max(bytes, MAX_LOGICAL_MESSAGE_BYTES)`
+    /// encoded bytes. Exhausting that separate budget closes the subscriber.
+    pub fn set_outbound_limits(&self, frames: usize, bytes: usize) -> HostResult<()> {
+        if frames == 0 || bytes < jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES {
+            return Err("outbound limits must admit at least one maximum wire frame".into());
+        }
+        if self.outbound_len() > frames || self.queues.outbound_bytes.get() > bytes {
+            return Err(Error::new(
+                ErrorCode::Backpressure,
+                "outbound queue exceeds requested limits",
+            )
+            .into());
+        }
+        if let LinkKind::Subscriber { id: Some(id), .. } = &self.kind {
+            // A local carrier must resume a partially sent message, unlike a
+            // socket subscriber that reconnects on pressure. Retained logical
+            // output has its own finite budget in addition to queued frames.
+            self.binding.db.bound_subscriber_output(
+                *id,
+                frames.max(1024),
+                bytes.max(jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES),
+            )?;
+        }
+        self.queues.outbound_limits.set(Some((frames, bytes)));
+        Ok(())
+    }
+
+    /// Move only whole frames that fit the carrier's remaining budget. The
+    /// rest stay ordered here, and draining a bounded queue wakes its producer.
+    pub fn take_outbound_with_budget(&self, frames: usize, bytes: usize) -> Vec<Vec<u8>> {
+        let mut queue = self.queues.outbound.borrow_mut();
+        let mut out = Vec::new();
+        let mut remaining = bytes;
+        while out.len() < frames && queue.front().is_some_and(|frame| frame.len() <= remaining) {
+            let frame = queue.pop_front().expect("checked frame");
+            remaining -= frame.len();
+            self.queues
+                .outbound_bytes
+                .set(self.queues.outbound_bytes.get() - frame.len());
+            out.push(frame);
+        }
+        drop(queue);
+        if !out.is_empty() && self.queues.outbound_limits.get().is_some() {
+            self.binding.hooks.schedule_tick();
+        }
+        out
     }
 
     /// How many frames are waiting to be sent.

@@ -1,7 +1,7 @@
 //! Activating new policies on a live authority re-checks what its replicas
 //! hold: rows a tighter read policy hides leave every subscribed replica.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;

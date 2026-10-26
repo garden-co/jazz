@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
 import { IDBFactory, IDBObjectStore, indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import { readFile } from "node:fs/promises";
@@ -12,8 +13,6 @@ import {
   INDEXEDDB_BTREE_PAGE_SIZE,
   INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
-  INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
-  INDEXEDDB_STORAGE_ADMISSION_KEY,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   INDEXEDDB_REPLICA_NODE_BYTES,
@@ -21,12 +20,12 @@ import {
   IndexedDbPageStore,
   UnsupportedStorageCodecsError,
 } from "./indexeddb-page-store.js";
-import type { IndexedDbAdmissionView } from "./indexeddb-page-store.js";
 import { loadWasmModule } from "./wasm-loader.js";
 import admissionGolden from "../../fixtures/browser-storage-admission-v1.json";
-import sqliteGolden from "../../fixtures/browser-sqlite-root-v1.json";
+import sqliteGolden from "../../fixtures/browser-sqlite-root-v2.json";
 import {
   SQLITE_BROWSER_DATABASE_VERSION,
+  SQLITE_BROWSER_ROOT_KEY,
   encodeSqliteBrowserRoot,
   sqliteReplicaKey,
 } from "./browser-sqlite-storage.js";
@@ -77,11 +76,13 @@ describe("IndexedDbPageStore", () => {
     vi.restoreAllMocks();
   });
 
-  it("publishes fresh admission without scanning and rejects missing or corrupt receipts on reopen", async () => {
+  it("publishes the current codec manifest and rejects missing or corrupt manifests on reopen", async () => {
     const name = databaseName();
     const first = await IndexedDbPageStore.open(name);
-    const admitted = first.storageAdmission();
-    expect(admitted[1]?.slice(0, 5)).toEqual(new Uint8Array([74, 83, 65, 49, 0]));
+    const fresh = await storageSnapshot(name);
+    const plane = fresh[INDEXEDDB_STORAGE_MANIFEST_STORE]!;
+    const admitted = plane.values[plane.keys.indexOf(INDEXEDDB_STORAGE_MANIFEST_KEY)];
+    expect(admitted).toEqual(INDEXEDDB_STORAGE_MANIFEST);
     await first.commit({
       expectedGeneration: 0,
       metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
@@ -89,18 +90,19 @@ describe("IndexedDbPageStore", () => {
     });
     await first.close();
     const reopened = await IndexedDbPageStore.open(name);
-    expect(reopened.storageAdmission()).toEqual(admitted);
+    const again = (await storageSnapshot(name))[INDEXEDDB_STORAGE_MANIFEST_STORE]!;
+    expect(again.values[again.keys.indexOf(INDEXEDDB_STORAGE_MANIFEST_KEY)]).toEqual(admitted);
     expect(await reopened.readPage(1)).toEqual(new Uint8Array([7]));
     await reopened.close();
     for (const receipt of [undefined, new Uint8Array([74, 83, 65, 49, 0])]) {
       const raw = await openRawDatabase(name);
       const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
       const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-      if (receipt === undefined) plane.delete(INDEXEDDB_STORAGE_ADMISSION_KEY);
-      else plane.put(receipt, INDEXEDDB_STORAGE_ADMISSION_KEY);
+      if (receipt === undefined) plane.delete(INDEXEDDB_STORAGE_MANIFEST_KEY);
+      else plane.put(receipt, INDEXEDDB_STORAGE_MANIFEST_KEY);
       await transactionDone(tx);
       raw.close();
-      await expect(IndexedDbPageStore.open(name)).rejects.toThrow("storage admission receipt");
+      await expect(IndexedDbPageStore.open(name)).rejects.toThrow("storage epoch manifest");
       const verify = await openRawDatabase(name);
       const pages = verify.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
       expect(await requestResult(pages.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
@@ -111,32 +113,15 @@ describe("IndexedDbPageStore", () => {
     }
   });
 
-  it("keeps refused legacy admission read-only, revokes the view, and releases the lock for retry", async () => {
+  it("refuses old codec profiles without legacy WASM validation or changing records and releases the lock for retry", async () => {
     const name = databaseName();
     await installEmptyEpochOneFixture(name);
     const before = await storageSnapshot(name);
-    let retained: IndexedDbAdmissionView | undefined;
     const wasm = await loadWasmModule();
-    const validate = wasm.WasmDb.preflightBrowserEpochOne;
-    const preflight = vi
-      .spyOn(wasm.WasmDb, "preflightBrowserEpochOne")
-      .mockImplementation(async (handle) => {
-        retained = handle as IndexedDbAdmissionView;
-        expect(await retained.metadata()).toBeNull();
-        expect(await retained.readPage(1)).toBeNull();
-        expect(Object.isFrozen(retained)).toBe(true);
-        expect(Object.keys(retained).sort()).toEqual(["metadata", "readPage"]);
-        await expect(IndexedDbPageStore.open(name)).rejects.toThrow("active in another");
-        // Exercise the real SQLite binding's explicit old-protocol refusal.
-        await validate(handle);
-      });
+    const preflight = vi.spyOn(wasm.WasmDb, "preflightBrowserEpochOne");
     for (let attempt = 1; attempt <= 2; attempt++) {
-      await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
-        "Groove browser epoch admission on SQLite is not supported on SQLite yet",
-      );
-      expect(preflight).toHaveBeenCalledTimes(attempt);
-      expect(() => retained!.metadata()).toThrow("invalidated");
-      expect(() => retained!.readPage(1)).toThrow("invalidated");
+      await expect(IndexedDbPageStore.open(name)).rejects.toThrow("unsupported storage format");
+      expect(preflight).not.toHaveBeenCalled();
       expect(await storageSnapshot(name)).toEqual(before);
     }
     const epoch = await acquireBrowserPhysicalDatabaseEpoch(name);
@@ -146,6 +131,7 @@ describe("IndexedDbPageStore", () => {
   it("rolls back an aborted SQLite ready publication and retries with the same root identity", async () => {
     const name = databaseName();
     const owner = "alice";
+    const expectedPath = `/jazz-${createHash("sha256").update(name).digest("hex").slice(0, 32)}.sqlite`;
     const stores: IndexedDbPageStore[] = [];
     const first = await IndexedDbPageStore.open(name, { owner, format: "sqlite" });
     stores.push(first);
@@ -170,7 +156,7 @@ describe("IndexedDbPageStore", () => {
       if (
         this.transaction.db.name === name &&
         this.name === INDEXEDDB_STORAGE_MANIFEST_STORE &&
-        key === INDEXEDDB_STORAGE_MANIFEST_KEY
+        key === SQLITE_BROWSER_ROOT_KEY
       ) {
         expect(value).toEqual(encodeSqliteBrowserRoot({ ...root, state: "ready" }));
         expect(runtime.flush).toHaveBeenCalledOnce();
@@ -186,7 +172,7 @@ describe("IndexedDbPageStore", () => {
         first.openSqliteRuntime(async (storage) => {
           expect(storage).toEqual({
             backend: "indexeddb",
-            path: `/jazz-sqlite-v1-${root.node}.sqlite`,
+            path: expectedPath,
             requireExisting: false,
           });
           return runtime;
@@ -202,13 +188,13 @@ describe("IndexedDbPageStore", () => {
       expect(retry.replicaNode).toEqual(node);
       await retry.openSqliteRuntime(async (storage) => {
         expect(storage.requireExisting).toBe(false);
-        expect(storage.path).toBe(`/jazz-sqlite-v1-${root.node}.sqlite`);
+        expect(storage.path).toBe(expectedPath);
         return { flush: async () => undefined, close: async () => undefined };
       });
       const after = await storageSnapshot(name);
       const expected = structuredClone(before);
       const plane = expected[INDEXEDDB_STORAGE_MANIFEST_STORE]!;
-      plane.values[plane.keys.indexOf(INDEXEDDB_STORAGE_MANIFEST_KEY)] = encodeSqliteBrowserRoot({
+      plane.values[plane.keys.indexOf(SQLITE_BROWSER_ROOT_KEY)] = encodeSqliteBrowserRoot({
         ...root,
         state: "ready",
       });
@@ -219,7 +205,7 @@ describe("IndexedDbPageStore", () => {
       expect(reopened.replicaNode).toEqual(node);
       await reopened.openSqliteRuntime(async (storage) => {
         expect(storage.requireExisting).toBe(true);
-        expect(storage.path).toBe(`/jazz-sqlite-v1-${root.node}.sqlite`);
+        expect(storage.path).toBe(expectedPath);
         return { flush: async () => undefined, close: async () => undefined };
       });
     } finally {
@@ -272,7 +258,8 @@ describe("IndexedDbPageStore", () => {
       const create = fakeIndexedDb.open(name, SQLITE_BROWSER_DATABASE_VERSION);
       create.onupgradeneeded = () => {
         const plane = create.result.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-        plane.put(expected, INDEXEDDB_STORAGE_MANIFEST_KEY);
+        plane.put(INDEXEDDB_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
+        plane.put(expected, SQLITE_BROWSER_ROOT_KEY);
         plane.put(node.buffer, INDEXEDDB_REPLICA_NODE_KEY);
         plane.put(owner, INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY);
       };
@@ -294,7 +281,7 @@ describe("IndexedDbPageStore", () => {
           return bytes(copy);
         };
         for (const invalid of [
-          changed(0, "jazz.browser.sqlite-root.v2"),
+          changed(0, "jazz.browser.sqlite-root.v1"),
           changed(1, "other-root"),
           changed(2, "bob"),
           changed(3, "02".repeat(16)),
@@ -309,17 +296,12 @@ describe("IndexedDbPageStore", () => {
           const raw = await openRawDatabase(name);
           const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
           const done = transactionDone(tx);
-          tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
-            invalid,
-            INDEXEDDB_STORAGE_MANIFEST_KEY,
-          );
+          tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(invalid, SQLITE_BROWSER_ROOT_KEY);
           await done;
           raw.close();
           const corrupt = await storageSnapshot(name);
           const records = corrupt[INDEXEDDB_STORAGE_MANIFEST_STORE]!;
-          expect(records.values[records.keys.indexOf(INDEXEDDB_STORAGE_MANIFEST_KEY)]).toEqual(
-            invalid,
-          );
+          expect(records.values[records.keys.indexOf(SQLITE_BROWSER_ROOT_KEY)]).toEqual(invalid);
           await expect(IndexedDbPageStore.open(name, { owner, format: "sqlite" })).rejects.toThrow(
             "Missing or invalid SQLite browser storage manifest",
           );
@@ -932,19 +914,20 @@ describe("IndexedDbPageStore", () => {
 
   it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
     const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
-    const withoutNodeFormat = required.filter(
-      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.node-storage.v3",
-    );
+    // The last Groove browser root's inventory (alpha.59).
+    const groove = [
+      "groove.dictionary.v1",
+      "groove.durable-index.v2",
+      "groove.large-value.v2",
+      "groove.ordered-chunk-storage.v2",
+      "groove.ordered-kv.v1",
+      "jazz.node-storage.v2",
+    ];
     for (const [requiredCodecIds, missing, unknown] of [
-      [withoutNodeFormat, ["groove.durable-index.v2", "jazz.node-storage.v3"], []],
+      [groove, ["jazz.sqlite-storage.v2"], groove],
+      [[], ["jazz.sqlite-storage.v2"], []],
       [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
-      [required.filter((codec) => codec !== "jazz.node-storage.v3"), ["jazz.node-storage.v3"], []],
-      [required.filter((codec) => codec !== "groove.dictionary.v1"), ["groove.dictionary.v1"], []],
-      [
-        [...required, "jazz.subscription-program-fact-key.v1"].sort(),
-        [],
-        ["jazz.subscription-program-fact-key.v1"],
-      ],
+      [["jazz.sqlite-storage.v1"], ["jazz.sqlite-storage.v2"], ["jazz.sqlite-storage.v1"]],
     ] as const) {
       const name = databaseName();
       await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });
@@ -1104,7 +1087,10 @@ async function installEmptyEpochOneFixture(name: string): Promise<void> {
   const raw = await createRawEpochDatabase(name);
   const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
   const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-  plane.put(INDEXEDDB_EPOCH_1_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
+  plane.put(
+    { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds: ["jazz.sqlite-storage.v1"] },
+    INDEXEDDB_STORAGE_MANIFEST_KEY,
+  );
   plane.put(epochOneReplicaNode().buffer, INDEXEDDB_REPLICA_NODE_KEY);
   await transactionDone(tx);
   raw.close();
@@ -1196,12 +1182,7 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
-function hexBytes(value: string): Uint8Array {
-  const trimmed = value.trim();
-  if (trimmed.length % 2 !== 0) throw new Error("hex fixture must have even length");
-  return Uint8Array.from(
-    Array.from({ length: trimmed.length / 2 }, (_, index) =>
-      Number.parseInt(trimmed.slice(index * 2, index * 2 + 2), 16),
-    ),
-  );
+function hexBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/\s/g, "");
+  return Uint8Array.from(clean.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
 }

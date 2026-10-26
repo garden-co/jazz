@@ -5,9 +5,9 @@ fn corrupt(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorCode::Storage, error.to_string())
 }
 
-// jazz.sqlite.relay-upload.v1: explicit magic/version followed by exactly one
+// jazz.sqlite.relay-upload.v2: explicit magic/version followed by exactly one
 // existing Commit wire message. The version pins the nested wire layout too.
-const JOURNAL_PREFIX: &[u8] = b"JRU\x01";
+const JOURNAL_PREFIX: &[u8] = b"JRU\x02";
 
 fn journal_bytes(message: &SyncMessage) -> Vec<u8> {
     let mut bytes = JOURNAL_PREFIX.to_vec();
@@ -144,6 +144,7 @@ impl Inner {
                 SyncMessage::Commit {
                     author: prior_author,
                     session: prior_session,
+                    expect: prior_expect,
                     ..
                 },
             ) = (&message, &mut request)
@@ -164,6 +165,10 @@ impl Inner {
                 commit_who(None, author.as_deref(), session.is_some()).map_err(corrupt)?;
                 *prior_author = author.clone();
                 *prior_session = session.clone();
+                // Forwarding clears hop-local echo hints. The original
+                // request stays journalled for exact retry admission, while
+                // replay compares the same normalized forwarded payload.
+                prior_expect.clear();
             }
             if encode(&message) != encode(&request) || self.applied_fate(node, tx as u64)?.is_some()
             {
@@ -296,7 +301,7 @@ impl Db {
             ops,
             author,
             session,
-            updated_at,
+            expect: _,
         } = request.clone()
         else {
             unreachable!()
@@ -306,6 +311,17 @@ impl Db {
         }
         let who = commit_who(policy, author.as_deref(), session.is_some())?;
         let mut inner = self.inner();
+        if inner.scope_isolated_owner {
+            // A private foreground's payload is already bound to its admitted
+            // owner, including sealed initialization publications. Ordinary
+            // session normalization must not change that durable identity.
+            inner.require_owner_subject(inner.sessions[index].identity)?;
+            if author.as_deref() != Some(inner.identity.author.canonical()) || session.is_none() {
+                return Err(rejected(
+                    "private owner upload differs from its admitted author",
+                ));
+            }
+        }
         if inner.non_durable {
             return Err(unsupported(
                 "upload forwarding from a non-durable foreground",
@@ -361,7 +377,11 @@ impl Db {
             ops,
             author,
             session,
-            updated_at,
+            // Echo suppression is a hop-local optimization. This relay
+            // journals original operations and writer identity, but cannot
+            // promise it holds the sender's speculative image. Ask authority
+            // to ship its images before forwarding the qualified receipt.
+            expect: Vec::new(),
         };
         // Reject unsupported coordinates before journalling, so a rejected Move
         // or unknown table cannot later poison receipt reconciliation.

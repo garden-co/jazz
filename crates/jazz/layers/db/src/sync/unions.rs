@@ -1,6 +1,7 @@
-//! Exact UNION occurrences for cold reads and live subscriptions. The authority applies all
-//! arm and outer windows; replicas hydrate only the named outputs and readable
-//! witnesses, then recheck their ordinary predicates and permissions at its cut.
+//! UNION prefix coverage for cold reads and scoped live subscriptions. The
+//! authority ships the prefix before the requested outer window. Qualified
+//! reads pair its semantic occurrences with permission witnesses at one cut;
+//! replicas check that prefix before applying their requested outer window.
 
 use super::*;
 use crate::query::{
@@ -83,6 +84,15 @@ impl UnionLive {
 }
 
 pub(super) enum LiveUpdate {
+    OrdinarySettled {
+        id: u64,
+        through: u64,
+        global: bool,
+    },
+    Rejected {
+        id: u64,
+        error: Error,
+    },
     Receipt {
         id: u64,
         through: u64,
@@ -111,6 +121,30 @@ fn wait_for_coverage() -> Error {
 }
 
 impl Inner {
+    pub(in crate::db) fn union_has_pending_inputs(
+        &self,
+        tables: &BTreeSet<String>,
+    ) -> Result<bool, Error> {
+        // Both indexes start with the physical table. Never scan unrelated
+        // pending uploads to classify a query's optimistic preview.
+        for table in tables {
+            if self
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _jazz_shadow WHERE t=?1) OR \
+                     EXISTS(SELECT 1 FROM _jazz_owner_input_rows_v1 \
+                     WHERE t=?1 AND pending=1 AND writes=1)",
+                    [table],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(storage)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(in crate::db) fn live_union(
         &self,
         prepared: &PreparedQuery,
@@ -125,6 +159,7 @@ impl Inner {
                 &prepared.binding,
                 deleted,
                 scope,
+                RemoteReach::REMOTE,
             ))?
             .union
             .clone()
@@ -139,10 +174,32 @@ impl Inner {
         let mut changed = BTreeMap::new();
         for update in updates {
             let id = match &update {
-                LiveUpdate::Receipt { id, .. }
+                LiveUpdate::OrdinarySettled { id, .. }
+                | LiveUpdate::Rejected { id, .. }
+                | LiveUpdate::Receipt { id, .. }
                 | LiveUpdate::Evidence { id, .. }
                 | LiveUpdate::Settled { id, .. } => *id,
             };
+            if let LiveUpdate::OrdinarySettled {
+                through, global, ..
+            } = update
+            {
+                if let Some(remote) = client
+                    .remote_ids
+                    .get(&id)
+                    .and_then(|key| client.remote.get_mut(key))
+                {
+                    remote.answered.set(true);
+                    remote.global.set(global);
+                    remote.through = Some(through);
+                    remote.resumed = false;
+                    // Coverage can settle an empty downstream read without a
+                    // changed row. Notify the relay only after this evidence
+                    // batch has committed, just like a relayed fetch answer.
+                    client.relay_ready = true;
+                }
+                continue;
+            }
             let Some(key) = client.remote_ids.get(&id) else {
                 continue;
             };
@@ -156,6 +213,8 @@ impl Inner {
                 continue;
             }
             let error = match update {
+                LiveUpdate::OrdinarySettled { .. } => unreachable!("handled above"),
+                LiveUpdate::Rejected { error, .. } => Some(error),
                 LiveUpdate::Receipt {
                     through,
                     occurrences,
@@ -193,8 +252,17 @@ impl Inner {
                                     .map(|item| item.row)
                                     .eq(rows.iter().copied()) =>
                         {
-                            pending.evidence = Some(evidence);
-                            None
+                            let covered =
+                                evidence.iter().map(|row| row.id).collect::<BTreeSet<_>>();
+                            if rows.iter().all(|row| covered.contains(row)) {
+                                pending.evidence = Some(evidence);
+                                None
+                            } else {
+                                Some(Error::new(
+                                    ErrorCode::Protocol,
+                                    "scoped live UNION evidence omits a covered root",
+                                ))
+                            }
                         }
                         _ => Some(Error::new(
                             ErrorCode::Protocol,
@@ -229,6 +297,7 @@ impl Inner {
                         remote.resumed = false;
                         client.known = client.known.max(through);
                         changed.insert(Rc::as_ptr(live) as usize, live.clone());
+                        client.relay_ready = true;
                         None
                     }
                     _ => Some(Error::new(
@@ -242,6 +311,7 @@ impl Inner {
                 remote.global.set(false);
                 live.retire_pending();
                 *remote.refused.borrow_mut() = Some(error);
+                client.relay_ready = true;
             }
         }
         changed.into_values().collect()
@@ -254,24 +324,7 @@ impl Inner {
         read: &ReadSpec,
         live: &UnionLive,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
-        // Existing indexes start with the physical table. Probe only this
-        // query's inputs instead of scanning unrelated pending upload units.
-        let mut pending = false;
-        for table in live.tables.borrow().iter() {
-            pending = self
-                .conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM _jazz_shadow WHERE t=?1) OR \
-                 EXISTS(SELECT 1 FROM _jazz_owner_input_rows_v1 \
-                 WHERE t=?1 AND pending=1 AND writes=1)",
-                    [table],
-                    |row| row.get(0),
-                )
-                .map_err(storage)?;
-            if pending {
-                break;
-            }
-        }
+        let pending = self.union_has_pending_inputs(&live.tables.borrow())?;
         live.optimistic.set(pending);
         let coverage = live.coverage.borrow().clone();
         let mut materialization = read.clone();
@@ -312,7 +365,7 @@ impl Inner {
                 wait_for_coverage()
             }
         })?;
-        Ok((rows, dependencies))
+        Ok((union_page(&prepared.query, rows), dependencies))
     }
 }
 
@@ -504,15 +557,135 @@ pub(super) fn exact(
     Ok(exact)
 }
 
+/// Ordinary receipts list prefix roots rather than arm occurrences. Constrain
+/// each leaf to those roots, retaining the requested outer window. Inner
+/// offsets use separately hydrated predecessors and require checking the
+/// evaluated prefix against the receipt before publishing it.
+pub(super) fn prefix_roots(
+    prepared: &PreparedQuery,
+    roots: &[[u8; 16]],
+) -> Result<PreparedQuery, Error> {
+    // Inner windows also consume predecessor support, which is deliberately
+    // absent from the final result's root list. Evaluate their original shape
+    // over that support, then check the complete result against the receipt.
+    if !predecessor_queries(&prepared.query)?.is_empty() {
+        return Ok(prepared.clone());
+    }
+    fn restrict(expr: &RelationExpr, roots: &[[u8; 16]]) -> Result<RelationExpr, Error> {
+        if let Some(parts) = relation_union_parts(expr) {
+            let mut output = RelationExpr::Union {
+                inputs: parts
+                    .inputs
+                    .into_iter()
+                    .map(|arm| {
+                        Ok(RelationUnionArm {
+                            input: restrict(&arm.input, roots)?,
+                            label: arm.label,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?,
+            };
+            if let Some(terms) = parts.order_by {
+                output = RelationExpr::OrderBy {
+                    input: Box::new(output),
+                    terms,
+                };
+            }
+            if let Some(offset) = parts.offset {
+                output = RelationExpr::Offset {
+                    input: Box::new(output),
+                    offset,
+                };
+            }
+            if let Some(limit) = parts.limit {
+                output = RelationExpr::Limit {
+                    input: Box::new(output),
+                    limit,
+                };
+            }
+            return Ok(output);
+        }
+        let relation = RelationQuery { rel: expr.clone() };
+        let (scope, _) = relation_output_projection(&relation)
+            .map_err(|error| query_error(error.to_string()))?;
+        Ok(RelationExpr::Filter {
+            input: Box::new(expr.clone()),
+            predicate: RelationPredicate::In {
+                left: RelationColumnRef {
+                    scope: Some(scope),
+                    column: "id".to_owned(),
+                },
+                values: roots
+                    .iter()
+                    .map(|row| {
+                        RelationValueRef::literal(crate::tools::Value::Uuid(
+                            jazz_types::object::ObjectId::from_uuid(RowUuid::from_bytes(*row).0),
+                        ))
+                    })
+                    .collect(),
+            },
+        })
+    }
+    let relation = RelationQuery {
+        rel: restrict(
+            &prepared.query.relation.as_ref().expect("UNION query").rel,
+            roots,
+        )?,
+    };
+    let mut bounded = prepared.clone();
+    bounded.query =
+        relation_query_to_query(&relation).map_err(|error| query_error(error.to_string()))?;
+    Ok(bounded)
+}
+
+/// Each inner offset needs the prefix before that window as well as its output.
+/// The window must bound this extra work; the outer page alone cannot bound an
+/// arbitrarily ordered, unbounded inner result.
+fn predecessor_queries(query: &Query) -> Result<Vec<Query>, Error> {
+    fn walk(expr: &RelationExpr, outer: bool, out: &mut Vec<Query>) -> Result<(), Error> {
+        let relation = RelationQuery { rel: expr.clone() };
+        let query =
+            relation_query_to_query(&relation).map_err(|error| query_error(error.to_string()))?;
+        let window = relation_union_parts(expr)
+            .map(|parts| (parts.offset.unwrap_or(0), parts.limit))
+            .unwrap_or((query.offset, query.limit));
+        if !outer && window.0 > 0 {
+            let limit = window.1.ok_or_else(|| {
+                unsupported("remote UNION reads with an inner offset without a limit")
+            })?;
+            let size = window.0.checked_add(limit).ok_or_else(|| {
+                unsupported("remote UNION inner prefixes exceeding the evidence budget")
+            })?;
+            if size > scoped_reads::MAX_EVIDENCE {
+                return Err(unsupported(
+                    "remote UNION inner prefixes exceeding the evidence budget",
+                ));
+            }
+            out.push(remote_query(&query).into_owned());
+        }
+        if let Some(parts) = relation_union_parts(expr) {
+            for arm in parts.inputs {
+                walk(&arm.input, false, out)?;
+            }
+        }
+        Ok(())
+    }
+    let mut queries = Vec::new();
+    if let Some(relation) = &query.relation {
+        walk(&relation.rel, true, &mut queries)?;
+    }
+    Ok(queries)
+}
+
 impl Db {
-    pub(in crate::db) fn remote_fetch_shape(query: &Query) -> Result<(), Error> {
+    pub(in crate::db) fn remote_fetch_shape(&self, query: &Query) -> Result<(), Error> {
         if !crate::db::relation::is_union(query) {
-            return Self::remote_shape(query);
+            return self.remote_shape(query);
         }
         for (_, leaf) in leaves(query)? {
             let mut leaf = leaf;
             leaf.relation = None;
-            Self::remote_shape(&leaf)?;
+            self.remote_shape(&leaf)?;
             // Snapshot witness hydration uses the existing bounded indexed
             // existential traversal. Recursive inputs need their own receipt.
             if !leaf.reachable.is_empty() || !leaf.inherits.is_empty() {
@@ -524,6 +697,54 @@ impl Db {
 }
 
 impl Inner {
+    /// Ship only explicitly bounded inner prefixes, with their normal query
+    /// witnesses and read policies. These rows support reconstruction and do
+    /// not enlarge the final result's receipt.
+    pub(super) fn union_predecessor_inputs(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<Vec<Image>, Error> {
+        let mut images = Vec::new();
+        let mut budget = scoped_reads::MAX_EVIDENCE;
+        for query in predecessor_queries(&prepared.query)? {
+            let requested = query
+                .relation
+                .as_ref()
+                .and_then(|rel| relation_union_parts(&rel.rel))
+                .and_then(|parts| parts.limit)
+                .or(query.limit)
+                .ok_or_else(|| unsupported("unbounded remote UNION predecessor query"))?;
+            budget = budget.checked_sub(requested).ok_or_else(|| {
+                unsupported("remote UNION inner prefixes exceeding the evidence budget")
+            })?;
+            let mut prefix = prepared.clone();
+            prefix.query = normalize_relation(&query, &self.schema)?.unwrap_or(query);
+            let rows = self.run(&prefix, identity, read)?;
+            let table = self.schema.stored_table(&prefix.query.table)?;
+            let mut roots = Vec::new();
+            for row in &rows {
+                let id = row.id.as_bytes().to_vec();
+                let seq = row.seq as i64;
+                let mut found = self.images_where(table, false, ID_AT_SEQ, &[&id, &seq])?;
+                if found.is_empty() {
+                    found = self.images_where(table, true, ID_AT_SEQ, &[&id, &seq])?;
+                }
+                roots.extend(found);
+            }
+            let through = read.cut.as_ref().map_or(self.seq, |cut| cut.seq);
+            let inputs = if crate::db::relation::is_union(&prefix.query) {
+                self.union_inputs_with_budget(&prefix, identity, &rows, through, &mut budget)?
+            } else {
+                self.scoped_query_images(&prefix, identity, &roots, through, &mut budget)?
+            };
+            images.extend(roots);
+            images.extend(inputs);
+        }
+        Ok(images)
+    }
+
     /// Validate all witness lookups before executing even an empty UNION.
     pub(in crate::db) fn check_union_shape(&self, prepared: &PreparedQuery) -> Result<(), Error> {
         let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));

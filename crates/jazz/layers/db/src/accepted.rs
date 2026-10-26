@@ -702,18 +702,14 @@ impl Db {
                     ));
                 }
             }
-            // Ordinary rows hydrate a prefix and apply their offset locally.
-            // UNION occurrences already describe the final page. Both retain
-            // the original full query in the transaction read set.
-            expected = Some(
-                rows.into_iter()
-                    .skip(if crate::db::relation::is_union(&prepared.query) {
-                        0
-                    } else {
-                        prepared.query.offset
-                    })
-                    .collect::<Vec<_>>(),
-            );
+            // Both ordinary and UNION answers hydrate a prefix. Compare the
+            // requested page, while retaining the full query for commit-time
+            // read and phantom validation.
+            expected = Some(if crate::db::relation::is_union(&prepared.query) {
+                union_page(&prepared.query, rows)
+            } else {
+                rows.into_iter().skip(prepared.query.offset).collect()
+            });
         }
         let prepared = &bound_prepared;
         let cut = {

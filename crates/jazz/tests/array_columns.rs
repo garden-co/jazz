@@ -2,7 +2,7 @@
 //! declared element type, compared whole and searched by element.
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};

@@ -154,6 +154,58 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("requires a private owner capability instead of falling back to ordinary mode", () => {
+    const ordinary = vi.fn();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({ setNonDurableClient: ordinary }) },
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    expect(() => runtime.setPrivateOwnerClient()).toThrow("rebuild the native artifact");
+    expect(ordinary).not.toHaveBeenCalled();
+  });
+
+  it("keeps private owner admission mandatory after selecting ordinary mode again", async () => {
+    let admit!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      admit = resolve;
+    });
+    const wait = vi.fn(() => admission);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setNonDurableClient: () => undefined,
+            setPrivateOwnerClient: () => undefined,
+            waitForStorageOwner: wait,
+          }),
+      },
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.setNonDurableClient();
+    await runtime.waitForStorageOwner();
+    expect(wait).not.toHaveBeenCalled();
+    runtime.setPrivateOwnerClient();
+    runtime.setNonDurableClient();
+    let settled = false;
+    const waiting = runtime.waitForStorageOwner().then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(wait).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
+    admit();
+    await waiting;
+    expect(settled).toBe(true);
+  });
+
   it("encodes indexes and merge strategies in schema source", () => {
     const schemaBytes = encodeSchema({
       counters: {

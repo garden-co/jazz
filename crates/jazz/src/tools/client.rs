@@ -302,7 +302,7 @@ impl Forwarder {
             });
             let id = match held {
                 Some(at) => decoder.key(&self.rows.remove(at))?,
-                None => jazz_db::values::occurrence_key_with_union_arm(
+                None => jazz_db::values::occurrence_key(
                     row.row_uuid,
                     row.version,
                     &row.joined,
@@ -513,7 +513,12 @@ impl JazzClient {
                 .await
             }
         }
-        .map_err(|error| JazzError::Storage(error.to_string()))?;
+        .map_err(|error| match error.code {
+            crate::db::ErrorCode::UnsupportedStorageCodecs => {
+                JazzError::UnsupportedStorage(error.message)
+            }
+            _ => JazzError::Storage(error.to_string()),
+        })?;
         if let Some(session) = default_session.as_ref() {
             db.set_identity_claims(identity.author, session_claims_to_core_claims(session)?);
         }
@@ -1934,12 +1939,7 @@ impl Decoder<'_> {
                 NodeUuid(*node),
             )));
         }
-        Ok(jazz_db::values::occurrence_key_with_union_arm(
-            row.row_uuid(),
-            row.root_version(),
-            row.joined_rows(),
-            row.union_arm(),
-        ))
+        Ok(row.occurrence_key())
     }
 
     fn values(&self, row: &CurrentRow) -> Result<Vec<QueryResultField>> {

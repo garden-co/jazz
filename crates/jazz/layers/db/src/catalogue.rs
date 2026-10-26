@@ -73,11 +73,11 @@ impl Inner {
             .ok_or_else(|| absent("current policy schema has no accepted catalogue descriptor"))?;
         type LocalTable = (String, BTreeMap<GlobalPhysicalColumnId, String>);
         let mut local: BTreeMap<GlobalPhysicalTableId, LocalTable> = BTreeMap::new();
-        for admitted in &self.admitted {
-            let Some(names) = self.names.get(&admitted.version_id()) else {
+        for (version, _) in &self.admitted {
+            let Some(names) = self.names.get(version) else {
                 continue;
             };
-            let Some(descriptor) = self.catalogue_schema(admitted.version_id())? else {
+            let Some(descriptor) = self.catalogue_schema(*version)? else {
                 continue;
             };
             for (name, identity) in &descriptor.identities.tables {
@@ -305,7 +305,7 @@ impl Inner {
         if self.catalogue_schema(head.current)?.is_none() {
             return Err(invalid("catalogue current schema has no accepted manifest"));
         }
-        self.conn.execute("INSERT INTO _jazz_catalogue_head_v1(slot,value) VALUES(1,?1) ON CONFLICT(slot) DO UPDATE SET value=excluded.value",[encode(head)?]).map_err(storage)?;
+        self.conn.execute("INSERT INTO _jazz_catalogue_head_v1(slot,value) VALUES(1,?1) ON CONFLICT(slot) DO UPDATE SET value=excluded.value WHERE value<>excluded.value",[encode(head)?]).map_err(storage)?;
         self.catalogue_capture_pending.set(true);
         Ok(())
     }

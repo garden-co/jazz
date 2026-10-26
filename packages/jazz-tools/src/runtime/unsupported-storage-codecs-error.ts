@@ -11,9 +11,10 @@ export const UNSUPPORTED_STORAGE_CODECS_ERROR_CODE = "unsupported_storage_codecs
  *
  * Codec IDs carry their format version (`name.vN`): `missing` names formats
  * this build requires that the store lacks, and `unknown` names formats the
- * store was written with that this build does not read. A native SQLite root
- * refusal supplies `format` instead: the named layout the opener requires.
- * Its codec lists are empty because that refusal does not inspect old codecs.
+ * store was written with that this build does not read. The browser's store
+ * manifest declares codec IDs; the native SQLite engine stamps one storage
+ * format number instead, names it in the message, and leaves both lists
+ * empty.
  *
  * Class identity does not survive native bindings or browser worker
  * messages, so detect the refusal with {@link isUnsupportedStorageCodecsError},
@@ -57,26 +58,26 @@ export function isUnsupportedStorageCodecsError(error: unknown): error is Error 
 
 /**
  * Rebuild a storage-format refusal that crossed a binding or relay as an
- * {@link UnsupportedStorageCodecsError}, keeping its message and codec lists
- * or native storage format. Refusals without either complete codec lists or a
- * nonempty format identifier are returned unchanged.
+ * {@link UnsupportedStorageCodecsError}, keeping its message and codec lists.
+ * A refusal that carries no lists (the native SQLite engine's, whose message
+ * names the formats) gets empty ones. Any other value, or a refusal with
+ * incomplete or malformed lists or an invalid format, is returned unchanged.
  */
 export function asUnsupportedStorageCodecsError(error: unknown): unknown {
   if (error instanceof UnsupportedStorageCodecsError) return error;
   if (!isUnsupportedStorageCodecsError(error)) return error;
-  const { missing, unknown } = error;
-  const format =
-    typeof error.format === "string" && error.format.length > 0 ? error.format : undefined;
-  const lists = isStringArray(missing) && isStringArray(unknown);
-  // A format-only refusal has no codec lists. Malformed or partial lists
-  // must not be silently replaced with empty ones merely because format exists.
-  if (!lists && !(format !== undefined && missing === undefined && unknown === undefined))
-    return error;
+  const { missing, unknown, format } = error;
+  if (format !== undefined && (typeof format !== "string" || format.length === 0)) return error;
+  const withoutLists = missing === undefined && unknown === undefined;
+  if (!withoutLists && (!isStringArray(missing) || !isStringArray(unknown))) return error;
   return new UnsupportedStorageCodecsError(
-    lists ? [...missing] : [],
-    lists ? [...unknown] : [],
+    [...(missing ?? [])],
+    [...(unknown ?? [])],
     error.message,
-    { cause: error, ...(format === undefined ? {} : { format }) },
+    {
+      cause: error,
+      ...(format === undefined ? {} : { format }),
+    },
   );
 }
 

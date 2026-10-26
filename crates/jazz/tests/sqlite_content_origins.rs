@@ -21,6 +21,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 fn open(node: u8, path: Option<&Path>, private: bool) -> Db {
+    open_as(node, path, private, AuthorSubject::SYSTEM)
+}
+fn open_as(node: u8, path: Option<&Path>, private: bool, author: AuthorSubject) -> Db {
     let policies = if private {
         TablePolicies::new()
             .with_select(PolicyExpr::False)
@@ -41,7 +44,7 @@ fn open(node: u8, path: Option<&Path>, private: bool) -> Db {
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
+            author,
         },
     );
     match path {
@@ -149,10 +152,18 @@ fn fetch(client: &Db, dbs: &[&Db], deleted: bool) -> Vec<CurrentRow> {
     try_fetch(client, dbs, deleted).unwrap()
 }
 fn try_fetch(client: &Db, dbs: &[&Db], deleted: bool) -> Result<Vec<CurrentRow>, jazz::db::Error> {
+    try_fetch_at_tier(client, dbs, deleted, ReadTier::Remote)
+}
+fn try_fetch_at_tier(
+    client: &Db,
+    dbs: &[&Db],
+    deleted: bool,
+    tier: ReadTier,
+) -> Result<Vec<CurrentRow>, jazz::db::Error> {
     let bytes = postcard::to_allocvec(&Query::from("notes")).unwrap();
     let read = client.all_serialized_query(
         &bytes,
-        opts(ReadTier::Remote, deleted),
+        opts(tier, deleted),
         None,
         None,
         None,
@@ -337,26 +348,37 @@ fn relay_forwards_origins_for_ordinary_reads() {
 
 /// This transport fault models an older/incomplete owner cache. The row may
 /// remain readable, but a missing upstream origin must not become the relay's
-/// own transaction. Pending owner content is never exported as accepted.
+/// own transaction. Foregrounds read the offline cache at LocalFirst; a strict
+/// Remote read would wait for the authority. Pending content has no accepted origin.
 #[test]
 fn relay_never_invents_missing_or_optimistic_origins() {
     let server = open(3, None, false);
     server.set_authority();
     let row = insert(&server, "unknown origin");
-    let owner = open(2, None, false);
-    connect(&owner, &server, AuthorSubject::SYSTEM, true);
+    let account = AuthorSubject::authenticated("https://origins.example", "alice").unwrap();
+    let owner = open_as(2, None, false, account);
+    connect(&owner, &server, account, true);
+    owner.set_scope_isolated_storage_owner().unwrap();
     fetch(&owner, &[&owner, &server], false);
     assert!(history(&owner, row.row_uuid()).is_empty());
-    let alice = open(1, None, false);
-    let sent = connect(&alice, &owner, AuthorSubject::SYSTEM, false);
-    assert_eq!(fetch(&alice, &[&alice, &owner], false).len(), 1);
+    owner.set_remote_link_hint(RemoteLinkHint::Failed);
+    let alice = open_as(1, None, false, account);
+    alice.set_private_owner_client().unwrap();
+    let sent = connect(&alice, &owner, account, false);
+    assert_eq!(
+        try_fetch_at_tier(&alice, &[&alice, &owner], false, ReadTier::LocalFirst)
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(history(&alice, row.row_uuid()).is_empty());
     assert!(origins(&sent.borrow()).is_empty());
     owner.set_remote_link_hint(RemoteLinkHint::Failed);
     block_on(owner.update("notes", row.row_uuid(), text("pending"), Default::default())).unwrap();
-    let bob = open(4, None, false);
-    let sent = connect(&bob, &owner, AuthorSubject::SYSTEM, false);
-    let rows = fetch(&bob, &[&bob, &owner], false);
+    let bob = open_as(4, None, false, account);
+    bob.set_private_owner_client().unwrap();
+    let sent = connect(&bob, &owner, account, false);
+    let rows = try_fetch_at_tier(&bob, &[&bob, &owner], false, ReadTier::LocalFirst).unwrap();
     assert_eq!(cell(&rows[0], "text"), Value::String("pending".into()));
     assert!(origins(&sent.borrow()).is_empty());
     assert!(history(&bob, row.row_uuid()).is_empty());
@@ -409,22 +431,25 @@ fn content_witness_and_origin_survive_an_offline_restart() {
 /// to ordinary reads must not change its tag, field order or integer encoding.
 #[test]
 fn content_origins_v1_keeps_existing_wire_bytes() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_content_origins_v1.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v2/content-origins.json"
+    ))
+    .unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.content-origins.v1");
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     let message = SyncMessage::Origins {
         commits: vec![(7, [0x11; 16], (1 << 52) + 3)],
     };
-    let bytes = postcard::to_allocvec(&message).unwrap();
+    let bytes = jazz::db::encode_message(&message).unwrap();
     assert_eq!(hex::encode(&bytes), fixture["hex"].as_str().unwrap());
-    let decoded: SyncMessage = postcard::from_bytes(&bytes).unwrap();
+    let decoded = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(origins(&[decoded]), vec![(7, [0x11; 16], (1 << 52) + 3)]);
 }
 
 /// Bob wrote the same payload twice, but Alice's owner missed the second
 /// content version. A tombstone from a peer without witness refs must never
 /// attach the owner's older cached transaction, even when its bytes match.
+/// Alice reads that offline owner cache through a LocalFirst foreground.
 #[test]
 fn a_gap_in_relay_history_does_not_guess_a_content_reference() {
     let server = open(3, None, false);
@@ -444,9 +469,16 @@ fn a_gap_in_relay_history_does_not_guess_a_content_reference() {
     block_on(server.delete("notes", row.row_uuid(), Default::default())).unwrap();
     fetch(&owner, &[&owner, &server], true);
     assert_eq!(history(&owner, row.row_uuid()).len(), 1);
+    owner.set_remote_link_hint(RemoteLinkHint::Failed);
     let alice = open(1, None, false);
+    alice.set_non_durable_client();
     let sent = connect(&alice, &owner, AuthorSubject::SYSTEM, false);
-    assert_eq!(fetch(&alice, &[&alice, &owner], true).len(), 1);
+    assert_eq!(
+        try_fetch_at_tier(&alice, &[&alice, &owner], true, ReadTier::LocalFirst)
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(history(&alice, row.row_uuid()).is_empty());
     assert!(origins(&sent.borrow()).is_empty());
     assert!(
@@ -530,8 +562,14 @@ fn persisted_witness_references_forward_after_owner_restart() {
     let owner = open(2, Some(&path), false);
     owner.set_remote_link_hint(RemoteLinkHint::Failed);
     let bob = open(1, None, false);
+    bob.set_non_durable_client();
     let sent = connect(&bob, &owner, AuthorSubject::SYSTEM, false);
-    assert_eq!(fetch(&bob, &[&bob, &owner], true).len(), 1);
+    assert_eq!(
+        try_fetch_at_tier(&bob, &[&bob, &owner], true, ReadTier::LocalFirst)
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(origin(&history(&bob, first.row_uuid())[0]), (127, [3; 16]));
     assert!(
         sent.borrow()
@@ -563,8 +601,10 @@ fn malformed_persisted_witnesses_refuse_relay_reads() {
         let owner = open(2, Some(&path), false);
         owner.set_remote_link_hint(RemoteLinkHint::Failed);
         let bob = open(1, None, false);
+        bob.set_non_durable_client();
         connect(&bob, &owner, AuthorSubject::SYSTEM, false);
-        let error = try_fetch(&bob, &[&bob, &owner], true).unwrap_err();
+        let error =
+            try_fetch_at_tier(&bob, &[&bob, &owner], true, ReadTier::LocalFirst).unwrap_err();
         assert_eq!(error.code, jazz::db::ErrorCode::Storage);
         assert!(error.message.contains("content-witness-v1"));
     }
@@ -574,15 +614,17 @@ fn malformed_persisted_witnesses_refuse_relay_reads() {
 /// use a named postcard-u64 encoding with exact boundary-byte fixtures.
 #[test]
 fn content_witness_v1_pins_wire_and_durable_value_bytes() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_content_witness_v1.json")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v2/content-witness.json"
+    ))
+    .unwrap();
     assert_eq!(fixture["wireRole"], "jazz.sqlite.sync.content-witness.v1");
     assert_eq!(fixture["storageRole"], "jazz.sqlite.content-witness.v1");
-    assert_eq!(fixture["version"], 1);
+    assert_eq!(fixture["version"], 2);
     let message: SyncMessage = serde_json::from_value(fixture["message"].clone()).unwrap();
-    let bytes = postcard::to_allocvec(&message).unwrap();
+    let bytes = jazz::db::encode_message(&message).unwrap();
     assert_eq!(hex::encode(&bytes), fixture["hex"].as_str().unwrap());
-    let decoded: SyncMessage = postcard::from_bytes(&bytes).unwrap();
+    let decoded = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(serde_json::to_value(decoded).unwrap(), fixture["message"]);
     for case in fixture["durableValues"].as_array().unwrap() {
         let value = case["value"].as_u64().unwrap();

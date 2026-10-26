@@ -117,7 +117,10 @@ impl Wire {
         }
         block_on(server.tick()).unwrap();
         while let Some(message) = self.from_server.borrow_mut().pop_front() {
-            if matches!(message, SyncMessage::FateV1 { .. }) {
+            if matches!(
+                message,
+                SyncMessage::FateV1 { .. } | SyncMessage::OriginFateV2 { global: true, .. }
+            ) {
                 self.fates.push(message.clone());
             }
             self.to_client.borrow_mut().push_back(message);
@@ -142,7 +145,7 @@ impl Wire {
         for _ in 0..100 {
             self.pump(writer, server);
             if let Some(fate) = self.fates[first_new_fate..].iter().find(|message| {
-                matches!(message, SyncMessage::FateV1 { node, tx, .. } if (*node, *tx) == wanted)
+                matches!(message, SyncMessage::FateV1 { node, tx, .. } | SyncMessage::OriginFateV2 { node, tx, global: true, .. } if (*node, *tx) == wanted)
             }) {
                 return fate.clone();
             }
@@ -159,10 +162,15 @@ fn origin(message: &SyncMessage) -> Origin {
 }
 
 fn result(fate: &SyncMessage) -> &Result<(), WireError> {
-    let SyncMessage::FateV1 { result, .. } = fate else {
-        panic!("expected an authority fate");
-    };
-    result
+    match fate {
+        SyncMessage::FateV1 { result, .. }
+        | SyncMessage::OriginFateV2 {
+            result,
+            global: true,
+            ..
+        } => result,
+        _ => panic!("expected an authority fate"),
+    }
 }
 
 fn rows(db: &Db) -> BTreeMap<RowUuid, String> {
@@ -285,9 +293,23 @@ fn late_same_writer_unit_cannot_overwrite_its_accepted_successor() {
                 postcard::to_allocvec(result(&rejected)).unwrap()
             );
             let accepted_again = wire.deliver(&writer, &server, &newer_message);
+            let mut durable_receipt = accepted.clone();
+            let SyncMessage::OriginFateV2 { held, .. } = &accepted_again else {
+                panic!("expected original-writer replay receipt");
+            };
+            assert!(
+                held.is_empty(),
+                "replay cannot reuse another connection's echo cache"
+            );
+            let SyncMessage::OriginFateV2 { held, .. } = &mut durable_receipt else {
+                panic!("expected original-writer receipt");
+            };
+            // Only the hop-local echo hint changes. Original writer identity,
+            // transaction, authority cut, result and Global flag stay exact.
+            held.clear();
             assert_eq!(
                 postcard::to_allocvec(&accepted_again).unwrap(),
-                postcard::to_allocvec(&accepted).unwrap()
+                postcard::to_allocvec(&durable_receipt).unwrap()
             );
             assert_eq!(rows(&server), expected, "replays cannot rewrite the row");
             assert!(writer.detach_connection(&upstream));

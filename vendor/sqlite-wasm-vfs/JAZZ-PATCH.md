@@ -29,3 +29,17 @@ Regression coverage is in
 WASM API and an IndexedDB implementation with injected request/commit faults.
 It covers Local refusal, repeated barriers, earlier durable writes, unrelated
 files, failed close, cached reopen refusal and explicit reset.
+
+## Reload after physical owner changes
+
+`RelaxedIdbUtil::reload_db(filename)` reloads exactly one file from IndexedDB,
+replacing its cached blocks or removing the cache entry if the file disappeared.
+The original `preload_db` skips cached paths; reusing it after a new owner acquires
+the physical lock could hide external corruption or deletion. Reload requires
+exclusive ownership, all previous SQLite connections closed, and their commits
+flushed. Existing latched persistence errors still reject reopening. It does not
+write IndexedDB or change the durable format.
+
+`packages/jazz-tools/src/runtime/browser-storage-artifact.test.ts` changes and
+then deletes persisted blocks between real WASM opens. Reopening must reject
+both cases, preserving the corrupt file and admitted owner record respectively.

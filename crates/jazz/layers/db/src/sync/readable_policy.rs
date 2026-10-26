@@ -124,12 +124,35 @@ impl Inner {
             self.fan.dropped.set(self.fan.dropped.get() + 1);
         }
         if let Some((query, binding, deleted, scope)) = self.sessions[index].relayed.remove(&id) {
-            self.release_remote(&query, &binding, deleted, &scope);
+            self.release_remote(&query, &binding, deleted, &scope, RemoteReach::REMOTE);
         }
         self.sessions[index].outbox.push(SyncMessage::Refused {
             id,
             code: error.code,
             message: error.message,
         });
+    }
+
+    /// A shared row/evidence frame cannot be partially delivered. Refuse the
+    /// affected peer's reads and release its interests before closing it.
+    pub(super) fn refuse_session_reads(&mut self, index: usize, error: Error) {
+        let session = &mut self.sessions[index];
+        let mut ids = session.subs.keys().copied().collect::<BTreeSet<_>>();
+        ids.extend(session.outbox.iter().filter_map(|message| match message {
+            SyncMessage::Answer { id, .. }
+            | SyncMessage::AcceptedAnswerV1 { id, .. }
+            | SyncMessage::ScopedEvidenceAnswerV1 { id, .. }
+            | SyncMessage::AcceptedScopedEvidenceAnswerV1 { id, .. } => Some(*id),
+            _ => None,
+        }));
+        for id in ids {
+            let _ = session.transport.send(SyncMessage::Refused {
+                id,
+                code: error.code,
+                message: error.message.clone(),
+            });
+        }
+        let released = session.close(&self.fan.dropped);
+        self.release_session_reads(released);
     }
 }

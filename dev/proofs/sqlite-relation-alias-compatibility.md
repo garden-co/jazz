@@ -29,8 +29,7 @@ changing the preimage layout. UNION occurrences continue to use their separate
 **`jazz.sqlite.serializable-union-read-content.v1`** role.
 
 As with other retained relation ASTs, an aliased read requires
-**`jazz.sqlite.serializable-union-observed.v1`**, existing postcard discriminant
-4. Its `WireRead.query` retains the existing relation AST. Admission validates
+**`jazz.sqlite.serializable-union-observed.v1`**, existing postcard discriminant 4. Its `WireRead.query` retains the existing relation AST. Admission validates
 the canonical envelope, executes the projection under the admitted identity,
 and compares both row versions and named content before applying writes. It
 does not reconstruct aliases from a hydration request's physical selection.

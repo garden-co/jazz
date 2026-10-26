@@ -1,0 +1,660 @@
+//! The shared v2 semantic corpus pins all 47 tags plus representative extended
+//! forms, and runs through Rust, WASM and NAPI's public versioned decoder.
+//! Bodies inherited from upstream keep their field bytes; independent E2EE
+//! fixtures supply the appended tags. Historical corpora are never rewritten.
+//! Carrier Hello/Error bytes remain v6. Codec admission does not grant trust.
+
+use crate::common;
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::pin::pin;
+use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
+
+use jazz::db::{
+    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SyncMessage,
+    Transport, UpdateOptions, block_on, decode_message, encode_frames, encode_message,
+    validate_frame_batch_for_corpus,
+};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::model::transaction::OpenTransactionId;
+use jazz::protocol::PermissionAdviceAction;
+use jazz::query::{Query, col, eq, lit};
+use jazz::records::Value;
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::wire::{
+    TransportError, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
+    current_wire_features, encode_frame, encode_websocket_frame_batch,
+};
+use serde::{Deserialize, Serialize};
+
+use common::{compile_schema, read_and_allow_all_writes, session_eq};
+
+const CORPUS: &str = "sqlite_sync_wire_v1.json";
+const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
+
+/// Historical upstream variants retained for the frozen producer. `RowsPart`: a
+/// framing of a `Rows` too large for one frame, whose real frames are
+/// megabytes (binding_host's frame-split test covers it).
+const VARIANTS: [&str; 20] = [
+    "Subscribe",
+    "Unsubscribe",
+    "Hold",
+    "Fetch",
+    "Commit",
+    "ChunkRequests",
+    "PushChunks",
+    "Chunks",
+    "Rows",
+    "Evict",
+    "Unlist",
+    "Settled",
+    "Answer",
+    "Refused",
+    "Fate",
+    "Advise",
+    "Advice",
+    "Schema",
+    "Origins",
+    "SchemaAdmission",
+];
+
+const V2_VARIANTS: [&str; 47] = [
+    "Subscribe",
+    "Unsubscribe",
+    "Hold",
+    "Fetch",
+    "Commit",
+    "ChunkRequests",
+    "PushChunks",
+    "Chunks",
+    "Rows",
+    "Evict",
+    "Unlist",
+    "Settled",
+    "Answer",
+    "Refused",
+    "Fate",
+    "Advise",
+    "Advice",
+    "Schema",
+    "Origins",
+    "SchemaAdmission",
+    "RowsPart",
+    "ScopedFetchV1",
+    "ContentWitnessesV1",
+    "AcceptedRowsV1",
+    "AcceptedFetchV1",
+    "AcceptedAnswerV1",
+    "CatalogueMetadataV1",
+    "CatalogueFetchV1",
+    "CatalogueCoveredV1",
+    "FateV1",
+    "OwnerStoredV1",
+    "OwnerProjectionV1",
+    "OwnerInputsV1",
+    "OwnerReadyV1",
+    "PolicyDescriptorV1",
+    "OwnerInitializationReserveV1",
+    "OwnerInitializationReservedV1",
+    "OwnerInitializationPublishV1",
+    "ScopedEvidenceAnswerV1",
+    "AcceptedScopedEvidenceAnswerV1",
+    "AcceptedOverlayCheckV1",
+    "AcceptedOverlayCheckedV1",
+    "SubscribeReadablePolicyV1",
+    "UnionAnswerV1",
+    "ScopedUnionSubscribeV1",
+    "OriginFateV2",
+    "Stored",
+];
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Corpus {
+    format: String,
+    /// One recorded frame per variant.
+    messages: Vec<Message>,
+    #[serde(default)]
+    examples: Vec<Message>,
+    /// Complete batches a reader accepts that are not sync messages.
+    frames: Vec<Batch>,
+    /// Batches a reader must reject.
+    rejections: Vec<Batch>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Message {
+    variant: String,
+    reader: String,
+    frame_hex: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Batch {
+    name: String,
+    reader: String,
+    batch_hex: String,
+}
+
+fn reader(name: &str) -> CorpusReader {
+    match name {
+        "server-opening" => CorpusReader::ServerOpening,
+        "server" => CorpusReader::Server,
+        "client" => CorpusReader::Client,
+        other => panic!("unknown corpus reader {other}"),
+    }
+}
+
+fn variant(message: &SyncMessage) -> String {
+    format!("{message:?}")
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+fn corpus_named(name: &str) -> Corpus {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name);
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
+    let corpus = corpus_named("sqlite_sync_wire_v2.json");
+    assert_eq!(corpus.format, "jazz-sqlite-sync-wire-corpus-v2");
+    let variants: Vec<&str> = corpus.messages.iter().map(|m| m.variant.as_str()).collect();
+    assert_eq!(
+        variants, V2_VARIANTS,
+        "one frame of every variant, in order"
+    );
+    for message in corpus.messages.iter().chain(&corpus.examples) {
+        let bytes = unhex(&message.frame_hex);
+        let decoded: SyncMessage = decode_message(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "{}: the pinned frame no longer decodes ({error}); the sync wire layout changed",
+                message.variant
+            )
+        });
+        assert_eq!(variant(&decoded), message.variant);
+        assert_eq!(
+            encode_message(&decoded).unwrap(),
+            bytes,
+            "{}: re-encoding changed the bytes; the sync wire layout changed",
+            message.variant
+        );
+    }
+}
+
+#[test]
+fn the_corpus_validator_accepts_every_frame_and_rejects_every_rejection() {
+    let corpus = corpus_named("sqlite_sync_wire_v2.json");
+    let features = current_wire_features();
+    for message in corpus.messages.iter().chain(&corpus.examples) {
+        let batch = encode_websocket_frame_batch(&[unhex(&message.frame_hex)]).unwrap();
+        validate_frame_batch_for_corpus(&batch, reader(&message.reader), features)
+            .unwrap_or_else(|error| panic!("{}: {error}", message.variant));
+    }
+    for frame in &corpus.frames {
+        validate_frame_batch_for_corpus(&unhex(&frame.batch_hex), reader(&frame.reader), features)
+            .unwrap_or_else(|error| panic!("{}: {error}", frame.name));
+    }
+    for rejection in &corpus.rejections {
+        assert!(
+            validate_frame_batch_for_corpus(
+                &unhex(&rejection.batch_hex),
+                reader(&rejection.reader),
+                features,
+            )
+            .is_err(),
+            "{} was accepted",
+            rejection.name
+        );
+    }
+}
+
+/// Mallory's raw upstream-v1 frames cannot cross either v2 semantic boundary.
+/// The exact old files stay usable as incompatibility fixtures.
+#[test]
+fn historical_upstream_semantic_frames_are_refused() {
+    for message in corpus_named(CORPUS).messages {
+        let frame = unhex(&message.frame_hex);
+        assert!(decode_message(&frame).is_err(), "{}", message.variant);
+        let batch = encode_websocket_frame_batch(&[frame]).unwrap();
+        for side in [CorpusReader::Client, CorpusReader::Server] {
+            assert!(
+                validate_frame_batch_for_corpus(&batch, side, current_wire_features()).is_err(),
+                "{}",
+                message.variant
+            );
+        }
+    }
+}
+
+// ---- producing the corpus --------------------------------------------------
+
+type Recorded = Rc<RefCell<BTreeMap<String, (String, Vec<u8>)>>>;
+
+/// One side of a duplex link that sends every message through the
+/// production frame encoder and hands the peer the decoded frames,
+/// recording the first frame of each variant.
+struct Recording {
+    outbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
+    /// The reader of what this side sends.
+    peer: &'static str,
+    recorded: Recorded,
+}
+
+impl Transport for Recording {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        for frame in encode_frames(message).unwrap() {
+            let decoded: SyncMessage = postcard::from_bytes(&frame).unwrap();
+            self.recorded
+                .borrow_mut()
+                .entry(variant(&decoded))
+                .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
+            self.outbound.borrow_mut().push_back(decoded);
+        }
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+fn connect(client: &Db, server: &Db, author: AuthorSubject, recorded: &Recorded) {
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    block_on(client.connect_upstream(Box::new(Recording {
+        outbound: up.clone(),
+        inbound: down.clone(),
+        peer: "server",
+        recorded: recorded.clone(),
+    })));
+    server.accept_subscriber(
+        Box::new(Recording {
+            outbound: down,
+            inbound: up,
+            peer: "client",
+            recorded: recorded.clone(),
+        }),
+        author,
+    );
+}
+
+fn user(n: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([0x40 + n; 16])
+}
+
+fn subject(n: u8) -> Value {
+    Value::String(user(n).principal_parts().1)
+}
+
+const ME: [&str; 3] = ["user", "identity", "subject"];
+
+/// `notes(owner, body)`, readable by their owner. `draft` adds a column,
+/// a schema version the server has not admitted.
+fn schema(draft: bool) -> JazzSchema {
+    let mut notes = TableSchemaBuilder::new("notes")
+        .column("owner", ColumnType::Text)
+        .column("body", ColumnType::Bytea);
+    if draft {
+        notes = notes.column("title", ColumnType::Text);
+    }
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(notes.policies(read_and_allow_all_writes(session_eq("owner", &ME))))
+            .build(),
+    )
+}
+
+fn note(owner: u8, body: Vec<u8>) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("owner".to_owned(), subject(owner)),
+        ("body".to_owned(), Value::Bytes(body)),
+    ])
+}
+
+fn open(node: u8, author: AuthorSubject, draft: bool) -> Db {
+    block_on(Db::open(DbConfig::new(
+        schema(draft),
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )))
+    .unwrap()
+}
+
+fn pump(dbs: &[&Db]) {
+    for _ in 0..12 {
+        for db in dbs {
+            block_on(db.tick()).unwrap();
+        }
+    }
+}
+
+fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
+    let mut future = pin!(future);
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..100 {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        for db in dbs {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    panic!("did not complete");
+}
+
+/// Just over the inline limit, so it travels as chunks; uniform, so the
+/// pinned frames stay small.
+fn large(seed: u8) -> Vec<u8> {
+    vec![seed; jazz::large_values::INLINE_VALUE_MAX_BYTES + 1]
+}
+
+/// A scenario that sends every `SyncMessage` variant at least once.
+fn record() -> BTreeMap<String, (String, Vec<u8>)> {
+    let recorded: Recorded = Rc::default();
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        schema(false),
+        DbIdentity {
+            node: NodeUuid::from_bytes([1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let shared = RowUuid::from_bytes([0x11; 16]);
+    block_on(server.insert(
+        "notes",
+        note(1, large(1)),
+        InsertOptions {
+            row_id: Some(shared),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(server.update("notes", shared, note(1, large(2)), UpdateOptions::default())).unwrap();
+
+    // Schema, SchemaAdmission, Subscribe, Rows, Settled, ChunkRequests,
+    // Chunks: a client subscribes and pulls the large value it reads.
+    let alice = open(0x51, user(1), false);
+    connect(&alice, &server, user(1), &recorded);
+    let notes = alice.prepare_query(&Query::from("notes")).unwrap();
+    let stream = block_on(alice.subscribe(&notes, ReadOpts::default())).unwrap();
+    pump(&[&alice, &server, &alice]);
+    let _ = block_on(alice.all(&notes, ReadOpts::default())).unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // PushChunks, Commit, Fate: a write with a new large value.
+    let mine = RowUuid::from_bytes([0x12; 16]);
+    block_on(alice.insert(
+        "notes",
+        note(1, large(3)),
+        InsertOptions {
+            row_id: Some(mine),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // Fetch, Answer, Origins: a serializable transaction's second read is
+    // pinned to its snapshot, so after a newer write it answers from
+    // history.
+    let open_tx = OpenTransactionId::new();
+    block_on(alice.begin_serializable(open_tx)).unwrap();
+    let _ = drive(
+        &[&alice, &server, &alice],
+        alice.serializable_tx_ref(open_tx).all_prepared(&notes),
+    );
+    block_on(server.update("notes", shared, note(1, large(4)), UpdateOptions::default())).unwrap();
+    pump(&[&alice, &server, &alice]);
+    let _ = drive(
+        &[&alice, &server, &alice],
+        alice.serializable_tx_ref(open_tx).all_prepared(&notes),
+    );
+    alice.abandon_serializable_handle(open_tx).unwrap();
+
+    // Origins: a history subscription ships superseded versions, and the
+    // commits behind them first.
+    let history = alice
+        .prepare_query(
+            &Query::from("history.notes").filter(eq(col("id"), lit(Value::Uuid(shared.0)))),
+        )
+        .unwrap();
+    let _history = block_on(alice.subscribe(&history, ReadOpts::default())).unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // Advise, Advice.
+    let id = alice.request_permission_advice(
+        PermissionAdviceAction::Read {
+            table: "notes".to_owned(),
+            row: shared,
+        },
+        None,
+    );
+    let _ = drive(&[&alice, &server, &alice], alice.permission_advice(id));
+
+    // Unlist: the server gives the shared note away while alice holds it.
+    block_on(server.update(
+        "notes",
+        shared,
+        BTreeMap::from([("owner".to_owned(), subject(2))]),
+        UpdateOptions::default(),
+    ))
+    .unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // Unsubscribe.
+    drop(stream);
+    pump(&[&alice, &server, &alice]);
+
+    // Hold, Evict: alice's own note is deleted while she is away; she
+    // reconnects holding it.
+    block_on(server.delete("notes", mine, Default::default())).unwrap();
+    connect(&alice, &server, user(1), &recorded);
+    pump(&[&alice, &server, &alice]);
+
+    // SchemaAdmission: a client on a schema version the server has not
+    // admitted is told so.
+    let bob = open(0x52, user(2), true);
+    connect(&bob, &server, user(2), &recorded);
+    pump(&[&bob, &server, &bob]);
+
+    // Refused: a subscription the server cannot serve. No replica sends
+    // one (it prepares queries against the same schema), so a raw session
+    // does, on the schema version alice announced.
+    let schema = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Schema"].1).unwrap();
+    let inbound = Rc::new(RefCell::new(VecDeque::from([
+        schema,
+        SyncMessage::Subscribe {
+            id: 1,
+            query: Query::from("missing"),
+            binding: BTreeMap::new(),
+            since: None,
+            include_deleted: false,
+            tier: ReadTier::LocalFirst,
+            wait: None,
+        },
+    ])));
+    server.accept_subscriber(
+        Box::new(Recording {
+            outbound: Rc::default(),
+            inbound,
+            peer: "client",
+            recorded: recorded.clone(),
+        }),
+        user(3),
+    );
+    pump(&[&server]);
+
+    recorded.borrow().clone()
+}
+
+/// Writes `fixtures/sqlite_sync_wire_v1.json` when
+/// `JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1`. Until alpha.60 ships, re-run it
+/// for a sync message layout change; after, add a new corpus instead.
+#[test]
+#[ignore = "#1787: manual wire corpus producer; run for a sync wire layout change"]
+fn produce_sqlite_sync_wire_corpus_v1() {
+    assert_eq!(
+        jazz::db::SYNC_ENCODING_PREFIX,
+        b"JSQL\x01",
+        "never regenerate a historical wire corpus under a different codec"
+    );
+    assert_eq!(
+        std::env::var("JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS").as_deref(),
+        Ok("1"),
+        "set JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1 to overwrite the pinned corpus"
+    );
+    let mut recorded = record();
+    let missing: Vec<&str> = VARIANTS
+        .iter()
+        .copied()
+        .filter(|v| !recorded.contains_key(*v))
+        .collect();
+    assert!(missing.is_empty(), "the scenario never sent {missing:?}");
+    let messages: Vec<Message> = VARIANTS
+        .iter()
+        .map(|v| {
+            let (reader, frame) = recorded.remove(*v).unwrap();
+            Message {
+                variant: (*v).to_owned(),
+                reader,
+                frame_hex: hex(&frame),
+            }
+        })
+        .collect();
+
+    let batch = |frames: &[Vec<u8>]| hex(&encode_websocket_frame_batch(frames).unwrap());
+    let hello = |role| {
+        encode_frame(&WireFrame::Hello(WireHello::current(
+            role,
+            current_wire_features(),
+        )))
+        .unwrap()
+    };
+    let error = encode_frame(&WireFrame::Error(WireError::new(
+        WireErrorCode::MalformedFrame,
+        WireRetry::Never,
+        "malformed frame",
+    )))
+    .unwrap();
+    let mut commit = unhex(&messages[4].frame_hex);
+    commit.truncate(commit.len() / 2);
+    let subscribe = unhex(&messages[0].frame_hex);
+    let unsubscribe = unhex(&messages[1].frame_hex);
+    // The last Groove-era wire version, from the corpus this one replaced.
+    let groove: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/wire_frame_artifact_corpus_v6.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let v5_hello = groove["rejections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "unsupported exact-v5 hello")
+        .unwrap()["frame_hex"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let entry = |name: &str, reader: &str, batch_hex: String| Batch {
+        name: name.to_owned(),
+        reader: reader.to_owned(),
+        batch_hex,
+    };
+    let corpus = Corpus {
+        format: FORMAT.to_owned(),
+        messages,
+        examples: Vec::new(),
+        frames: vec![
+            entry(
+                "client hello",
+                "server-opening",
+                batch(&[hello(WirePeerRole::Client)]),
+            ),
+            entry("core hello", "client", batch(&[hello(WirePeerRole::Core)])),
+            entry(
+                "relay hello",
+                "server-opening",
+                batch(&[hello(WirePeerRole::Relay)]),
+            ),
+            entry(
+                "two messages in one batch",
+                "server",
+                batch(&[subscribe.clone(), unsubscribe]),
+            ),
+            entry("structured error", "client", batch(&[error])),
+        ],
+        rejections: vec![
+            entry(
+                "unknown sync message discriminant",
+                "server",
+                batch(&[vec![0x7f]]),
+            ),
+            entry(
+                "unknown sync message discriminant",
+                "client",
+                batch(&[vec![0x7f]]),
+            ),
+            entry("truncated commit", "server", batch(&[commit])),
+            entry(
+                "a sync message with bytes after it",
+                "server",
+                batch(&[[subscribe.as_slice(), &[0]].concat()]),
+            ),
+            entry(
+                "a client hello followed by a message in the opening batch",
+                "server-opening",
+                batch(&[hello(WirePeerRole::Client), subscribe.clone()]),
+            ),
+            entry(
+                "a sync message as the opening batch",
+                "server-opening",
+                batch(&[subscribe.clone()]),
+            ),
+            entry(
+                "unsupported Groove-era v5 hello",
+                "server-opening",
+                batch(&[unhex(&v5_hello)]),
+            ),
+            entry(
+                "a client-bound frame with tag 0 that is not a hello",
+                "client",
+                batch(&[subscribe]),
+            ),
+            entry(
+                "a client-bound frame with tag 1 that is not an error",
+                "client",
+                batch(&[vec![1, 0xff]]),
+            ),
+            entry("not a websocket frame batch", "server", hex(&[0xff, 0xff])),
+        ],
+    };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(CORPUS);
+    std::fs::write(path, serde_json::to_string_pretty(&corpus).unwrap() + "\n").unwrap();
+}

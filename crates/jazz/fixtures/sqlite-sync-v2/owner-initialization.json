@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "roles": [
+    "jazz.sqlite.owner-initialization.v1",
+    "jazz.sqlite.sync.owner-initialization-reserve.v1",
+    "jazz.sqlite.sync.owner-initialization-reserved.v1",
+    "jazz.sqlite.sync.owner-initialization-publish.v1"
+  ],
+  "messages": {
+    "reserve": "4a53514c02237f1111111111111111111111111111111122222222222222222222222222222222808180808080800c",
+    "reserved": "4a53514c02247f111111111111111111111111111111110022222222222222222222222222222222808180808080800c",
+    "refused": "4a53514c022480011111111111111111111111111111111101020664656e696564",
+    "publish": "4a53514c022511111111111111111111111111111111410402020202020202020202020202020202838080808080800802070001828080808080800801010101010101010101010101010101818080808080800800000000"
+  },
+  "stored": {
+    "nodeHex": "22222222222222222222222222222222",
+    "tx": 6755399441055872,
+    "nonceHex": "11111111111111111111111111111111",
+    "subject": "[\"https://issuer.example\",\"alice\"]",
+    "schemaHex": "66db23d1af6f5dd0b955450ee172c3cd",
+    "state": 0,
+    "types": ["blob", "integer", "blob", "text", "blob", "integer"]
+  },
+  "encoding": "jazz.sqlite.sync.v2"
+}

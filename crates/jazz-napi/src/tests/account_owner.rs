@@ -1,4 +1,4 @@
-use crate::*;
+use super::*;
 use jazz::records::{RecordDescriptor, ValueType};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
 
@@ -114,7 +114,7 @@ fn publish(db: &NapiDb) -> String {
     let seal =
         super::initialization::finish_seal(db, db.seal_initialization_transaction(open).unwrap())
             .unwrap();
-    let _write = db.publish_initialization_transaction(seal.token).unwrap();
+    let _write = db.publish_test(seal.token).unwrap();
     for _ in 0..16 {
         db.tick().unwrap();
     }
@@ -148,7 +148,7 @@ fn take_original_pending_unit(db: &NapiDb) -> Vec<u8> {
     let Some(inner) = inner.as_ref() else {
         panic!("persistent owner");
     };
-    let core = &inner.core;
+    let core = &inner.binding.db;
     let upstream =
         core_block_on(core.connect_upstream(Box::new(OutboundCapture(Rc::clone(&sent)))));
     for _ in 0..16 {
@@ -219,10 +219,24 @@ fn legacy_root_claim_preserves_rows_and_restores_exact_pending_before_transport(
             .unwrap(),
             expected_status
         );
+        let replay = take_original_pending_unit(&db);
+        let mut expected: jazz::db::SyncMessage = postcard::from_bytes(&expected_unit).unwrap();
+        let recovered: jazz::db::SyncMessage = postcard::from_bytes(&replay).unwrap();
+        let jazz::db::SyncMessage::Commit { expect, .. } = &recovered else {
+            panic!("replayed commit")
+        };
+        assert!(
+            expect.is_empty(),
+            "reopened connections cannot retain hop-local echo hints"
+        );
+        let jazz::db::SyncMessage::Commit { expect, .. } = &mut expected else {
+            panic!("original commit")
+        };
+        expect.clear();
         assert_eq!(
-            take_original_pending_unit(&db),
-            expected_unit,
-            "owner startup restores the exact old-node unit before transport attachment"
+            replay,
+            postcard::to_allocvec(&expected).unwrap(),
+            "owner startup preserves all original durable unit bytes apart from hop-local hints"
         );
         close(db);
     }

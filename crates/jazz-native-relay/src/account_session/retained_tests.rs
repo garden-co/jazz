@@ -3,6 +3,7 @@
 //! successful foreground operations alone cannot establish that absence.
 use super::*;
 use base64::Engine;
+use jazz::tools::native_transport_connector::NativeTransportRequest;
 
 const APP: &str = "07070707-0707-0707-0707-070707070707";
 const ISSUER: &str = "https://issuer.example";

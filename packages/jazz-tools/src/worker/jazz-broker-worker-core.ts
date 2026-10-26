@@ -102,6 +102,7 @@ type RuntimeContext = {
   runtime: NativeRuntimeAdapter | null;
   initialize: Promise<void>;
   closing: Promise<void> | null;
+  retiring: boolean;
   idleReleaseTimer: ReturnType<typeof setTimeout> | null;
   pageStore: IndexedDbPageStore | null;
   disposePageStoreInvalidation: (() => void) | null;
@@ -178,6 +179,8 @@ type PhysicalDatabaseOwner = {
   pageStore: IndexedDbPageStore;
   storageOwner: string;
   release: Promise<void> | null;
+  retiring: boolean;
+  treeRetirementRequired: boolean;
   disposeInvalidation: (() => void) | null;
 };
 
@@ -305,14 +308,18 @@ async function ensurePhysicalDatabaseOwner(
     // A follower may arrive in the small clean-close window. Never hand it a
     // page store whose epoch is already being released; wait for the release
     // and claim a fresh physical epoch instead.
-    if (existing.release) {
-      await existing.release;
+    if (existing.retiring) {
+      await releasePhysicalDatabaseOwner(dbName);
       return await ensurePhysicalDatabaseOwner(dbName, storageOwner, runtimeSources);
     }
     if (existing.storageOwner !== storageOwner) {
       throw new Error(
         `IndexedDB database ${dbName} is already owned by a different Jazz browser session; choose a different driver.dbName or reset this database before changing accounts`,
       );
+    }
+    if (existing.treeRetirementRequired) {
+      await existing.pageStore.retireTreeOwnership();
+      existing.treeRetirementRequired = false;
     }
     return existing;
   }
@@ -363,6 +370,8 @@ async function openPhysicalDatabaseOwner(
       pageStore,
       storageOwner,
       release: null,
+      retiring: false,
+      treeRetirementRequired: false,
       disposeInvalidation: null,
     };
     physicalDatabaseOwners.set(dbName, owner);
@@ -386,24 +395,32 @@ async function openPhysicalDatabaseOwner(
 async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
   const owner = physicalDatabaseOwners.get(dbName);
   if (!owner) return;
+  owner.retiring = true;
   if (!owner.release) {
     owner.release = (async () => {
+      let epochFailure: { error: unknown } | undefined;
       try {
         await owner.pageStore.releaseBrowserWorkerEpoch(owner.epoch.id);
-      } finally {
-        owner.disposeInvalidation?.();
-        owner.disposeInvalidation = null;
-        try {
-          await owner.pageStore.close();
-        } finally {
-          await owner.epoch.release();
-          if (pendingRuntimeOwnerRetirements.get(dbName) === owner) {
-            pendingRuntimeOwnerRetirements.delete(dbName);
-          }
-          physicalDatabaseOwners.delete(dbName);
-        }
+      } catch (error) {
+        // An externally invalidated sidecar can no longer clear its record,
+        // but the SQLite file still has to close before its lock is released.
+        epochFailure = { error };
       }
-    })();
+      await owner.pageStore.close();
+      owner.disposeInvalidation?.();
+      owner.disposeInvalidation = null;
+      await owner.epoch.release();
+      if (pendingRuntimeOwnerRetirements.get(dbName) === owner) {
+        pendingRuntimeOwnerRetirements.delete(dbName);
+      }
+      if (physicalDatabaseOwners.get(dbName) === owner) physicalDatabaseOwners.delete(dbName);
+      if (epochFailure) throw epochFailure.error;
+    })().catch((error) => {
+      // Retain the owner and the admission fence. A later release or successor
+      // admission retries closing this exact file before acquiring a new one.
+      owner.release = null;
+      throw error;
+    });
   }
   await owner.release;
 }
@@ -411,8 +428,8 @@ async function releasePhysicalDatabaseOwner(dbName: string): Promise<void> {
 /**
  * An external IDB delete/versionchange invalidates every handle, including a
  * lease-only bootstrap that has no tab context to close. The epoch record may
- * already be gone, but `releasePhysicalDatabaseOwner` still releases the Web
- * Lock in its finally path. Clear active lease bookkeeping first: those IDs
+ * already be gone, but `releasePhysicalDatabaseOwner` still closes its runtime
+ * before releasing the Web Lock. Clear active lease bookkeeping first: those IDs
  * belonged to the erased root and must not keep this realm artificially live.
  */
 function releaseInvalidatedPhysicalDatabaseOwner(dbName: string): void {
@@ -1018,8 +1035,8 @@ async function connectTab(
       clearTimeout(context.idleReleaseTimer);
       context.idleReleaseTimer = null;
     }
-    if (context?.closing) {
-      await context.closing;
+    if (context?.retiring) {
+      await releaseIdleContext(context);
       assertAdmission();
       context = contexts.get(key);
     }
@@ -1114,6 +1131,7 @@ function createContext(
     authFailureEpoch: 0,
     initialize: Promise.resolve(),
     closing: null,
+    retiring: false,
     idleReleaseTimer: null,
   };
   const initializeContext = contextInitializationTail.then(() => initialize(context));
@@ -1181,14 +1199,14 @@ async function initialize(context: RuntimeContext): Promise<void> {
             proof.token,
             proof.appId,
             proof.claimedAuthor,
-            physicalOwner.storageOwner,
+            options.dbName,
             cachedCatalogue,
           )
         : await wasmModule.WasmDb.openBrowser(
             storage,
             schema,
             config,
-            physicalOwner.storageOwner,
+            options.dbName,
             cachedCatalogue,
           ),
     );
@@ -1252,7 +1270,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
       // Retire its failed runtime before a later context retries admission.
       await context.pageStore?.retireTreeOwnership();
     } catch {
-      // Preserve the initialization error after fencing the failed runtime.
+      // A foreground lease may retain this physical owner. Its next schema
+      // admission must retry closing the failed runtime before opening another.
+      const owner = physicalDatabaseOwners.get(context.options.dbName);
+      if (owner && owner.pageStore === context.pageStore) owner.treeRetirementRequired = true;
     }
     try {
       cleanupFailedContext(context);
@@ -1394,6 +1415,8 @@ function carriesCredential(authJson: string): boolean {
 
 function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
+  // A worker with no server has the last word on its tabs' writes.
+  if (!requestedUrl) context.runtime?.setRemoteLinkHint("none");
   if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
   // A retained account's tabs open before the provider supplies a credential.
@@ -2131,12 +2154,13 @@ function requireRuntime(context: RuntimeContext): NativeRuntimeAdapter {
 async function resetContextStorage(context: RuntimeContext): Promise<void> {
   const dbName = context.options.dbName;
   const owner = physicalDatabaseOwners.get(dbName);
-  if (!owner || owner.release || resettingPhysicalRoots.has(dbName)) {
+  if (!owner || owner.retiring || resettingPhysicalRoots.has(dbName)) {
     throw new Error("Browser storage owner is unavailable for reset");
   }
   // Fence admissions and mutations before the first await. The name is derived
   // solely from the already-admitted peer, never from the reset request.
   resettingPhysicalRoots.add(dbName);
+  owner.retiring = true;
   const affected = [...contexts.values()].filter(
     (candidate) => candidate.options.dbName === dbName,
   );
@@ -2174,16 +2198,14 @@ async function resetContextStorage(context: RuntimeContext): Promise<void> {
   } catch (error) {
     failure ??= { error };
   } finally {
-    try {
-      await owner.pageStore.close();
-    } catch (error) {
-      failure ??= { error };
-    }
     foregroundLeaseOwners.delete(dbName);
-    pendingRuntimeOwnerRetirements.delete(dbName);
-    if (physicalDatabaseOwners.get(dbName) === owner) physicalDatabaseOwners.delete(dbName);
     try {
+      // A failed close leaves the old SQLite runtime alive. Keep its owner and
+      // Web Lock; successor admission retries this exact retirement first.
+      await owner.pageStore.close();
       await owner.epoch.release();
+      pendingRuntimeOwnerRetirements.delete(dbName);
+      if (physicalDatabaseOwners.get(dbName) === owner) physicalDatabaseOwners.delete(dbName);
     } catch (error) {
       failure ??= { error };
     } finally {
@@ -2210,6 +2232,7 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
   if (resettingPhysicalRoots.has(context.options.dbName)) return;
   if (contexts.get(context.key) !== context) return;
   if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
+  context.retiring = true;
   if (!context.closing) {
     context.closing = (async () => {
       for (const peer of context.peers.values()) {
@@ -2229,12 +2252,12 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       context.runtime = null;
       context.disposePageStoreInvalidation?.();
       context.disposePageStoreInvalidation = null;
-      context.pageStore = null;
       context.disposeTelemetry?.();
       context.disposeTelemetry = null;
       context.disposeAuxiliaryTrace?.();
       context.disposeAuxiliaryTrace = null;
       await treeRetirement;
+      context.pageStore = null;
       if (contexts.get(context.key) !== context) return;
       contexts.delete(context.key);
       if (physicalOwner && physicalDatabaseOwners.get(context.options.dbName) === physicalOwner) {
@@ -2244,7 +2267,10 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       // A final close acknowledges the physical lifetime, not just its tree.
       // Retained lease/admission owners have no release promise to await.
       await physicalOwner?.release;
-    })();
+    })().catch((error) => {
+      context.closing = null;
+      throw error;
+    });
   }
   await context.closing;
 }
@@ -2254,9 +2280,7 @@ function scheduleIdleContextRelease(context: RuntimeContext): void {
   context.idleReleaseTimer = setTimeout(() => {
     context.idleReleaseTimer = null;
     if (context.peers.size !== 0 || context.pendingAdmissionTasks !== 0) return;
-    void releaseIdleContext(context).then(() => {
-      maybeCloseWorker();
-    });
+    void releaseIdleContext(context).then(maybeCloseWorker, maybeCloseWorker);
   }, 50);
 }
 
@@ -2311,6 +2335,7 @@ function maybeCloseWorker(): void {
 function workerHasLiveWork(): boolean {
   return (
     resettingPhysicalRoots.size > 0 ||
+    [...physicalDatabaseOwners.values()].some((owner) => owner.retiring) ||
     contexts.size > 0 ||
     inspectorControlPorts.size > 0 ||
     pendingBootstrapOperations > 0 ||

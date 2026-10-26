@@ -157,6 +157,7 @@ export async function firstAccountEpoch(
         attempt >= 2 ||
         !(error instanceof PersistedWriteRejectedError) ||
         (error.code !== "transaction_conflict" &&
+          error.code !== "serialization_conflict" &&
           error.code !== "permission_denied" &&
           error.code !== "exclusive_conflict")
       )

@@ -291,7 +291,7 @@ fn rejected_receipt_and_reason_survive_replica_restart() {
     assert_eq!(count(&server), 0);
 }
 
-/// Alice's upload waits while Bob's relay queues it. Only the authority's
+/// Alice's ordinary worker previews her queued upload. Only the authority's
 /// acceptance can settle the original transaction globally.
 #[test]
 fn relay_uploads_wait_for_authority_acceptance() {
@@ -306,7 +306,12 @@ fn relay_uploads_wait_for_authority_acceptance() {
         block_on(relay.tick()).unwrap();
     }
     assert_eq!(client.write_state(tx).unwrap().fate, Fate::Pending);
-    assert_eq!(count(&relay), 0);
+    assert_eq!(
+        count(&relay),
+        1,
+        "the ordinary worker retains Alice's preview"
+    );
+    assert_eq!(client.write_state(tx).unwrap().global_time, None);
     assert_eq!(count(&server), 0);
     drive(
         &[&client, &relay, &server, &relay, &client],

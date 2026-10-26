@@ -29,7 +29,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-mod common;
+use crate::common;
 
 use duplex_transport::duplex;
 use jazz::block_on;
@@ -559,12 +559,15 @@ fn worker_connected_to(node: u8, server: &Db) -> Db {
 }
 
 fn foreground_over(node: u8, worker: Db) -> Foreground {
-    let tab = fresh_client(node);
+    foreground_over_as(node, worker, AuthorSubject::for_test_bytes([node; 16]))
+}
+
+fn foreground_over_as(node: u8, worker: Db, author: AuthorSubject) -> Foreground {
+    let tab = block_on(Db::open(config(node, author))).expect("open foreground");
     tab.set_non_durable_client();
     let (tab_transport, worker_transport) = duplex();
     let _upstream = block_on(tab.connect_upstream(tab_transport));
-    let _foreground =
-        worker.accept_subscriber(worker_transport, AuthorSubject::for_test_bytes([node; 16]));
+    let _foreground = worker.accept_subscriber(worker_transport, author);
     Foreground { tab, worker }
 }
 
@@ -1128,4 +1131,109 @@ fn remote_answer_coverage_preserves_local_first_pending_writes() {
     assert_withheld(&mut remote, &alice, None, 8);
     block_on(local_first.close()).expect("close local-first remote answer");
     block_on(remote.close()).expect("close remote read");
+}
+
+/// A foreground over a storage owner that has no server (a browser app
+/// without `serverUrl`): its own write opens its subscription, and a
+/// second foreground over the same owner sees it too.
+#[test]
+fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
+    // A binding's store is a replica from the start, server or not.
+    let worker = fresh_client(0x80);
+    worker.become_replica();
+    let author = AuthorSubject::for_test_bytes([0x80; 16]);
+    let foreground = foreground_over_as(0x81, worker, author);
+    block_on(foreground.tab.insert(
+        "items",
+        BTreeMap::from([("label".to_owned(), Value::String("local".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(30)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert through the foreground");
+    let mut stream = subscribe(&foreground.tab, &items(), ReadOpts::default());
+    let (_, rows, _) = opening(foreground.first_event(&mut stream, None));
+    assert_eq!(rows, vec![row(30)]);
+
+    let other = block_on(Db::open(config(0x82, author))).expect("open sibling");
+    other.set_non_durable_client();
+    let (tab_transport, worker_transport) = duplex();
+    let _upstream = block_on(other.connect_upstream(tab_transport));
+    let _foreground = foreground
+        .worker
+        .accept_subscriber(worker_transport, author);
+    let mut stream = subscribe(&other, &items(), ReadOpts::default());
+    let rows = (0..MAX_TURNS)
+        .find_map(|_| {
+            let event = stream.try_next_event();
+            if event.is_none() {
+                block_on(other.tick()).expect("tick second tab");
+                foreground.turn(None);
+                block_on(other.tick()).expect("tick second tab after worker");
+            }
+            event
+        })
+        .map(|event| opening(event).1)
+        .expect("the second tab's opening");
+    assert_eq!(rows, vec![row(30)], "the second tab reads the owner's rows");
+}
+
+/// A foreground's one-shot read with a first-load wait, through a worker
+/// whose live server does not answer: the worker serves its store once the
+/// wait runs out, and the read completes with the rows held locally.
+///
+/// ```text
+/// server (silent) ══ worker ══ tab (hint Live)
+/// tab: all(wait 200ms) ─ worker relays ─ (no answer) ─ 200ms ─► worker's rows
+/// ```
+#[test]
+fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() {
+    let server = seeded_server();
+    let foreground = foreground_over(0x75, worker_connected_to(0x74, &server));
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+
+    // An open subscription to the same query, released by its own wait.
+    let mut stream = subscribe(&foreground.tab, &items(), wait_for_remote(SHORT));
+    let opened = Instant::now();
+    while stream.try_next_event().is_none() {
+        assert!(
+            opened.elapsed() < Duration::from_secs(5),
+            "the opening is released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        foreground.turn(None);
+    }
+
+    let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let started = Instant::now();
+    let read = foreground.tab.all_serialized_query(
+        &bytes,
+        wait_for_remote(SHORT),
+        None,
+        None,
+        None,
+        false,
+        || false,
+        |attachment| foreground.tab.detach_query(attachment),
+    );
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    let rows = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            break match result.expect("foreground one-shot read") {
+                SerializedReadResult::Rows(rows) => rows.len(),
+                SerializedReadResult::Relation(_) => panic!("items is a row query"),
+            };
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the read must not outlive its first-load wait"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        foreground.turn(None);
+    };
+    assert!(started.elapsed() >= SHORT);
+    assert_eq!(rows, 0, "the cold worker holds none of the server's rows");
 }

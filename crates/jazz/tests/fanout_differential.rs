@@ -4,7 +4,7 @@
 //! commit each maintained result must equal a fresh read. Not ported from
 //! Jazz: this pins the prototype's fan-out (src/fanout.rs).
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 
@@ -326,5 +326,132 @@ fn run(seed: u64) {
     assert!(
         stats.skipped > stats.woken,
         "keyed invalidation skips most groups: {stats:?}"
+    );
+}
+
+/// A client's synced subscriptions (rows the server lists) re-check the
+/// rows a commit wrote instead of re-running: random writes on either end,
+/// and after each round trip every maintained result equals a fresh read.
+#[test]
+fn synced_results_recheck_written_rows_and_match_one_shot_reads() {
+    use jazz::db::{DeleteOptions, ReadTier, UpdateOptions, duplex};
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let node = |n: u8| DbIdentity {
+        node: NodeUuid::from_bytes([n; 16]),
+        author: AuthorSubject::SYSTEM,
+    };
+    let worker = block_on(Db::open(DbConfig::new(schema.clone(), node(1)))).unwrap();
+    let client = block_on(Db::open(DbConfig::new(schema, node(2)))).unwrap();
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    worker.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let pump = || {
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+        }
+        block_on(client.tick()).unwrap();
+    };
+    let task = |n: usize| row(7, n);
+    let task_cells = |n: usize, done: bool| {
+        cells(&[
+            ("title", Value::String(format!("t{:02}", n % 13))),
+            ("done", Value::Bool(done)),
+        ])
+    };
+    for n in 0..20 {
+        block_on(worker.insert(
+            "tasks",
+            task_cells(n, n % 3 == 0),
+            InsertOptions {
+                row_id: Some(task(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let mut live: Vec<Live> = [
+        Query::from("tasks"),
+        Query::from("tasks").filter(eq(col("done"), lit(Value::Bool(true)))),
+        Query::from("tasks")
+            .order_by("title", OrderDirection::Asc)
+            .limit(5),
+        Query::from("tasks")
+            .select(["done"])
+            .order_by("title", OrderDirection::Desc),
+    ]
+    .into_iter()
+    .map(|query| {
+        let query = client.prepare_query(&query).unwrap();
+        let stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+        Live {
+            query,
+            identity: AuthorSubject::SYSTEM,
+            stream,
+            rows: Vec::new(),
+            includes_room: false,
+        }
+    })
+    .collect();
+    pump();
+    let local = ReadOpts {
+        tier: ReadTier::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let check = |live: &mut Vec<Live>, step: usize| {
+        for sub in live.iter_mut() {
+            apply(sub);
+            let fresh = block_on(client.all(&sub.query, local.clone())).unwrap();
+            assert_eq!(sub.rows, snapshot(&fresh), "diverged after step {step}");
+        }
+    };
+    check(&mut live, 0);
+    let before = client.fanout_stats();
+    let mut rng = Rng(5);
+    let mut next = 20;
+    for step in 1..=120 {
+        let on = if rng.next(2) == 0 { &client } else { &worker };
+        let n = rng.next(next);
+        match rng.next(4) {
+            0 => {
+                block_on(on.insert(
+                    "tasks",
+                    task_cells(next, rng.next(2) == 0),
+                    InsertOptions {
+                        row_id: Some(task(next)),
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+                next += 1;
+            }
+            1 => {
+                let _ = block_on(on.delete("tasks", task(n), DeleteOptions::default()));
+            }
+            _ => {
+                let _ = block_on(on.update(
+                    "tasks",
+                    task(n),
+                    task_cells(n + rng.next(5), rng.next(2) == 0),
+                    UpdateOptions::default(),
+                ));
+            }
+        }
+        pump();
+        check(&mut live, step);
+    }
+    let after = client.fanout_stats();
+    assert!(
+        after.rechecked - before.rechecked > 10 * (after.reran - before.reran),
+        "synced groups re-check written rows: {before:?} -> {after:?}"
     );
 }

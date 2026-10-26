@@ -112,15 +112,15 @@ declare module "jazz-wasm" {
     static preflightBrowserEpochOne(pageStore: unknown): Promise<void>;
     static __browserStorageAdmissionReceipt(completed: boolean): Uint8Array;
     /**
-     * Host-only relay open; `storageOwner` is supplied by broker ownership admission.
-     * `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
-     * to pick the SQLite VFS (IndexedDB, with the file named after `storageOwner`, by default).
+     * Host-only relay open; `database` is the physical database name admitted by broker
+     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
+     * to pick the SQLite VFS (IndexedDB, with the file named after `database`, by default).
      */
     static openBrowser(
       pageStore: unknown,
       schema: Uint8Array,
       config: Uint8Array,
-      storageOwner: string,
+      database: string,
       cachedCatalogue?: Uint8Array,
     ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
@@ -130,7 +130,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
-      storageOwner: string,
+      database: string,
       cachedCatalogue?: Uint8Array,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
@@ -162,7 +162,7 @@ declare module "jazz-wasm" {
     /** Empty bytes mean no accepted column identity; otherwise a 16-byte UUID. */
     columnIdentity(table: string, column: string): Promise<Uint8Array>;
     /** Delete a durable browser store; no database may have it open. */
-    static destroyBrowserStorage(storage: unknown, storageOwner: string): Promise<void>;
+    static destroyBrowserStorage(storage: unknown, database: string): Promise<void>;
     /** Resolves once every commit so far is in the browser store's backing storage. */
     flush(): Promise<void>;
 
@@ -288,6 +288,7 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
+    setPrivateOwnerClient(): void;
     setScopeIsolatedStorageOwner(): void;
     waitForStorageOwner(): Promise<void>;
     /** @internal Foreground node-lease handoff only. */

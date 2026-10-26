@@ -35,8 +35,7 @@ run_phase() {
 }
 
 if [[ "${1:-}" == "--ci" && $# == 1 ]]; then
-  run_phase legacy-benchmark-correctness \
-    cargo test -p jazz --features testing --test legacy_benchmark_smoke
+  run_phase core-benchmark-correctness cargo test -p jazz-sim --test core_benchmark_smoke
   run_phase jazz-sim-scenario-correctness cargo test -p jazz-sim --test scenario_smoke
   run_phase band-book-pages cargo test -p jazz-example-band-book-benchmark --test pages
   run_phase stage-plan-crew-dashboard cargo test -p jazz-example-stage-plan-benchmark --lib board::crew_dashboard::tests::fanout_preserves_exact_membership_updates_and_revocation -- --exact

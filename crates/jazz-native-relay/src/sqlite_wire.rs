@@ -1,11 +1,13 @@
 //! Bounded native carrier for SQLite's existing semantic messages.
-use super::*;
+use jazz::db::SyncMessage;
+use jazz::protocol_limits::validate_logical_message_len;
+use jazz::wire::{TransportError, WireTransport};
 
 pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(message)
+    jazz::db::encode_message(message)
 }
 pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    jazz::postcard_exact::decode_postcard_exact(bytes)
+    jazz::db::decode_message(bytes)
 }
 #[derive(Debug)]
 pub enum SendOutcome {
@@ -44,6 +46,17 @@ impl<W: WireTransport> NativeRelayTransport<W> {
         }
     }
     pub fn try_recv(&mut self) -> Option<SyncMessage> {
+        let bytes = self.receive()?;
+        // receive already admitted the canonical semantic envelope.
+        Some(decode_sync_message(&bytes).expect("validated native frame"))
+    }
+    /// The socket bridge forwards the admitted frame without reserializing it.
+    pub(crate) fn send(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        self.check()?;
+        validate_logical_message_len(frame.len()).map_err(TransportError::Failed)?;
+        self.wire.send_frame(frame)
+    }
+    pub(crate) fn receive(&mut self) -> Option<Vec<u8>> {
         if self.failure.is_some() {
             return None;
         }
@@ -51,7 +64,7 @@ impl<W: WireTransport> NativeRelayTransport<W> {
         let decoded = validate_logical_message_len(bytes.len())
             .and_then(|()| decode_sync_message(&bytes).map_err(|e| e.to_string()));
         match decoded {
-            Ok(message) => Some(message),
+            Ok(_) => Some(bytes),
             Err(message) => {
                 if let Ok(jazz::wire::WireFrame::Error(error)) = jazz::wire::decode_frame(&bytes) {
                     self.remote_error = Some(error);

@@ -27,6 +27,8 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  static openPersistentAccountOwnerWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, storageOwner: string, token: string, appId: string, claimedAuthor: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
+  static openPersistentAccountOwner(dataPath: string, schema: Uint8Array, config: Uint8Array, storageOwner: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
   validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void
   mergeCatalogueCaptures(previous: Uint8Array, next: Uint8Array): Uint8Array
   hasAuthenticatedCatalogue(): boolean | PendingNativeCatalogueState
@@ -36,8 +38,6 @@ export declare class NapiDb {
   cancelInitializationTransaction(token: string): void
   recordInitializationInsertAbsence(openId: string, table: string, rowId: Uint8Array): Uint8Array | PendingNativeRead
   initializationTransactionStatus(ids: Array<string>): string | PendingNativePermissionAdvice
-  static openPersistentAccountOwnerWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, storageOwner: string, token: string, appId: string, claimedAuthor: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
-  static openPersistentAccountOwner(dataPath: string, schema: Uint8Array, config: Uint8Array, storageOwner: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
   /**
    * Exact wire capabilities compiled into this native binding.
    *
@@ -87,6 +87,7 @@ export declare class NapiDb {
    * the proof-bearing path.
    */
   static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
+  /** Open the durable store in directory `data_path` (one SQLite file). */
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
   /**
    * Open a deliberate persistent backend runtime. This is intentionally a
@@ -94,10 +95,11 @@ export declare class NapiDb {
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string, cachedCatalogue?: Uint8Array | undefined | null): NapiDb
-  /** Read an accepted table UUID without blocking pending native storage. */
   tableIdentity(table: string): Uint8Array | PendingNativeRead
-  /** Read an accepted column UUID without blocking pending native storage. */
   columnIdentity(table: string, column: string): Uint8Array | PendingNativeRead
+  coverCatalogue(table: string, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  allSettlementMetadata(query: Uint8Array, opts: JsonValue | undefined | null, openTransactionId: string, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null, includeRows?: boolean | undefined | null): Uint8Array | PendingNativeRead
+  setPrivateOwnerClient(): void
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
   /** Begin one owner-wide transaction. */
@@ -106,122 +108,119 @@ export declare class NapiDb {
   commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openTransactionId: string): void
+  /**
+   * The host's tick callback: called with `"immediate"` whenever there
+   * is sync work (a local write to upload, frames to apply).
+   */
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
+  /** Register a callback for rejected writes that no active wait consumed. */
   onMutationError(callback: (event: any) => void): void
   /**
    * Decode, prepare, and execute one read inside Rust. Query-plan ownership
    * never crosses the language boundary.
    */
   all(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
-  /** Refresh opened-schema catalogue coverage without returning row bodies. */
-  coverCatalogue(table: string, author?: Uint8Array | undefined | null, claims?: Record<string, unknown> | undefined | null): Uint8Array | PendingNativeRead
-  /**
-   * Opt-in transaction settlement sidecar for E2EE; ordinary rows and their
-   * codec remain unchanged. The caller still needs global snapshot acceptance.
-   */
-  allSettlementMetadata(query: Uint8Array, opts: JsonValue | undefined | null, openTransactionId: string, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null, includeRows?: boolean | undefined | null): Uint8Array | PendingNativeRead
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
-  /**
-   * Set ambient claims for mutation and other explicitly serialized
-   * identity operations. Prepared queries capture scoped identity and
-   * claims at preparation time, so concurrent reads do not consult this
-   * shared map.
-   */
+  /** Set the claims reads and writes as `author` are checked with. */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
+  /**
+   * Exact local state for the write-merge bridge: the row as stored,
+   * deleted or not. Write authorization remains at the mutation boundary;
+   * this is not a query.
+   */
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
-  subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription | PendingNativeSubscription
+  subscribe(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean } | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Subscription
+  /** Apply received frames and send what is due on every link. */
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
+  /**
+   * The optimistic in-memory side of a client/worker pair: its
+   * subscriptions open with the worker's answer.
+   */
   setNonDurableClient(): void
   /**
    * Report what the host knows about the path to the authoritative server
    * (`"none" | "attempting" | "live" | "failed"`; the TypeScript names
    * `"connecting" | "connected" | "unavailable"` are accepted as aliases).
-   * Drives only local-first reads that wait for the server on first load. The core timestamps each
-   * `"attempting"` report as the start of a new attempt; until this is
-   * first called, reachability is derived from this runtime's own upstream.
+   * Drives only local-first reads that wait for the server on first load.
    */
   setRemoteLinkHint(state: string): void
+  /**
+   * Connect to the server over byte frames the host carries: each frame
+   * is one postcard `SyncMessage`.
+   */
   connectUpstream(): Transport
+  /**
+   * Connect after the carrier accepted the server Hello. Negotiated
+   * features must be compiled in; the rest of the session context
+   * (authority endpoints, epochs) has no counterpart on SQLite's sync, so
+   * this is otherwise [`Self::connect_upstream`].
+   */
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
-  /** Return the originating node clock before a host releases its memory runtime. */
+  /**
+   * The newest transaction time this database handed out under its node
+   * (a `TxTime` is the commit seq). A leased node's next holder seeds it
+   * through `seedForegroundTxTimeHighWater`.
+   */
   foregroundTxTimeHighWater(): bigint
-  /** Merge a checked host-retained node clock before opening new local writes. */
+  /**
+   * Continue after a previous holder of this node: no transaction time at
+   * or below `high_water` is reused.
+   */
   seedForegroundTxTimeHighWater(highWater: bigint): void
-  /** Capture through the same ordered owner queue as local mutations. */
+  /** Capture a snapshot reference, as its persisted string's bytes. */
   captureSnapshot(): Uint8Array | PendingNativeRead
+  /**
+   * Complete once every local write so far reached `tier`. Commits are in
+   * the SQLite file when their write call returns, so only `global` waits.
+   */
   waitForPendingWrites(tier: string): Uint8Array | PendingNativeRead
   close(): Promise<undefined>
 }
 
-/** A single owner observation, retained on the JavaScript thread until ready. */
 export declare class PendingNativeCatalogueState {
   poll(): NativeCatalogueState | null
   cancel(): void
 }
 
-/** Thread-affine initialization preparation, driven by the owner's normal ticks. */
 export declare class PendingNativeInitializationSeal {
   poll(): NativeInitializationSeal | null
   cancel(): void
 }
 
 /**
- * A JavaScript-thread-owned permission preflight which is waiting for an
- * authenticated upstream authority.  Like pending reads, this remains on the
- * owning JavaScript thread: NAPI's worker-pool promises require `Send`, while
- * the request future deliberately owns thread-affine connection state.
+ * A JavaScript-thread-owned permission preflight waiting for the upstream
+ * authority's answer. Like pending reads, it stays on the owning JavaScript
+ * thread.
  */
 export declare class PendingNativePermissionAdvice {
   poll(): string | null
+  /** Stop waiting; a late answer is ignored. */
   cancel(): void
 }
 
 /**
- * A JavaScript-thread-owned binding read waiting for query coverage or
- * asynchronous large-value storage. NAPI promises execute on a Send worker
- * pool, whereas a Jazz runtime is deliberately `Rc`/thread-affine. The
- * adapter drives this object after its peer transport makes progress instead
- * of blocking Node.
+ * A JavaScript-thread-owned read waiting for the server. NAPI promises
+ * execute on a Send worker pool, whereas a Jazz database is deliberately
+ * `Rc`/thread-affine. The adapter drives this object after its peer
+ * transport makes progress instead of blocking Node.
  */
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
   cancel(): void
 }
 
-/** Thread-affine subscription opening waiting for the core owner. */
-export declare class PendingNativeSubscription {
-  setWake(callback: ((err: Error | null, arg: string) => void)): void
-  poll(): Subscription | null
-  cancel(): void
-}
-
-/**
- * Opaque marker returned while the next bounded native subscription batch is
- * waiting for chunk I/O. Call `readAll` again after transport progress.
- */
-export declare class PendingNativeSubscriptionBatch {
-  /**
-   * The host should wait this bounded delay before asking the subscription
-   * to retry a retained chunk-hydration batch.
-   */
-  retryAfterMs(): number | null
-}
-
+/** A single-use capability that remains bound to its originating schema facade. */
 export declare class StagedStreamingMutation {
-  attach(openTransactionId: string): void
+  attach(transaction: string): void
   abort(): boolean
 }
 
-/**
- * Native bounded-memory sink used by the TypeScript async streaming-mutation
- * adapter. Each push incrementally prepares and stages bounded Groove nodes,
- * using the same ingress policy and resumable construction as WASM.
- */
+/** A large value uploaded in chunks, then published as one row mutation. */
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void
   finish(): Write
@@ -230,8 +229,12 @@ export declare class StreamingMutation {
 }
 
 export declare class Subscription {
-  readAll(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
-  drain(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
+  /**
+   * Every event available now; empty until the next tick or local write
+   * has something to deliver.
+   */
+  readAll(): Array<SubscriptionEvent>
+  drain(): Array<SubscriptionEvent>
   close(): boolean
 }
 
@@ -244,7 +247,15 @@ export declare class TestJwtIssuer {
   stop(): Promise<void>
 }
 
+/**
+ * One sync link, carried by the host as byte frames. Frames are applied
+ * and produced by the database's tick.
+ */
 export declare class Transport {
+  /**
+   * SQLite's sync has no auxiliary chunk lane: large-value chunks travel
+   * as ordinary sync messages, so every frame belongs to the ordinary lane.
+   */
   routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
   recvAuxiliaryWireFrames(): Array<Uint8Array>
   auxiliaryReceiveTimeoutMs(): number | null
@@ -253,6 +264,10 @@ export declare class Transport {
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>
+  /**
+   * Tick the database this link belongs to: apply received frames, send
+   * what is due. Returns the number of frames waiting to be sent.
+   */
   tick(): number
   close(): boolean
 }
@@ -261,7 +276,12 @@ export declare class Write {
   get txId(): string
   get payload(): Uint8Array
   get rowId(): Uint8Array
-  writeState(): any
+  writeState(): JsonValue
+  /**
+   * Resolve once the write reached `tier`: at once for `none` and
+   * `local` (the commit is in the store when the write call returns), on
+   * the server's acceptance for `global`, rejecting if it refused.
+   */
   wait(tier: string, observeOnly?: boolean | undefined | null): Promise<undefined>
   close(): boolean
 }
@@ -365,7 +385,8 @@ export interface SubscriptionDeltaEvent {
   type: 'delta'
   reset: boolean
   delta: Uint8Array
-  terminalOperations: Array<SubscriptionTerminalOperation>
+  /** Always empty: SQLite subscriptions deliver whole-row deltas. */
+  terminalOperations: Array<never>
   settled: boolean
   tier: 'None' | 'Local' | 'Global'
 }
@@ -373,87 +394,16 @@ export interface SubscriptionDeltaEvent {
 export type SubscriptionEvent =
   SubscriptionDeltaEvent | SubscriptionRejectedEvent | SubscriptionClosedEvent
 
-export interface SubscriptionInvalidAuthoritySourceClosureReason {
-  type: 'InvalidAuthoritySourceClosure'
-  transition: string
-}
-
 export interface SubscriptionRejectedEvent {
   type: 'rejected'
-  reason: SubscriptionRejectionReason
+  reason: SubscriptionServerFailureReason
 }
 
-export type SubscriptionRejectionReason =
-  SubscriptionUnsupportedShapeCapabilityReason | SubscriptionShapeRegistrationPendingReason | SubscriptionServerFailureReason | SubscriptionInvalidAuthoritySourceClosureReason
-
+/** Why the server refused a subscription. */
 export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
-  code: 'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal'
-}
-
-export interface SubscriptionShapeRegistrationPendingReason {
-  type: 'ShapeRegistrationPendingCatalogueAdmission'
-}
-
-export interface SubscriptionTerminalCollectionPathSegment {
-  Collection: string
-}
-
-export type SubscriptionTerminalEdit =
-  SubscriptionTerminalInsertEdit | SubscriptionTerminalUpdateEdit | SubscriptionTerminalRemoveEdit | SubscriptionTerminalMoveEdit
-
-export interface SubscriptionTerminalInsert {
-  index: number
-  key: Uint8Array
-  value: Uint8Array
-}
-
-export interface SubscriptionTerminalInsertEdit {
-  Insert: SubscriptionTerminalInsert
-}
-
-export interface SubscriptionTerminalKeyPathSegment {
-  Key: Uint8Array
-}
-
-export interface SubscriptionTerminalMove {
-  key: Uint8Array
-  index: number
-}
-
-export interface SubscriptionTerminalMoveEdit {
-  Move: SubscriptionTerminalMove
-}
-
-export interface SubscriptionTerminalOperation {
-  root_key: Uint8Array
-  path: Array<SubscriptionTerminalPathSegment>
-  edit: SubscriptionTerminalEdit
-}
-
-export type SubscriptionTerminalPathSegment =
-  SubscriptionTerminalCollectionPathSegment | SubscriptionTerminalKeyPathSegment
-
-export interface SubscriptionTerminalRemove {
-  key: Uint8Array
-}
-
-export interface SubscriptionTerminalRemoveEdit {
-  Remove: SubscriptionTerminalRemove
-}
-
-export interface SubscriptionTerminalUpdate {
-  key: Uint8Array
-  value: Uint8Array
-}
-
-export interface SubscriptionTerminalUpdateEdit {
-  Update: SubscriptionTerminalUpdate
-}
-
-export interface SubscriptionUnsupportedShapeCapabilityReason {
-  type: 'UnsupportedShapeCapability'
-  detail: string
+  /** The server's reason. */
+  code: string
 }
 
 export interface UpdateOptions {

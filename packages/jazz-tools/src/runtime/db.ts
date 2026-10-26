@@ -4311,6 +4311,10 @@ export class Db {
     const runtime = client.getRuntime();
     if (!runtime.tableIdentity)
       throw new Error("Runtime does not expose catalogue table identities");
+    if (localOnly && !(await client.hasAuthenticatedCatalogue())) {
+      this.assertOpen();
+      return null;
+    }
     if (!localOnly) {
       const initialOfflineState = this.connection.initialExplicitOfflineState();
       if (initialOfflineState) await initialOfflineState;
@@ -4347,7 +4351,7 @@ export class Db {
     column: string,
     localOnly = false,
   ): Promise<string | null> {
-    await this.tableIdentity(table, localOnly);
+    if ((await this.tableIdentity(table, localOnly)) === null) return null;
     const runtime = this.getClient(table._schema).getRuntime();
     if (!runtime.columnIdentity)
       throw new Error("Runtime does not expose catalogue column identities");

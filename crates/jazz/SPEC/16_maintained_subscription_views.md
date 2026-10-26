@@ -664,7 +664,7 @@ Window limitations:
 - root `limit`/`offset` windows without explicit `order_by` are supported by
   injecting the ch. 6 default ascending row-id order before lowering through
   `TopBy`; this applies to both prepared bindings and policy-routed maintained
-  views. Explicit order keys retain ascending row id as their stable tie-break.
+  views. Explicit order keys break ties by row id in the last key's direction (ch. 6).
 - The same rule applies to every non-recursive relation-local window, including
   an `array_subquery`: without child `order_by`, each parent/correlation group
   is ordered by ascending child row id before its child-local `offset` and

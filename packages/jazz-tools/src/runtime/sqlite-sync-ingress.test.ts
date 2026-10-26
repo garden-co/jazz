@@ -7,17 +7,20 @@ import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-ut
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
-// Existing jazz.sqlite.native-relay-carrier.v1 bytes: Unsubscribe { id: 128 }.
+// jazz.sqlite.sync.v2: the explicit JSQL/2 header and Unsubscribe { id: 128 }.
 // Byte-level ingress checks are required here: row equality cannot detect an
 // unread suffix or alternate varint spelling at the generated artifact boundary.
-const valid = new Uint8Array([1, 128, 1]);
+const prefix = [0x4a, 0x53, 0x51, 0x4c, 2];
+const valid = new Uint8Array([...prefix, 1, 128, 1]);
 const invalid = [
   new Uint8Array([...valid, 0]),
-  new Uint8Array([129, 0, 128, 1]),
-  new Uint8Array([1, 128, 129, 0]),
+  new Uint8Array([...prefix, 129, 0, 128, 1]),
+  new Uint8Array([...prefix, 1, 128, 129, 0]),
   new Uint8Array(),
   new Uint8Array([255]),
   valid.slice(0, -1),
+  new Uint8Array([1, 128, 1]), // Historical unversioned SQLite frame.
+  new Uint8Array([0x4a, 0x53, 0x51, 0x4c, 1, 1, 128, 1]), // Rejected prior version.
 ];
 
 for (const artifact of ["napi", "wasm"] as const) {

@@ -773,11 +773,17 @@ impl Db {
             ));
         }
         let (col, value) = self.finalize_streaming_upload(&mut upload, table, column)?;
-        self.inner().derived.push(value.clone());
-        cells.insert(
-            column.to_owned(),
-            nullable(&col, Value::Large(Box::new(value))),
-        );
+        // A value that fits inline is written as an ordinary inline cell, as
+        // the store keeps it: its commit carries the bytes, not a
+        // descriptor of chunks the store then reclaims.
+        let logical = if value.byte_length <= lv::INLINE_VALUE_MAX_BYTES as u64 {
+            let bytes = self.inner().chunks.value_bytes(&value)?;
+            logical_value(value.kind, bytes)?
+        } else {
+            self.inner().derived.push(value.clone());
+            Value::Large(Box::new(value))
+        };
+        cells.insert(column.to_owned(), nullable(&col, logical));
         let result = match mutation {
             StreamingMutationKind::Insert if base.is_some() => Err(Error::new(
                 ErrorCode::WriteRejected,

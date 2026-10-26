@@ -3,7 +3,7 @@
 //! membership is deleted. The replica must lose it (and get it back when
 //! access returns). Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -11,12 +11,16 @@ mod duplex_transport;
 use std::collections::BTreeMap;
 
 use duplex_transport::duplex;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SubscriptionEvent, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnType, Operation, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+};
 
 use common::{
     allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
@@ -275,5 +279,258 @@ fn membership_write_cost_with_many_holders() {
     eprintln!(
         "server tick after one membership write, 300 clients holding 3 rooms each: median {:?}",
         times[times.len() / 2]
+    );
+}
+
+/// A one-shot `Remote` read after access was lost leaves out the cached rows
+/// the server's answer no longer lists, in an ordered window or not, though
+/// no subscription held them to see them leave: here the reader wrote them.
+/// Local reads keep them (INV-SYNC-14).
+#[test]
+fn a_remote_read_after_losing_access_leaves_out_unlisted_cached_rows() {
+    for window in [None, Some((1, 2))] {
+        let server = open(0, AuthorSubject::SYSTEM);
+        let me = Value::String(alice().principal_parts().1);
+        for n in 1..=4 {
+            server
+                .seed_settled_mergeable_for_bootstrap(
+                    "memberships",
+                    id(2, n),
+                    AuthorSubject::SYSTEM,
+                    cells(&[("room", Value::Uuid(id(1, n).0)), ("member", me.clone())]),
+                )
+                .unwrap();
+        }
+        let client = open(1, alice());
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, alice());
+        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        for n in 1..=4 {
+            block_on(client.insert(
+                "rooms",
+                cells(&[("name", Value::String(format!("room {n}")))]),
+                InsertOptions {
+                    row_id: Some(id(1, n)),
+                    ..InsertOptions::default()
+                },
+            ))
+            .unwrap();
+        }
+        pump(&server, &client);
+
+        let mut query = Query::from("rooms").order_by("name", OrderDirection::Asc);
+        if let Some((offset, limit)) = window {
+            query.offset = offset;
+            query.limit = Some(limit);
+        }
+        let bytes = postcard::to_allocvec(&query).unwrap();
+        let remote = || {
+            let read = client.all_serialized_query(
+                &bytes,
+                ReadOpts::for_read_tier(ReadTier::Remote),
+                None,
+                None,
+                None,
+                false,
+                || false,
+                |attachment| client.detach_query(attachment),
+            );
+            let mut read = std::pin::pin!(read);
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            for _ in 0..50 {
+                if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                    let jazz::db::SerializedReadResult::Rows(rows) = result.unwrap() else {
+                        panic!("the remote read answered with something other than rows");
+                    };
+                    let mut ids: Vec<RowUuid> = rows.iter().map(|row| row.row_uuid()).collect();
+                    ids.sort();
+                    return ids;
+                }
+                pump(&server, &client);
+            }
+            panic!("the remote read did not answer");
+        };
+
+        for n in 1..=4 {
+            block_on(server.delete("memberships", id(2, n), Default::default())).unwrap();
+        }
+        pump(&server, &client);
+        assert_eq!(remote(), Vec::<RowUuid>::new(), "window {window:?}");
+        assert_eq!(
+            local(&client, "rooms"),
+            [id(1, 1), id(1, 2), id(1, 3), id(1, 4)]
+        );
+    }
+}
+
+/// Through a relay, a `Remote` read by id after the reader lost access leaves
+/// the row out: the relay serves the upstream's answer, not its cached copy.
+#[test]
+fn a_remote_read_through_an_edge_after_losing_access_leaves_the_row_out() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let me = Value::String(alice().principal_parts().1);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "rooms",
+            id(1, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[("name", Value::String("room 1".into()))]),
+        )
+        .unwrap();
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "memberships",
+            id(2, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[("room", Value::Uuid(id(1, 1).0)), ("member", me)]),
+        )
+        .unwrap();
+    // The reader's own durable store relays for its foreground, as a
+    // browser worker does for its tabs.
+    let edge = open(5, alice());
+    let (edge_side, server_side) = duplex();
+    let _edge_upstream = block_on(edge.connect_upstream(edge_side));
+    server.accept_subscriber(server_side, alice());
+    edge.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let client = open(1, alice());
+    let (client_side, edge_client_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    edge.accept_subscriber(edge_client_side, alice());
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let pump_all = || {
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+        }
+        block_on(client.tick()).unwrap();
+    };
+    let query = Query::from("rooms").filter(eq(col("id"), lit(Value::Uuid(id(1, 1).0))));
+    let bytes = postcard::to_allocvec(&query).unwrap();
+    let remote = || {
+        let read = client.all_serialized_query(
+            &bytes,
+            ReadOpts::for_read_tier(ReadTier::Remote),
+            None,
+            None,
+            None,
+            false,
+            || false,
+            |attachment| client.detach_query(attachment),
+        );
+        let mut read = std::pin::pin!(read);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        for _ in 0..50 {
+            if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                let jazz::db::SerializedReadResult::Rows(rows) = result.unwrap() else {
+                    panic!("the remote read answered with something other than rows");
+                };
+                return rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+            }
+            pump_all();
+        }
+        panic!("the remote read did not answer");
+    };
+    assert_eq!(remote(), [id(1, 1)]);
+    block_on(server.delete("memberships", id(2, 1), Default::default())).unwrap();
+    pump_all();
+    assert_eq!(remote(), Vec::<RowUuid>::new());
+}
+
+fn inherited_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("rooms")
+                    .column("name", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(exists(
+                        "memberships",
+                        vec![outer_eq("room", "id"), session_eq("member", &ME)],
+                    ))),
+            )
+            .table(
+                TableSchemaBuilder::new("memberships")
+                    .fk_column("room", "rooms")
+                    .column("member", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("room", "rooms")
+                    .column("body", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Inherits {
+                        operation: Operation::Select,
+                        via_column: "room".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .build(),
+    )
+}
+
+#[test]
+fn a_replica_holds_the_parent_its_rows_inherit_read_access_from() {
+    let open = |node: u8, author: AuthorSubject| {
+        let config = DbConfig::new(
+            inherited_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        );
+        if node == 0 {
+            block_on(Db::open_history_complete(config))
+        } else {
+            block_on(Db::open(config))
+        }
+        .unwrap()
+    };
+    let server = open(0, AuthorSubject::SYSTEM);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    let me = Value::String(alice().principal_parts().1);
+    seed(
+        "rooms",
+        id(1, 1),
+        cells(&[("name", Value::String("room".into()))]),
+    );
+    seed(
+        "memberships",
+        id(2, 1),
+        cells(&[("room", Value::Uuid(id(1, 1).0)), ("member", me)]),
+    );
+    seed(
+        "messages",
+        id(3, 1),
+        cells(&[
+            ("room", Value::Uuid(id(1, 1).0)),
+            ("body", Value::String("m".into())),
+        ]),
+    );
+    let client = open(1, alice());
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let messages = client.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(local(&client, "messages"), [id(3, 1)]);
+    assert_eq!(
+        local(&client, "rooms"),
+        [id(1, 1)],
+        "the room her messages inherit read access from ships with them"
+    );
+
+    block_on(server.delete("memberships", id(2, 1), Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        local(&client, "rooms"),
+        [id(1, 1)],
+        "the room she can no longer read stays readable locally (INV-SYNC-14)"
     );
 }

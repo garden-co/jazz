@@ -53,7 +53,7 @@ fn open(node: u8, path: Option<&Path>) -> Db {
 }
 fn foreground(node: u8) -> Db {
     let db = open(node, None);
-    db.set_non_durable_client();
+    db.set_private_owner_client().unwrap();
     db
 }
 fn owner(path: Option<&Path>) -> Db {
@@ -132,6 +132,129 @@ fn writes_require_current_private_owner_admission() {
     turns(&[&tab, &owner]);
     insert(&tab, "reconnected", true);
     assert_eq!(values(&tab), ["admitted", "reconnected"]);
+}
+
+/// Alice's ordinary tab can stage an offline write before its worker connects;
+/// only Bob's authority can accept that write and earn Global durability.
+#[test]
+fn ordinary_worker_mode_allows_writes_before_connecting() {
+    let tab = open(1, None);
+    tab.set_non_durable_client();
+    let tx = insert(&tab, "offline ordinary", true).mergeable_tx_id();
+    assert_eq!(tab.write_state(tx).unwrap().fate, Fate::Pending);
+    assert_eq!(values(&tab), ["offline ordinary"]);
+    let worker = open(50, None);
+    connect(&tab, &worker);
+    turns(&[&tab, &worker]);
+    assert_eq!(tab.write_state(tx).unwrap().fate, Fate::Pending);
+    assert_ne!(
+        tab.write_state(tx).unwrap().durability,
+        DurabilityTier::Global
+    );
+    let denied = insert(&tab, "denied by authority", false).mergeable_tx_id();
+    turns(&[&tab, &worker]);
+    assert_eq!(tab.write_state(denied).unwrap().fate, Fate::Pending);
+    let server = open(90, None);
+    server.set_authority();
+    connect(&worker, &server);
+    turns(&[&tab, &worker, &server]);
+    assert_eq!(tab.write_state(tx).unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        tab.write_state(tx).unwrap().durability,
+        DurabilityTier::Global
+    );
+    assert!(matches!(
+        tab.write_state(denied).unwrap().fate,
+        Fate::Rejected(_)
+    ));
+    assert_eq!(values(&server), ["offline ordinary"]);
+}
+
+/// Alice's E2EE tab cannot remove its admission fence by selecting ordinary
+/// mode, reconnecting to a generic worker, or promoting itself to authority.
+#[test]
+fn private_foreground_mode_cannot_be_downgraded() {
+    let tab = foreground(1);
+    tab.set_non_durable_client();
+    denied(&tab);
+    let owner = owner(None);
+    let connection = connect(&tab, &owner);
+    turns(&[&tab, &owner]);
+    insert(&tab, "admitted private", true);
+    assert!(tab.detach_connection(&connection));
+    tab.set_non_durable_client();
+    let ordinary = open(51, None);
+    connect(&tab, &ordinary);
+    turns(&[&tab, &ordinary]);
+    denied(&tab);
+    assert!(
+        values(&ordinary).is_empty(),
+        "private retries must not escape before admission"
+    );
+    tab.set_authority();
+    assert!(!tab.is_authority());
+    assert!(
+        block_on(tab.insert("notes", cells("bad promotion", true), Default::default())).is_err()
+    );
+}
+
+/// Alice selects her host role before peer admission or writes. Reusing an
+/// ordinary connection or an already written store cannot adopt private inputs.
+#[test]
+fn private_foreground_mode_requires_an_unused_host() {
+    let standalone = open(90, None);
+    insert(&standalone, "already written", true);
+    assert!(standalone.set_private_owner_client().is_err());
+    let ordinary = open(1, None);
+    ordinary.set_non_durable_client();
+    insert(&ordinary, "pending ordinary", true);
+    assert!(ordinary.set_private_owner_client().is_err());
+    let tab = open(2, None);
+    let worker = open(50, None);
+    let connection = connect(&tab, &worker);
+    assert!(tab.detach_connection(&connection));
+    assert!(tab.set_private_owner_client().is_err());
+    let authority = open(90, None);
+    authority.set_authority();
+    assert!(authority.set_private_owner_client().is_err());
+    let leased = open(3, None);
+    leased.seed_seq_floor(10_000);
+    leased.set_private_owner_client().unwrap();
+    denied(&leased);
+}
+
+/// Mallory's worker cannot turn Alice's ordinary tab into a private foreground.
+/// Wire injection is needed here because a correct worker never sends an
+/// unsolicited owner acknowledgement; all subject/schema/node fields are valid.
+#[test]
+fn peer_messages_cannot_select_private_foreground_mode() {
+    let tab = open(1, None);
+    tab.set_non_durable_client();
+    let (up, mut peer) = duplex_transport::duplex();
+    let (mut bridge, down) = duplex_transport::duplex();
+    let owner = owner(None);
+    block_on(tab.connect_upstream(up));
+    owner.accept_subscriber(down, alice());
+    block_on(tab.tick()).unwrap();
+    let mut schema = None;
+    while let Some(message) = peer.try_recv() {
+        if let SyncMessage::Schema { version } = &message {
+            schema = Some(*version);
+        }
+        bridge.send(message).unwrap();
+    }
+    block_on(owner.tick()).unwrap();
+    while let Some(message) = bridge.try_recv() {
+        peer.send(message).unwrap();
+    }
+    peer.send(SyncMessage::OwnerReadyV1 {
+        schema: schema.unwrap(),
+        subject: alice().canonical().into(),
+        node: [50; 16],
+    })
+    .unwrap();
+    assert_eq!(block_on(tab.tick()).unwrap_err().code, ErrorCode::Protocol);
+    assert!(block_on(tab.wait_for_storage_owner()).is_err());
 }
 
 /// Alice writes while her owner is offline from Bob's authority. Owner storage
@@ -308,7 +431,7 @@ fn reconnect_cannot_silently_replace_the_private_owner() {
 #[test]
 fn owner_ready_v1_matches_independent_bytes() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_owner_ready_v1.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/owner-ready.json")).unwrap();
     let bytes: Vec<u8> = fixture["readyHex"]
         .as_str()
         .unwrap()
@@ -321,9 +444,9 @@ fn owner_ready_v1_matches_independent_bytes() {
         subject: alice().canonical().into(),
         node: [0x33; 16],
     };
-    assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
+    assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
     assert!(matches!(
-        postcard::from_bytes::<SyncMessage>(&bytes).unwrap(),
+        jazz::db::decode_message(&bytes).unwrap(),
         SyncMessage::OwnerReadyV1 { .. }
     ));
 }

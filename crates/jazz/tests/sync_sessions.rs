@@ -2,7 +2,7 @@
 //! session, never stalls the others, and its slot is reused, so churn does
 //! not grow the server. Not ported from Jazz.
 
-mod common;
+use crate::common;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -230,4 +230,43 @@ fn churn_does_not_grow_the_server() {
     pump(&server, &[&stay]);
     assert_eq!(local(&stay), 300);
     assert_eq!(server.open_subscribers(), 1);
+}
+
+/// Alice's ordinary socket has no room to send; it is disconnected rather
+/// than retained as a local retry carrier. Bob still receives later writes.
+#[test]
+fn ordinary_socket_backpressure_still_releases_the_session() {
+    // A transport fixture is necessary to reject a send before its message
+    // is accepted; database operations cannot control a socket's capacity.
+    struct Pressured(Box<dyn Transport>);
+    impl Transport for Pressured {
+        fn send(&mut self, _: SyncMessage) -> Result<(), TransportError> {
+            Err(TransportError::Backpressure)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            self.0.try_recv()
+        }
+    }
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let bob = open(2, user(2));
+    let (client_side, server_side, _) = pipe();
+    let _alice_up = block_on(alice.connect_upstream(client_side));
+    server.accept_subscriber(Box::new(Pressured(server_side)), user(1));
+    let (client_side, server_side, _) = pipe();
+    let _bob_up = block_on(bob.connect_upstream(client_side));
+    server.accept_subscriber(server_side, user(2));
+    let query = Query::from("messages");
+    let _alice_rows =
+        block_on(alice.subscribe(&alice.prepare_query(&query).unwrap(), ReadOpts::default()))
+            .unwrap();
+    let _bob_rows =
+        block_on(bob.subscribe(&bob.prepare_query(&query).unwrap(), ReadOpts::default())).unwrap();
+    post(&server, 0);
+    pump(&server, &[&alice, &bob]);
+    assert_eq!(server.open_subscribers(), 1);
+    assert_eq!(local(&bob), 1);
+    post(&server, 1);
+    pump(&server, &[&alice, &bob]);
+    assert_eq!(local(&bob), 2);
 }

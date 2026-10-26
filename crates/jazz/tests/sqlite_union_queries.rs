@@ -338,20 +338,29 @@ fn arm_keys_and_tie_order_are_stable_and_use_result_key_v2() {
     assert_eq!(wire, fixture);
 }
 
-/// Alice gets an explicit coverage error for remote union hydration. Local
-/// reads remain available on her replica while per-arm coverage is unported.
+/// Alice can attach a UNION while offline, but a Remote stream cannot claim
+/// an authority result before coverage arrives. Local reads remain available.
 #[test]
-fn remote_union_reads_are_explicitly_refused() {
+fn remote_union_reads_wait_for_authority_coverage() {
     // A fresh owner without authority mode is a replica once it attaches.
     let client = open(false);
     let (up, _down) = duplex_transport::duplex();
     block_on(client.connect_upstream(up));
     let prepared = client.prepare_query(&query(both())).unwrap();
-    let error = match block_on(client.subscribe(&prepared, ReadOpts::default())) {
-        Err(error) => error,
-        Ok(_) => panic!("remote union must refuse incomplete coverage"),
-    };
-    assert!(error.message.contains("union-arm coverage"));
+    let mut preview = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    while let Some(event) = preview.try_next_event() {
+        match event {
+            SubscriptionEvent::Delta { settled, .. } => assert!(!settled),
+            SubscriptionEvent::Rejected { reason } => panic!("offline attachment: {reason}"),
+            SubscriptionEvent::Closed => panic!("offline attachment closed"),
+        }
+    }
+    let mut remote = block_on(client.subscribe(
+        &prepared,
+        ReadOpts::for_read_tier(jazz::db::ReadTier::Remote),
+    ))
+    .unwrap();
+    assert!(remote.try_next_event().is_none());
     assert!(
         block_on(client.all(
             &prepared,

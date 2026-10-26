@@ -6,7 +6,7 @@
 //! non-serializable commit. Not ported verbatim (Jazz's suite drives its
 //! server shell and snapshot-capture internals).
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -242,7 +242,7 @@ impl Net {
         match self.settle(i, receipt.0) {
             Ok(_) => Redeem::Joined,
             Err(error) => {
-                assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+                common::assert_serialization_conflict(&error);
                 Redeem::Conflict
             }
         }
@@ -379,7 +379,7 @@ fn an_offline_prepared_redemption_of_a_revoked_invite_conflicts() {
     let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
     net.go_online(BACKEND);
     let error = net.settle(BACKEND, receipt.0).unwrap_err();
-    assert_eq!(error.code, ErrorCode::TransactionConflict);
+    common::assert_serialization_conflict(&error);
     assert_eq!(net.members("abc"), 1);
     // The rejected optimistic member is gone from the backend's replica.
     let members = net
@@ -392,6 +392,39 @@ fn an_offline_prepared_redemption_of_a_revoked_invite_conflicts() {
             .len(),
         1
     );
+}
+
+/// A serializable transaction that only reads still commits at the
+/// authority, which re-runs its reads: a read that went stale conflicts.
+#[test]
+fn a_read_only_serializable_commit_validates_its_reads() {
+    let mut net = Net::new(3);
+    let invite = net.write_invite(OWNER, "abc");
+    assert_eq!(net.redeem(BACKEND, "abc", false, || {}), Redeem::Joined);
+    let read_only = |net: &Net| {
+        let db = net.db(BACKEND);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&invite_query("abc")).unwrap();
+        assert_eq!(
+            net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
+                .unwrap()
+                .len(),
+            1
+        );
+        block_on(db.commit_serializable_handle(open)).unwrap()
+    };
+    let holds = read_only(&net);
+    assert!(
+        net.settle(BACKEND, holds.0).is_ok(),
+        "an unchanged read commits"
+    );
+    net.go_offline(BACKEND);
+    let stale = read_only(&net);
+    net.revoke(OWNER, invite);
+    net.go_online(BACKEND);
+    let error = net.settle(BACKEND, stale.0).unwrap_err();
+    common::assert_serialization_conflict(&error);
 }
 
 /// Offline, a backend that never received another backend's redemption
@@ -436,13 +469,14 @@ fn an_offline_absence_guard_conflicts_when_the_invite_was_taken() {
                 .wait_for_pending_writes(DurabilityTier::Global),
         )
         .unwrap_err();
-    assert_eq!(all.code, ErrorCode::TransactionConflict);
+    common::assert_serialization_conflict(&all);
     let error = net.settle(OTHER, receipt.0).unwrap_err();
     assert_eq!(
         error.code,
-        ErrorCode::TransactionConflict,
+        ErrorCode::WriteRejected,
         "read {seen} members; the authority has 1"
     );
+    common::assert_serialization_conflict(&error);
     assert_eq!(net.members("abc"), 1);
 }
 
@@ -671,4 +705,118 @@ fn a_read_of_deleted_rows_validates_as_it_was_read() {
     let receipt = net.drive(db.commit_serializable_handle(open)).unwrap();
     net.settle(OWNER, receipt.0)
         .expect("the authority re-reads deleted rows too");
+}
+
+/// Two transactions on one replica (a backend serving concurrent
+/// requests) both find a seeded id absent and insert it. The second commit
+/// is a conflict, so a retry finds the first one's row, never a storage
+/// error about an object that already exists.
+#[test]
+fn racing_inserts_of_one_id_on_one_replica_conflict() {
+    let net = Net::new(1);
+    let db = net.db(0);
+    let id = RowUuid::from_bytes([0x77; 16]);
+    let one = || Query::from("invites").filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let mut opens = Vec::new();
+    for _ in 0..2 {
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&one()).unwrap();
+        assert!(
+            net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
+                .unwrap()
+                .is_empty()
+        );
+        net.drive(db.serializable_tx_ref(open).insert(
+            "invites",
+            code("seeded"),
+            jazz::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        opens.push(open);
+    }
+    let first = net.drive(db.commit_serializable_handle(opens[0])).unwrap();
+    let second = net.drive(db.commit_serializable_handle(opens[1]));
+    let error = second.expect_err("the second insert of the id conflicts");
+    assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+    net.settle(0, first.0).expect("the first commit settles");
+    let all = net.core.prepare_query(&one()).unwrap();
+    assert_eq!(
+        block_on(net.core.all(&all, ReadOpts::default()))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A serializable insert of an id another commit took after the
+/// transaction's snapshot conflicts (a retry sees the row), rather than
+/// being refused for the id being taken.
+#[test]
+fn an_insert_of_an_id_taken_after_the_snapshot_conflicts() {
+    let net = Net::new(1);
+    let db = net.db(0);
+    let id = RowUuid::from_bytes([0x78; 16]);
+    let one = || Query::from("invites").filter(eq(col("id"), lit(Value::Uuid(id.0))));
+    let mut opens = Vec::new();
+    for _ in 0..2 {
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&one()).unwrap();
+        assert!(
+            net.drive(db.serializable_tx_ref(open).all_prepared(&prepared))
+                .unwrap()
+                .is_empty()
+        );
+        opens.push(open);
+    }
+    let insert = |open| {
+        net.drive(db.serializable_tx_ref(open).insert(
+            "invites",
+            code("seeded"),
+            jazz::db::InsertOptions {
+                row_id: Some(id),
+                ..Default::default()
+            },
+        ))
+    };
+    insert(opens[0]).unwrap();
+    let first = block_on(db.commit_serializable_handle(opens[0])).unwrap();
+    let error = insert(opens[1]).expect_err("the id was taken after the snapshot");
+    assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
+    db.abandon_serializable_handle(opens[1]).unwrap();
+    net.settle(0, first.0).expect("the first commit settles");
+}
+
+/// Offline, a serializable transaction's `Remote` read waits for the
+/// authority rather than answering from the replica; it answers once the
+/// link is back.
+#[test]
+fn an_offline_remote_read_in_a_transaction_waits_for_the_authority() {
+    let mut net = Net::new(1);
+    net.write_invite(OWNER, "cached");
+    net.go_offline(OWNER);
+    let db = net.db(OWNER);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("not cached")).unwrap();
+    let tx = db.serializable_tx_ref(open);
+    let mut read = pin!(tx.all_prepared_at(&query, false, None, jazz::db::ReadTier::Remote));
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..5 {
+        assert!(read.as_mut().poll(&mut context).is_pending());
+        net.pump();
+    }
+    // Back online (as `Net::go_online`, which the pending read's borrow
+    // rules out).
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_side));
+    net.core
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x50; 16]));
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    assert!(net.drive(read).unwrap().is_empty());
+    db.abandon_serializable_handle(open).unwrap();
 }

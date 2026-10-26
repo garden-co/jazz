@@ -769,8 +769,11 @@ produces `[rowB, rowB]`, while a missing B produces `[rowA]`.
 
 Explicit `order_by` overrides the default primary ordering for the result boundary
 where it appears. Ordered row-valued results remain total and replay-stable:
-after the user-declared order terms, ties are broken by ascending row id unless
-the query surface later exposes an explicit, stable tie policy. Child-local
+after the user-declared order terms, ties are broken by row id in the direction
+of the last declared term (ascending when that term is ascending, descending when
+it is descending) unless the query surface later exposes an explicit, stable tie
+policy. Following the last term's direction lets one declared index, which ends
+in the row id, supply the whole order in either scan direction. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
 parents or sibling relation payloads. The row id used for relation defaults and explicit ordering ties
 is the child source row id, and its ordering is independently evaluated within
@@ -801,7 +804,9 @@ key encoding where that type is a valid key part (groove ch. 2). A grouped query
 whose group key contains a type without a specified stable order must be rejected
 until that type's ordering is specified. If an explicit `order_by` is applied to
 grouped output and multiple groups tie on the user order terms, the group key is
-the stable tie-breaker.
+the stable tie-breaker. Opaque synthetic row and occurrence identities identify
+groups but do not define their order. Apply this logical ordering before the
+grouped output's `offset` and `limit`.
 
 Ordering is part of the delivered result, not a presentation hint. Initial
 snapshots, reset-result-set `ViewUpdate`s, maintained subscription deltas, and

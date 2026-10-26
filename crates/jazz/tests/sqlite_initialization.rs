@@ -722,13 +722,15 @@ fn initialization_wire_encoding_fixture() {
     let message:jazz::db::SyncMessage=serde_json::from_value(serde_json::json!({"Commit":{
         "node":vec![2;16],"tx":4503599627370499u64,
         "kind":{"SerializableOriginsV1":{"snapshot":7,"reads":[],"own":[[4503599627370498u64,vec![1;16],4503599627370497u64]]}},
-        "ops":[],"author":null,"session":null,"updated_at":null
+        "ops":[],"author":null,"session":null,"expect":[]
     }})).unwrap();
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_initialization_v1.json")).unwrap();
-    let bytes = postcard::to_allocvec(&message).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/sqlite-sync-v2/initialization.json"
+    ))
+    .unwrap();
+    let bytes = jazz::db::encode_message(&message).unwrap();
     assert_eq!(hex::encode(&bytes), fixture["commitHex"].as_str().unwrap());
-    let roundtrip: jazz::db::SyncMessage = postcard::from_bytes(&bytes).unwrap();
+    let roundtrip = jazz::db::decode_message(&bytes).unwrap();
     assert_eq!(
         serde_json::to_value(&roundtrip).unwrap(),
         serde_json::to_value(&message).unwrap()
@@ -829,8 +831,8 @@ impl jazz::db::Transport for TamperOrigins {
         self.transport.try_recv()
     }
 }
-/// Bob rejects malformed origin mappings and Mallory attribution on Alice's
-/// ordinary connection. The appended wire variant does not bypass admission.
+/// Bob rejects malformed origin mappings. A changed author on Alice's ordinary
+/// session link is normalized to Alice, including the persisted row provenance.
 #[test]
 fn origin_dependencies_still_validate_shape_and_authenticated_scope() {
     for mode in ["duplicate", "invalid-position", "forged-author"] {
@@ -845,7 +847,7 @@ fn origin_dependencies_still_validate_shape_and_authenticated_scope() {
         block_on(alice.serializable_tx_ref(id).update(
             "notes",
             row(1),
-            cells("must reject"),
+            cells("follow-up"),
             Default::default(),
         ))
         .unwrap();
@@ -856,15 +858,20 @@ fn origin_dependencies_still_validate_shape_and_authenticated_scope() {
             mode,
         })));
         bob.accept_subscriber(down, author("alice"));
-        assert!(
-            drive(
-                &[&alice, &bob],
-                alice.wait_for_transaction(receipt.0, DurabilityTier::Global)
-            )
-            .is_err(),
-            "{mode}"
+        let result = drive(
+            &[&alice, &bob],
+            alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
         );
-        assert_eq!(rows(&bob), vec![(row(1), "founder".into())], "{mode}");
+        if mode == "forged-author" {
+            result.unwrap();
+            assert_eq!(rows(&bob), vec![(row(1), "follow-up".into())]);
+            let provenance = bob.row_provenance("notes", row(1)).unwrap().unwrap();
+            assert_eq!(provenance.1, author("alice").canonical());
+            assert_eq!(provenance.3, author("alice").canonical());
+        } else {
+            assert!(result.is_err(), "{mode}");
+            assert_eq!(rows(&bob), vec![(row(1), "founder".into())], "{mode}");
+        }
     }
 }
 /// Bob's authority-local initialization reports the reserved transaction in

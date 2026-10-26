@@ -1,17 +1,18 @@
 //! Relation facade queries on SQLite: a client's hopTo, gather or match read
-//! arrives as relation IR ending in a full-row projection, and is read as
-//! the ordinary query it stands for. Projections that rename or narrow the
-//! output are refused; full-row unions preserve their arm occurrences.
+//! arrives as relation IR and is read as the ordinary query it stands for.
+//! E2EE narrowing projections retain selected columns and row identities;
+//! full-row unions preserve their arm occurrences.
 
-mod common;
+use crate::common;
 use common::compile_schema;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::query::RelationUnionArm;
 use jazz::query::{Query, RelationQuery};
 use jazz::records::Value as CoreValue;
 use jazz::tools::public_schema::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationProjectColumn,
-    RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
 use jazz::tools::{
     ColumnType, PolicyExpr, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
@@ -107,15 +108,36 @@ fn a_full_row_relation_projection_reads_as_its_ordinary_query() {
     assert_eq!(ids, [id(1), id(3)]);
 }
 
+/// Alice narrows a filtered relation to its title and identity. The same rows
+/// remain available through a full-row UNION, with their full column shape.
 #[test]
-fn narrowing_projections_are_refused_and_full_row_unions_are_supported() {
+fn narrowing_projections_and_full_row_unions_preserve_rows_and_column_shapes() {
     let db = open();
+    for (n, title, done) in [(1, "visible", true), (2, "filtered", false)] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "todos",
+            id(n),
+            AuthorSubject::SYSTEM,
+            BTreeMap::from([
+                ("title".to_owned(), CoreValue::String(title.into())),
+                ("done".to_owned(), CoreValue::Bool(done)),
+            ]),
+        )
+        .unwrap();
+    }
     let narrowed = db
         .prepare_query(&relation_query(done_todos(&["id", "title"])))
-        .expect_err("a narrowing projection is refused");
-    assert!(
-        narrowed.to_string().contains("not supported yet"),
-        "{narrowed}"
+        .expect("a narrowing projection is supported");
+    let rows = block_on(db.all(&narrowed, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), id(1));
+    let cells = rows[0]
+        .cells()
+        .map(|(name, value)| (name, value.unwrap().clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        cells,
+        BTreeMap::from([("title", CoreValue::String("visible".into()))])
     );
     let union = db
         .prepare_query(&relation_query(RelationExpr::Union {
@@ -125,9 +147,18 @@ fn narrowing_projections_are_refused_and_full_row_unions_are_supported() {
             }],
         }))
         .expect("a full-row union is supported");
-    assert!(
-        block_on(db.all(&union, ReadOpts::default()))
-            .unwrap()
-            .is_empty()
+    let rows = block_on(db.all(&union, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), id(1));
+    let cells = rows[0]
+        .cells()
+        .map(|(name, value)| (name, value.unwrap().clone()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        cells,
+        BTreeMap::from([
+            ("title", CoreValue::String("visible".into())),
+            ("done", CoreValue::Bool(true)),
+        ])
     );
 }

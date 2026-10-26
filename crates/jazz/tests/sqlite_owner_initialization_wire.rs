@@ -9,13 +9,12 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 #[test]
 fn owner_initialization_v1_pins_wire_and_durable_fields() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite_owner_initialization_v1.json"
+        "../fixtures/sqlite-sync-v2/owner-initialization.json"
     ))
     .unwrap();
     for name in ["reserve", "reserved", "refused", "publish"] {
         let bytes = hex::decode(fixture["messages"][name].as_str().unwrap()).unwrap();
-        let (message, rest) = postcard::take_from_bytes::<SyncMessage>(&bytes).unwrap();
-        assert!(rest.is_empty());
+        let message = jazz::db::decode_message(&bytes).unwrap();
         match (&message, name) {
             (
                 SyncMessage::OwnerInitializationReserveV1 {
@@ -56,7 +55,7 @@ fn owner_initialization_v1_pins_wire_and_durable_fields() {
             }
             _ => panic!("changed message tag: {name}"),
         }
-        assert_eq!(postcard::to_allocvec(&message).unwrap(), bytes);
+        assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
     }
     let schema = common::compile_schema(
         &SchemaBuilder::new()
@@ -97,7 +96,7 @@ fn owner_initialization_v1_pins_wire_and_durable_fields() {
     })
     .unwrap();
     tab.send(
-        postcard::from_bytes(
+        jazz::db::decode_message(
             &hex::decode(fixture["messages"]["reserve"].as_str().unwrap()).unwrap(),
         )
         .unwrap(),
@@ -115,7 +114,7 @@ fn owner_initialization_v1_pins_wire_and_durable_fields() {
         .find(|m| matches!(m, SyncMessage::OwnerInitializationReservedV1 { .. }))
         .unwrap();
     assert_eq!(
-        hex::encode(postcard::to_allocvec(&reply).unwrap()),
+        hex::encode(jazz::db::encode_message(&reply).unwrap()),
         fixture["messages"]["reserved"]
     );
     block_on(owner.close()).unwrap();

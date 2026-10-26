@@ -153,6 +153,7 @@ fn drained_account_handoff_preserves_history_and_write_identity() {
 /// Alice's unsent unit blocks linked Bob even through the trusted account host.
 /// Failed handoff leaves the old login reopenable and its exact original wire
 /// upload unchanged, including node, transaction ID, author and session binding.
+/// Connection-local echo expectations are cleared on reopen.
 #[test]
 fn pending_account_handoff_preserves_original_upload_and_owner() {
     let root = Root::new();
@@ -170,7 +171,21 @@ fn pending_account_handoff_preserves_original_upload_and_owner() {
     );
     let alice = root.open(author("alice"));
     assert_eq!(texts(&alice), ["offline"]);
-    assert_eq!(pending_wire(&alice), before);
+    let after = pending_wire(&alice);
+    let mut original: SyncMessage = postcard::from_bytes(&before).unwrap();
+    let recovered: SyncMessage = postcard::from_bytes(&after).unwrap();
+    let SyncMessage::Commit { expect, .. } = &recovered else {
+        panic!("expected recovered commit");
+    };
+    assert!(
+        expect.is_empty(),
+        "a reopened connection has no held-row cache"
+    );
+    let SyncMessage::Commit { expect, .. } = &mut original else {
+        panic!("expected original commit");
+    };
+    expect.clear();
+    assert_eq!(after, postcard::to_allocvec(&original).unwrap());
     close(alice);
 }
 
@@ -182,7 +197,7 @@ fn pending_foreground_upload_blocks_linked_owner_handoff() {
     let root = Root::new();
     let alice = root.open(author("alice"));
     let foreground = block_on(Db::open(config(author("alice"), 2))).unwrap();
-    foreground.set_non_durable_client();
+    foreground.set_private_owner_client().unwrap();
     connect(&foreground, &alice, author("alice"));
     drive(&[&foreground, &alice]);
     insert(&foreground, "sibling");
