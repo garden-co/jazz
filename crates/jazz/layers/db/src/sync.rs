@@ -3011,7 +3011,21 @@ impl Inner {
         if self.meta("client")?.is_none() {
             return Ok(());
         }
-        let mut client = Client::new(*self.identity.node.as_bytes());
+        // A settled upload's rows now carry server seqs, so the stored
+        // versions no longer show the local seqs handed out. The fates
+        // recorded for this node do: the next commit continues after them,
+        // or it would reuse a transaction id the authority dedupes away.
+        let me = *self.identity.node.as_bytes();
+        let settled: Option<i64> = self
+            .conn
+            .cached_row(
+                "SELECT MAX(tx) FROM _jazz_settled WHERE node = ?1",
+                [me.to_vec()],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        self.seq = self.seq.max(settled.unwrap_or(0) as u64);
+        let mut client = Client::new(me);
         client.known = self.meta("known")?.unwrap_or(0);
         client.persisted_known = client.known;
         let mut statement = self

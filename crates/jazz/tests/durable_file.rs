@@ -326,6 +326,51 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
     );
 }
 
+/// A replica whose uploads all settled holds only server seqs; reopened, it
+/// must still continue after the local seqs it handed out, or its next write
+/// reuses a transaction id the authority already applied and is dropped as a
+/// resend.
+#[test]
+fn a_reopened_replica_whose_uploads_settled_continues_after_its_own_seqs() {
+    let path = scratch("settled-replica");
+    let server = block_on(Db::open_history_complete(config(0xec))).unwrap();
+    let connect = |client: &Db| {
+        let (client_side, server_side) = duplex();
+        block_on(client.connect_upstream(client_side));
+        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    };
+    let insert = |db: &Db, n: u64| {
+        let options = InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        };
+        let tx = block_on(db.insert("items", item(n), options))
+            .unwrap()
+            .mergeable_tx_id();
+        drive(
+            &[db, &server, db],
+            db.wait_for_transaction(tx, DurabilityTier::Global),
+        )
+        .unwrap();
+        tx
+    };
+    let last = {
+        let client = open_file(&path, 5);
+        connect(&client);
+        insert(&client, 0);
+        insert(&client, 1)
+    };
+    let client = open_file(&path, 5);
+    connect(&client);
+    assert!(insert(&client, 2) > last, "the commit seq continues");
+    assert_eq!(
+        count(&server),
+        3,
+        "the new write was applied, not deduplicated"
+    );
+}
+
 /// A node handed to a fresh in-memory database (a browser tab's
 /// main-thread peer under a leased node) continues after the previous
 /// holder's seqs: the authority deduplicates uploads by transaction id, so a
