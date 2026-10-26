@@ -751,3 +751,33 @@ fn racing_inserts_of_one_id_on_one_replica_conflict() {
         1
     );
 }
+
+/// Offline, a serializable transaction's `Remote` read waits for the
+/// authority rather than answering from the replica; it answers once the
+/// link is back.
+#[test]
+fn an_offline_remote_read_in_a_transaction_waits_for_the_authority() {
+    let mut net = Net::new(1);
+    net.write_invite(OWNER, "cached");
+    net.go_offline(OWNER);
+    let db = net.db(OWNER);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let query = db.prepare_query(&invite_query("not cached")).unwrap();
+    let tx = db.serializable_tx_ref(open);
+    let mut read = pin!(tx.all_prepared_at(&query, false, None, jazz::db::ReadTier::Remote));
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..5 {
+        assert!(read.as_mut().poll(&mut context).is_pending());
+        net.pump();
+    }
+    // Back online (as `Net::go_online`, which the pending read's borrow
+    // rules out).
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_side));
+    net.core
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x50; 16]));
+    db.set_remote_link_hint(RemoteLinkHint::Live);
+    assert!(net.drive(read).unwrap().is_empty());
+    db.abandon_serializable_handle(open).unwrap();
+}

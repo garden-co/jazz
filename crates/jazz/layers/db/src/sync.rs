@@ -3094,6 +3094,65 @@ impl Db {
         Upstream(client.connection)
     }
 
+    /// Unlist the cached rows of a remote query's settled view that its
+    /// answer, listing `listed`, left out. Each pass reads the view again,
+    /// so rows that move up into a window are checked too.
+    fn unlist_unanswered(
+        &self,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        listed: &[[u8; 16]],
+    ) -> Result<(), Error> {
+        // A history read lists versions and a flat join tuples, not the
+        // rows a replica caches.
+        if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
+            return Ok(());
+        }
+        let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
+        // Only which rows the view holds matters: ids, not values (whose
+        // large chunks may not be here yet), nor included rows.
+        let mut query = remote_query(&query).into_owned();
+        query.select.get_or_insert_with(Vec::new);
+        query.includes.clear();
+        query.array_subqueries.clear();
+        let prepared = PreparedQuery {
+            query,
+            binding,
+            shape: Shape([0; 16]),
+            binding_id: Binding([0; 16]),
+            request_claims: None,
+            schema: self.view.clone(),
+        };
+        let read = ReadSpec {
+            members_only: true,
+            settled_only: true,
+            include_deleted,
+            ..ReadSpec::default()
+        };
+        let inner = self.inner.borrow();
+        let table = inner.schema.stored_table(&prepared.query.table)?.to_owned();
+        let mut previous = Vec::new();
+        loop {
+            let stale: Vec<RowUuid> = inner
+                .run(&prepared, None, &read)?
+                .into_iter()
+                .filter(|row| row.union_arm.is_none() && !listed.contains(row.id.0.as_bytes()))
+                .map(|row| row.id)
+                .collect();
+            if stale.is_empty() || stale == previous {
+                return Ok(());
+            }
+            for &row in &stale {
+                let id = row.0.as_bytes().to_vec();
+                for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
+                    inner.unlist(&table, row, &image.key)?;
+                }
+            }
+            previous = stale;
+        }
+    }
+
     /// Drop the upstream: reads stop waiting, writes queue.
     pub fn detach_connection(&self, upstream: &Upstream) -> bool {
         let mut inner = self.inner.borrow_mut();
@@ -3463,7 +3522,7 @@ impl Db {
         };
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
-        poll_fn(|_| {
+        let answer = poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
@@ -3471,7 +3530,7 @@ impl Db {
                 && let Some(Some(_)) = client.answers.get(&id)
             {
                 let answer = client.answers.remove(&id).flatten().expect("answered");
-                return Poll::Ready(answer.map(|(through, _)| Some(through)));
+                return Poll::Ready(answer.map(Some));
             }
             let ask = if strict {
                 client.transport.is_some()
@@ -3517,7 +3576,22 @@ impl Db {
             }
             Poll::Pending
         })
-        .await
+        .await?;
+        // A current answer lists its result's rows: cached rows the
+        // replica's settled view of it holds and the answer lacks lost their
+        // listing (INV-SYNC-14), though no subscription saw them leave.
+        let Some((through, listed)) = answer else {
+            return Ok(None);
+        };
+        if at.is_none() {
+            self.unlist_unanswered(
+                prepared.query.clone(),
+                prepared.binding.clone(),
+                include_deleted,
+                &listed,
+            )?;
+        }
+        Ok(Some(through))
     }
 
     /// Freeze everything this database has committed, its own unsettled
@@ -3912,6 +3986,7 @@ impl Db {
                             answered_remotes.push((
                                 remote.query.clone(),
                                 remote.binding.clone(),
+                                remote.include_deleted,
                                 Some(ids),
                                 resumed,
                             ));
@@ -4046,9 +4121,16 @@ impl Db {
         } else if shadow_changed {
             self.inner.borrow().persist_shadow()?;
         }
+        // A settled answer lists its result's rows: cached rows the
+        // replica's view of that result holds and the server's lacks lost
+        // their listing (INV-SYNC-14), as rows a commit took away do.
         // Nothing to reconcile after a resume: the client declared what it
         // holds (`Hold`), so the server ships what is missing or stale.
-        drop(answered_remotes);
+        for (query, binding, include_deleted, listed, resumed) in answered_remotes {
+            if let (Some(listed), false) = (listed, resumed) {
+                self.unlist_unanswered(query, binding, include_deleted, &listed)?;
+            }
+        }
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
@@ -6135,7 +6217,12 @@ impl Db {
         if let Some(tx) = open_tx {
             let rows = self
                 .serializable_tx_ref(tx)
-                .all_prepared_as(&prepared, opts.read_view.include_deleted, identity)
+                .all_prepared_at(
+                    &prepared,
+                    opts.read_view.include_deleted,
+                    identity,
+                    opts.tier,
+                )
                 .await?;
             return Ok(result(rows));
         }

@@ -361,6 +361,31 @@ fn a_small_streamed_upload_reaches_the_server() {
     );
 }
 
+/// A replica streams a small value before it first connects: the chunks
+/// go up ahead of the commit once it does, and the server takes the row.
+#[test]
+fn a_small_value_streamed_before_connecting_reaches_the_server() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    alice.become_replica();
+    block_on(alice.insert_streaming_value_with_id(
+        "docs",
+        row(1),
+        BTreeMap::from([("body".to_owned(), Value::String("upload".into()))]),
+        "blob",
+        std::io::Cursor::new(vec![1, 2, 3, 4, 5, 6]),
+    ))
+    .unwrap();
+    // A tick offline reclaims what nothing references.
+    block_on(alice.tick()).unwrap();
+    let _a = connect(&server, &alice, user(1));
+    pump(&server, &[&alice]);
+    assert_eq!(
+        local_cell(&server, "docs", 1, "blob").unwrap(),
+        Some(Value::Bytes(vec![1, 2, 3, 4, 5, 6]))
+    );
+}
+
 /// A trusted backend streams a value for a session it acts for, chunk by
 /// chunk as the bindings do: the row reaches the server.
 #[test]

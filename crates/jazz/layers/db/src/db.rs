@@ -5001,6 +5001,20 @@ impl TxRef<'_> {
         include_deleted: bool,
         identity: Option<AuthorSubject>,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_at(prepared, include_deleted, identity, ReadTier::LocalFirst)
+            .await
+    }
+
+    /// As [`Self::all_prepared_as`], at `tier`: a `Remote` read waits for
+    /// the authority's answer, offline too; any other tier answers offline
+    /// from the replica, at the cut it knows.
+    pub async fn all_prepared_at(
+        &self,
+        prepared: &PreparedQuery,
+        include_deleted: bool,
+        identity: Option<AuthorSubject>,
+        tier: ReadTier,
+    ) -> Result<Vec<CurrentRow>, Error> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
         // answers and the authority's validation decides).
@@ -5060,10 +5074,14 @@ impl TxRef<'_> {
                     prepared,
                     at,
                     include_deleted,
-                    sync::RemoteReach::BEST_EFFORT,
+                    if tier == ReadTier::Remote {
+                        sync::RemoteReach::REMOTE
+                    } else {
+                        sync::RemoteReach::BEST_EFFORT
+                    },
                     None,
                     None,
-                    false,
+                    tier == ReadTier::Remote,
                 )
                 .await?;
             if let Some(Batch {

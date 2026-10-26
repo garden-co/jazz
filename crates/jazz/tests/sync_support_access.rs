@@ -11,9 +11,11 @@ mod duplex_transport;
 use std::collections::BTreeMap;
 
 use duplex_transport::duplex;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SubscriptionEvent, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::Query;
+use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -276,4 +278,86 @@ fn membership_write_cost_with_many_holders() {
         "server tick after one membership write, 300 clients holding 3 rooms each: median {:?}",
         times[times.len() / 2]
     );
+}
+
+/// A one-shot `Remote` read after access was lost leaves out the cached rows
+/// the server's answer no longer lists, in an ordered window or not, though
+/// no subscription held them to see them leave: here the reader wrote them.
+/// Local reads keep them (INV-SYNC-14).
+#[test]
+fn a_remote_read_after_losing_access_leaves_out_unlisted_cached_rows() {
+    for window in [None, Some((1, 2))] {
+        let server = open(0, AuthorSubject::SYSTEM);
+        let me = Value::String(alice().principal_parts().1);
+        for n in 1..=4 {
+            server
+                .seed_settled_mergeable_for_bootstrap(
+                    "memberships",
+                    id(2, n),
+                    AuthorSubject::SYSTEM,
+                    cells(&[("room", Value::Uuid(id(1, n).0)), ("member", me.clone())]),
+                )
+                .unwrap();
+        }
+        let client = open(1, alice());
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, alice());
+        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        for n in 1..=4 {
+            block_on(client.insert(
+                "rooms",
+                cells(&[("name", Value::String(format!("room {n}")))]),
+                InsertOptions {
+                    row_id: Some(id(1, n)),
+                    ..InsertOptions::default()
+                },
+            ))
+            .unwrap();
+        }
+        pump(&server, &client);
+
+        let mut query = Query::from("rooms").order_by("name", OrderDirection::Asc);
+        if let Some((offset, limit)) = window {
+            query.offset = offset;
+            query.limit = Some(limit);
+        }
+        let bytes = postcard::to_allocvec(&query).unwrap();
+        let remote = || {
+            let read = client.all_serialized_query(
+                &bytes,
+                ReadOpts::for_read_tier(ReadTier::Remote),
+                None,
+                None,
+                None,
+                false,
+                || false,
+                |attachment| client.detach_query(attachment),
+            );
+            let mut read = std::pin::pin!(read);
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            for _ in 0..50 {
+                if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                    let jazz::db::SerializedReadResult::Rows(rows) = result.unwrap() else {
+                        panic!("the remote read answered with something other than rows");
+                    };
+                    let mut ids: Vec<RowUuid> = rows.iter().map(|row| row.row_uuid()).collect();
+                    ids.sort();
+                    return ids;
+                }
+                pump(&server, &client);
+            }
+            panic!("the remote read did not answer");
+        };
+
+        for n in 1..=4 {
+            block_on(server.delete("memberships", id(2, n), Default::default())).unwrap();
+        }
+        pump(&server, &client);
+        assert_eq!(remote(), Vec::<RowUuid>::new(), "window {window:?}");
+        assert_eq!(
+            local(&client, "rooms"),
+            [id(1, 1), id(1, 2), id(1, 3), id(1, 4)]
+        );
+    }
 }
