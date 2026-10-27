@@ -150,3 +150,5 @@ mod write_check_evidence;
 mod storage_owner_retirement;
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+#[path = "../write_receipt_owner.rs"]
+mod write_receipt_owner;
