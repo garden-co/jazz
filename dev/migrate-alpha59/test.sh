@@ -18,10 +18,12 @@ trap 'rm -rf "$work"' EXIT
 app=0a590000-0000-4000-8000-000000000059
 
 "$here/prepare.sh" both
-(cd "$a59" && CARGO_TARGET_DIR="$t59" cargo build --release -p jazz-cli --bin jazz-tools \
-  -p migrate-alpha59-produce -p migrate-alpha59-export -p migrate-alpha59-dump)
-(cd "$a60" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-tools \
-  -p migrate-alpha59-import)
+# `--bin` filters every listed package, so the tool crates build separately.
+(cd "$a59" && CARGO_TARGET_DIR="$t59" cargo build --release -p jazz-cli --bin jazz-tools &&
+  CARGO_TARGET_DIR="$t59" cargo build --release -p migrate-alpha59-produce \
+    -p migrate-alpha59-export -p migrate-alpha59-dump)
+(cd "$a60" && CARGO_TARGET_DIR="$t60" cargo build --release -p jazz-cli --bin jazz-tools &&
+  CARGO_TARGET_DIR="$t60" cargo build --release -p migrate-alpha59-import)
 
 "$t59/release/a59-produce" --out "$work/a59" --server-bin "$t59/release/jazz-tools"
 "$t59/release/a59-export" --data-dir "$work/a59" --work "$work/copy" --out "$work/dump"
