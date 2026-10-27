@@ -617,7 +617,9 @@ impl<F: Future> Future for Parked<F> {
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
 
 /// See [`Hooks::rejected`].
-pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>)>;
+/// Told of a refused upload no wait claimed; returns whether the refusal
+/// reached the application (a listener was there to take it).
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>) -> bool>;
 
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
@@ -669,7 +671,10 @@ impl Hooks {
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
     /// A relayed session's refused commit is reported under its own id.
-    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+    /// Returns the seqs of `node`'s own refusals that reached the
+    /// application, through a wait or the hook.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) -> Vec<u64> {
+        let mut delivered = Vec::new();
         for rejection in rejections {
             let (seq, error) = (rejection.seq, &rejection.error);
             let writer = NodeUuid::from_bytes(rejection.writer);
@@ -677,14 +682,19 @@ impl Hooks {
                 .then(|| self.claims.borrow_mut().remove(&seq))
                 .flatten()
                 .and_then(|claim| claim.upgrade());
-            if claim.as_ref().is_some_and(|claim| claim.get()) {
-                continue;
-            }
-            if let Some(rejected) = self.rejected.borrow().as_ref() {
+            let reached = if claim.as_ref().is_some_and(|claim| claim.get()) {
+                true
+            } else if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, error, rejection.serializable, claim);
+                rejected(&tx_id, error, rejection.serializable, claim)
+            } else {
+                false
+            };
+            if reached && writer == node {
+                delivered.push(seq);
             }
         }
+        delivered
     }
 }
 
@@ -757,6 +767,8 @@ pub struct Binding {
     /// Local-first accounts a backend admitted (see
     /// [`Binding::admit_local_first_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+    /// Whether the next tick reports the retry store's refusals again.
+    requeue: Rc<Cell<bool>>,
 }
 
 /// A Jazz self-signed proof of a local-first account.
@@ -784,6 +796,7 @@ impl Binding {
             refused: Rc::default(),
             bound: Rc::default(),
             admitted: Rc::default(),
+            requeue: Rc::new(Cell::new(true)),
         }
     }
 
@@ -1475,20 +1488,31 @@ impl Binding {
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
+        // Refusals kept from before (a reopened store's, or ones no
+        // listener took) go out again first.
+        let requeued = if self.requeue.replace(false) {
+            self.db.requeue_rejected_transactions()
+        } else {
+            Ok(())
+        };
         let rejections = self.db.take_upstream_rejections();
-        let own: Vec<u64> = rejections
-            .iter()
-            .filter(|rejection| rejection.writer == *self.node.as_bytes())
-            .map(|rejection| rejection.seq)
-            .collect();
-        self.hooks.report(self.node, rejections);
-        // Reported: the retry store lets go of their payloads.
-        let discarded = own
+        let delivered = self.hooks.report(self.node, rejections);
+        // Delivered: the retry store lets go of their payloads. One no
+        // listener took stays, for the next listener or the next open.
+        let discarded = delivered
             .into_iter()
             .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
         result?;
+        requeued?;
         Ok(discarded?)
+    }
+
+    /// Report the refusals the retry store still holds again on the next
+    /// tick: the host now has a listener for them.
+    pub fn redeliver_rejections(&self) {
+        self.requeue.set(true);
+        self.hooks.schedule_tick();
     }
 
     /// Make this store the optimistic, non-durable foreground of a durable

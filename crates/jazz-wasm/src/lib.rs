@@ -447,14 +447,20 @@ impl WasmDbInner {
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, claimed| {
-                report_later(
-                    &reporter,
-                    &tx_id.to_string(),
-                    error,
-                    serializable,
-                    true,
-                    claimed,
-                );
+                // The event is handed over on the next task; a listener
+                // registered now takes it.
+                let listening = reporter.mutation_errors.borrow().is_some();
+                if listening {
+                    report_later(
+                        &reporter,
+                        &tx_id.to_string(),
+                        error,
+                        serializable,
+                        true,
+                        claimed,
+                    );
+                }
+                listening
             }));
         Self { binding, host }
     }
@@ -1320,6 +1326,8 @@ impl WasmDb {
     pub fn on_mutation_error(&self, callback: js_sys::Function) {
         if let Ok(inner) = self.open_inner() {
             *inner.host.mutation_errors.borrow_mut() = Some(callback);
+            // Refusals kept while nobody listened reach this callback now.
+            inner.binding.redeliver_rejections();
         }
     }
 

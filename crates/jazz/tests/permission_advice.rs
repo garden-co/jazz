@@ -107,6 +107,42 @@ fn ask(client: &Db, server: &Db, action: PermissionAdviceAction) -> PermissionAd
     drive(&[client, server, client], client.permission_advice(id))
 }
 
+/// A client transport that records the ids of the advice requests it
+/// sends.
+struct RecordingAdvice {
+    inner: Box<dyn jazz::db::Transport>,
+    sent: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+}
+
+impl jazz::db::Transport for RecordingAdvice {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::wire::TransportError> {
+        if let jazz::db::SyncMessage::Advise { id, .. } = &message {
+            self.sent.borrow_mut().push(*id);
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+/// [`connect`], returning the ids of the advice requests the client sends.
+fn connect_recording(
+    client: &Db,
+    server: &Db,
+    author: AuthorSubject,
+) -> std::rc::Rc<std::cell::RefCell<Vec<u64>>> {
+    let (client_side, server_side) = duplex();
+    let sent = std::rc::Rc::default();
+    block_on(client.connect_upstream(Box::new(RecordingAdvice {
+        inner: client_side,
+        sent: std::rc::Rc::clone(&sent),
+    })));
+    server.accept_subscriber(server_side, author);
+    sent
+}
+
 fn connect(client: &Db, server: &Db, author: AuthorSubject) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
@@ -294,7 +330,7 @@ fn an_answer_resolves_only_the_request_it_was_asked_for() {
     )))
     .unwrap();
     let client = open(0xa1, alice);
-    connect(&client, &server, alice);
+    let sent = connect_recording(&client, &server, alice);
     let insert = |owner| PermissionAdviceAction::Insert {
         table: "notes".to_owned(),
         cells: note(owner, "new"),
@@ -331,6 +367,11 @@ fn an_answer_resolves_only_the_request_it_was_asked_for() {
     assert_eq!(
         drive(&[&client, &server, &client], client.permission_advice(next)),
         PermissionAdvice::Allowed
+    );
+    assert!(sent.borrow().contains(&next));
+    assert!(
+        !sent.borrow().contains(&unsent),
+        "a request cancelled before it was sent never goes out"
     );
 
     // A reopened database starts its ids elsewhere, so an id held over

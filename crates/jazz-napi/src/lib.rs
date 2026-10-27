@@ -596,10 +596,13 @@ impl Inner {
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, _| {
-                if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
-                    let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
-                    callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
-                }
+                let callbacks = reporter.upstream_mutation_errors.borrow();
+                let Some(callback) = callbacks.as_ref() else {
+                    return false;
+                };
+                let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
+                callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
+                true
             }));
         Self { binding, host }
     }
@@ -1654,6 +1657,8 @@ impl NapiDb {
             .weak::<true>()
             .build()?;
         *inner.host.upstream_mutation_errors.borrow_mut() = Some(upstream);
+        // Refusals kept while nobody listened reach this callback now.
+        inner.binding.redeliver_rejections();
         Ok(())
     }
 

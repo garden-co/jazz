@@ -1033,6 +1033,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let seen = std::rc::Rc::clone(&refused);
     *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
         seen.borrow_mut().push(tx_id.clone());
+        true
     }));
     worker.set_remote_link_hint("live").unwrap();
     let mut up = worker.connect_upstream();
@@ -1062,6 +1063,84 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     // (INV-TX-9): only the store that made a write retries it.
     assert!(worker.db.rejected_transactions().unwrap().is_empty());
     assert!(server.db.rejected_transactions().unwrap().is_empty());
+}
+
+/// A refusal no listener took stays in the retry store (INV-TX-9): the
+/// store's payload is let go only once the refusal reached the
+/// application, here when a listener arrives and asks for it again.
+#[test]
+fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let identity = identity(0xe2);
+    let client = Binding::new(
+        block_on(Db::open(DbConfig::new(schema, identity))).unwrap(),
+        identity,
+        false,
+    );
+    let listening = std::rc::Rc::new(std::cell::Cell::new(false));
+    let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (on, seen) = (std::rc::Rc::clone(&listening), std::rc::Rc::clone(&heard));
+    *client.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
+        if on.get() {
+            seen.borrow_mut().push(tx_id.clone());
+        }
+        on.get()
+    }));
+    client.set_remote_link_hint("live").unwrap();
+    let up = client.connect_upstream();
+    let down = server.accept_subscriber(client.author(), Default::default());
+    let links = [(&up, &down)];
+    let write = client.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, client.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    let update = client
+        .update("notes", &row, &title("changed"), &none())
+        .unwrap();
+    pump(&links);
+    assert!(heard.borrow().is_empty());
+    assert_eq!(
+        client
+            .db
+            .rejected_transactions()
+            .unwrap()
+            .iter()
+            .map(|r| r.seq)
+            .collect::<Vec<_>>(),
+        [update.seq],
+        "nobody heard it: the payload stays"
+    );
+
+    listening.set(true);
+    client.redeliver_rejections();
+    pump(&links);
+    assert_eq!(*heard.borrow(), [update.tx_id]);
+    assert!(client.db.rejected_transactions().unwrap().is_empty());
 }
 
 #[test]

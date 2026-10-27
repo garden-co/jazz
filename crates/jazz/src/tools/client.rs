@@ -67,7 +67,12 @@ const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(2);
 /// doubling per consecutive failure up to [`RECONNECT_MAX_DELAY`].
 const TICK_RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
 /// Consecutive recoverable tick failures the driver rides out; one more
-/// stops it as if the failure were fatal (INV-API-23).
+/// stops it as if the failure were fatal (INV-API-23). With the backoff
+/// above that is about 2.5 s of failures in a row, after which the client
+/// stays stopped: every call reports the error, and recovering means
+/// opening a new client. `Db::tick` does not surface backpressure (the
+/// transport absorbs it), so in practice the retries cover protocol and
+/// transaction-conflict failures.
 const TICK_RECOVERY_ATTEMPTS: u32 = 8;
 /// The local store under `AppContext::data_dir`.
 const STORE_FILE: &str = "jazz.sqlite";

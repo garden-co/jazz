@@ -1125,21 +1125,6 @@ impl Db {
             let mut inner = db.inner.borrow_mut();
             inner.seq = seq;
             inner.load_client()?;
-            // Refusals kept for a host that had not reported them yet.
-            let writer = *inner.identity.node.as_bytes();
-            let retained: Vec<UpstreamRejection> = inner
-                .rejected_transactions()?
-                .into_iter()
-                .map(|rejected| UpstreamRejection {
-                    writer,
-                    seq: rejected.seq,
-                    error: rejected.error,
-                    serializable: rejected.serializable,
-                })
-                .collect();
-            if !retained.is_empty() {
-                inner.upstream_rejections = Some(retained);
-            }
             if inner.client.is_some() {
                 inner.raise_to_local_base();
             }
@@ -1187,6 +1172,34 @@ impl Db {
     pub fn track_upstream_rejections(&self) {
         let mut inner = self.inner.borrow_mut();
         inner.upstream_rejections.get_or_insert_with(Vec::new);
+    }
+
+    /// Report again, through [`Db::take_upstream_rejections`], each refused
+    /// commit the retry store still holds and that is not already waiting
+    /// to be taken: for a host that could not deliver it before (no
+    /// listener yet). Does nothing unless refusals are tracked.
+    pub fn requeue_rejected_transactions(&self) -> Result<(), Error> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.upstream_rejections.is_none() {
+            return Ok(());
+        }
+        let writer = *inner.identity.node.as_bytes();
+        let retained = inner.rejected_transactions()?;
+        let queued = inner.upstream_rejections.as_mut().expect("tracked");
+        for rejected in retained {
+            if !queued
+                .iter()
+                .any(|r| r.writer == writer && r.seq == rejected.seq)
+            {
+                queued.push(UpstreamRejection {
+                    writer,
+                    seq: rejected.seq,
+                    error: rejected.error,
+                    serializable: rejected.serializable,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// This store's own commits the authority refused, with their payloads,

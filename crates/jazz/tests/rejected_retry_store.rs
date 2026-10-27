@@ -173,7 +173,9 @@ fn the_originating_store_keeps_a_refused_payload_until_it_is_reported() {
 }
 
 /// A refusal the host had not reported when the store closed is kept and
-/// reported again by the reopened store.
+/// reported again once the reopened store's host tracks refusals and asks
+/// for the kept ones; a store reopened without such a host leaves it
+/// alone.
 #[test]
 fn an_unreported_refusal_survives_a_reopen() {
     let path = scratch("reopen");
@@ -196,7 +198,15 @@ fn an_unreported_refusal_survives_a_reopen() {
         seq
     };
 
+    let untracked = open();
+    untracked.requeue_rejected_transactions().unwrap();
+    assert!(untracked.take_upstream_rejections().is_empty());
+    drop(untracked);
+
     let reopened = open();
+    reopened.track_upstream_rejections();
+    reopened.requeue_rejected_transactions().unwrap();
+    reopened.requeue_rejected_transactions().unwrap();
     assert_eq!(
         reopened
             .take_upstream_rejections()
@@ -209,7 +219,10 @@ fn an_unreported_refusal_survives_a_reopen() {
     assert_eq!(reopened.rejected_transactions().unwrap()[0].seq, seq);
     reopened.discard_rejected_transaction(seq).unwrap();
     drop(reopened);
-    assert!(open().take_upstream_rejections().is_empty());
+    let again = open();
+    again.track_upstream_rejections();
+    again.requeue_rejected_transactions().unwrap();
+    assert!(again.take_upstream_rejections().is_empty());
 }
 
 /// A store whose host does not report refusals keeps no payloads.
