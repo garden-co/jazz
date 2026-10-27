@@ -800,8 +800,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private networkRetryCount = 0;
   /** The current `serverTransportError` is a published outage, not a terminal failure. */
   private serverOutageReported = false;
-  /** The last core tick failed and the next one is its retry. */
-  private coreTickFailureRetried = false;
   private serverOutageStartedAt: number | null = null;
   private serverLinkRequested = false;
   private nativeLinkEverConnected = false;
@@ -3389,33 +3387,19 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      void this.runCoreTick().then(
-        () => {
-          this.coreTickFailureRetried = false;
-        },
-        (error) => {
-          // Native revocation can retire a foreground after its wake crossed
-          // into the JS queue. Native liveness distinguishes that stale wake
-          // from a still-live scope with an actual transport/core failure.
-          try {
-            if (this.db.isNativeForegroundClosed?.()) return;
-            if (this.reportNativeAuthRejection()) return;
-          } catch (livenessError) {
-            reportAsyncRuntimeError(livenessError);
-            return;
-          }
-          // The status is read after the failure, so its cause may already be
-          // gone: a renewal can promote a fresh bearer in between (#4296).
-          // Only a failure that persists into a second tick is reported.
-          if (!this.coreTickFailureRetried) {
-            this.coreTickFailureRetried = true;
-            this.scheduleCoreTick();
-            return;
-          }
-          this.coreTickFailureRetried = false;
-          reportAsyncRuntimeError(error);
-        },
-      );
+      void this.runCoreTick().catch((error) => {
+        // Native revocation can retire a foreground after its wake crossed
+        // into the JS queue. Native liveness distinguishes that stale wake
+        // from a still-live scope with an actual transport/core failure.
+        try {
+          if (this.db.isNativeForegroundClosed?.()) return;
+          if (this.reportNativeAuthRejection()) return;
+        } catch (livenessError) {
+          reportAsyncRuntimeError(livenessError);
+          return;
+        }
+        reportAsyncRuntimeError(error);
+      });
     });
   }
 
