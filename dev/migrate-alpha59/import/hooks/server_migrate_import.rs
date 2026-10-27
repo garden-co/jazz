@@ -39,3 +39,37 @@ pub async fn migrate_import_account(state: &ServerState, command_json: &str) -> 
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
+
+/// What this server answers when `principal_json` logs in:
+/// `{"Ok": assignment}` or `{"Err": reason}`, as the exporter records it.
+pub async fn migrate_import_login(
+    state: &ServerState,
+    principal_json: &str,
+) -> Result<serde_json::Value, String> {
+    let principal = serde_json::from_str(principal_json).map_err(|error| error.to_string())?;
+    let accounts = state
+        .accounts
+        .as_ref()
+        .ok_or("the server has no account registry")?;
+    Ok(match accounts.login(principal).await {
+        Ok(assignment) => serde_json::json!({ "Ok": assignment }),
+        Err(error) => serde_json::json!({ "Err": error.to_string() }),
+    })
+}
+
+/// The active permissions head: `{"schema_hash", "version", "permissions"}`.
+pub fn migrate_import_active_permissions(state: &ServerState) -> Result<serde_json::Value, String> {
+    let Some(active) = state
+        .catalogue
+        .active_schema(&state.catalogue_store)
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(serde_json::Value::Null);
+    };
+    let permissions: std::collections::BTreeMap<_, _> = active.permissions.into_iter().collect();
+    Ok(serde_json::json!({
+        "schema_hash": active.summary.schema_hash.to_string(),
+        "version": active.summary.version,
+        "permissions": permissions,
+    }))
+}

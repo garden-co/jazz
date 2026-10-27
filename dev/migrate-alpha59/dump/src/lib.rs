@@ -30,6 +30,12 @@ pub enum Record {
     AdminEntry(AdminEntry),
     /// One command of the account journal (`accounts.rocksdb`), in order.
     Account(Account),
+    /// What alpha.59 answers when this principal logs in after the whole
+    /// journal: `{"Ok": assignment}` or `{"Err": reason}`. For verification.
+    AccountLogin {
+        principal_json: String,
+        login_json: String,
+    },
     /// One stored row version.
     Version(Version),
     Footer(Footer),

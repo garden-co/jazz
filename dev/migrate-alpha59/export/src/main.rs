@@ -269,7 +269,7 @@ async fn export_accounts<W: std::io::Write>(
         .open(path.to_path_buf(), vec!["default".into()], profile)
         .await
         .map_err(err)?;
-    let commands =
+    let (commands, decoded) =
         jazz::account_registry::migrate_export::migrate_export_account_commands(&storage).await?;
     for (revision, command_json) in commands.into_iter().enumerate() {
         writer
@@ -277,6 +277,16 @@ async fn export_accounts<W: std::io::Write>(
                 revision: revision as u64,
                 command_json,
             }))
+            .map_err(err)?;
+    }
+    for (principal_json, login_json) in
+        jazz::account_registry::migrate_export::migrate_export_account_logins(&decoded)?
+    {
+        writer
+            .write(&dump::Record::AccountLogin {
+                principal_json,
+                login_json,
+            })
             .map_err(err)?;
     }
     storage.close().await.map_err(err)?;

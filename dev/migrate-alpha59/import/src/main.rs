@@ -8,6 +8,8 @@
 //! original author and timestamp. Nothing is written into the SQLite files
 //! directly.
 
+mod verify;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -35,9 +37,8 @@ struct Args {
     app_id: AppId,
 }
 
-fn parse_args() -> Result<Args, String> {
+fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut dump, mut data_dir, mut app_id) = (None, None, None);
-    let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -58,17 +59,32 @@ fn parse_args() -> Result<Args, String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let args = match parse_args() {
+    let mut args = std::env::args().skip(1).peekable();
+    let verifying = args.peek().is_some_and(|arg| arg == "verify");
+    if verifying {
+        args.next();
+    }
+    let args = match parse_args(args) {
         Ok(args) => args,
         Err(error) => {
             eprintln!("sqlite-import: {error}");
-            eprintln!("usage: sqlite-import --dump <dump> --data-dir <new dir> --app-id <uuid>");
+            eprintln!(
+                "usage: sqlite-import [verify] --dump <dump> --data-dir <dir> --app-id <uuid>"
+            );
             return ExitCode::from(2);
         }
     };
-    match run(&args).await {
+    let result = if verifying {
+        verify::verify(&args).await
+    } else {
+        run(&args).await
+    };
+    match result {
         Ok(summary) => {
             println!("{summary}");
+            if summary["ok"] == Json::Bool(false) {
+                return ExitCode::FAILURE;
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -112,7 +128,9 @@ async fn run(args: &Args) -> Result<Json, String> {
             dump::Record::Schema(schema) => head.runtime_schemas.push(schema),
             dump::Record::AdminEntry(entry) => head.admin.push(entry),
             dump::Record::Account(account) => head.accounts.push(account),
-            dump::Record::Lens(_) | dump::Record::ActiveSchema { .. } => {}
+            dump::Record::Lens(_)
+            | dump::Record::ActiveSchema { .. }
+            | dump::Record::AccountLogin { .. } => {}
             dump::Record::Version(version) => {
                 first_version = Some(version);
                 break;
