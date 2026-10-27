@@ -229,7 +229,7 @@ fn install(dir: &Path) -> PathBuf {
 /// per storage format; once a format has shipped its committed file is
 /// never regenerated, only added beside.
 #[tokio::test]
-#[ignore = "manual corpus producer; run once per new storage format"]
+#[ignore = "#1787: manual corpus producer; run once per new storage format"]
 async fn produce_server_data_dir_corpus_v1() {
     assert_eq!(
         std::env::var("JAZZ_WRITE_SERVER_DATA_DIR_CORPUS").as_deref(),
