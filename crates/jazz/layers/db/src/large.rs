@@ -385,6 +385,38 @@ struct Cached {
 }
 
 impl Chunks {
+    /// Pin the chunk reader at the same committed state as a worker's row
+    /// reader. Both are pinned on the writer's owner before it can advance.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn begin_read_snapshot(&self) -> Result<(), Error> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Error::new(ErrorCode::Storage, "chunk reader poisoned"))?;
+        let reader = state.reader.as_ref().expect("file reader");
+        reader.execute_batch("BEGIN").map_err(storage)?;
+        reader
+            .query_row("SELECT version FROM _jazz_format LIMIT 1", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn end_read_snapshot(&self) -> Result<(), Error> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| Error::new(ErrorCode::Storage, "chunk reader poisoned"))?;
+        state
+            .reader
+            .as_ref()
+            .expect("file reader")
+            .execute_batch("ROLLBACK")
+            .map_err(storage)
+    }
+
     /// Chunks of a store in memory (`path` is `None`) or the file at
     /// `path`, on its VFS.
     pub(crate) fn install(

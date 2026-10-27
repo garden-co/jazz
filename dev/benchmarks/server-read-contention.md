@@ -4,7 +4,11 @@
 independent requests to one file-backed Jazz server. It is a local diagnostic
 for server scheduling, with authenticated public clients and real WebSockets.
 The engine, permissions, sync, write acknowledgements and storage settings are
-the normal implementation. No reader-pool implementation is included.
+the normal implementation. The diagnostic itself does not change the engine.
+
+The [native reader comparison](server-read-pool.md) records the subsequent
+prototype, with both runtimes rebuilt using distinct point-query bindings so
+every measured point request executes fresh SQL.
 
 The existing example CodSpeed cases measure operation cost. Some have many
 subscriptions in flight, but their engine fixtures execute on one thread. The

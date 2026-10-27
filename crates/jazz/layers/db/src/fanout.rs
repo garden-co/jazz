@@ -82,6 +82,8 @@ pub(super) struct Group {
     awaiting: bool,
     /// Whether the opening was published.
     opened: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    opening_read: Option<read_pool::Read>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -129,6 +131,8 @@ pub(super) struct Fanout {
     keys: HashMap<(String, String, String), BTreeSet<u64>>,
     key_columns: HashMap<String, BTreeSet<String>>,
     stats: FanoutStats,
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_openings: BTreeSet<u64>,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
 }
@@ -185,6 +189,8 @@ impl Fanout {
     }
 
     fn drop_group(&mut self, gid: u64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.pending_openings.remove(&gid);
         if let Some(group) = self.groups.remove(&gid) {
             let group = group.borrow();
             self.by_key.remove(&group.key);
@@ -316,14 +322,30 @@ impl Inner {
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
+        // Only committed, native authority openings move to read workers.
+        // Transaction overlays and nested relation assembly keep their owner.
+        #[cfg(not(target_arch = "wasm32"))]
+        let opening_read = (self.read_pool.is_some()
+            && self.client.is_none()
+            && self.conn.is_autocommit()
+            && prepared.query.array_subqueries.is_empty())
+        .then(read_pool::Read::default);
+        #[cfg(not(target_arch = "wasm32"))]
+        let background = opening_read.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let background = false;
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
-        {
-            Ok(rows) => (rows, false),
-            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-            Err(error) => return Err(error),
+        let (rows, awaiting) = if background {
+            (Vec::new(), true)
+        } else {
+            match self
+                .execute(&compiled, &prepared.query.table)
+                .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
+            {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+                Err(error) => return Err(error),
+            }
         };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let root = prepared
@@ -344,6 +366,10 @@ impl Inner {
         }));
         let gid = self.fan.next;
         self.fan.next += 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        if opening_read.is_some() {
+            self.fan.pending_openings.insert(gid);
+        }
         self.fan.index(gid, &watches);
         self.fan.by_key.insert(key.clone(), gid);
         let handle = Rc::new(RefCell::new(Group {
@@ -361,6 +387,8 @@ impl Inner {
             includes,
             awaiting,
             opened: !awaiting,
+            #[cfg(not(target_arch = "wasm32"))]
+            opening_read,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -736,6 +764,10 @@ impl Inner {
             self.fan.index(gid, &watches);
             group.watches = watches;
             if reset {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(read) = &mut group.opening_read {
+                    read.invalidate();
+                }
                 self.reset_group(&mut group);
             } else {
                 self.refresh_group(&mut group, None);
@@ -1126,15 +1158,31 @@ impl Inner {
     }
 
     /// A group's rows, with array relations nested in their cells.
-    fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
+    fn group_rows(&self, group: &mut Group) -> Result<Option<Vec<CurrentRow>>, Error> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(mut read) = group.opening_read.take() {
+            let compiled = self.compile(&group.prepared, group.identity, &group.read)?;
+            let rows = self
+                .read_pool
+                .as_ref()
+                .expect("opening reader pool")
+                .borrow_mut()
+                .poll(&mut read, &compiled, &group.prepared.query.table)?;
+            if rows.is_none() {
+                group.opening_read = Some(read);
+            }
+            return Ok(rows);
+        }
         let rows = self.run(&group.prepared, group.identity, &group.read)?;
         self.nest_relations(&group.prepared, group.identity, &group.read, rows)
+            .map(Some)
     }
 
     fn reset_group(&self, group: &mut Group) {
         match self.group_rows(group) {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
-            Ok(rows) => {
+            Ok(None) => group.awaiting = true,
+            Ok(Some(rows)) => {
                 group.awaiting = false;
                 // Rows that left the result go out as removals before the
                 // re-opening: a reset tells local readers to replace their
@@ -1174,6 +1222,14 @@ impl Inner {
 
     /// Bring a group's result up to date; true when it re-ran the query.
     fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(read) = &mut group.opening_read {
+            // A data/policy/claim dependency changed while the opening ran.
+            // Never publish its older result, including an empty result.
+            read.invalidate();
+            group.awaiting = true;
+            return true;
+        }
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
                 Some(Ok(Some(event))) => {
@@ -1193,7 +1249,11 @@ impl Inner {
             }
         }
         let rows = match self.group_rows(group) {
-            Ok(rows) => rows,
+            Ok(Some(rows)) => rows,
+            Ok(None) => {
+                group.awaiting = true;
+                return true;
+            }
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
                 return true;
@@ -1230,6 +1290,24 @@ impl Inner {
         let order = group.prepared.query.order_by.clone();
         if let Some(Ok(keys)) = self.sort_keys(group, &order, false, &group.rows) {
             group.keys = keys;
+        }
+    }
+
+    /// Poll only outstanding openings, not every live subscription.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn poll_read_openings(&mut self) {
+        let pending: Vec<_> = self
+            .fan
+            .pending_openings
+            .iter()
+            .filter_map(|gid| self.fan.groups.get(gid).map(|g| (*gid, g.clone())))
+            .collect();
+        for (gid, handle) in pending {
+            let mut group = handle.borrow_mut();
+            self.reset_group(&mut group);
+            if group.opening_read.is_none() {
+                self.fan.pending_openings.remove(&gid);
+            }
         }
     }
 }
