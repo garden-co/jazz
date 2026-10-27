@@ -977,3 +977,33 @@ fn a_reopened_authority_still_derives_what_it_recorded() {
     drop(core);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_upload_whose_record_is_gone_reads_as_maybe_conflicting_and_authoring_every_column() {
+    let mut net = Net::new(2);
+    let row = net.seed(0);
+    net.offline(1);
+    let alice = net.edit_settled(0, row, &[("title", "alice")]);
+    let bob = net.edit(1, row, &[("note", "bob")]);
+    net.online(1);
+    net.settle(1, bob.1);
+    let alice_seq = net.conflict(row, alice).seq;
+    assert!(!net.conflict(row, alice).maybe_conflicting);
+    assert!(net.conflict(row, bob).overlapping.is_empty());
+
+    // Retention drops alice's record (and the seed's), not bob's.
+    net.core.prune_recorded_writes(alice_seq).unwrap();
+    let alice_conflict = net.conflict(row, alice);
+    assert!(
+        alice_conflict.maybe_conflicting,
+        "nothing tells what alice had seen"
+    );
+    assert_eq!(alice_conflict.resolved_base, None);
+    let bob_conflict = net.conflict(row, bob);
+    assert!(bob_conflict.maybe_conflicting);
+    assert_eq!(
+        writers(&bob_conflict.overlapping),
+        vec![alice],
+        "an unrecorded write authors every column"
+    );
+}

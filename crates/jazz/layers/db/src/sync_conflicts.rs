@@ -84,9 +84,14 @@ const WRITES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_writes (t TEXT NOT NU
      tx INTEGER NOT NULL, base_seq INTEGER, base_via INTEGER, pending_node BLOB, \
      pending_tx INTEGER, \
      authored BLOB, \
-     PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID; \
+     PRIMARY KEY (seq, t, id, k)) WITHOUT ROWID; \
      CREATE TABLE IF NOT EXISTS _jazz_columns (t TEXT NOT NULL, name TEXT NOT NULL, \
      code INTEGER NOT NULL, PRIMARY KEY (t, name)) WITHOUT ROWID;";
+
+/// How many seqs back `_jazz_writes` keeps records. An upload's version
+/// older than that reads as unrecorded: maybe conflicting, authoring every
+/// column.
+const WRITES_RETAINED: u64 = 1 << 20;
 
 /// The authored-column name a deletion or restore writes.
 const DELETION: &str = "_del";
@@ -249,6 +254,33 @@ impl Inner {
             )
             .map_err(storage)?;
         }
+        self.prune_writes(seq.saturating_sub(WRITES_RETAINED))
+    }
+
+    /// Record an accepted upload's writes (see [`Self::record_writes`]) if
+    /// it can: a failure leaves them unrecorded, never rejects the upload.
+    /// Returns whether they went in.
+    pub(super) fn record_writes_if_able(
+        &self,
+        ops: &[StagedOp],
+        bases: &[WireBase],
+        writers: ([u8; 16], ([u8; 16], u64)),
+        seq: u64,
+        rows: &[(String, RowUuid, Vec<u8>)],
+    ) -> Result<bool, Error> {
+        begin_savepoint(&self.conn, "writes")?;
+        let recorded = self.record_writes(ops, bases, writers, seq, rows).is_ok();
+        end_savepoint(&self.conn, "writes", recorded)?;
+        Ok(recorded)
+    }
+
+    /// Drop the records of versions at or below `through`.
+    fn prune_writes(&self, through: u64) -> Result<(), Error> {
+        if through == 0 {
+            return Ok(());
+        }
+        self.exec("DELETE FROM _jazz_writes WHERE seq <= ?1", [through as i64])
+            .map_err(storage)?;
         Ok(())
     }
 
@@ -344,10 +376,15 @@ impl Inner {
         rows.into_iter()
             .map(|recorded| {
                 let Some(node) = recorded.node else {
+                    let writer = *origins.get(&recorded.seq).ok_or_else(corrupt)?;
+                    // This store's own write is made over the current image.
+                    // An upload's version without a record (pruned, or its
+                    // recording failed) saw nothing anyone can tell.
+                    let own = writer.0 == *self.identity.node.as_bytes();
                     return Ok(Version {
                         seq: recorded.seq,
-                        writer: origins[&recorded.seq],
-                        base_seq: None,
+                        writer,
+                        base_seq: (!own).then_some(0),
                         base_via: false,
                         base_pending: None,
                         authored: None,
@@ -469,6 +506,17 @@ impl Db {
     /// `None` unbranched) maybe conflicts, and its conflict analysis, in seq
     /// order (SPEC 4 §4.6, INV-HIST-21). Derived from this store's accepted
     /// history on demand; meaningful on the authority.
+    /// Drop the authority's conflict records of versions at or below
+    /// `through`, as its retention does for old ones.
+    #[cfg(feature = "testing")]
+    pub fn prune_recorded_writes(&self, through: u64) -> Result<(), Error> {
+        let inner = self.inner();
+        if !inner.writes_table.get() {
+            return Ok(());
+        }
+        inner.prune_writes(through)
+    }
+
     #[cfg(feature = "testing")]
     pub fn write_conflicts(
         &self,

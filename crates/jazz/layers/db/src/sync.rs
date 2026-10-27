@@ -6502,20 +6502,23 @@ impl Db {
         }
         .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
         .and_then(|rows| {
-            if !relay {
-                self.inner
-                    .borrow()
-                    .record_writes(&ops, &bases, (origin.0, writer), seq, &rows)?;
-            }
-            Ok(rows)
+            let recorded = !relay
+                && self.inner.borrow().record_writes_if_able(
+                    &ops,
+                    &bases,
+                    (origin.0, writer),
+                    seq,
+                    &rows,
+                )?;
+            Ok((rows, recorded))
         });
         let mut inner = self.inner();
         match finished {
-            Ok(rows) => {
+            Ok((rows, recorded)) => {
                 end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
                 // `_jazz_writes` exists once the savepoint that created it
                 // is released, not before.
-                if !relay {
+                if recorded {
                     inner.writes_table.set(true);
                 }
                 drop(inner);

@@ -475,7 +475,11 @@ The authority keeps, beside each row version an accepted upload wrote, its
 writer, its resolved base with the predecessor's full id (the node left
 empty when it is the writer's), and its authored stored columns as a bitmask
 over per-table column codes (`_jazz_writes`, with the codes interned in
-`_jazz_columns`; both created with the first accepted upload). Its own
+`_jazz_columns`; both created with the first accepted upload). Recording
+is best effort and bounded: a failure to record never rejects the upload,
+and records older than a retention window of seqs are dropped. An upload's
+version without a record reads as maybe conflicting, over nothing seen and
+authoring every column. Its own
 writes are not kept there: they are made over the current image, so they
 are never maybe conflicting, and in another write's analysis they author
 every column. The flag and the walk are derived on demand
