@@ -279,14 +279,16 @@ fn a_refused_connection_is_surfaced_and_retried() {
 /// #4248: alice's bearer expires while the app is in the background, so the
 /// worker's reconnect after the link drops is refused. The worker stops
 /// instead of resending the dead bearer forever, the status tells the host
-/// the credential was refused (so it renews instead of failing for good),
-/// and the renewed bearer replaces the worker and clears the failure.
+/// the credential was refused (so it renews), and the renewed bearer
+/// replaces the worker and clears the failure. #4296: a refused credential
+/// is auth state, not a failed session, so alice's ticks keep running
+/// meanwhile, as on the web and Node transports.
 ///
 /// ```text
 /// alice ─open─► relay ══socket(bearer 1)══► edge   (connected)
 ///                 │     ✗ link lost (backgrounded)
 ///                 │ ══socket(bearer 1)══✗ edge     AuthFailed: worker stops
-/// alice ─tick─► relay                              (LifecycleFailure, auth_rejected)
+/// alice ─tick─► relay                              (Ok, auth_rejected, link Failed)
 /// alice ─renew(bearer 2)─► relay ══socket(bearer 2)══► edge
 /// alice ─tick─► relay                              (Ok)
 /// ```
@@ -313,11 +315,17 @@ fn an_expired_bearer_stops_the_worker_and_a_renewed_one_recovers() {
     });
     assert_eq!(
         host.tick_foreground(alice),
-        Err(JazzNativeRelayStatus::LifecycleFailure),
-        "a refused session still fails the tick"
+        Ok(()),
+        "a refused credential must not fail local ticks"
     );
     let (is_connected, rejected) = status(&mut host, alice);
     assert!(!is_connected);
+    host.sync_foreground_remote_link(alice);
+    assert_eq!(
+        host.foregrounds[&alice].remote_link_hint,
+        Some(RemoteLinkHint::Failed),
+        "reads must not wait on an upstream that refused the credential"
+    );
     assert!(
         rejected
             .as_deref()

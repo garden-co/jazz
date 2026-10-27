@@ -189,3 +189,41 @@ it("rejects unknown transaction reads before invoking native commands", () => {
   expect(execute).not.toHaveBeenCalled();
   expect(tick).not.toHaveBeenCalled();
 });
+
+// #4296: a refused credential is auth state, not a failed tick. Each new
+// refusal is reported once; a renewed credential that is refused again is a
+// new refusal.
+it("reports each new upstream credential refusal once while ticks keep running", async () => {
+  const statuses: (string | null)[] = [
+    null,
+    "token expired",
+    "token expired",
+    null,
+    "token expired",
+  ];
+  let authRejected: string | null = null;
+  const tick = vi.fn(() => {
+    authRejected = statuses.shift() ?? null;
+  });
+  const db = new NativeForegroundDb(
+    { execute: (command: Uint8Array) => command, tick, close: () => true },
+    {
+      encodeNativeForegroundCommand: () => Uint8Array.of(1),
+      decodeNativeForegroundResponse: () => ({
+        type: "nativeConnectionStatus",
+        configured: true,
+        explicitlyOffline: false,
+        connected: false,
+        authRejected,
+      }),
+    } as never,
+  );
+  const reported: string[] = [];
+  db.onAuthRejected((reason) => reported.push(reason));
+
+  for (let turn = 0; turn < 5; turn += 1) db.tick();
+  await Promise.resolve();
+
+  expect(tick).toHaveBeenCalledTimes(5);
+  expect(reported).toEqual(["token expired", "token expired"]);
+});

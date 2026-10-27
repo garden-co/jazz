@@ -608,9 +608,9 @@ pub enum ForegroundDbCommandResponse {
         explicitly_offline: bool,
         connected: bool,
         /// The upstream refused the scope's credential, with its reason. Set
-        /// until a connection with a refreshed credential succeeds; the host
-        /// renews the credential rather than treating the failed tick as
-        /// fatal (#4248).
+        /// until a connection with a refreshed credential succeeds. Ticks
+        /// keep running meanwhile: the host reads this after a tick and
+        /// renews the credential (#4248, #4296).
         auth_rejected: Option<String>,
     },
     NativeSessionMetadata {
@@ -771,7 +771,10 @@ struct PrivateScopeSocketWorker {
     terminal_error: Arc<Mutex<Option<String>>>,
     /// The upstream refused this worker's credential. The worker stops on
     /// it, so only a replacement built with a refreshed credential (or an
-    /// explicit reconnect) can connect again.
+    /// explicit reconnect) can connect again. This is auth state, not a
+    /// failed session: it is not latched in `terminal_error`, so local ticks
+    /// keep running while the host renews the credential, as on the web and
+    /// Node transports (#4296).
     auth_rejected: Arc<Mutex<Option<String>>>,
     /// The worker's socket loop has exited and will never reconnect on its
     /// own. An explicit reconnect replaces such a worker.
@@ -779,15 +782,24 @@ struct PrivateScopeSocketWorker {
 }
 
 impl PrivateScopeSocketWorker {
-    /// The worker gave up after a terminal failure: it is no longer an
-    /// upstream and nothing but a replacement can clear its failure.
+    /// The worker gave up after a terminal failure or a refused credential:
+    /// it is no longer an upstream and nothing but a replacement can clear
+    /// its failure.
     fn terminally_stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire)
-            && self
+            && (self
                 .terminal_error
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .is_some()
+                || self.is_auth_rejected())
+    }
+
+    fn is_auth_rejected(&self) -> bool {
+        self.auth_rejected
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
     }
 }
 
@@ -1077,15 +1089,14 @@ impl NativeRelayHost {
                                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                             set_terminal(None);
                         }
-                        // A refused credential is a rejected session: it
-                        // latches like one, and the worker stops on it.
+                        // A refused credential is auth state, not a failed
+                        // session: the worker stops on it, but local ticks
+                        // continue while the host renews the credential.
                         NativeRelaySocketEvent::AuthRejected(error) => {
                             connected_for_event.store(false, Ordering::Release);
                             *auth_rejected_for_event
                                 .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                                Some(error.clone());
-                            set_terminal(Some(error));
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
                         }
                         NativeRelaySocketEvent::TerminalError(error) => {
                             if connected_for_event.swap(false, Ordering::AcqRel) {
@@ -1546,7 +1557,10 @@ impl NativeRelayHost {
         } else {
             match self.private_scope_workers.get(&scope) {
                 Some(worker) if worker.connected.load(Ordering::Acquire) => RemoteLinkHint::Live,
-                Some(_) if self.private_scope_terminal_error(&scope).is_some() => {
+                Some(worker)
+                    if worker.is_auth_rejected()
+                        || self.private_scope_terminal_error(&scope).is_some() =>
+                {
                     RemoteLinkHint::Failed
                 }
                 Some(_) if opened.link_was_live => RemoteLinkHint::Failed,
@@ -1589,9 +1603,10 @@ impl NativeRelayHost {
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
         let (relay, scope) = (opened.relay, opened.scope.clone());
         // A rejected session or a stopped upstream fails the tick. A lost
-        // established link that the worker is retrying is not latched: it is
-        // reported through the remote-link hint and `NativeConnectionStatus`
-        // while local work continues.
+        // established link that the worker is retrying, or a refused
+        // credential the host is renewing, is not latched: it is reported
+        // through the remote-link hint and `NativeConnectionStatus` while
+        // local work continues.
         if self.private_scope_terminal_error(&scope).is_some() {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }

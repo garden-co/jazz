@@ -49,6 +49,9 @@ export type NativeForegroundModule = Pick<
 export class NativeForegroundDb {
   private closed = false;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
+  private authRejectedCallback: ((reason: string) => void) | undefined;
+  /** The refusal last reported, so each refused credential is reported once. */
+  private reportedAuthRejection: string | null = null;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
 
   constructor(
@@ -74,6 +77,16 @@ export class NativeForegroundDb {
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
     this.assertOpen();
     this.mutationErrorCallback = callback;
+  }
+
+  /**
+   * Observe the upstream refusing the scope's credential. The refusal is auth
+   * state, not a failed tick: local ticks keep running, and each tick reports
+   * a new refusal once, so the app can renew the credential (#4248, #4296).
+   */
+  onAuthRejected(callback: (reason: string) => void): void {
+    this.assertOpen();
+    this.authRejectedCallback = callback;
   }
 
   all(
@@ -138,6 +151,14 @@ export class NativeForegroundDb {
   tick(): void {
     this.assertOpen();
     this.runtime.tick();
+    if (this.authRejectedCallback) {
+      const rejected = this.nativeConnectionStatus().authRejected ?? null;
+      if (rejected && rejected !== this.reportedAuthRejection)
+        queueMicrotask(() => {
+          if (!this.closed) this.authRejectedCallback?.(rejected);
+        });
+      this.reportedAuthRejection = rejected;
+    }
     if (this.mutationErrorCallback) {
       const response = this.execute({ type: "drainMutationErrors" });
       if (response.type === "operationError") throw foregroundOperationError(response);
