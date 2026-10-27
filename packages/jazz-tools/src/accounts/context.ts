@@ -163,18 +163,22 @@ export async function createAccountDbWithRuntimeSource(
     };
     const schedule = (token: string) => {
       const expires = parseJwtPayload(token)?.exp;
-      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
+      if (typeof expires !== "number" || !Number.isFinite(expires)) return;
+      // Already expired, as when the app slept past its renewal timer (mobile
+      // platforms suspend timers in the background): renew now rather than
+      // leave nothing to renew it (#4248).
+      if (expires * 1000 <= Date.now()) {
+        renew();
         return;
+      }
       // A token that lives to its scheduled refresh ends any renewal streak.
       scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)), () =>
         renewals.reset(),
       );
     };
-    const renew = () => {
-      const delay = renewals.next();
-      if (delay === 0) void refresh();
-      else scheduleIn(delay);
-    };
+    // Always through the timer, never inline: `schedule()` runs inside a
+    // refresh, which an inline refresh would find still running and skip.
+    const renew = () => scheduleIn(renewals.next());
     const refresh = async () => {
       // A retained account refreshes when revalidation binds its credential.
       if (refreshing || stopped || isProvisionalAccount(account)) return;
@@ -194,7 +198,11 @@ export async function createAccountDbWithRuntimeSource(
       }
     };
     const stopAuth = opened.onAuthChanged((state) => {
-      if (state.error === "expired" || state.error === "missing") renew();
+      // A refused credential renews whatever the server called it: a
+      // rotated signing key reads as "invalid" until a new token is issued.
+      // "disabled" means the app has that auth mode turned off, which a new
+      // token cannot fix.
+      if (state.error && state.error !== "disabled") renew();
     });
     stopBound = onAccountCredentialBound(account, () => {
       renewals.reset();
