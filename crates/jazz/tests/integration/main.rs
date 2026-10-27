@@ -83,6 +83,8 @@ mod relation_policies;
 mod relation_queries;
 #[path = "../relation_results.rs"]
 mod relation_results;
+#[path = "../relational_delete_retraction.rs"]
+mod relational_delete_retraction;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
 #[path = "../schema_activation.rs"]

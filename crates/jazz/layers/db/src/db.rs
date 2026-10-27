@@ -3900,6 +3900,11 @@ impl Inner {
             Located::Row {
                 key, deleted: true, ..
             } => key,
+            // As for an update: a replica must hold the row to restore it,
+            // and saying so discloses nothing.
+            Located::Absent { .. } if self.client.is_some() => {
+                return Err(update_target_not_loaded("RESTORE", table_name, row));
+            }
             Located::Absent { .. } => {
                 return Err(rejected(format!(
                     "RESTORE target {row:?} does not exist in `{table_name}`"
