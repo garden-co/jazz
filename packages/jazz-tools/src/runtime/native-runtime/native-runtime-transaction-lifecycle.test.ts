@@ -7,6 +7,7 @@ import {
   type NativeRowDescriptorField,
 } from "./native-codec.js";
 import type { WasmSchema } from "../../drivers/types.js";
+import type { NativeCoreErrorReason } from "./native-error-code.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { parseSnapshotRef, UnsupportedSnapshotError } from "../snapshot-ref.js";
 import {
@@ -1129,9 +1130,10 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     wait: async () => {
       await nextWriteStateChange();
       if (rejected) {
-        throw Object.assign(new Error("WriteRejected: AuthorizationDenied"), {
-          code: "write_rejected",
-        });
+        throw Object.assign(
+          new Error("WriteRejected: authorization_denied: INSERT policy denied the new row"),
+          { code: "write_rejected", reason: "authorization_denied" },
+        );
       }
     },
     writeState: () => ({}),
@@ -1173,83 +1175,11 @@ it("does not emit onMutationError when an active wait handles the rejection", as
   expect(listener).not.toHaveBeenCalled();
 });
 
-const CASCADE_ANCESTOR = "4f6c0b6f3a1e9d2c8b7a6f5e4d3c2b1a";
+// Bindings carry the core reason of a rejected wait as `error.reason`; every
+// reason maps to its rejection code and a readable reason.
+const DENIED = "WriteRejected: authorization_denied: INSERT policy denied the new row";
 it.each([
-  [
-    "SerializationConflict (reason: Serializable transaction conflicted with another write)",
-    "serialization_conflict",
-    "Serializable transaction conflicted with another write",
-  ],
-  [
-    `Cascade { root: TxId { time: TxTime(7), node: NodeUuid(00000000-0000-0000-0000-000000000007) } } (reason: Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected)`,
-    "cascade_rejected",
-    `Transaction was rejected because ancestor transaction ${CASCADE_ANCESTOR} was rejected`,
-  ],
-  [
-    "CausalityViolation (reason: Transaction violated causal ordering)",
-    "causality_violation",
-    "Transaction violated causal ordering",
-  ],
-  [
-    "ClientClockTooFarAhead (reason: Client clock is too far ahead)",
-    "client_clock_too_far_ahead",
-    "Client clock is too far ahead",
-  ],
-  // Older native bindings without the appended readable reason.
-  [
-    "SerializationConflict",
-    "serialization_conflict",
-    "Serializable transaction conflicted with another write",
-  ],
-])(
-  "gives a readable reason for a %s wait rejection and keeps the core diagnostic",
-  async (debugReason, code, reason) => {
-    const txId = "00000000000070008000000000000044" as TxId;
-    const diagnostic = `WriteRejected: transaction TxId { time: TxTime(44), node: NodeUuid(00000000-0000-0000-0000-000000000044) } was rejected: ${debugReason}`;
-    const write = {
-      txId,
-      payload: new Uint8Array(),
-      wait: async () => {
-        throw Object.assign(new Error(diagnostic), { code: "write_rejected" });
-      },
-      writeState: () => ({}),
-    };
-    const runtime = new NativeRuntimeAdapter(
-      {
-        openMemory: () =>
-          fakeDb({
-            insert: () => write,
-            onMutationError: () => undefined,
-          }),
-      } as never,
-      testSchema,
-      new Uint8Array(16),
-      TEST_RUNTIME_AUTHOR,
-      1,
-      true,
-    );
-
-    runtime.insert(
-      "todos",
-      { title: { type: "Text", value: "rejected" } },
-      null,
-      "00000000-0000-0000-0000-000000000044",
-    );
-    const rejection = await runtime
-      .waitForTransaction(txId, "global")
-      .catch((error: unknown) => error);
-
-    expect(rejection).toMatchObject({ kind: "rejected", transactionId: txId, code, reason });
-    expect((rejection as { reason: string }).reason).not.toMatch(/TxId|TxTime|NodeUuid/);
-    expect(Object.getOwnPropertyDescriptor(rejection, "message")).toMatchObject({
-      enumerable: false,
-      value: diagnostic,
-    });
-  },
-);
-
-// Bindings carry the core reason of a rejected wait as `error.reason`.
-it.each([
+  ["authorization_denied", DENIED, "permission_denied", "Write rejected by server authorization"],
   [
     "client_clock_too_far_ahead",
     "WriteRejected: client_clock_too_far_ahead: the write's timestamp is 90000ms ahead of the authority's clock",
@@ -1257,24 +1187,32 @@ it.each([
     "Client clock is too far ahead",
   ],
   [
-    "authorization_denied",
-    "WriteRejected: authorization_denied: INSERT policy denied the new row",
-    "permission_denied",
-    "Write rejected by server authorization",
-  ],
-  [
     "serialization_conflict",
     "WriteRejected: SerializationConflict (reason: Serializable transaction conflicted with another write)",
     "serialization_conflict",
     "Serializable transaction conflicted with another write",
   ],
-  [
-    "row_already_deleted",
-    "WriteRejected: row already deleted: 00000000-0000-0000-0000-000000000045",
-    "write_rejected",
-    "row already deleted: 00000000-0000-0000-0000-000000000045",
-  ],
-])(
+  ...(
+    [
+      ["row_already_deleted", "row already deleted: 00000000-0000-0000-0000-000000000045"],
+      [
+        "row_already_exists",
+        "encoding error: object already exists: 00000000-0000-0000-0000-000000000045",
+      ],
+      ["row_not_deleted", "row not deleted: 00000000-0000-0000-0000-000000000045"],
+      ["missing_required", "missing required field `title` in `todos`"],
+      ["branch_move", "invalid mergeable commit: branch column does not match exact branch key"],
+      ["missing_chunks", "large-value chunks are not available locally yet"],
+      ["permissions_head_missing", "permissions_head_missing: no published permissions head"],
+    ] satisfies [NativeCoreErrorReason, string][]
+  ).map(
+    ([coreReason, detail]) =>
+      [coreReason, `WriteRejected: ${detail}`, "write_rejected", detail] as const,
+  ),
+  // Without a reason (not a core rejection) it is a plain write rejection,
+  // whatever its message says.
+  [undefined, DENIED, "write_rejected", "authorization_denied: INSERT policy denied the new row"],
+] as [NativeCoreErrorReason | undefined, string, string, string][])(
   "maps a rejection with core reason %s to its code",
   async (coreReason, diagnostic, code, reason) => {
     const txId = "00000000000070008000000000000045" as TxId;
@@ -1312,6 +1250,10 @@ it.each([
       .catch((error: unknown) => error);
 
     expect(rejection).toMatchObject({ kind: "rejected", transactionId: txId, code, reason });
+    expect(Object.getOwnPropertyDescriptor(rejection, "message")).toMatchObject({
+      enumerable: false,
+      value: diagnostic,
+    });
   },
 );
 
