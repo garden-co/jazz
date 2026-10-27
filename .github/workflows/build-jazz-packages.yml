@@ -260,21 +260,6 @@ jobs:
         if: startsWith(matrix.platform, 'linux-')
         run: dev/artifacts/linux-napi/build.sh ${{ matrix.platform }}
 
-      # The Windows runner image supplies the MSVC toolchain but not libclang.
-      # RocksDB's zstd-sys build uses bindgen, which must be pointed at the DLL
-      # before napi invokes Cargo.
-      - name: Install libclang for Windows bindgen
-        if: matrix.platform == 'win32-x64-msvc'
-        shell: pwsh
-        run: |
-          choco install llvm --version=21.1.8 --yes --no-progress --limit-output
-          $libclangPath = Join-Path $env:ProgramFiles "LLVM\bin"
-          if (-not (Test-Path (Join-Path $libclangPath "libclang.dll"))) {
-            throw "LLVM installation did not provide libclang.dll at $libclangPath"
-          }
-          "LIBCLANG_PATH=$libclangPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $libclangPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
       - name: Build jazz-napi binding
         if: ${{ !startsWith(matrix.platform, 'linux-') }}
         run: |

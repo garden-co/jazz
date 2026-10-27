@@ -12,9 +12,8 @@ indexes, Rust and Node versions are pinned in `Dockerfile`; the AL2023 package
 repository release is pinned by the base image. Compiler/libc versions, image
 identity and recipe identity are recorded in the producer manifest.
 
-The baseline intentionally uses GCC11: a bounded Bullseye/GCC10 build trial
-failed on RocksDB11.1.1's C++20 `using enum`. Moving to Ubuntu22.04 would still
-require glibc2.35, above AL2023's glibc2.34. Details and follow-up belong in
+The baseline is AL2023 (GCC11, glibc2.34), the userspace Vercel builds run
+on. Ubuntu22.04 would require glibc2.35, above AL2023's glibc2.34. Details and follow-up belong in
 [#3048](https://github.com/garden-co/jazz/issues/3048) and
 [#2675](https://github.com/garden-co/jazz/issues/2675).
 

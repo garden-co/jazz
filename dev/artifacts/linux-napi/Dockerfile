@@ -6,8 +6,7 @@ COPY --from=node /usr/local/ /usr/local/
 COPY --from=rust /usr/local/rustup/ /usr/local/rustup/
 COPY --from=rust /usr/local/cargo/bin/ /usr/local/cargo/bin/
 # AL2023 pins its package repository release through /etc/dnf/vars/releasever.
-# GCC11 is needed by RocksDB's C++20 `using enum`; Bullseye GCC10 cannot build it.
-RUN dnf install -y gcc gcc-c++ clang-devel cmake make git gzip tar findutils \
+RUN dnf install -y gcc gcc-c++ cmake make git gzip tar findutils \
  && dnf clean all \
  && npm install --global pnpm@10.14.0
 ENV RUSTUP_HOME=/usr/local/rustup
