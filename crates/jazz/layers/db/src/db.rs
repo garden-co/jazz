@@ -26,7 +26,7 @@ pub use crate::options::{
     UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
-use crate::compile::{Compiled, Ctx, Cut, Session, View};
+use crate::compile::{Compiled, Ctx, Cut, Overlay as CutOverlay, Session, View};
 use crate::tools::{CmpOp, PolicyExpr};
 
 #[path = "fanout.rs"]
@@ -1338,8 +1338,30 @@ impl Db {
         author: AuthorSubject,
         grounded: &[RowUuid],
     ) -> Result<String, Error> {
-        self.inner()
-            .explain_write_check(table, row, author, grounded)
+        let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
+        let inner = self.inner();
+        let stored = inner.schema.table(table)?.stored.clone();
+        let overlay = CutOverlay::Grounded(Arc::new(BTreeMap::from([(stored, ids)])));
+        inner.explain_write_check(table, row, author, overlay)
+    }
+
+    /// Diagnostics: SQLite's query plan for the INSERT check of `row` of
+    /// `table` as `author` against a unit's post-state (every row the unit
+    /// wrote but `row`), as the post-state pass runs it.
+    #[doc(hidden)]
+    pub fn explain_post_state_check_plan(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+    ) -> Result<String, Error> {
+        let inner = self.inner();
+        let stored = inner.schema.table(table)?.stored.clone();
+        let overlay = CutOverlay::Except {
+            table: stored,
+            row: *row.0.as_bytes(),
+        };
+        inner.explain_write_check(table, row, author, overlay)
     }
 
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
@@ -2850,8 +2872,8 @@ impl Inner {
             .map(|(holds, _)| holds)
     }
 
-    /// [`Inner::holds_at`], also returning how many grounded rows of a
-    /// write check's unit the check read.
+    /// [`Inner::holds_at`], also returning what of a write check's overlay
+    /// the check read.
     fn holds_counting(
         &self,
         table: &Table,
@@ -2859,19 +2881,19 @@ impl Inner {
         key: &[u8],
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
-    ) -> Result<(bool, usize), Error> {
-        let (sql, params, preps, overlaid) = self.policy_check(table, row, key, cut, policy)?;
+    ) -> Result<(bool, OverlayRead), Error> {
+        let (sql, params, preps, read) = self.policy_check(table, row, key, cut, policy)?;
         let value: i64 = self.with_preps(&preps, |_| {
             self.conn
                 .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
                 .map_err(storage)
         })?;
-        Ok((value != 0, overlaid))
+        Ok((value != 0, read))
     }
 
     /// The statement [`Inner::holds_at`] runs: the policy SQL boolean for
-    /// one stored row, its parameters, the preps it needs, and how many
-    /// grounded rows it reads.
+    /// one stored row, its parameters, the preps it needs, and what of the
+    /// cut's overlay it reads.
     fn policy_check(
         &self,
         table: &Table,
@@ -2879,12 +2901,15 @@ impl Inner {
         key: &[u8],
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
-    ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>, usize), Error> {
+    ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
         let condition = policy(&mut ctx)?;
-        let overlaid = ctx.overlaid_rows;
+        let read = OverlayRead {
+            rows: ctx.overlaid_rows,
+            tables: std::mem::take(&mut ctx.overlay_tables),
+        };
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
@@ -2895,27 +2920,26 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        Ok((sql, params, preps, overlaid))
+        Ok((sql, params, preps, read))
     }
 
     /// SQLite's plan for the INSERT check a unit ending now would run on
     /// `row` (SPEC 7): its policy reads committed state, overlaid with the
-    /// `grounded` rows of the same table, as a later round sees them.
+    /// unit's rows `overlay` names.
     fn explain_write_check(
         &self,
         table: &str,
         row: RowUuid,
         author: AuthorSubject,
-        grounded: &[RowUuid],
+        overlay: CutOverlay,
     ) -> Result<String, Error> {
         let table = self.schema.table(table)?;
         let own = self.seq + 1;
-        let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
         let cut = Cut {
             seq: self.seq,
             own,
             extra: Vec::new(),
-            grounded: Some(Arc::new(BTreeMap::from([(table.stored.clone(), ids)]))),
+            overlay: Some(overlay),
         };
         let session = self.session(author);
         let (sql, params, _, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
@@ -3137,8 +3161,10 @@ impl Inner {
         }
         let mut pending = live;
         let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
-        // Each write with the round it passed in.
-        let mut rounds: Vec<(DeferredCheck, usize)> = Vec::with_capacity(pending.len());
+        // Each write with the round it passed in and the tables its policy
+        // reads through the overlay.
+        let mut rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)> =
+            Vec::with_capacity(pending.len());
         let mut round = 0;
         let mut evidence = EvidenceBudget::default();
         loop {
@@ -3146,13 +3172,15 @@ impl Inner {
                 seq: seq.saturating_sub(1),
                 own: seq,
                 extra: Vec::new(),
-                grounded: Some(Arc::new(grounded.clone())),
+                overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
             for check in pending {
-                if self.write_check_holds(&schema, &check, cut.clone(), &mut evidence)? {
-                    passed.push(check);
+                let (holds, tables) =
+                    self.write_check_holds(&schema, &check, cut.clone(), &mut evidence)?;
+                if holds {
+                    passed.push((check, tables));
                 } else {
                     failed.push(check);
                 }
@@ -3160,13 +3188,13 @@ impl Inner {
             if !failed.is_empty() && passed.is_empty() {
                 return Err(write_check_denied(&failed[0]));
             }
-            for check in passed {
+            for (check, tables) in passed {
                 let stored = schema.table(&check.table)?.stored.clone();
                 grounded
                     .entry(stored)
                     .or_default()
                     .insert(*check.row.0.as_bytes());
-                rounds.push((check, round));
+                rounds.push((check, round, tables));
             }
             if failed.is_empty() {
                 break;
@@ -3174,17 +3202,18 @@ impl Inner {
             pending = failed;
             round += 1;
         }
-        self.post_state_pass(&schema, rounds, grounded, seq, &mut evidence)
+        self.post_state_pass(&schema, rounds, seq, &mut evidence)
     }
 
-    /// Check `check`'s policy on the rows `cut` shows.
+    /// Check `check`'s policy on the rows `cut` shows. Also returns the
+    /// stored tables the policy read through the cut's overlay.
     fn write_check_holds(
         &self,
         schema: &Schema,
         check: &DeferredCheck,
         cut: Cut,
         evidence: &mut EvidenceBudget,
-    ) -> Result<bool, Error> {
+    ) -> Result<(bool, BTreeSet<String>), Error> {
         let table = schema.table(&check.table)?;
         let session = self.session(check.author);
         let (holds, read) =
@@ -3205,74 +3234,97 @@ impl Inner {
                     }
                 }
             })?;
-        evidence.charge(read)?;
-        Ok(holds)
+        evidence.charge(read.rows)?;
+        Ok((holds, read.tables))
     }
 
     /// The unit is accepted only if every write's policy also holds on the
     /// state the whole unit leaves behind (SPEC 7, INV-RLS-9): committed
     /// state overlaid with every write of the unit but the row under
     /// check, which is never evidence for itself. A write is checked again
-    /// only when the writes grounded with or after it could have taken its
-    /// pass away: any of them, under a policy that is not monotone in the
-    /// rows present, or else one that replaced a row's earlier content. A
-    /// unit that only adds rows under monotone policies is checked once
-    /// per write.
+    /// only when a table its policy reads holds a write grounded with or
+    /// after it that could have taken its pass away: any write, under a
+    /// policy that is not monotone in the rows present, or else one that
+    /// replaced a row's earlier content. A unit that only adds rows under
+    /// monotone policies is checked once per write.
+    ///
+    /// The post-state overlays every live row of the unit, so it binds no
+    /// id list: a re-check reaches the unit's rows through the policy's
+    /// correlated keys, like committed ones, and reads none of them
+    /// wholesale. It is not charged to the evidence budget.
     fn post_state_pass(
         &self,
         schema: &Schema,
-        rounds: Vec<(DeferredCheck, usize)>,
-        grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)>,
         seq: u64,
         evidence: &mut EvidenceBudget,
     ) -> Result<(), Error> {
-        // Per round: how many writes passed in it, and how many of those
-        // replaced a row's earlier content.
-        let last = rounds.iter().map(|(_, r)| *r).max().unwrap_or(0);
-        let mut written = vec![0usize; last + 2];
-        let mut replaced = vec![0usize; last + 2];
-        for (check, round) in &rounds {
+        // Per stored table and round: how many writes passed in it, and
+        // how many of those replaced a row's earlier content; then suffix
+        // sums, so index `r` counts the writes grounded in round `r` or
+        // later.
+        let last = rounds.iter().map(|(_, r, _)| *r).max().unwrap_or(0);
+        let mut later: HashMap<String, (Vec<usize>, Vec<usize>)> = HashMap::new();
+        let mut stored_of = Vec::with_capacity(rounds.len());
+        for (check, round, _) in &rounds {
+            let stored = schema.table(&check.table)?.stored.clone();
+            let (written, replaced) = later
+                .entry(stored.clone())
+                .or_insert_with(|| (vec![0; last + 2], vec![0; last + 2]));
             written[*round] += 1;
             if check.replaces() {
                 replaced[*round] += 1;
             }
+            stored_of.push(stored);
         }
-        // Suffix sums: writes grounded in a round at or after each round.
-        for r in (0..=last).rev() {
-            written[r] += written[r + 1];
-            replaced[r] += replaced[r + 1];
+        for (written, replaced) in later.values_mut() {
+            for r in (0..=last).rev() {
+                written[r] += written[r + 1];
+                replaced[r] += replaced[r + 1];
+            }
         }
         let mut monotone: HashMap<(String, u8), bool> = HashMap::new();
-        for (check, round) in &rounds {
-            let others = written[*round] - 1;
-            let others_replacing = replaced[*round] - usize::from(check.replaces());
+        for ((check, round, tables), stored) in rounds.iter().zip(&stored_of) {
+            // The writes grounded with or after this one, in the tables its
+            // policy reads, other than its own.
+            let (mut others, mut others_replacing) = (0, 0);
+            for table in tables {
+                if let Some((written, replaced)) = later.get(table) {
+                    others += written[*round];
+                    others_replacing += replaced[*round];
+                }
+            }
+            if tables.contains(stored) {
+                others -= 1;
+                others_replacing -= usize::from(check.replaces());
+            }
             if others == 0 {
                 continue;
             }
-            let key = (check.table.clone(), check.check.kind());
-            let grows = match monotone.get(&key) {
-                Some(grows) => *grows,
-                None => {
-                    let grows = self.write_policy_is_monotone(schema, check)?;
-                    monotone.insert(key, grows);
-                    grows
+            if others_replacing == 0 {
+                let key = (check.table.clone(), check.check.kind());
+                let grows = match monotone.get(&key) {
+                    Some(grows) => *grows,
+                    None => {
+                        let grows = self.write_policy_is_monotone(schema, check)?;
+                        monotone.insert(key, grows);
+                        grows
+                    }
+                };
+                if grows {
+                    continue;
                 }
-            };
-            if grows && others_replacing == 0 {
-                continue;
-            }
-            let table = schema.table(&check.table)?;
-            let mut overlay = grounded.clone();
-            if let Some(ids) = overlay.get_mut(&table.stored) {
-                ids.remove(check.row.0.as_bytes());
             }
             let cut = Cut {
                 seq: seq.saturating_sub(1),
                 own: seq,
                 extra: Vec::new(),
-                grounded: Some(Arc::new(overlay)),
+                overlay: Some(CutOverlay::Except {
+                    table: stored.clone(),
+                    row: *check.row.0.as_bytes(),
+                }),
             };
-            if !self.write_check_holds(schema, check, cut, evidence)? {
+            if !self.write_check_holds(schema, check, cut, evidence)?.0 {
                 return Err(write_check_denied(check));
             }
         }
@@ -4418,6 +4470,14 @@ impl DeferredCheck {
 /// over every check (SPEC 7): past it, the unit is rejected as not
 /// supported yet instead of being decided at unbounded cost.
 const WRITE_CHECK_EVIDENCE_BUDGET: usize = 262_144;
+
+/// What of a write check's overlay its policy read.
+struct OverlayRead {
+    /// Grounded rows bound into the check (see [`Ctx::overlaid_rows`]).
+    rows: usize,
+    /// Stored tables read through the overlay.
+    tables: BTreeSet<String>,
+}
 
 /// The rows of its own writes a unit's write checks have read so far.
 #[derive(Default)]

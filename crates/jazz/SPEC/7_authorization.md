@@ -338,11 +338,15 @@ depend on the order in which the client made its writes.
 The first round reads no overlaid rows. Later rounds build one overlay per
 table and share it among their checks; a check overlays only the tables its
 policy reads, and still reads every unit row in those tables. A unit whose
-writes depend on each other's rows (a self-dependent chain) or whose
-post-state pass re-checks many writes therefore costs time quadratic in its
-size. The overlaid rows the unit's checks read are summed over every check
-after the first round, and a unit whose checks would read more than 262,144 of
-its own rows is rejected instead of being evaluated at unbounded cost. The
+writes depend on each other's rows (a self-dependent chain) therefore costs
+time quadratic in its size. The post-state pass does not: its overlay is every
+row the unit leaves live but the one under check, so a re-check reaches the
+unit's rows through the policy's keys, as it does committed rows, and a write
+is re-checked only when a table its policy reads holds a later write that could
+take its pass away. The overlaid rows the grounding rounds' checks read are
+summed over every check after the first round, and a unit whose checks would
+read more than 262,144 of its own rows is rejected instead of being evaluated
+at unbounded cost. The
 rejection is `MalformedCommit` carrying "Reading more than 262144 rows of a
 transaction's own writes in its write-policy checks is not supported yet";
 applications receive it as a `write_rejected` rejection with that sentence as

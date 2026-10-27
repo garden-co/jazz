@@ -515,7 +515,8 @@ fn folder_schema() -> JazzSchema {
                     .policies(
                         TablePolicies::new()
                             .with_select(PolicyExpr::True)
-                            .with_insert(in_my_folder),
+                            .with_insert(in_my_folder.clone())
+                            .with_update(Some(in_my_folder.clone()), in_my_folder),
                     ),
             )
             .build(),
@@ -633,6 +634,79 @@ fn an_import_under_committed_parents_is_accepted() {
     assert_eq!(count(&server, "folders"), 2_001);
 }
 
+/// A bulk update under a policy that reads its own table re-checks every
+/// write against the unit's post-state, but reaches the unit's rows
+/// through the policy's keys: a thousand updates fit, where binding the
+/// unit's ids into each re-check would cost a million rows of evidence.
+/// The post-state still refuses an update whose evidence the same unit
+/// takes away.
+///
+/// ```text
+/// alice ──tx{ update 1000 folders(parent: root) }──────────────────► core ──► Accepted
+/// alice ──tx{ f1.parent = f0, f0.owner = bob, 998 updates }────────► core ──► Rejected
+/// ```
+#[test]
+fn a_bulk_update_is_checked_against_the_post_state_without_reading_it_whole() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let root = RowUuid::from_bytes([0x53; 16]);
+    let (server, alice_db) = folders(alice, root);
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        for index in 0..1_000 {
+            block_on(tx.insert("folders", folder(alice, root), options(chain_folder(index))))
+                .unwrap();
+        }
+    })
+    .unwrap();
+
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        for index in 0..1_000 {
+            block_on(tx.update(
+                "folders",
+                chain_folder(index),
+                folder(alice, root),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+    })
+    .expect("a thousand updates under committed evidence are accepted");
+
+    let refused = commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.update(
+            "folders",
+            chain_folder(1),
+            folder(alice, chain_folder(0)),
+            Default::default(),
+        ))
+        .unwrap();
+        block_on(tx.update(
+            "folders",
+            chain_folder(0),
+            folder(bob, root),
+            Default::default(),
+        ))
+        .unwrap();
+        for index in 2..1_000 {
+            block_on(tx.update(
+                "folders",
+                chain_folder(index),
+                folder(alice, root),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+    })
+    .expect_err("f1's parent is bob's in the unit's post-state");
+    assert!(
+        !refused.to_string().contains("is not supported yet"),
+        "{refused}"
+    );
+}
+
 /// A write check reads its policy's rows as of the unit's cut: committed
 /// rows, overlaid with the unit's grounded ones, plus the newest history
 /// image of rows changed since. Every arm of that read must let SQLite
@@ -672,4 +746,12 @@ fn write_checks_search_the_policy_table_through_the_cut() {
             "grounded {grounded:?}: {plan}"
         );
     }
+    // The post-state pass overlays the unit's rows without an id list.
+    let plan = server
+        .explain_post_state_check_plan("members", joining, alice)
+        .unwrap();
+    assert!(
+        !plan.contains("SCAN") && !plan.contains("CO-ROUTINE"),
+        "post-state: {plan}"
+    );
 }
