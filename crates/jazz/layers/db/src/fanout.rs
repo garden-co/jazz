@@ -1020,7 +1020,7 @@ impl Inner {
                             .as_ref()
                         {
                             None => Sql::Null,
-                            Some(value) => match self.logical_key(to_sql(value).ok()??) {
+                            Some(value) => match self.logical_key(to_sql(value).ok()??, None) {
                                 Ok(value) => value,
                                 Err(error) => return Some(Err(error)),
                             },
@@ -1079,7 +1079,11 @@ impl Inner {
             let values = found.remove(row.id.0.as_bytes().as_slice())?;
             let mut key: SortKey = Vec::with_capacity(order.len() + 1);
             for (value, by) in values.into_iter().zip(order) {
-                let value = match self.logical_key(value) {
+                let kind = table
+                    .column(&by.column)
+                    .filter(|column| crate::large::large_capable(column))
+                    .map(crate::large::kind);
+                let value = match self.logical_key(value, kind) {
                     Ok(value) => value,
                     Err(error) if crate::large::is_missing(&error) => {
                         blocked = true;
@@ -1101,12 +1105,20 @@ impl Inner {
         Some(Ok(keys))
     }
 
-    /// A sort-key cell as its logical bytes, so keys compare as the `jazz`
-    /// collation orders them: a chunked or tagged cell is read as its value.
-    fn logical_key(&self, value: Sql) -> Result<Sql, Error> {
-        Ok(match value {
-            Sql::Text(cell) => Sql::Text(self.chunks.materialize(&cell)?),
-            value => value,
+    /// A sort-key cell as its logical value, so keys compare as the values
+    /// do: a chunked cell of a large-capable column of `kind` is read whole.
+    fn logical_key(
+        &self,
+        value: Sql,
+        kind: Option<jazz_types::large_values::LargeValueKind>,
+    ) -> Result<Sql, Error> {
+        Ok(match (value, kind) {
+            (Sql::Integer(cell), Some(kind)) => crate::large::inline_cell(
+                kind,
+                self.chunks
+                    .materialize(rusqlite::types::ValueRef::Integer(cell))?,
+            ),
+            (value, _) => value,
         })
     }
 

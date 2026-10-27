@@ -332,10 +332,14 @@ pub enum Cell {
     Null,
     Int(i64),
     Real(f64),
-    /// Raw TEXT bytes: a large-capable cell may be tagged bytes or a chunked
-    /// descriptor, which travel as stored (never as chunk bytes).
+    /// Raw TEXT bytes.
     Text(#[serde(with = "serde_bytes")] Vec<u8>),
     Blob(Vec<u8>),
+    /// A chunked large value, as its encoded descriptor: a stored chunked
+    /// cell names an epoch local to its store, so it travels as the
+    /// descriptor and is interned again where it lands (never as chunk
+    /// bytes).
+    Large(#[serde(with = "serde_bytes")] Vec<u8>),
 }
 
 impl From<Sql> for Cell {
@@ -358,6 +362,8 @@ impl From<&Cell> for Sql {
             Cell::Real(v) => Sql::Real(*v),
             Cell::Text(v) => Sql::Text(v.clone()),
             Cell::Blob(v) => Sql::Blob(v.clone()),
+            // Not a stored cell until interned ([`Inner::stored_cells`]).
+            Cell::Large(_) => Sql::Null,
         }
     }
 }
@@ -2359,8 +2365,34 @@ impl Inner {
         let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
         for image in &mut images {
             self.resolve_authors(image)?;
+            self.portable_large(image)?;
         }
         Ok(images)
+    }
+
+    /// Images carry chunked values by their descriptors: epochs are local
+    /// to one database.
+    fn portable_large(&self, image: &mut Image) -> Result<(), Error> {
+        let Some(table) = self.physical.tables.get(&image.table) else {
+            return Ok(());
+        };
+        for (name, cell) in &mut image.cells {
+            let Cell::Int(chunked) = cell else {
+                continue;
+            };
+            if !table
+                .by_stored_column(name)
+                .is_some_and(crate::large::large_capable)
+            {
+                continue;
+            }
+            let value = self.chunks.descriptor(*chunked)?;
+            *cell = Cell::Large(
+                jazz_types::large_values::encode_large_value_ref(&value)
+                    .map_err(|e| Error::new(ErrorCode::Storage, format!("large value: {e}")))?,
+            );
+        }
+        Ok(())
     }
 
     /// Images carry authors by their identity parts: codes are local to
@@ -2415,6 +2447,17 @@ impl Inner {
         type Parts = (Option<uuid::Uuid>, Option<String>, Option<String>);
         let mut parts: BTreeMap<&'static str, Parts> = BTreeMap::new();
         for (name, cell) in &image.cells {
+            if let Cell::Large(descriptor) = cell {
+                let value =
+                    jazz_types::large_values::decode_large_value_ref(descriptor).map_err(|e| {
+                        Error::new(
+                            ErrorCode::Storage,
+                            format!("large value from upstream: {e}"),
+                        )
+                    })?;
+                cells.push((name.clone(), self.large_cell(&value)?));
+                continue;
+            }
             let Some((stored, part)) = crate::values::author_part(name) else {
                 cells.push((name.clone(), Sql::from(cell)));
                 continue;
@@ -2479,7 +2522,32 @@ impl Inner {
             Sql::Integer(image.deleted as i64),
             Sql::Integer(image.content as i64),
         ];
-        for (column, value) in self.stored_cells(image)? {
+        let physical = self.physical.tables.get(&image.table);
+        let mut cells = self.stored_cells(image)?;
+        // Key columns are this store's: an upstream's keys for columns
+        // indexed here are kept, others dropped, and missing ones derived.
+        if let Some(physical) = physical {
+            cells.retain(|(name, _)| {
+                crate::large::keyed_by(name).is_none() || physical.key_of_key(name).is_some()
+            });
+            for key in &physical.keys {
+                if cells.iter().any(|(name, _)| *name == key.stored) {
+                    continue;
+                }
+                let keyed = crate::large::keyed_by(&key.stored).expect("a key column");
+                let Some((_, cell)) = cells.iter().find(|(name, _)| name == keyed) else {
+                    continue;
+                };
+                let cell = match self.key_cell(cell) {
+                    Ok(cell) => cell,
+                    // A replica may not hold the value's first chunks.
+                    Err(error) if crate::large::is_missing(&error) => Sql::Null,
+                    Err(error) => return Err(error),
+                };
+                cells.push((key.stored.clone(), cell));
+            }
+        }
+        for (column, value) in cells {
             names.push(quote(&column));
             values.push(value);
         }
@@ -6820,12 +6888,17 @@ fn image_out(schema: &Schema, mut image: Image) -> Option<Image> {
     image.table = table.name.clone();
     image.cells = std::mem::take(&mut image.cells)
         .into_iter()
-        .filter_map(
-            |(name, cell)| match table.columns.iter().find(|c| c.stored == name) {
+        .filter_map(|(name, cell)| {
+            // A key column travels named after the column it keys.
+            if let Some(keyed) = crate::large::keyed_by(&name) {
+                let column = table.columns.iter().find(|c| c.stored == keyed)?;
+                return Some((crate::large::key_column(&column.name), cell));
+            }
+            match table.columns.iter().find(|c| c.stored == name) {
                 Some(column) => Some((column.name.clone(), cell)),
                 None => name.starts_with('$').then_some((name, cell)),
-            },
-        )
+            }
+        })
         .collect();
     Some(image)
 }
@@ -6836,12 +6909,16 @@ fn image_in(schema: &Schema, mut image: Image) -> Option<Image> {
     image.table = table.stored.clone();
     image.cells = std::mem::take(&mut image.cells)
         .into_iter()
-        .filter_map(
-            |(name, cell)| match table.columns.iter().find(|c| c.name == name) {
+        .filter_map(|(name, cell)| {
+            if let Some(keyed) = crate::large::keyed_by(&name) {
+                let column = table.columns.iter().find(|c| c.name == keyed)?;
+                return Some((crate::large::key_column(&column.stored), cell));
+            }
+            match table.columns.iter().find(|c| c.name == name) {
                 Some(column) => Some((column.stored.clone(), cell)),
                 None => name.starts_with('$').then_some((name, cell)),
-            },
-        )
+            }
+        })
         .collect();
     Some(image)
 }

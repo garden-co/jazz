@@ -620,7 +620,23 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
                 )
             })
             .collect();
-        tables.insert(name.clone(), Table::stored_only(name, columns));
+        let mut table = Table::stored_only(name.clone(), columns);
+        // A large-capable column has a partial index of its chunked rows
+        // (`large::triggers`): its kind comes from the schemas unioned in.
+        for column in &mut table.columns {
+            let index = format!("{name}__lv_{}", column.stored);
+            let large: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    [&index],
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            if large {
+                column.ty = ValueType::Nullable(Box::new(ValueType::String));
+            }
+        }
+        tables.insert(name, table);
     }
     Ok(Schema {
         tables,
@@ -1038,6 +1054,7 @@ impl Db {
             let mut physical = stored_schema(&conn, &config.schema)?;
             let ddl = physical.union(&schema)?;
             execute_script(&conn, &ddl)?;
+            crate::large::fill_keys(&conn, &chunks, &physical)?;
             physical
         };
         names.admit(&conn, &schema)?;
@@ -1373,6 +1390,19 @@ impl Db {
             .cached_row(
                 "SELECT (SELECT count(*) FROM _jazz_lv_node), \
                  (SELECT count(*) FROM _jazz_lv_root WHERE durable > 0)",
+                [],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(storage)
+    }
+
+    /// Diagnostics: (epochs, encoded edit bytes they hold).
+    #[doc(hidden)]
+    pub fn large_value_epochs_for_test(&self) -> Result<(u64, u64), Error> {
+        self.inner()
+            .conn
+            .cached_row(
+                "SELECT count(*), coalesce(sum(length(edits)), 0) FROM _jazz_lv_epoch",
                 [],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
@@ -2055,6 +2085,7 @@ impl Db {
             }
             let ddl = inner.physical.union(&target)?;
             execute_script(&inner.conn, &ddl)?;
+            crate::large::fill_keys(&inner.conn, &inner.chunks, &inner.physical)?;
             // A new copy holds its source's values, in every row version.
             for cell in &cells {
                 if let crate::names::LensCellRule::Copy(source) = &cell.rule {
@@ -2519,8 +2550,15 @@ impl Inner {
         let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
+                // A group's key: the group-by cell (which a chunked value's
+                // class stands for in SQL) by its value.
                 let key = match row.get_ref(0).map_err(storage)? {
-                    ValueRef::Text(cell) => format!("{:?}", self.chunks.materialize(cell)?),
+                    cell @ ValueRef::Integer(_) if compiled.large_group => {
+                        format!("{:?}", self.chunks.materialize(cell)?)
+                    }
+                    ValueRef::Text(cell) | ValueRef::Blob(cell) if compiled.large_group => {
+                        format!("{cell:?}")
+                    }
                     cell => format!("{:?}", Sql::from(cell)),
                 };
                 blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
@@ -3414,10 +3452,10 @@ impl Inner {
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
         crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
-        let prefix = crate::large::sort_prefix(crate::large::kind(column), logical);
-        Ok(Sql::Text(crate::large::chunked_cell(
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
             &prepared.value_ref,
-            &prefix,
         )?))
     }
 
@@ -3461,21 +3499,51 @@ impl Inner {
 
     /// The cell of a chunked value this store holds the chunks for. A value
     /// an edit shrank to the inline threshold is stored inline, so each
-    /// logical value has exactly one cell and equality compares cells.
+    /// logical value has exactly one inline cell.
     pub(crate) fn large_cell(
         &self,
         large: &jazz_types::large_values::LargeValueRef,
     ) -> Result<Sql, Error> {
-        use jazz_types::large_values::LargeValueKind;
         if large.byte_length <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES as u64 {
             let bytes = self.chunks.value_bytes(large)?;
-            return Ok(Sql::Text(match large.kind {
-                LargeValueKind::Bytes => crate::large::inline_bytes(&bytes),
-                LargeValueKind::String | LargeValueKind::Json => bytes,
-            }));
+            return Ok(crate::large::inline_cell(large.kind, bytes));
         }
-        let prefix = self.chunks.prefix(large)?;
-        Ok(Sql::Text(crate::large::chunked_cell(large, &prefix)?))
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
+            large,
+        )?))
+    }
+
+    /// The key cell for a cell of a large-capable column: a chunked value's
+    /// sort prefix, NULL otherwise.
+    pub(crate) fn key_cell(&self, cell: &Sql) -> Result<Sql, Error> {
+        match cell {
+            Sql::Integer(cell) => self.chunks.prefix(&self.chunks.descriptor(*cell)?),
+            _ => Ok(Sql::Null),
+        }
+    }
+
+    /// The key cells the stored columns `written` (with their cells) need
+    /// in `table`'s physical table: (key column, key cell).
+    fn key_cells<'a>(
+        &self,
+        table: &Table,
+        written: impl Iterator<Item = (&'a str, &'a Sql)>,
+    ) -> Result<Vec<(String, Sql)>, Error> {
+        let Some(physical) = self.physical.tables.get(&table.stored) else {
+            return Ok(Vec::new());
+        };
+        if physical.keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut keys = Vec::new();
+        for (stored, cell) in written {
+            if let Some(key) = physical.key_of(stored) {
+                keys.push((key.stored.clone(), self.key_cell(cell)?));
+            }
+        }
+        Ok(keys)
     }
 
     /// Every stored column of `table`, including ones only other schema
@@ -3736,16 +3804,26 @@ impl Inner {
             values.push(Sql::Integer(deleted as i64));
             sets.push(format!("_del = ?{}", values.len()));
         }
+        let mut written = Vec::new();
         for (name, value) in cells {
-            values.push(match table.column(name) {
+            let cell = match table.column(name) {
                 Some(column) => self.bind_cell(column, value)?,
                 None => Self::bind_value(value)?,
-            });
+            };
+            written.push((table.stored_name(name).to_owned(), cell.clone()));
+            values.push(cell);
             sets.push(format!(
                 "{} = ?{}",
                 quote(table.stored_name(name)),
                 values.len()
             ));
+        }
+        for (key, cell) in self.key_cells(
+            table,
+            written.iter().map(|(name, cell)| (name.as_str(), cell)),
+        )? {
+            values.push(cell);
+            sets.push(format!("{} = ?{}", quote(&key), values.len()));
         }
         for (name, value) in self.stamp()?.updated() {
             values.push(value);
@@ -3822,6 +3900,7 @@ impl Inner {
             Sql::Blob(key.clone()),
             Sql::Integer(seq as i64),
         ];
+        let mut written: Vec<(String, Sql)> = Vec::new();
         for column in &table.columns {
             let value = match (cells.get(&column.name), &column.default) {
                 (Some(value), _) => self.bind_cell(column, value)?,
@@ -3832,11 +3911,20 @@ impl Inner {
                 }
             };
             for (_, copy) in copies.iter().filter(|(c, _)| *c == column.name) {
+                written.push((copy.clone(), value.clone()));
                 names.push(quote(copy));
                 values.push(value.clone());
             }
+            written.push((column.stored.clone(), value.clone()));
             names.push(quote(&column.stored));
             values.push(value);
+        }
+        for (key, cell) in self.key_cells(
+            table,
+            written.iter().map(|(name, cell)| (name.as_str(), cell)),
+        )? {
+            names.push(quote(&key));
+            values.push(cell);
         }
         for (stored, default) in dropped {
             names.push(quote(&stored));
@@ -4687,6 +4775,7 @@ impl Db {
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
             let ddl = inner.physical.union(&logical)?;
             execute_script(&inner.conn, &ddl)?;
+            crate::large::fill_keys(&inner.conn, &inner.chunks, &inner.physical)?;
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &logical)?;
             inner

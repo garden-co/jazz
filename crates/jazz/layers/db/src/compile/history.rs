@@ -120,6 +120,7 @@ impl Ctx<'_> {
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: 0,
             versioned: true,
             union: false,

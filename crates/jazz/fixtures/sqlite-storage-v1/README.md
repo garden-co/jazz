@@ -7,12 +7,13 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
-are stored, and a rejection's reason name changed how fates are recorded).
+are stored, a rejection's reason name changed how fates are recorded, and
+large values moved to epochs with integer cells, BLOB bytes and key columns).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `9cce55030ad6f58f45dba9ae8bbf57b0dc619d47cfa0a6573982572ada9f8968`.
+  the SQLite file `20d2507d882e659445552d61b98bde71c98e2141906bdef2416cf3ebfcc1904e`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `c80e4301d3e30661e89660ab71deff2790a1863b616c07292eeadeb05680ed4a`.
+  `4e500c1ffeeb3e0bcdb41f281f9f644d118b4dff1a22635b2266ac94274050b5`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,

@@ -49,12 +49,12 @@ Invariant digest:
 A large-capable column is declared without a type, like every stored column,
 so each cell keeps its SQLite storage class:
 
-| Value | Cell |
-| --- | --- |
-| inline string or JSON (≤ 64 KiB) | TEXT, its UTF-8 bytes |
-| inline bytes (≤ 64 KiB) | BLOB, its bytes |
-| chunked (> 64 KiB) | INTEGER `epoch * 4096 + n` |
-| null | NULL |
+| Value                            | Cell                       |
+| -------------------------------- | -------------------------- |
+| inline string or JSON (≤ 64 KiB) | TEXT, its UTF-8 bytes      |
+| inline bytes (≤ 64 KiB)          | BLOB, its bytes            |
+| chunked (> 64 KiB)               | INTEGER `epoch * 4096 + n` |
+| null                             | NULL                       |
 
 `typeof(cell) = 'integer'` is the chunked arm. `cell / 4096` is the epoch id
 and `cell % 4096` is `n`, the number of the epoch's edits that apply, so
@@ -66,11 +66,17 @@ logical length exceeds `INLINE_VALUE_MAX_BYTES`. So an inline cell never equals
 a chunked one, and a write that brings a chunked value back under the limit
 stores it inline.
 
-A column with a declared index additionally has a hidden sibling column
-`<column>__k`. It holds the value's sort prefix (its first `SORT_PREFIX_BYTES`
-= 256 logical bytes, cut on a code point for text) for chunked cells and NULL
-otherwise. The column's indexes are on `COALESCE(<column>__k, <column>)`.
-Unindexed columns have no sibling.
+A column that an index names additionally has a hidden key column
+`$k:<column>` in the table and its history (`$` names are the engine's). It
+holds the value's sort prefix (its first `SORT_PREFIX_BYTES` = 256 logical
+bytes, cut on a code point for text, in the column's storage class) for
+chunked cells and NULL otherwise. The column's indexes, orderings and ranges
+are on `COALESCE("$k:<column>", <column>)`. A key column is store-local: a
+store writes it with the cell, fills it for cells stored before an index
+named the column, and an image carries it under the column's wire name, which
+the receiving store keeps for the columns it indexes. Unindexed columns have
+no key column; their orderings take each chunked value's sort key from the
+Rust prep.
 
 ## 19.2 Trees and nodes
 
@@ -99,10 +105,9 @@ row or policy. Storing a node that exists is a no-op.
 
 ```text
 _jazz_lv_epoch (
-  id         INTEGER PRIMARY KEY,   -- local to this store, never reused
+  id         INTEGER PRIMARY KEY,   -- local to this store
   root       BLOB NOT NULL,         -- the tree the edits apply to
-  len        INTEGER NOT NULL,      -- the tree's byte length
-  utf16_len  INTEGER,               -- the tree's UTF-16 length (strings)
+  base       BLOB NOT NULL,         -- the tree's descriptor: lengths, kind
   edits      BLOB NOT NULL,         -- encoded edits, appended in order
   count      INTEGER NOT NULL,      -- how many edits `edits` holds
   refs       INTEGER NOT NULL       -- cells referencing this epoch
@@ -111,7 +116,14 @@ _jazz_lv_epoch (
 
 The value of `(epoch, n)` is the tree at `root` with the first `n` edits
 applied in order. `n = 0` is the tree itself. Appending an edit increments
-`count`; nothing else in a version's value can change.
+`count`; nothing else in a version's value can change. An id is local to its
+store and is reused only after the epoch was deleted, when no cell names it.
+
+A write interns its value's cell: the epoch over the same tree whose edits
+start with the value's edits names it (`(E, n)` for the first `n`); else an
+epoch whose edits the value's edits extend is appended to; else a new epoch is
+created. Edits are self-delimiting and concatenated, so these are byte-prefix
+tests on `edits`.
 
 `INV-CONTENT-2`: an epoch's first `count` edits are never rewritten while any
 cell references a prefix that includes them. Appending is the only way an
@@ -140,9 +152,9 @@ replace  tag offset [utf16_offset] delete [utf16_delete] [len] bytes
   Ordinary typing therefore spends one byte on it.
 - Coordinates address the value as the previous edits left it.
 - An append's offset is the current logical length, known while replaying.
-- String columns carry the UTF-16 offset (also relative) and the UTF-16 length
-  of every deletion, which cannot be derived without reading the deleted text.
-  An insertion's UTF-16 length is derived from its bytes. Bytes and JSON
+- String and JSON columns carry the UTF-16 offset (also relative) and the
+  UTF-16 length of every deletion, which cannot be derived without reading the
+  deleted text. An insertion's UTF-16 length is derived from its bytes. Bytes
   columns carry byte coordinates only.
 - No lengths are stored per edit: a version's length is the tree's length plus
   the sum of `inserted − deleted` over its prefix.
@@ -217,15 +229,15 @@ A chunked value is read by replaying its prefix over the parts of its tree the
 read needs. Partial reads (byte, UTF-8 and UTF-16 ranges, JSON pointers) map
 their range through the edits and read only the leaves it covers.
 
-| Operation | How it runs |
-| --- | --- |
-| `=` against an inline-size literal | SQL: an inline cell compares directly; a chunked cell never matches |
+| Operation                                            | How it runs                                                                                        |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `=` against an inline-size literal                   | SQL: an inline cell compares directly; a chunked cell never matches                                |
 | `=`, `IN`, DISTINCT, GROUP BY between chunked values | equal cells are equal values; unequal cells are compared by length, then content, in the Rust prep |
-| `=` against a literal over 64 KiB | the Rust prep |
-| length | the Rust prep: tree length plus the prefix's net edits |
-| ORDER BY and ranges, indexed column | the index on `COALESCE(c__k, c)`; the Rust prep orders values sharing a prefix |
-| ORDER BY and ranges, unindexed column | the Rust prep ranks the column's chunked values |
-| `contains`, LIKE, JSON pointer | the Rust prep reads the content |
+| `=` against a literal over 64 KiB                    | the Rust prep                                                                                      |
+| length                                               | the Rust prep: tree length plus the prefix's net edits                                             |
+| ORDER BY and ranges, indexed column                  | the index on `COALESCE(c__k, c)`; the Rust prep orders values sharing a prefix                     |
+| ORDER BY and ranges, unindexed column                | the Rust prep ranks the column's chunked values                                                    |
+| `contains`, LIKE, JSON pointer                       | the Rust prep reads the content                                                                    |
 
 The prep answers before the statement runs and hands its answers to the
 statement as parameters, so every query, trigger and schema object uses only
@@ -240,12 +252,12 @@ materialized logical value.
 `delta(a, b)` takes two cells of one column and returns edits, in the edit
 encoding, that turn a's value into b's:
 
-| Case | Computation |
-| --- | --- |
-| same epoch, `n_a ≤ n_b` | b's edits after a's prefix: a byte range of the epoch |
-| same epoch, `n_a > n_b`, or epochs over the same root | the common edit prefix (a byte comparison), then the inverse of a's remaining edits and b's remaining edits; inverting a deletion reads the deleted bytes from the base |
-| different roots | each side as pieces (leaf spans and inserted bytes); both trees are walked together, subtrees with equal hashes are skipped, and only differing leaves are compared byte by byte |
-| either side inline | one replace of the whole value |
+| Case                                                  | Computation                                                                                                                                                                      |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| same epoch, `n_a ≤ n_b`                               | b's edits after a's prefix: a byte range of the epoch                                                                                                                            |
+| same epoch, `n_a > n_b`, or epochs over the same root | the common edit prefix (a byte comparison), then the inverse of a's remaining edits and b's remaining edits; inverting a deletion reads the deleted bytes from the base          |
+| different roots                                       | each side as pieces (leaf spans and inserted bytes); both trees are walked together, subtrees with equal hashes are skipped, and only differing leaves are compared byte by byte |
+| either side inline                                    | one replace of the whole value                                                                                                                                                   |
 
 The result need not be minimal when content moves. Reading it needs only the
 leaves in changed regions. Sync (§19.8), merge strategies, and the public
@@ -271,11 +283,11 @@ retained cell references a truncated edit. A replica never rebases.
 
 A large-capable cell in a row-version message has one of three forms:
 
-| Form | Contents | Used when |
-| --- | --- | --- |
-| inline | the TEXT or BLOB | the value is inline |
+| Form    | Contents                                                        | Used when                                                                        |
+| ------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| inline  | the TEXT or BLOB                                                | the value is inline                                                              |
 | `Delta` | edits relative to the same column at the message's base version | the receiver holds the base version and the edits insert at most 64 KiB in total |
-| `Tree` | root hash, byte length, UTF-16 length, then edits | otherwise |
+| `Tree`  | root hash, byte length, UTF-16 length, then edits               | otherwise                                                                        |
 
 **Client to authority.** A write's base is its existing base annotation
 (`Seq(s)` or `Pending(on)`), so `Delta` adds no field. A `Tree` whose nodes
@@ -373,6 +385,10 @@ An epoch whose `refs` reaches 0 is deleted, releasing its root; a root at 0
 releases its tree; a node no edge, root, lease or receipt holds is reclaimed.
 Reclamation is queued in the transaction that released the last reference and
 runs on tick, so a version's value is retained exactly as long as the version.
+An update retains every new cell's epoch before it releases any old one, so an
+epoch that moves between columns of a row is never freed in between. An epoch
+interned for a write that then stored another cell is named by no cell; the
+next reclamation deletes it.
 
 `INV-CONTENT-8`: collection removes only epochs and nodes unreachable from
 every retained version, lease and receipt.

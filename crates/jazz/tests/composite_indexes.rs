@@ -264,11 +264,9 @@ fn composite_index_definition_in_the_store_file_is_pinned() {
             "tasks__ix(owner,rank)".to_owned(),
             concat!(
                 "CREATE INDEX \"tasks__ix(owner,rank)\" ON \"tasks\"(",
-                // A text cell may be chunked; the key is its inline text.
-                "(CASE WHEN (substr(CAST(\"owner\" AS BLOB), 1, 1) = X'FF') ",
-                "THEN CAST(substr(CAST(\"owner\" AS BLOB), 39, ",
-                "CAST(CAST(substr(CAST(\"owner\" AS BLOB), 34, 5) AS TEXT) AS INTEGER)) AS TEXT) ",
-                "ELSE \"owner\" END), \"rank\", id)"
+                // A text cell may be chunked; the key is its key column's
+                // sort prefix then, its inline text otherwise.
+                "COALESCE(\"$k:owner\", \"owner\"), \"rank\", id)"
             )
             .to_owned()
         )]

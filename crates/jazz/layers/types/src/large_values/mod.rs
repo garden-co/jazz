@@ -12,6 +12,7 @@ use json_syntax::StreamingJsonValidator;
 use thiserror::Error;
 
 pub mod chunks;
+pub mod epoch;
 mod inputs;
 pub use inputs::{AttemptError, ChunkInputs, LoadedChunk};
 
@@ -138,8 +139,8 @@ pub const MAX_PHYSICAL_TRAVERSAL_NODES: usize = MAX_LOGICAL_TRAVERSAL_STEPS;
 /// This is a safe memory ceiling, not a promise to admit every depth below it:
 /// the default serde_json::Value parser admits only 127 simultaneous containers.
 pub const MAX_JSON_NESTING_DEPTH: usize = 128;
-pub const MAX_EDIT_COUNT: usize = 64;
-pub const MAX_EDIT_TAIL_BYTES: usize = 256 * 1024;
+/// The most edits a descriptor's tail holds: an epoch's (SPEC §19.3).
+pub const MAX_EDIT_COUNT: usize = epoch::EPOCH_MAX_EDITS;
 /// A randomly allocated 256-bit retrieval capability for one immutable chunk.
 ///
 /// This is deliberately not a storage key: each storage adapter derives its
@@ -950,34 +951,48 @@ pub type TailAppendOutcome = TailOutcome;
 pub type TailEditOutcome = TailOutcome;
 
 /// Append `edit` to `updated`, the edited copy of `value`. Consolidation is
-/// required when `value`'s tail already holds `MAX_EDIT_COUNT` edits or the
-/// new tail (24 accounting bytes plus the inserted bytes per edit) exceeds
-/// `MAX_EDIT_TAIL_BYTES`.
+/// required once the tail no longer fits one epoch (SPEC §19.3): too many
+/// edits, too many encoded bytes, or an insertion over `EPOCH_INSERT_BYTES`.
 fn push_tail_edit(
     value: &LargeValueRef,
     mut updated: LargeValueRef,
     edit: ReplaceEdit,
     enforce_tail_bounds: bool,
 ) -> Result<TailOutcome, Error> {
-    let next_tail_bytes =
-        value
-            .edit_tail
-            .iter()
-            .chain([&edit])
-            .try_fold(0_usize, |total, edit| {
-                total
-                    .checked_add(edit.insert_bytes.len())
-                    .and_then(|total| total.checked_add(24))
-                    .ok_or(Error::MetricOverflow)
-            })?;
-    let over_bounds =
-        value.edit_tail.len() >= MAX_EDIT_COUNT || next_tail_bytes > MAX_EDIT_TAIL_BYTES;
     updated.edit_tail.push(edit);
-    Ok(if enforce_tail_bounds && over_bounds {
-        TailOutcome::ConsolidationRequired(updated)
-    } else {
+    let fits = !enforce_tail_bounds || tail_fits_epoch(&updated)?;
+    debug_assert!(value.edit_tail.len() + 1 == updated.edit_tail.len());
+    Ok(if fits {
         TailOutcome::Updated(updated)
+    } else {
+        TailOutcome::ConsolidationRequired(updated)
     })
+}
+
+/// The byte and UTF-16 lengths of `value`'s tree: its tail undone.
+pub fn tail_base_lengths(value: &LargeValueRef) -> Result<(u64, Option<u64>), Error> {
+    let mut byte_length = value.byte_length;
+    let mut utf16_length = value.utf16_length;
+    for edit in value.edit_tail.iter().rev() {
+        let inserted = u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        byte_length = byte_length
+            .checked_sub(inserted)
+            .and_then(|length| length.checked_add(edit.delete_length))
+            .ok_or(Error::MalformedScalar)?;
+        if let Some(length) = &mut utf16_length {
+            *length = length
+                .checked_sub(edit.insert_utf16_length)
+                .and_then(|length| length.checked_add(edit.delete_utf16_length))
+                .ok_or(Error::MalformedScalar)?;
+        }
+    }
+    Ok((byte_length, utf16_length))
+}
+
+/// Whether `value`'s tail fits one epoch.
+pub fn tail_fits_epoch(value: &LargeValueRef) -> Result<bool, Error> {
+    let (length, utf16_length) = tail_base_lengths(value)?;
+    epoch::fits_epoch(value.kind, length, utf16_length, &value.edit_tail)
 }
 
 fn utf16_length_of(text: &str) -> Result<u64, Error> {
@@ -3083,16 +3098,20 @@ fn validate_descriptor_v1(value: &LargeValueRef) -> Result<(), Error> {
 }
 
 fn validate_descriptor_tail_bounds(value: &LargeValueRef) -> Result<(), Error> {
-    if value.edit_tail.len() > MAX_EDIT_COUNT {
+    // A tail fits one epoch, except for the one edit that may push it over
+    // before it is consolidated.
+    let Some((_, settled)) = value.edit_tail.split_last() else {
+        return Ok(());
+    };
+    if settled.len() > MAX_EDIT_COUNT {
         return Err(Error::MalformedScalar);
     }
     let mut tail_bytes = 0_usize;
-    for edit in &value.edit_tail {
+    for edit in settled {
         tail_bytes = tail_bytes
             .checked_add(edit.insert_bytes.len())
-            .and_then(|total| total.checked_add(24))
             .ok_or(Error::MetricOverflow)?;
-        if tail_bytes > MAX_EDIT_TAIL_BYTES {
+        if tail_bytes > epoch::EPOCH_EDIT_BYTES {
             return Err(Error::MalformedScalar);
         }
     }
@@ -6634,15 +6653,21 @@ mod tests {
     fn append_tail_reports_consolidation_before_exceeding_its_hard_bound() {
         let prepared =
             prepare_with_locator(LargeValueKind::Bytes, b"base", deterministic_locator).unwrap();
-        let mut value = prepared.value_ref;
-        for _ in 0..MAX_EDIT_COUNT {
+        let mut value = prepared.value_ref.clone();
+        // A one-byte append encodes to two bytes: an epoch holds this many.
+        for _ in 0..epoch::EPOCH_EDIT_BYTES / 2 {
             let TailAppendOutcome::Updated(updated) = append_tail(&value, vec![1]).unwrap() else {
-                panic!("the configured edit-count bound should be admissible");
+                panic!("a tail that fits an epoch should be admissible");
             };
             value = updated;
         }
         assert!(matches!(
             append_tail(&value, vec![2]).unwrap(),
+            TailAppendOutcome::ConsolidationRequired(_)
+        ));
+        // So does one insertion over an epoch's insertion bound.
+        assert!(matches!(
+            append_tail(&prepared.value_ref, vec![3; epoch::EPOCH_INSERT_BYTES + 1]).unwrap(),
             TailAppendOutcome::ConsolidationRequired(_)
         ));
     }
@@ -6744,11 +6769,12 @@ mod tests {
             Locator::from_seed(&locator)
         })
         .unwrap();
+        // Too large for an epoch: the transient tail is consolidated.
         let suffix = vec![0x5a; LEAF_TARGET_BYTES * 3];
-        let TailAppendOutcome::Updated(with_tail) =
+        let TailAppendOutcome::ConsolidationRequired(with_tail) =
             append_tail(&prepared.value_ref, suffix.clone()).unwrap()
         else {
-            panic!("test append must fit");
+            panic!("an append over the epoch insertion bound consolidates");
         };
         let available = prepared
             .staged_chunks

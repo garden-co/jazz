@@ -8,7 +8,7 @@
 //! ordinary row update, so policies, history and sync see a new version.
 
 use super::*;
-use crate::large::{Logical, logical};
+use crate::large::Logical;
 use jazz_types::large_values as lv;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -206,13 +206,13 @@ impl Inner {
         utf16: bool,
     ) -> Result<Vec<u8>, Error> {
         let (col, cell) = self.physical_cell(table, row, column, self.reader())?;
-        let Sql::Text(cell) = cell else {
+        if !large_cell(&cell) {
             return Err(not_large(table, column));
-        };
+        }
         if utf16 && crate::large::kind(&col) == lv::LargeValueKind::Bytes {
             return Err(not_large(table, column));
         }
-        match logical(&cell)? {
+        match self.chunks.logical(cell.as_ref())? {
             Logical::Inline(bytes) if utf16 => {
                 let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
                 let len = text.encode_utf16().count() as u64;
@@ -257,10 +257,10 @@ impl Inner {
         edit: Edit,
     ) -> Result<Value, Error> {
         let kind = crate::large::kind(column);
-        let Sql::Text(cell) = cell else {
+        if !large_cell(&cell) {
             return Err(not_large(table, &column.name));
-        };
-        let value = match logical(&cell)? {
+        }
+        let value = match self.chunks.logical(cell.as_ref())? {
             Logical::Inline(bytes) => {
                 let mut bytes = bytes.to_vec();
                 match edit {
@@ -289,7 +289,7 @@ impl Inner {
                 offset,
                 delete,
                 insert,
-            } => self.chunks.run(|inputs| {
+            } => self.chunks.run_write(|inputs| {
                 lv::replace_tail_attempt(&value, offset, delete, insert.clone(), inputs)
             })?,
         };
@@ -417,10 +417,10 @@ impl Db {
                 "JSON pointer selection requires a JSON column",
             ));
         }
-        let Sql::Text(cell) = cell else {
+        if !large_cell(&cell) {
             return Ok(None);
-        };
-        let source = match logical(&cell)? {
+        }
+        let source = match inner.chunks.logical(cell.as_ref())? {
             Logical::Inline(bytes) => bytes.to_vec(),
             Logical::Chunked(value) => {
                 let mut source = Vec::new();
@@ -1017,9 +1017,10 @@ fn lower_splices(
     splices: Vec<LargeValueUpdateSplice>,
 ) -> Result<Vec<Edit>, Error> {
     let kind = crate::large::kind(column);
-    let Sql::Text(raw) = cell else {
+    if !large_cell(cell) {
         return Err(query("partial splice requires a bytes or string cell"));
-    };
+    }
+    let raw = cell.as_ref();
     let (from, to, utf16) = match *within {
         LargeValueUpdatePage::Bytes { from, to } if kind == lv::LargeValueKind::Bytes => {
             (from, to, false)
@@ -1032,7 +1033,7 @@ fn lower_splices(
         }
         _ => return Err(query("splice page does not match the column's kind")),
     };
-    let current = logical(raw)?;
+    let current = inner.chunks.logical(raw)?;
     let len = match (&current, utf16) {
         (Logical::Chunked(value), true) => value.utf16_length.unwrap_or(0),
         (Logical::Inline(bytes), true) => std::str::from_utf8(bytes)
@@ -1144,11 +1145,11 @@ impl Inner {
                             format!("{table}.{column} is not a JSON column"),
                         ));
                     }
-                    let Sql::Text(raw) = &cell else {
+                    if !large_cell(&cell) {
                         return Err(query(format!("{table}.{column} is null")));
-                    };
+                    }
                     let mut json: serde_json::Value =
-                        serde_json::from_slice(&self.chunks.materialize(raw)?)
+                        serde_json::from_slice(&self.chunks.materialize(cell.as_ref())?)
                             .map_err(|e| query(format!("stored JSON: {e}")))?;
                     for edit in edits {
                         let slot = json.pointer_mut(&edit.at).ok_or_else(|| {
@@ -1195,4 +1196,9 @@ impl TxRef<'_> {
         )?;
         Ok(WriteHandle { row, seq: 0 })
     }
+}
+
+/// Whether `cell` holds a string, JSON or bytes value: inline or chunked.
+fn large_cell(cell: &Sql) -> bool {
+    matches!(cell, Sql::Text(_) | Sql::Blob(_) | Sql::Integer(_))
 }

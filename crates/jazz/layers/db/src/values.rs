@@ -86,10 +86,8 @@ pub(crate) fn in_savepoint<T>(
     result
 }
 
-/// One SQLite value, as bound or read. Text holds raw bytes: large-capable
-/// columns store text that is not UTF-8 (tagged bytes and chunked large-value
-/// descriptors, see [`crate::large`]), which SQLite stores and compares
-/// without interpreting.
+/// One SQLite value, as bound or read. Text holds raw bytes, which SQLite
+/// stores and compares without interpreting.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Sql {
     Null,
@@ -155,9 +153,9 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::F64(v) => Sql::Real(*v),
         Value::Bool(v) => Sql::Integer(*v as i64),
         Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
-        Value::Bytes(v) => Sql::Text(crate::large::inline_bytes(v)),
-        // A chunked cell carries its sort prefix, which needs the chunks:
-        // descriptors are stored through `Inner::large_cell`.
+        Value::Bytes(v) => Sql::Blob(v.clone()),
+        // A chunked cell names an epoch, which only a store has: descriptors
+        // are stored through `Inner::large_cell`.
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
@@ -260,14 +258,12 @@ pub(crate) fn from_sql(
         }));
     }
     match (ty, cell) {
-        (ValueType::String, ValueRef::Text(cell)) => {
-            let text = match cell.first() {
-                Some(&crate::large::CHUNKED) => chunks.materialize(cell)?,
-                _ => cell.to_vec(),
-            };
-            return Ok(String::from_utf8(text).ok().map(Value::String));
+        (ValueType::String, ValueRef::Text(_) | ValueRef::Integer(_)) => {
+            return Ok(String::from_utf8(chunks.materialize(cell)?)
+                .ok()
+                .map(Value::String));
         }
-        (ValueType::Bytes, ValueRef::Text(cell)) => {
+        (ValueType::Bytes, ValueRef::Blob(_) | ValueRef::Integer(_)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
         }
         // An author record, read as a JSON array of its fields (see
@@ -399,6 +395,9 @@ pub struct Table {
     pub provenance: Vec<Column>,
     /// How provenance is stored: authors as interned codes.
     pub stored_provenance: Vec<Column>,
+    /// The key columns of the large-capable columns an index names
+    /// ([`crate::large::key_column`]): stored, never read by name.
+    pub keys: Vec<Column>,
 }
 
 /// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
@@ -500,6 +499,19 @@ pub(crate) fn elided_as(stored: &str) -> Option<&'static str> {
     }
 }
 
+/// The key column of a large-capable column.
+fn key_column_of(column: &Column) -> Column {
+    let stored = crate::large::key_column(&column.stored);
+    Column {
+        name: stored.clone(),
+        stored,
+        ty: ValueType::Nullable(Box::new(column.ty.clone())),
+        default: None,
+        json: column.json,
+        merge: Default::default(),
+    }
+}
+
 fn stored_provenance_columns() -> Vec<Column> {
     STORED_PROVENANCE
         .iter()
@@ -552,9 +564,44 @@ impl Table {
             .find(|column| column.name == name)
     }
 
-    /// Every stored column: application columns, then stored provenance.
+    /// Every stored column: application columns, stored provenance, then
+    /// key columns.
     pub fn stored(&self) -> impl Iterator<Item = &Column> {
-        self.columns.iter().chain(&self.stored_provenance)
+        self.columns
+            .iter()
+            .chain(&self.stored_provenance)
+            .chain(&self.keys)
+    }
+
+    /// The key column of the stored column `stored`, if it has one.
+    pub(crate) fn key_of(&self, stored: &str) -> Option<&Column> {
+        let key = crate::large::key_column(stored);
+        self.keys.iter().find(|column| column.stored == key)
+    }
+
+    /// The key column stored as `key`, if this table has it.
+    pub(crate) fn key_of_key(&self, key: &str) -> Option<&Column> {
+        self.keys.iter().find(|column| column.stored == key)
+    }
+
+    /// The application column stored as `stored`.
+    pub(crate) fn by_stored_column(&self, stored: &str) -> Option<&Column> {
+        self.columns.iter().find(|column| column.stored == stored)
+    }
+
+    /// The key columns this table's indexes need.
+    fn needed_keys(&self) -> Vec<Column> {
+        self.columns
+            .iter()
+            .filter(|column| {
+                crate::large::large_capable(column)
+                    && self
+                        .indexes
+                        .iter()
+                        .any(|index| index.contains(&column.name))
+            })
+            .map(key_column_of)
+            .collect()
     }
 
     /// The stored name of a readable column (`id` and provenance are
@@ -583,6 +630,7 @@ impl Table {
         for column in &mut table.columns {
             column.name = column.stored.clone();
         }
+        table.keys = table.needed_keys();
         table.branch_by = self
             .branch_by
             .iter()
@@ -683,8 +731,12 @@ impl Schema {
                     branch_by: table.branch_by.clone(),
                     provenance: provenance_columns(),
                     stored_provenance: stored_provenance_columns(),
+                    keys: Vec::new(),
                 },
             );
+        }
+        for table in tables.values_mut() {
+            table.keys = table.needed_keys();
         }
         Self {
             tables,
@@ -719,6 +771,7 @@ impl Schema {
                     column.stored = stored.clone();
                 }
             }
+            table.keys = table.needed_keys();
         }
         schema
     }
@@ -791,7 +844,14 @@ impl Schema {
                 Some(physical) => {
                     let mut large = Vec::new();
                     for column in &table.columns {
-                        if physical.column(&column.stored).is_some() {
+                        if let Some(stored) = physical
+                            .columns
+                            .iter_mut()
+                            .find(|stored| stored.stored == column.stored)
+                        {
+                            // A reopened store knows a column by name only.
+                            stored.ty = column.ty.clone();
+                            stored.json = column.json;
                             continue;
                         }
                         let default = match &column.default {
@@ -823,8 +883,25 @@ impl Schema {
                     for index in &table.indexes {
                         let index = table.stored_index(index);
                         if !physical.indexes.contains(&index) {
+                            physical.indexes.push(index.clone());
+                            // A large-capable column an index names first
+                            // gains its key column, which the store fills
+                            // for the chunked cells it already holds
+                            // (`Inner::fill_keys`).
+                            for key in physical.needed_keys() {
+                                if physical.key_of(keyed(&key)).is_some() {
+                                    continue;
+                                }
+                                for target in [name.clone(), format!("{name}__h")] {
+                                    ddl.push_str(&format!(
+                                        "ALTER TABLE {} ADD COLUMN {};\n",
+                                        quote(&target),
+                                        column_def(&key)
+                                    ));
+                                }
+                                physical.keys.push(key);
+                            }
                             ddl.push_str(&physical.index_ddl(&index));
-                            physical.indexes.push(index);
                         }
                     }
                 }
@@ -832,6 +909,11 @@ impl Schema {
         }
         Ok(ddl)
     }
+}
+
+/// The stored column a key column keys.
+fn keyed(key: &Column) -> &str {
+    crate::large::keyed_by(&key.stored).expect("a key column")
 }
 
 /// Where one schema stores its tables and columns: logical table ->
@@ -845,12 +927,28 @@ impl Table {
     /// A table known only by its stored column names, as a reopened store
     /// lists it. Enough to extend it and to copy whole rows.
     pub(crate) fn stored_only(name: String, columns: Vec<String>) -> Self {
+        let keys = columns
+            .iter()
+            .filter(|column| crate::large::keyed_by(column).is_some())
+            .map(|column| Column {
+                name: column.clone(),
+                stored: column.clone(),
+                ty: ValueType::Nullable(Box::new(ValueType::String)),
+                default: None,
+                json: false,
+                merge: Default::default(),
+            })
+            .collect();
         Self {
             stored: name.clone(),
             name,
+            keys,
             columns: columns
                 .into_iter()
-                .filter(|column| !STORED_PROVENANCE.contains(&column.as_str()))
+                .filter(|column| {
+                    !STORED_PROVENANCE.contains(&column.as_str())
+                        && crate::large::keyed_by(column).is_none()
+                })
                 .map(|name| Column {
                     stored: name.clone(),
                     name,
@@ -885,7 +983,7 @@ impl Table {
                 Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
                 // The key expression queries order and range by.
                 None if table.by_stored(c).is_some_and(crate::large::large_capable) => {
-                    crate::large::key_sql(&quote(c))
+                    crate::large::key_sql(&quote(c), &quote(&crate::large::key_column(c)))
                 }
                 None => quote(c),
             })
@@ -951,11 +1049,11 @@ pub(crate) fn sql_literal(value: &Value) -> Result<String, Error> {
         Some(Sql::Null) => "NULL".to_owned(),
         Some(Sql::Integer(v)) => v.to_string(),
         Some(Sql::Real(v)) => format!("{v:e}"),
-        // A tagged bytes cell is TEXT that no SQL literal can spell (it
-        // starts with NUL), and a column default must be a literal.
+        // Text with a NUL has no SQL literal, and a column default must be
+        // a literal.
         Some(Sql::Text(v)) => match std::str::from_utf8(&v) {
             Ok(text) if !text.contains('\0') => format!("'{}'", text.replace('\'', "''")),
-            _ => return Err(unsupported("a bytes default on an added column")),
+            _ => return Err(unsupported("a text default with a NUL on an added column")),
         },
         Some(Sql::Blob(v)) => format!("X'{}'", hex(&v)),
     })
