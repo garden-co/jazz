@@ -83,6 +83,8 @@ mod provenance;
 mod recheck_policies;
 #[path = "../recheck_queries.rs"]
 mod recheck_queries;
+#[path = "../recheck_sync.rs"]
+mod recheck_sync;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_queries.rs"]
