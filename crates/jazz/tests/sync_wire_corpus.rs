@@ -1,4 +1,4 @@
-//! The shared v2 semantic corpus pins all 47 tags plus representative extended
+//! The shared v3 semantic corpus pins all 47 tags plus representative extended
 //! forms, and runs through Rust, WASM and NAPI's public versioned decoder.
 //! Bodies inherited from upstream keep their field bytes; independent E2EE
 //! fixtures supply the appended tags. Historical corpora are never rewritten.
@@ -188,8 +188,8 @@ fn corpus_named(name: &str) -> Corpus {
 
 #[test]
 fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
-    let corpus = corpus_named("sqlite_sync_wire_v2.json");
-    assert_eq!(corpus.format, "jazz-sqlite-sync-wire-corpus-v2");
+    let corpus = corpus_named("sqlite_sync_wire_v3.json");
+    assert_eq!(corpus.format, "jazz-sqlite-sync-wire-corpus-v3");
     let variants: Vec<&str> = corpus.messages.iter().map(|m| m.variant.as_str()).collect();
     assert_eq!(
         variants, V2_VARIANTS,
@@ -218,7 +218,7 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
 /// re-encodes to the same bytes.
 #[test]
 fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
-    let corpus = corpus_named("sqlite_sync_wire_v2.json");
+    let corpus = corpus_named("sqlite_sync_wire_v3.json");
     let reasons: Vec<Option<&str>> = corpus.fates.iter().map(|f| f.reason.as_deref()).collect();
     assert_eq!(
         reasons,
@@ -227,7 +227,7 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
     );
     for fate in &corpus.fates {
         let bytes = unhex(&fate.frame_hex);
-        let decoded: SyncMessage = postcard::from_bytes(&bytes).unwrap_or_else(|error| {
+        let decoded: SyncMessage = decode_message(&bytes).unwrap_or_else(|error| {
             panic!(
                 "{}: the pinned frame no longer decodes ({error}); the fate layout changed",
                 fate.name
@@ -243,7 +243,7 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
         assert_eq!(reason, &fate.reason, "{}", fate.name);
         assert!(!message.is_empty(), "{}", fate.name);
         assert_eq!(
-            postcard::to_allocvec(&decoded).unwrap(),
+            encode_message(&decoded).unwrap(),
             bytes,
             "{}: re-encoding changed the bytes; the fate layout changed",
             fate.name
@@ -253,7 +253,7 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
 
 #[test]
 fn the_corpus_validator_accepts_every_frame_and_rejects_every_rejection() {
-    let corpus = corpus_named("sqlite_sync_wire_v2.json");
+    let corpus = corpus_named("sqlite_sync_wire_v3.json");
     let features = current_wire_features();
     for message in corpus.messages.iter().chain(&corpus.examples) {
         let batch = encode_websocket_frame_batch(&[unhex(&message.frame_hex)]).unwrap();
@@ -283,7 +283,7 @@ fn the_corpus_validator_accepts_every_frame_and_rejects_every_rejection() {
     }
 }
 
-/// Mallory's raw upstream-v1 frames cannot cross either v2 semantic boundary.
+/// Mallory's raw upstream-v1 frames cannot cross either current semantic boundary.
 /// The exact old files stay usable as incompatibility fixtures.
 #[test]
 fn historical_upstream_semantic_frames_are_refused() {

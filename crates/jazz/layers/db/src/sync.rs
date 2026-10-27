@@ -1193,6 +1193,13 @@ pub enum SyncMessage {
     Stored {
         tx: u64,
     },
+    /// Append-only tag 47, jazz.sqlite.sync.writer-owner.v1. A trusted SYSTEM
+    /// carrier attests the original writer's identity separately from a write's
+    /// attribution or permission subject. Applies only to its next Commit.
+    WriterOwnerV1 {
+        node: [u8; 16],
+        owner: String,
+    },
 }
 
 impl SyncMessage {
@@ -1246,6 +1253,7 @@ impl SyncMessage {
             Self::ScopedUnionSubscribeV1 { .. } => "ScopedUnionSubscribeV1",
             Self::OriginFateV2 { .. } => "OriginFateV2",
             Self::Stored { .. } => "Stored",
+            Self::WriterOwnerV1 { .. } => "WriterOwnerV1",
         }
     }
 }
@@ -1806,6 +1814,7 @@ pub(crate) struct Session {
     /// Host-admitted private relays retain their upload's original author.
     /// Ordinary sessions keep connection-based attribution normalization.
     bound_write_author: bool,
+    writer_owner: Option<([u8; 16], AuthorSubject)>,
     /// Per client subscription: its queue, its group, whether it is
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
@@ -1910,6 +1919,7 @@ impl Session {
             identity,
             claims: None,
             bound_write_author: false,
+            writer_owner: None,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             output_retry_limits: None,
@@ -4033,6 +4043,60 @@ impl Inner {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
+    }
+
+    /// Recover the admitted owner by its indexed writer node, independently
+    /// of the next write's attribution or permission subject.
+    fn writer_owner_canonical(&self, node: [u8; 16]) -> Result<Option<String>, Error> {
+        let code: Option<i64> = self
+            .conn
+            .cached_row(
+                "SELECT author FROM _jazz_nodes WHERE node=?1",
+                [node.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some(code) = code else { return Ok(None) };
+        let (account, issuer, subject) = self.author_parts(code)?;
+        let canonical = if issuer == AuthorSubject::SYSTEM_ISSUER
+            && subject == AuthorSubject::SYSTEM_SUBJECT
+        {
+            AuthorSubject::SYSTEM.canonical().to_owned()
+        } else if account == jazz_types::account_registry::SYSTEM_ACCOUNT_ID.0
+            && issuer != AuthorSubject::SYSTEM_ISSUER
+        {
+            serde_json::to_string(&(issuer, subject)).expect("author tuple")
+        } else {
+            serde_json::to_string(&(account.to_string(), issuer, subject)).expect("author tuple")
+        };
+        Ok(Some(canonical))
+    }
+
+    fn writer_owner_declaration(
+        &self,
+        message: &SyncMessage,
+    ) -> Result<Option<SyncMessage>, Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
+            return Ok(None);
+        }
+        let Some((node, _)) = relay::upload_id(message) else {
+            return Ok(None);
+        };
+        // The connection's admitted identity owns this runtime's own writer.
+        // A SYSTEM runtime may connect through an ordinary session, which
+        // cannot attest SYSTEM ownership. Only forwarded writers need a
+        // separate original owner; those uploads require a trusted link.
+        if node == *self.identity.node.as_bytes() {
+            return Ok(None);
+        }
+        let owner = self.writer_owner_canonical(node)?.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Storage,
+                "forwarded writer has no admitted original owner",
+            )
+        })?;
+        Ok(Some(SyncMessage::WriterOwnerV1 { node, owner }))
     }
 
     /// Whether `identity` may commit as `node`. A node belongs to the
@@ -6718,6 +6782,7 @@ impl Db {
                 ));
             }
             let mut unit = inner.relay_pushes(message)?;
+            unit.extend(inner.writer_owner_declaration(message)?);
             unit.push(message.clone());
             if scoped {
                 ordered.push((position(message)?, unit));
@@ -6732,7 +6797,13 @@ impl Db {
             .unsent
             .iter()
             .filter(|_| uploads_ready)
-            .map(|commit| Ok((position(commit)?, inner.pushes_for(commit)?)))
+            .map(|commit| {
+                Ok((
+                    position(commit)?,
+                    inner.pushes_for(commit)?,
+                    inner.writer_owner_declaration(commit)?,
+                ))
+            })
             .collect::<Result<Vec<_>, Error>>()?;
         let client = inner.client.as_mut().expect("client");
         let mut out = std::mem::take(&mut client.outbox);
@@ -6796,12 +6867,15 @@ impl Db {
                 client.sent.push(commit.clone());
             }
         }
-        for (commit, (position, (locators, mut batches))) in commits.into_iter().zip(pushes) {
+        for (commit, (position, (locators, mut batches), declaration)) in
+            commits.into_iter().zip(pushes)
+        {
             if let Some(id) = relay::upload_id(&commit)
                 && !locators.is_empty()
             {
                 client.pushed.insert(id, locators);
             }
+            batches.extend(declaration);
             batches.push(commit);
             if scoped {
                 ordered.push((position, batches));
@@ -6818,6 +6892,9 @@ impl Db {
         out.extend(fetches);
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
+        // Only new upload units are decorated. An outbox left by backpressure
+        // already contains either the declaration and commit, or just the commit
+        // when the declaration was sent. Retrying must not add another header.
         let mut out = out.into_iter();
         while let Some(message) = out.next() {
             let message = match relay::upload_id(&message)
@@ -8959,6 +9036,17 @@ impl Db {
         upstream_claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
         let connection_identity = self.inner.borrow().sessions[index].identity;
+        if let SyncMessage::WriterOwnerV1 { node, owner } = &message {
+            if connection_identity != AuthorSubject::SYSTEM {
+                return Err(rejected(
+                    "writer ownership attestation requires a trusted SYSTEM connection",
+                ));
+            }
+            let owner = AuthorSubject::from_canonical(owner)
+                .map_err(|error| query_error(error.to_string()))?;
+            self.inner.borrow_mut().sessions[index].writer_owner = Some((*node, owner));
+            return Ok(());
+        }
         if let SyncMessage::AcceptedOverlayCheckV1 {
             id,
             query,
@@ -9871,7 +9959,23 @@ impl Db {
                         });
                     return Ok(());
                 }
-                if !self.inner.borrow().claim_node(node, &identity)? {
+                let writer_owner = {
+                    let declared = self.inner.borrow_mut().sessions[index].writer_owner.take();
+                    match (connection_identity, declared) {
+                        (AuthorSubject::SYSTEM, Some((declared_node, owner)))
+                            if declared_node == node =>
+                        {
+                            owner
+                        }
+                        (_, None) => connection_identity,
+                        _ => {
+                            return Err(rejected(
+                                "writer ownership attestation names a different node",
+                            ));
+                        }
+                    }
+                };
+                if !self.inner.borrow().claim_node(node, &writer_owner)? {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();
                     let global = inner.authority;

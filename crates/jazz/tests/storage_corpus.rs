@@ -2,10 +2,10 @@
 //! format this build reads ([`jazz::format::STORAGE_FORMAT`]), plus stores
 //! from before SQLite.
 //!
-//! - `fixtures/sqlite-storage-v2/` holds an authority and a client replica
+//! - `fixtures/sqlite-storage-v3/` holds an authority and a client replica
 //!   that synced with it, written once by
-//!   `produce_sqlite_storage_corpus_v2` and never regenerated. Format 1 is
-//!   retained as an unchanged refusal corpus. Current code must reopen v2
+//!   `produce_sqlite_storage_corpus_v3` and never regenerated. Formats 1 and 2
+//!   remain unchanged refusal corpora. Current code must reopen v3
 //!   with every row, history version, branch, large value, renamed column
 //!   and pending upload intact, accept current writes, and reopen again.
 //! - A damaged copy is refused with a storage error, never read as data; a
@@ -50,12 +50,12 @@ use common::{allow_all_policies, compile_schema};
 // ---- the corpus ------------------------------------------------------------
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
-const SERVER_FILE: &str = "sqlite-storage-v2/server.sqlite.gz.base64";
-const CLIENT_FILE: &str = "sqlite-storage-v2/client.sqlite.gz.base64";
+const SERVER_FILE: &str = "sqlite-storage-v3/server.sqlite.gz.base64";
+const CLIENT_FILE: &str = "sqlite-storage-v3/client.sqlite.gz.base64";
 /// SHA-256 of the decoded SQLite files. The corpus is immutable: a new
 /// storage format gets a new corpus beside this one.
-const SERVER_SHA256: &str = "072244d4ee6a63d440a2797927b4373d261ee312be71bc2537d2bbe9741dd2fa";
-const CLIENT_SHA256: &str = "994bdd01c34a0dfb8706fe6e47bdb9bc48cd8b93907276ea78d0233161243ec4";
+const SERVER_SHA256: &str = "93c5ffcaa43d6b0afc89009a918315c2951eba9f710bdcde35c0507fdd578446";
+const CLIENT_SHA256: &str = "4e2f587afb652dc0e1713845c49b3de153e15f9a93175530068683aa2b4f5c1b";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -921,7 +921,7 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
     );
 }
 
-/// The server's recorded fates are format 1 too: the rejected commit's fate
+/// The server's recorded fates are part of format 3: the rejected commit's fate
 /// still decodes, with its reason name, from `_jazz_applied`.
 #[test]
 fn pinned_server_corpus_keeps_a_rejected_fate_with_its_reason() {

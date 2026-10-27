@@ -34,7 +34,7 @@ fn pair() -> (NativeRelayTransport<Wire>, Arc<Mutex<State>>) {
 }
 fn frozen() -> Vec<u8> {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_native_relay_wire_v2.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite_native_relay_wire_v3.json")).unwrap();
     let s = fixture["unsubscribe_128"].as_str().unwrap();
     (0..s.len())
         .step_by(2)
@@ -75,7 +75,8 @@ fn sqlite_carrier_rejects_bad_frames_without_resuming_the_stream() {
     for invalid in [
         vec![],
         vec![255],
-        vec![1, 128, 1], // Historical SQLite v1 has no admitted v2 envelope.
+        vec![1, 128, 1], // Historical SQLite v1 has no admitted v3 envelope.
+        b"JSQL\x02\x01\x80\x01".to_vec(), // Historical v2 fixture, unchanged.
         trailing,
         vec![0; jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES + 1],
     ] {

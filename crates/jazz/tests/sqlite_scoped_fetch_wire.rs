@@ -48,9 +48,9 @@ fn requests() -> [(&'static str, SyncMessage); 2] {
 #[test]
 fn sqlite_scoped_fetch_v1_has_a_frozen_append_only_wire_encoding() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/scoped-fetch.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/scoped-fetch.json")).unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.scoped-fetch.v1");
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     for (name, request) in requests() {
         let encoded = jazz::db::encode_message(&request).unwrap();
         let hex: String = encoded.iter().map(|byte| format!("{byte:02x}")).collect();

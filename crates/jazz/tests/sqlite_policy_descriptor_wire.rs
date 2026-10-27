@@ -53,7 +53,7 @@ fn policy_descriptor_v1_pins_wire_and_storage_bytes() {
         schema: SchemaVersion::new(schema.clone()),
     };
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/policy-descriptor.json"
+        "../fixtures/sqlite-sync-v3/policy-descriptor.json"
     ))
     .unwrap();
     let blob = hex::decode(fixture["descriptor"].as_str().unwrap()).unwrap();

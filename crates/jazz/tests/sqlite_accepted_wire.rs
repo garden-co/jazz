@@ -76,9 +76,9 @@ fn messages() -> Vec<(&'static str, SyncMessage)> {
 #[test]
 fn accepted_v1_pins_wire_and_storage_bytes() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/accepted.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/accepted.json")).unwrap();
     let generated = serde_json::json!({
-        "version":2,"encoding":"jazz.sqlite.sync.v2",
+        "version":3,"encoding":"jazz.sqlite.sync.v3",
         "roles":["jazz.sqlite.sync.accepted-row.v1","jazz.sqlite.sync.accepted-fetch.v1","jazz.sqlite.sync.accepted-answer.v1","jazz.sqlite.accepted-row.v1"],
         "messages": messages().iter().map(|(name,message)| ((*name).to_owned(),hex::encode(jazz::db::encode_message(message).unwrap()))).collect::<BTreeMap<_,_>>(),
         "durableContent":hex::encode(postcard::to_allocvec(&content()).unwrap()),

@@ -268,6 +268,9 @@ fn receipts(peer: &mut dyn jazz::db::Transport) -> Vec<Result<(), jazz::db::Wire
                 global: true,
                 ..
             } => Some(result),
+            jazz::db::SyncMessage::OriginFateV2 {
+                result: Err(error), ..
+            } => Some(Err(error)),
             _ => None,
         })
         .collect()
@@ -491,10 +494,10 @@ fn serializable_read_validation_stays_at_the_authority() {
 fn relay_journal_and_fates_have_frozen_versioned_bytes() {
     use jazz::db::{SyncMessage, WireError};
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/relay-upload.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/relay-upload.json")).unwrap();
     assert_eq!(fixture["journalRole"], "jazz.sqlite.relay-upload.v2");
     assert_eq!(fixture["fateRole"], "jazz.sqlite.sync.origin-fate.v2");
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     for (name, result) in [
         ("accepted", Ok(())),
         ("conflict", Err(WireError::Conflict("stale".into()))),
@@ -1034,5 +1037,404 @@ fn a_writer_keeps_its_identity_when_switching_between_direct_and_trusted_relay()
         .unwrap_or_else(|error| panic!("direct_first={direct_first}: {error}"));
         assert_eq!(texts(&server), ["after", "before"]);
         assert_eq!(client.write_state(next).unwrap().fate, Fate::Accepted);
+    }
+}
+
+struct WriterOwnerBudgetTransport {
+    inner: Box<dyn jazz::db::Transport>,
+    budget: std::rc::Rc<std::cell::Cell<usize>>,
+    sent: std::rc::Rc<std::cell::RefCell<Vec<jazz::db::SyncMessage>>>,
+}
+impl jazz::db::Transport for WriterOwnerBudgetTransport {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::db::TransportError> {
+        if matches!(
+            &message,
+            jazz::db::SyncMessage::WriterOwnerV1 { .. } | jazz::db::SyncMessage::Commit { .. }
+        ) {
+            if self.budget.get() == 0 {
+                return Err(jazz::db::TransportError::Backpressure);
+            }
+            self.budget.set(self.budget.get() - 1);
+            self.sent.borrow_mut().push(message.clone());
+        }
+        self.inner.send(message)
+    }
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+/// Alice's upload and Bob's relay's own write each drain through a one-message
+/// budget after repeated stalls. Forwarded ownership is sent once; Bob's own
+/// writer uses the connection's admitted identity without a declaration.
+/// Alice -> relay --[owner; pause; commit]--> authority -> real receipt.
+#[test]
+fn writer_owner_backpressure_drains_without_duplicate_declarations() {
+    use jazz::db::SyncMessage;
+    for forwarded in [false, true] {
+        let server = authority();
+        let relay = open(50, AuthorSubject::SYSTEM, None);
+        let client = open(1, alice(), None);
+        relay.set_remote_link_hint(RemoteLinkHint::Failed);
+        connect(&client, &relay, alice());
+        let writer = if forwarded { &client } else { &relay };
+        let tx = insert(writer, "one complete upload", true);
+        turns(&[&client, &relay]);
+        let budget = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (up, down) = duplex_transport::duplex();
+        block_on(relay.connect_upstream(Box::new(WriterOwnerBudgetTransport {
+            inner: up,
+            budget: budget.clone(),
+            sent: sent.clone(),
+        })));
+        server.accept_subscriber(down, AuthorSubject::SYSTEM);
+        for _ in 0..32 {
+            turns(&[&relay, &server]);
+        }
+        assert!(sent.borrow().is_empty());
+        assert!(texts(&server).is_empty());
+        assert_eq!(writer.write_state(tx).unwrap().fate, Fate::Pending);
+        for turn in 0..64 {
+            budget.set(1);
+            for db in [&relay, &server, &client] {
+                block_on(db.tick()).unwrap();
+            }
+            if turn == 0 && forwarded {
+                assert_eq!(writer.write_state(tx).unwrap().fate, Fate::Pending);
+                assert!(
+                    texts(&server).is_empty(),
+                    "a declaration does not publish or settle the write"
+                );
+            }
+            if writer.write_state(tx).unwrap().fate == Fate::Accepted {
+                break;
+            }
+        }
+        assert_eq!(
+            sent.borrow().len(),
+            if forwarded { 2 } else { 1 },
+            "forwarded={forwarded}: one commit, with one declaration only for a forwarded writer"
+        );
+        let messages = sent.borrow();
+        if forwarded {
+            assert!(
+                matches!(&messages[0], SyncMessage::WriterOwnerV1 { node, owner } if *node == [1; 16] && owner == alice().canonical())
+            );
+            assert!(matches!(&messages[1], SyncMessage::Commit { node, .. } if *node == [1; 16]));
+        } else {
+            assert!(matches!(&messages[0], SyncMessage::Commit { node, .. } if *node == [50; 16]));
+        }
+        assert_eq!(writer.write_state(tx).unwrap().fate, Fate::Accepted);
+        assert_eq!(texts(&server), ["one complete upload"]);
+        assert_eq!(server.seq_high_water(), 1);
+    }
+}
+
+/// Mallory cannot attest Alice's writer on an ordinary session, even before its
+/// first write; refusal leaves that node available to authenticated Alice.
+#[test]
+fn writer_owner_ordinary_attestation_is_rejected_before_node_claim() {
+    let server = authority();
+    let (mut peer, link) = duplex_transport::duplex();
+    server.accept_subscriber(link, bob());
+    peer.send(jazz::db::SyncMessage::WriterOwnerV1 {
+        node: [1; 16],
+        owner: alice().canonical().to_owned(),
+    })
+    .unwrap();
+    send_upload(peer.as_mut(), &captured_upload(1, "forged", true));
+    turns(&[&server]);
+    let closed = server.take_closed_subscribers();
+    assert_eq!(closed.len(), 1);
+    assert!(closed[0].1.message.contains("trusted SYSTEM"));
+    assert!(texts(&server).is_empty());
+    let client = open(1, alice(), None);
+    connect(&client, &server, alice());
+    let tx = insert(&client, "legitimate", true);
+    drive(
+        &[&client, &server],
+        client.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(texts(&server), ["legitimate"]);
+}
+
+/// Bob's trusted carrier cannot apply a declaration to a different writer node;
+/// the rejected frame neither writes rows nor reserves Alice's node.
+#[test]
+fn writer_owner_wrong_node_attestation_cannot_claim_a_writer() {
+    let server = authority();
+    let (mut peer, link) = duplex_transport::duplex();
+    server.accept_subscriber(link, AuthorSubject::SYSTEM);
+    peer.send(jazz::db::SyncMessage::WriterOwnerV1 {
+        node: [2; 16],
+        owner: bob().canonical().to_owned(),
+    })
+    .unwrap();
+    send_upload(peer.as_mut(), &captured_upload(1, "wrong node", true));
+    turns(&[&server]);
+    let closed = server.take_closed_subscribers();
+    assert_eq!(closed.len(), 1);
+    assert!(closed[0].1.message.contains("different node"));
+    assert!(texts(&server).is_empty());
+    let client = open(1, alice(), None);
+    connect(&client, &server, alice());
+    let tx = insert(&client, "legitimate", true);
+    drive(
+        &[&client, &server],
+        client.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(texts(&server), ["legitimate"]);
+}
+
+/// Alice's previously admitted node stays hers when a trusted carrier asserts
+/// Bob as its owner. Replaying Alice's real unit still returns its original fate.
+#[test]
+fn writer_owner_conflicting_attestation_preserves_existing_owner_and_receipt() {
+    use jazz::db::SyncMessage;
+    let server = authority();
+    let original = captured_upload(1, "original", true);
+    let (mut alice_link, accepted) = duplex_transport::duplex();
+    server.accept_subscriber(accepted, alice());
+    send_upload(alice_link.as_mut(), &original);
+    turns(&[&server]);
+    assert!(matches!(receipts(alice_link.as_mut()).as_slice(), [Ok(())]));
+    let (mut peer, link) = duplex_transport::duplex();
+    server.accept_subscriber(link, AuthorSubject::SYSTEM);
+    peer.send(SyncMessage::WriterOwnerV1 {
+        node: [1; 16],
+        owner: bob().canonical().to_owned(),
+    })
+    .unwrap();
+    send_upload(peer.as_mut(), &original);
+    turns(&[&server]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Err(_)]));
+    send_upload(alice_link.as_mut(), &original);
+    turns(&[&server]);
+    assert!(matches!(receipts(alice_link.as_mut()).as_slice(), [Ok(())]));
+    assert_eq!(texts(&server), ["original"]);
+    assert_eq!(server.seq_high_water(), 1);
+}
+
+/// Alice starts directly, queues a second write through two offline durable
+/// relays, then reopens every server and returns to the direct route.
+/// Alice -> authority; Alice -> near -> far (restart) -> authority; Alice -> authority.
+#[test]
+fn writer_owner_survives_multihop_reopen_and_direct_route_changes() {
+    let account = jazz::account_registry::AccountId(uuid::Uuid::from_bytes([0x11; 16]));
+    for author in [alice(), alice().with_account(account)] {
+        let directory = tempfile::tempdir().unwrap();
+        let server_path = directory.path().join("authority.sqlite");
+        let near_path = directory.path().join("near.sqlite");
+        let far_path = directory.path().join("far.sqlite");
+        let client = open(1, author, None);
+        let second;
+        {
+            let server = open(90, AuthorSubject::SYSTEM, Some(&server_path));
+            server.set_authority();
+            connect(&client, &server, author);
+            let first = insert(&client, "first direct", true);
+            drive(
+                &[&client, &server],
+                client.wait_for_transaction(first, DurabilityTier::Global),
+            )
+            .unwrap();
+            let near = open(50, AuthorSubject::SYSTEM, Some(&near_path));
+            let far = open(51, AuthorSubject::SYSTEM, Some(&far_path));
+            far.set_remote_link_hint(RemoteLinkHint::Failed);
+            connect(&near, &far, AuthorSubject::SYSTEM);
+            connect(&client, &near, author);
+            second = insert(&client, "second relayed", true);
+            turns(&[&client, &near, &far]);
+            assert_eq!(client.write_state(second).unwrap().fate, Fate::Pending);
+            assert_eq!(texts(&server), ["first direct"]);
+        }
+        let server = open(90, AuthorSubject::SYSTEM, Some(&server_path));
+        server.set_authority();
+        let near = open(50, AuthorSubject::SYSTEM, Some(&near_path));
+        let far = open(51, AuthorSubject::SYSTEM, Some(&far_path));
+        connect(&far, &server, AuthorSubject::SYSTEM);
+        connect(&near, &far, AuthorSubject::SYSTEM);
+        connect(&client, &near, author);
+        drive(
+            &[&client, &near, &far, &server],
+            client.wait_for_transaction(second, DurabilityTier::Global),
+        )
+        .unwrap();
+        connect(&client, &server, author);
+        let third = insert(&client, "third direct", true);
+        drive(
+            &[&client, &server],
+            client.wait_for_transaction(third, DurabilityTier::Global),
+        )
+        .unwrap();
+        assert_eq!(
+            texts(&server),
+            ["first direct", "second relayed", "third direct"]
+        );
+        assert_eq!(server.seq_high_water(), 3);
+        let query = server.prepare_query(&Query::from("notes")).unwrap();
+        for row in block_on(server.all(&query, ReadOpts::default())).unwrap() {
+            let provenance = server
+                .row_provenance("notes", row.row_uuid())
+                .unwrap()
+                .unwrap();
+            assert_eq!(provenance.1, author.canonical());
+        }
+    }
+}
+
+/// Bob's trusted carrier uses Alice's writer declaration for one commit only.
+/// A missing declaration on the next commit cannot reuse Alice's ownership.
+#[test]
+fn writer_owner_declaration_is_consumed_by_its_next_commit() {
+    use jazz::db::SyncMessage;
+    let server = authority();
+    let original = captured_upload(1, "original", true);
+    let (mut peer, link) = duplex_transport::duplex();
+    server.accept_subscriber(link, AuthorSubject::SYSTEM);
+    peer.send(SyncMessage::WriterOwnerV1 {
+        node: [1; 16],
+        owner: alice().canonical().to_owned(),
+    })
+    .unwrap();
+    send_upload(peer.as_mut(), &original);
+    turns(&[&server]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Ok(())]));
+    send_upload(peer.as_mut(), &original);
+    turns(&[&server]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Err(_)]));
+    peer.send(SyncMessage::WriterOwnerV1 {
+        node: [1; 16],
+        owner: alice().canonical().to_owned(),
+    })
+    .unwrap();
+    send_upload(peer.as_mut(), &original);
+    turns(&[&server]);
+    assert!(matches!(receipts(peer.as_mut()).as_slice(), [Ok(())]));
+    assert_eq!(texts(&server), ["original"]);
+    assert_eq!(server.seq_high_water(), 1);
+}
+
+/// Alice's ownership message has independently assembled bytes. Both public
+/// decoders preserve its exact fields; malformed frames never become messages.
+/// This boundary-level test pins the wire role that a normal row API cannot inspect.
+#[test]
+fn writer_owner_wire_bytes_match_independent_field_fixtures() {
+    use jazz::db::{SyncMessage, decode_message, encode_message};
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/sqlite_writer_owner_v1.json")).unwrap();
+    assert_eq!(fixture["role"], "jazz.sqlite.sync.writer-owner.v1");
+    assert_eq!(fixture["outer_encoding"], "jazz.sqlite.sync.v3");
+    for case in fixture["cases"].as_array().unwrap() {
+        let bytes = hex::decode(case["bytes_hex"].as_str().unwrap()).unwrap();
+        let node = hex::decode(case["node_hex"].as_str().unwrap()).unwrap();
+        let owner = case["owner"].as_str().unwrap();
+        AuthorSubject::from_canonical(owner).unwrap();
+        let message = SyncMessage::WriterOwnerV1 {
+            node: node.try_into().unwrap(),
+            owner: owner.to_owned(),
+        };
+        assert_eq!(encode_message(&message).unwrap(), bytes);
+        for decoded in [
+            decode_message(&bytes).unwrap(),
+            jazz::sync_codec::decode_sync_message(&bytes).unwrap(),
+        ] {
+            assert!(
+                matches!(decoded, SyncMessage::WriterOwnerV1 { node: decoded_node, owner: decoded_owner } if decoded_node == [1;16] && decoded_owner == owner)
+            );
+        }
+        for end in 0..bytes.len() {
+            assert!(jazz::sync_codec::decode_sync_message(&bytes[..end]).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(jazz::sync_codec::decode_sync_message(&trailing).is_err());
+    }
+}
+
+/// Bob's trusted carrier cannot install a malformed owner spelling, and its
+/// declaration is scoped to that connection rather than a later SYSTEM link.
+#[test]
+fn writer_owner_invalid_or_abandoned_declarations_do_not_leak() {
+    use jazz::db::SyncMessage;
+    for owner in ["not json", "[]", r#"[ "https://issuer.example", "alice" ]"#] {
+        let server = authority();
+        let (mut peer, link) = duplex_transport::duplex();
+        server.accept_subscriber(link, AuthorSubject::SYSTEM);
+        peer.send(SyncMessage::WriterOwnerV1 {
+            node: [1; 16],
+            owner: owner.to_owned(),
+        })
+        .unwrap();
+        send_upload(peer.as_mut(), &captured_upload(1, "invalid", true));
+        turns(&[&server]);
+        assert_eq!(server.take_closed_subscribers().len(), 1);
+        assert!(texts(&server).is_empty());
+    }
+    let server = authority();
+    let (mut abandoned, link) = duplex_transport::duplex();
+    server.accept_subscriber(link, AuthorSubject::SYSTEM);
+    abandoned
+        .send(SyncMessage::WriterOwnerV1 {
+            node: [2; 16],
+            owner: bob().canonical().to_owned(),
+        })
+        .unwrap();
+    turns(&[&server]);
+    let (mut current, link) = duplex_transport::duplex();
+    server.accept_subscriber(link, AuthorSubject::SYSTEM);
+    send_upload(
+        current.as_mut(),
+        &captured_upload(1, "fresh connection", true),
+    );
+    turns(&[&server]);
+    assert!(matches!(receipts(current.as_mut()).as_slice(), [Ok(())]));
+    assert_eq!(texts(&server), ["fresh connection"]);
+}
+
+/// Alice owns the writer, while Bob is the delegated permission subject and
+/// row author. Ownership cannot bypass Bob's policy or replace his provenance.
+#[test]
+fn writer_owner_attestation_keeps_permission_scope_and_row_attribution_separate() {
+    use jazz::db::SyncMessage;
+    for allowed in [false, true] {
+        let server = authority();
+        let (mut peer, link) = duplex_transport::duplex();
+        server.accept_subscriber(link, AuthorSubject::SYSTEM);
+        let mut upload = captured_upload(1, "delegated", allowed);
+        for message in &mut upload {
+            if let SyncMessage::Commit {
+                author, session, ..
+            } = message
+            {
+                *author = Some(bob().canonical().to_owned());
+                *session = Some(BTreeMap::new());
+            }
+        }
+        peer.send(SyncMessage::WriterOwnerV1 {
+            node: [1; 16],
+            owner: alice().canonical().to_owned(),
+        })
+        .unwrap();
+        send_upload(peer.as_mut(), &upload);
+        turns(&[&server]);
+        let receipts = receipts(peer.as_mut());
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].is_ok(), allowed);
+        if allowed {
+            let query = server.prepare_query(&Query::from("notes")).unwrap();
+            let rows = block_on(server.all(&query, ReadOpts::default())).unwrap();
+            assert_eq!(rows.len(), 1);
+            let provenance = server
+                .row_provenance("notes", rows[0].row_uuid())
+                .unwrap()
+                .unwrap();
+            assert_eq!(provenance.1, bob().canonical());
+        } else {
+            assert!(texts(&server).is_empty());
+        }
     }
 }

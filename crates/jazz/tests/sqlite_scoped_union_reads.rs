@@ -638,7 +638,7 @@ fn scoped_union_partial_receipts_retire_with_the_request_and_connection() {
 fn scoped_union_coverage_sequence_has_fixed_bytes() {
     use jazz::db::{ScopedReadRowV1, UnionOccurrenceV1};
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/scoped-union.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/scoped-union.json")).unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.scoped-union-coverage.v2");
     for (key, id, through, populated) in [("populated", 128, 300, true), ("empty", 129, 301, false)]
     {

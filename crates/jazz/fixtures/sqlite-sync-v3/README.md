@@ -11,7 +11,7 @@ by one canonical Postcard message. The outer websocket Hello and Error carrier
 stays at v6. Matching Hello versions do not make different semantic codecs
 compatible: the semantic decoder rejects the old header before delivery.
 
-The 47 message tags retain their v2 numbers and fields, except for rejected
+The original 47 message tags retain their v2 numbers and fields, except for rejected
 write results. A rejection now carries an optional stable reason name before
 its display message. The body layout is:
 
@@ -42,8 +42,12 @@ the native host must agree on that ABI as well as the semantic wire version.
 explicit integer, UTF-8, Option and Result encodings. It does not call a Jazz
 serializer and refuses to replace an existing fixture with different values.
 `error-cases.json` pins named and unnamed rejections in every receipt envelope,
-plus an unknown reason name. `../sqlite_sync_wire_v3.json` covers all 47 tags,
+plus an unknown reason name. `../sqlite_sync_wire_v3.json` pins the original 47 tags,
 26 extended forms, two rejected fates, carrier frames and malformed batches.
+The append-only tag 47, `jazz.sqlite.sync.writer-owner.v1`, has independent
+fixtures in `../sqlite_writer_owner_v1.json`. Together these cover all 48
+current tags. The [writer ownership compatibility notes](../../../../dev/proofs/sqlite-writer-owner-attestation.md)
+describe its trust, queueing and coordinated-release requirements.
 `../sqlite_write_fate_v2.json` pins the raw durable results.
 
 The format-3 authority and replica snapshots live in

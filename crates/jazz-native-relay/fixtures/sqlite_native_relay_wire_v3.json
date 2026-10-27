@@ -1,0 +1,5 @@
+{
+  "wire_carrier": "jazz.sqlite.native-relay-carrier.v3",
+  "semantic_encoding": "jazz.sqlite.sync.v3",
+  "unsubscribe_128": "4a53514c03018001"
+}

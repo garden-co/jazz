@@ -1050,14 +1050,19 @@ fn accepted_evidence_rejects_invalid_conflicting_and_wrong_direction_messages() 
     );
     let server = open(3, true);
     let (mut a, b) = duplex();
-    server.accept_subscriber(b, user("mallory"));
+    let subscriber = server.accept_subscriber(b, user("mallory"));
     a.send(message(3, 1)).unwrap();
+    block_on(server.tick()).unwrap();
+    let closed = server.take_closed_subscribers();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, subscriber);
     assert!(
-        block_on(server.tick())
-            .unwrap_err()
+        closed[0]
+            .1
             .message
             .contains("server received AcceptedRowsV1")
     );
+    assert_eq!(server.open_subscribers(), 0);
 }
 
 /// Bob retransmitting proof cannot move Alice's begin frontier. SQL inspection

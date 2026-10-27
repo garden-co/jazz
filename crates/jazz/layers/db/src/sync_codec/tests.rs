@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 fn corpus() -> serde_json::Value {
     serde_json::from_str(include_str!(
-        "../../../../fixtures/sqlite_sync_artifact_corpus_v2.json"
+        "../../../../fixtures/sqlite_sync_artifact_corpus_v3.json"
     ))
     .unwrap()
 }
@@ -68,6 +68,7 @@ fn variant(message: &SyncMessage) -> &'static str {
         SyncMessage::ScopedUnionSubscribeV1 { .. } => "ScopedUnionSubscribeV1",
         SyncMessage::OriginFateV2 { .. } => "OriginFateV2",
         SyncMessage::Stored { .. } => "Stored",
+        SyncMessage::WriterOwnerV1 { .. } => "WriterOwnerV1",
     }
 }
 fn source(name: &str) -> serde_json::Value {

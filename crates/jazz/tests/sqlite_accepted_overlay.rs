@@ -726,7 +726,7 @@ fn accepted_overlay_v1_has_frozen_wire_bytes() {
         through: 128,
     };
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/accepted-overlay.json"
+        "../fixtures/sqlite-sync-v3/accepted-overlay.json"
     ))
     .unwrap();
     assert_eq!(
@@ -737,7 +737,7 @@ fn accepted_overlay_v1_has_frozen_wire_bytes() {
         fixture["answer_role"],
         "jazz.sqlite.sync.accepted-overlay-checked.v1"
     );
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     for (key, message) in [("request", request), ("answer", answer)] {
         let encoded = jazz::db::encode_message(&message).unwrap();
         let bytes = hex::decode(fixture[key].as_str().unwrap()).unwrap();

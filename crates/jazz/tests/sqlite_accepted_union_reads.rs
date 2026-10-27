@@ -756,7 +756,7 @@ fn accepted_union_observed_begin_refuses_late_proof() {
 fn accepted_union_coverage_sequence_has_fixed_bytes() {
     use jazz::db::{ScopedReadRowV1, UnionOccurrenceV1};
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/accepted-union.json"
+        "../fixtures/sqlite-sync-v3/accepted-union.json"
     ))
     .unwrap();
     assert_eq!(

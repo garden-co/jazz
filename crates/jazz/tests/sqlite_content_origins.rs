@@ -432,11 +432,11 @@ fn content_witness_and_origin_survive_an_offline_restart() {
 #[test]
 fn content_origins_v1_keeps_existing_wire_bytes() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/content-origins.json"
+        "../fixtures/sqlite-sync-v3/content-origins.json"
     ))
     .unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.content-origins.v1");
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     let message = SyncMessage::Origins {
         commits: vec![(7, [0x11; 16], (1 << 52) + 3)],
     };
@@ -615,12 +615,12 @@ fn malformed_persisted_witnesses_refuse_relay_reads() {
 #[test]
 fn content_witness_v1_pins_wire_and_durable_value_bytes() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/content-witness.json"
+        "../fixtures/sqlite-sync-v3/content-witness.json"
     ))
     .unwrap();
     assert_eq!(fixture["wireRole"], "jazz.sqlite.sync.content-witness.v1");
     assert_eq!(fixture["storageRole"], "jazz.sqlite.content-witness.v1");
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     let message: SyncMessage = serde_json::from_value(fixture["message"].clone()).unwrap();
     let bytes = jazz::db::encode_message(&message).unwrap();
     assert_eq!(hex::encode(&bytes), fixture["hex"].as_str().unwrap());
@@ -763,8 +763,17 @@ fn witness_protocol_rejects_invalid_conflicting_and_wrong_direction_messages() {
     let server = open(3, None, false);
     let (mut a, b) = duplex();
     let mallory = AuthorSubject::authenticated("https://issuer.example", "mallory").unwrap();
-    server.accept_subscriber(b, mallory);
+    let subscriber = server.accept_subscriber(b, mallory);
     a.send(message(reference(3, 1))).unwrap();
-    let error = block_on(server.tick()).unwrap_err();
-    assert!(error.message.contains("server received ContentWitnessesV1"));
+    block_on(server.tick()).unwrap();
+    let closed = server.take_closed_subscribers();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, subscriber);
+    assert!(
+        closed[0]
+            .1
+            .message
+            .contains("server received ContentWitnessesV1")
+    );
+    assert_eq!(server.open_subscribers(), 0);
 }

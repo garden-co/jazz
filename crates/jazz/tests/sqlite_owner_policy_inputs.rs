@@ -383,14 +383,14 @@ fn readable_policy_subscription_v1_has_frozen_wire_bytes() {
         include_deleted: true,
     };
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/readable-policy.json"
+        "../fixtures/sqlite-sync-v3/readable-policy.json"
     ))
     .unwrap();
     assert_eq!(
         fixture["role"],
         "jazz.sqlite.sync.readable-policy-subscribe.v1"
     );
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     for (name, message) in [("readable", request), ("ordinary", ordinary)] {
         let bytes = hex::decode(fixture[name].as_str().unwrap()).unwrap();
         assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);

@@ -9527,9 +9527,9 @@ fn foreground_extension_v1_byte_contract() {
 }
 
 #[test]
-fn foreground_coded_operation_error_v1_byte_contract() {
-    // Response 25 is appended to V1: a core error's stable code, then the
-    // unchanged reason. Uncoded failures keep response 8.
+fn foreground_coded_operation_error_abi3_byte_contract() {
+    // ABI 3 response 25 carries the stable code, optional structured reason
+    // name, then the display message. Uncoded failures keep response 8.
     let coded = ForegroundDbCommandResponse::CodedOperationError {
         reason_name: None,
         code: "not_observed".into(),
@@ -9538,7 +9538,7 @@ fn foreground_coded_operation_error_v1_byte_contract() {
     let bytes = [
         vec![25, 12],
         b"not_observed".to_vec(),
-        vec![17],
+        vec![0, 17],
         b"NotObserved: oops".to_vec(),
     ]
     .concat();
@@ -9546,6 +9546,25 @@ fn foreground_coded_operation_error_v1_byte_contract() {
     assert_eq!(
         postcard::from_bytes::<ForegroundDbCommandResponse>(&bytes).unwrap(),
         coded
+    );
+    let rejected = ForegroundDbCommandResponse::CodedOperationError {
+        code: "write_rejected".into(),
+        reason_name: Some("authorization_denied".into()),
+        reason: "denied".into(),
+    };
+    let rejected_bytes = [
+        vec![25, 14],
+        b"write_rejected".to_vec(),
+        vec![1, 20],
+        b"authorization_denied".to_vec(),
+        vec![6],
+        b"denied".to_vec(),
+    ]
+    .concat();
+    assert_eq!(postcard::to_allocvec(&rejected).unwrap(), rejected_bytes);
+    assert_eq!(
+        postcard::from_bytes::<ForegroundDbCommandResponse>(&rejected_bytes).unwrap(),
+        rejected
     );
     assert_eq!(
         postcard::to_allocvec(&ForegroundDbCommandResponse::OperationError {

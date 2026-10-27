@@ -711,7 +711,7 @@ fn tampered_alias_evidence_and_envelopes_are_rejected() {
 #[test]
 fn alias_evidence_uses_existing_versioned_bytes() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/alias-evidence.json"
+        "../fixtures/sqlite-sync-v3/alias-evidence.json"
     ))
     .unwrap();
     let client = open(1);

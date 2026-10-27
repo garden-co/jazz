@@ -35,14 +35,14 @@ async fn permissions_gate_rejects_each_original_writer_explicitly() {
     let mut stream = runtime.open_wire_stream(session).unwrap();
     // Frozen public Commit bytes avoid depending on private wire-kind types.
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../jazz/fixtures/sqlite-sync-v2/relay-upload.json"
+        "../../jazz/fixtures/sqlite-sync-v3/relay-upload.json"
     ))
     .unwrap();
     let bytes = hex::decode(fixture["request"].as_str().unwrap()).unwrap();
     assert_eq!(&bytes[..4], b"JRU\x02");
     // The pinned journal has its own envelope; send its canonical Commit body
     // through the current semantic envelope and public decoder.
-    let mut frame = b"JSQL\x02".to_vec();
+    let mut frame = b"JSQL\x03".to_vec();
     frame.extend_from_slice(&bytes[4..]);
     let request = jazz::sync_codec::decode_sync_message(&frame).unwrap();
     let mut other = request.clone();

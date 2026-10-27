@@ -9,7 +9,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 #[test]
 fn owner_initialization_v1_pins_wire_and_durable_fields() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/owner-initialization.json"
+        "../fixtures/sqlite-sync-v3/owner-initialization.json"
     ))
     .unwrap();
     for name in ["reserve", "reserved", "refused", "publish"] {

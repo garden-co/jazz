@@ -37,7 +37,7 @@ type WasmArtifactFrameValidator = ArtifactFrameValidator & {
   WasmDb: { prototype: { wireFeatures?: () => number } };
 };
 
-// `crates/jazz/fixtures/sqlite_sync_wire_v2.json` pins one independently assembled
+// `crates/jazz/fixtures/sqlite_sync_wire_v3.json` pins one independently assembled
 // frame of every SQLite sync message variant plus extended forms (see
 // crates/jazz/tests/sync_wire_corpus.rs), plus Hello and Error frames and
 // batches a reader must reject. Every one runs through both freshly generated
@@ -59,7 +59,7 @@ describe("wire frame artifact corpus", () => {
     "executes every pinned sync message and frame and rejects malformed input through NAPI and WASM",
     async () => {
       const corpus = syncWireCorpus();
-      expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v2");
+      expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v3");
       expect(corpus.messages.map((message) => message.variant)).toHaveLength(47);
       const accepted = [
         ...[...corpus.messages, ...corpus.examples].map((message) => ({
@@ -130,7 +130,13 @@ describe("wire frame artifact corpus", () => {
           }
         }
         const oldUpstream = readJson("sqlite_sync_wire_v1.json") as SyncWireCorpus;
-        for (const retired of [...oldUpstream.messages, ...sqliteMessageFixtures()]) {
+        const oldV2 = readJson("sqlite_sync_wire_v2.json") as SyncWireCorpus;
+        for (const retired of [
+          ...oldUpstream.messages,
+          ...oldV2.messages,
+          ...oldV2.examples,
+          ...sqliteMessageFixtures(),
+        ]) {
           const frame = hexToBytes(retired.frame_hex);
           expect(
             () => artifact.__testValidateSqliteSyncFrameCorpus(frame),
@@ -211,7 +217,7 @@ describe("wire frame artifact corpus", () => {
 function syncWireCorpus(): SyncWireCorpus {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/sqlite_sync_wire_v2.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/sqlite_sync_wire_v3.json", import.meta.url),
       "utf8",
     ),
   ) as SyncWireCorpus;

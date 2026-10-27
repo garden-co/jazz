@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 #[test]
 fn alice_fetches_exact_views_and_bob_reports_stored_with_independent_bytes() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/fetch-view.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/fetch-view.json")).unwrap();
     let branch = |value| BranchSelector {
         values: BTreeMap::from([("branch".into(), BranchColumnValue(vec![1, 0, value]))]),
     };

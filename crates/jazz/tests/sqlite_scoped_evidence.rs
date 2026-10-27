@@ -384,14 +384,14 @@ fn scoped_evidence_v1_has_frozen_wire_bytes() {
         }],
     };
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/scoped-evidence.json"
+        "../fixtures/sqlite-sync-v3/scoped-evidence.json"
     ))
     .unwrap();
     assert_eq!(
         fixture["role"],
         "jazz.sqlite.sync.scoped-evidence-answer.v1"
     );
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     let bytes = hex::decode(fixture["answer"].as_str().unwrap()).unwrap();
     assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
     let decoded = jazz::db::decode_message(&bytes).unwrap();
@@ -870,14 +870,14 @@ fn accepted_scoped_evidence_v1_has_frozen_wire_bytes() {
         }],
     };
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/accepted-scoped-evidence.json"
+        "../fixtures/sqlite-sync-v3/accepted-scoped-evidence.json"
     ))
     .unwrap();
     assert_eq!(
         fixture["role"],
         "jazz.sqlite.sync.accepted-scoped-evidence-answer.v1"
     );
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     let bytes = hex::decode(fixture["answer"].as_str().unwrap()).unwrap();
     assert_eq!(jazz::db::encode_message(&message).unwrap(), bytes);
     let decoded = jazz::db::decode_message(&bytes).unwrap();

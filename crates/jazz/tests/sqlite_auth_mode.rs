@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 
 /// Alice's local-first identity, Bob's external identity and Mallory's anonymous
 /// identity each see only their mode's rows. Forged top-level and provider claims
-/// cannot change either the read gate or the insert check.
+/// cannot change either the read gate or the insert check. Anonymous sessions
+/// cannot write, even when their table policy would otherwise allow it.
 #[test]
 fn authentication_mode_controls_reads_and_writes_without_trusting_claims() {
     let modes = [
@@ -91,9 +92,14 @@ fn authentication_mode_controls_reads_and_writes_without_trusting_claims() {
                 ));
                 assert_eq!(
                     write.is_ok(),
-                    table == mode,
+                    mode != "anonymous" && table == mode,
                     "{mode} writing {table} with forged {forged}"
                 );
+                if mode == "anonymous" {
+                    let error = write.unwrap_err();
+                    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected);
+                    assert_eq!(error.reason, Some(jazz::db::Reason::AuthorizationDenied));
+                }
             }
         }
     }

@@ -825,8 +825,8 @@ fn malformed_or_misattributed_owner_inputs_fail_closed() {
 fn owner_input_wire_v2_matches_independent_byte_fixtures() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/owner-inputs.json")).unwrap();
-    assert_eq!(fixture["version"], 2);
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/owner-inputs.json")).unwrap();
+    assert_eq!(fixture["version"], 3);
     assert_eq!(
         fixture["projectionRole"],
         "jazz.sqlite.sync.owner-projection.v1"

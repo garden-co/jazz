@@ -388,8 +388,8 @@ fn reconnect_replays_a_confirmed_local_receipt() {
 #[test]
 fn owner_receipts_have_frozen_versioned_bytes() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/owner-stored.json")).unwrap();
-    assert_eq!(fixture["version"], 2);
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/owner-stored.json")).unwrap();
+    assert_eq!(fixture["version"], 3);
     assert_eq!(fixture["role"], "jazz.sqlite.sync.owner-stored.v1");
     for case in fixture["cases"].as_array().unwrap() {
         let message = SyncMessage::OwnerStoredV1 {

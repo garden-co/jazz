@@ -338,10 +338,10 @@ fn malformed_read_content_or_origins_cannot_bypass_authority_validation() {
 fn read_content_and_commit_kind_match_independent_versioned_fixtures() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/owner-read-content.json"
+        "../fixtures/sqlite-sync-v3/owner-read-content.json"
     ))
     .unwrap();
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     assert_eq!(fixture["wireRole"], "jazz.sqlite.serializable-observed.v1");
     assert_eq!(
         fixture["contentRole"],

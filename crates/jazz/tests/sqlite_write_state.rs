@@ -330,11 +330,11 @@ fn relay_uploads_wait_for_authority_acceptance() {
 /// This lower-level fixture deliberately freezes the durable result envelope:
 /// authorities already use these bytes, and replicas now persist them too.
 #[test]
-fn write_fate_v1_keeps_the_existing_postcard_encoding() {
+fn write_fate_v2_keeps_the_current_postcard_encoding() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite_write_fate_v1.json")).unwrap();
-    assert_eq!(fixture["role"], "jazz.sqlite.write-fate.v1");
-    assert_eq!(fixture["version"], 1);
+        serde_json::from_str(include_str!("../fixtures/sqlite_write_fate_v2.json")).unwrap();
+    assert_eq!(fixture["role"], "jazz.sqlite.write-fate.v2");
+    assert_eq!(fixture["version"], 2);
     let cases = [
         ("accepted", Ok(())),
         ("conflict", Err(WireError::Conflict("no".into()))),

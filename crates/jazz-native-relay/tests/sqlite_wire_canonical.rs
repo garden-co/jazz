@@ -18,17 +18,18 @@ impl WireTransport for Frames {
 /// become Alice's valid unsubscribe or allow a later frame to resume the stream.
 #[test]
 fn overlong_sqlite_varints_fail_the_carrier() {
-    // Independent v2 header and canonical Unsubscribe(128) field bytes.
-    let valid = vec![b'J', b'S', b'Q', b'L', 2, 1, 128, 1];
+    // Independent v3 header and canonical Unsubscribe(128) field bytes.
+    let valid = vec![b'J', b'S', b'Q', b'L', 3, 1, 128, 1];
     let mut alice = NativeRelayTransport::current(Frames(VecDeque::from([valid.clone()])));
     assert!(matches!(
         alice.try_recv(),
         Some(SyncMessage::Unsubscribe { id: 128 })
     ));
     for malformed in [
-        vec![b'J', b'S', b'Q', b'L', 2, 129, 0, 128, 1],
-        vec![b'J', b'S', b'Q', b'L', 2, 1, 128, 129, 0],
-        vec![1, 128, 1], // Historical v1 is refused too.
+        vec![b'J', b'S', b'Q', b'L', 3, 129, 0, 128, 1],
+        vec![b'J', b'S', b'Q', b'L', 3, 1, 128, 129, 0],
+        vec![b'J', b'S', b'Q', b'L', 2, 1, 128, 1], // Historical v2.
+        vec![1, 128, 1],                            // Historical v1 is refused too.
     ] {
         let mut mallory =
             NativeRelayTransport::current(Frames(VecDeque::from([malformed, valid.clone()])));

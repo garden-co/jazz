@@ -397,11 +397,11 @@ fn invalid_allocator_records_fail_open_explicitly() {
 #[test]
 fn read_only_commits_keep_the_existing_wire_layout() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/readonly-commit.json"
+        "../fixtures/sqlite-sync-v3/readonly-commit.json"
     ))
     .unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.read-only-commit.v1");
-    assert_eq!(fixture["version"], 2);
+    assert_eq!(fixture["version"], 3);
     let message: jazz::db::SyncMessage =
         serde_json::from_value(fixture["message"].clone()).unwrap();
     let bytes = jazz::db::encode_message(&message).unwrap();

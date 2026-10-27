@@ -12,13 +12,13 @@ fn bytes(hex: &str) -> Vec<u8> {
     hex::decode(hex).unwrap()
 }
 
-/// Alice's current peer reads independently specified v2 frames and writes
+/// Alice's current peer reads independently specified v3 frames and writes
 /// exactly the same bytes, including per-operation timestamps and writer IDs.
 #[test]
 fn sync_v2_has_independent_byte_fixtures() {
     let fixtures: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/frames.json")).unwrap();
-    assert_eq!(fixtures["encoding"], "jazz.sqlite.sync.v2");
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/frames.json")).unwrap();
+    assert_eq!(fixtures["encoding"], "jazz.sqlite.sync.v3");
     for case in fixtures["cases"].as_array().unwrap() {
         let frame = bytes(case["frame_hex"].as_str().unwrap());
         let expected: SyncMessage = serde_json::from_value(case["message"].clone()).unwrap();
@@ -40,9 +40,9 @@ fn sync_v2_refuses_foreign_and_noncanonical_bytes() {
     for malformed in [
         "018001",             // Old SQLite Unsubscribe, without an envelope.
         "4a53514c01018001",   // Explicit older codec.
-        "4a53514c03018001",   // Future codec.
-        "4a53514c0201808100", // Noncanonical encoding of 128.
-        "4a53514c0201800100", // Valid message with a suffix.
+        "4a53514c04018001",   // Future codec.
+        "4a53514c0301808100", // Noncanonical encoding of 128.
+        "4a53514c0301800100", // Valid message with a suffix.
     ] {
         assert!(decode_message(&bytes(malformed)).is_err(), "{malformed}");
     }
@@ -52,7 +52,7 @@ fn sync_v2_refuses_foreign_and_noncanonical_bytes() {
 /// and none of its partial rows is delivered to Alice's database.
 #[test]
 fn sync_v2_bounds_fragment_count_and_rejects_interleaving() {
-    let part = bytes("4a53514c021400");
+    let part = bytes("4a53514c031400");
     let mut joiner = FrameJoiner::default();
     for _ in 0..jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES {
         assert!(joiner.push(&part).unwrap().is_none());
@@ -60,7 +60,7 @@ fn sync_v2_bounds_fragment_count_and_rejects_interleaving() {
     assert!(joiner.push(&part).is_err());
     let mut joiner = FrameJoiner::default();
     assert!(joiner.push(&part).unwrap().is_none());
-    assert!(joiner.push(&bytes("4a53514c020101")).is_err());
+    assert!(joiner.push(&bytes("4a53514c030101")).is_err());
     let oversized = vec![0; jazz::protocol_limits::MAX_WIRE_FRAME_BYTES + 1];
     assert!(decode_message(&oversized).is_err());
 }

@@ -42,7 +42,7 @@ async fn malformed_sqlite_message_closes_only_its_session() {
         vec![1, 128, 129, 0],
     ]
     .map(|body| {
-        let mut frame = b"JSQL\x02".to_vec();
+        let mut frame = b"JSQL\x03".to_vec();
         frame.extend(body);
         frame
     }) {

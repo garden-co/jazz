@@ -627,7 +627,7 @@ fn malformed_or_downgraded_union_receipts_are_rejected() {
 fn union_answer_v1_has_fixed_complete_bytes() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/union-answer.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/union-answer.json")).unwrap();
     assert_eq!(fixture["role"], "jazz.sqlite.sync.union-answer.v1");
     for (key, id, through, occurrences) in [
         (
@@ -1626,7 +1626,7 @@ fn live_union_relay_refuses_identity_and_claim_substitution() {
 fn live_union_coverage_pairs_have_fixed_bytes() {
     use jazz::db::SyncMessage;
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/union-answer.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/union-answer.json")).unwrap();
     assert_eq!(fixture["live_role"], "jazz.sqlite.sync.union-coverage.v1");
     for (key, id, through, global) in [
         ("global_pair", 128, 300, true),

@@ -81,13 +81,17 @@ fn schema() -> JazzSchema {
 }
 
 fn open_db() -> Db {
+    open_db_as(writer())
+}
+
+fn open_db_as(author: AuthorSubject) -> Db {
     let schema = schema();
     let db = block_on(Db::open(
         DbConfig::new(
             schema,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x81; 16]),
-                author: writer(),
+                author,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x8100)),
@@ -267,7 +271,7 @@ fn exact_mixed_reentry_delta(
 /// writer ──full/partial update or upsert──► hidden document ──► denied
 #[test]
 fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
-    let db = open_db();
+    let db = open_db_as(AuthorSubject::SYSTEM);
     let authorized_team = row(0x11);
     let winner = row(0x21);
     let second = row(0x22);
@@ -404,7 +408,7 @@ fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
 
 #[test]
 fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
-    let db = open_db();
+    let db = open_db_as(AuthorSubject::SYSTEM);
     let authorized_team = row(0x11);
     let unauthorized_team = row(0x12);
     let winner = row(0x21);

@@ -721,7 +721,7 @@ fn initialization_wire_encoding_fixture() {
         "ops":[],"author":null,"session":null,"expect":[]
     }})).unwrap();
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/initialization.json"
+        "../fixtures/sqlite-sync-v3/initialization.json"
     ))
     .unwrap();
     let bytes = jazz::db::encode_message(&message).unwrap();
@@ -963,7 +963,10 @@ fn write_only_ack_preserves_exact_initialization_image() {
         )
         .is_err()
     );
-    assert_eq!(rows(&alice), vec![(row(1), "founder".into())]);
+    assert!(
+        rows(&alice).is_empty(),
+        "the write-only image is evicted from Alice's cache"
+    );
     assert_eq!(rows(&bob), vec![(row(1), "founder".into())]);
 }
 

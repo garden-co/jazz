@@ -301,6 +301,10 @@ fn policy_with_all_writes(read: PolicyExpr) -> TablePolicies {
 }
 
 fn open_db() -> (Db, JazzSchema) {
+    open_db_as(AuthorSubject::for_test_bytes([0x63; 16]))
+}
+
+fn open_db_as(author: AuthorSubject) -> (Db, JazzSchema) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -317,7 +321,7 @@ fn open_db() -> (Db, JazzSchema) {
             schema.clone(),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x62; 16]),
-                author: AuthorSubject::for_test_bytes([0x63; 16]),
+                author,
             },
         )
         .with_id_source(SeededRowIdSource::new(1)),
@@ -617,7 +621,7 @@ fn branch_upsert_after_staged_delete_replaces_the_pending_tombstone() {
 /// alice ──insert/upsert rows──► tx overlay ──upsert same rows──► merged content
 #[test]
 fn session_transaction_can_upsert_its_staged_branch_rows_again() {
-    let (db, _) = open_db();
+    let (db, _) = open_db_as(AuthorSubject::SYSTEM);
     let alice = AuthorSubject::for_test_bytes([0xbd; 16]);
     let head = selector(0xbe);
     let inserted_row = RowUuid::from_bytes([0xbf; 16]);

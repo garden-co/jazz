@@ -439,7 +439,7 @@ fn pending_union_read_evidence_survives_reopen() {
 #[test]
 fn union_read_content_and_wire_kind_match_versioned_fixtures() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../fixtures/sqlite-sync-v2/union-read-content.json"
+        "../fixtures/sqlite-sync-v3/union-read-content.json"
     ))
     .unwrap();
     let client = block_on(Db::open(config(1))).unwrap();

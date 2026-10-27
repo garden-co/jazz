@@ -431,7 +431,7 @@ fn reconnect_cannot_silently_replace_the_private_owner() {
 #[test]
 fn owner_ready_v1_matches_independent_bytes() {
     let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v2/owner-ready.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/sqlite-sync-v3/owner-ready.json")).unwrap();
     let bytes: Vec<u8> = fixture["readyHex"]
         .as_str()
         .unwrap()

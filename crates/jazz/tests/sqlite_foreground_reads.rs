@@ -253,6 +253,7 @@ fn foreground_fallback_keeps_owner_rows_and_local_tier() {
         if timeout {
             std::thread::sleep(Duration::from_millis(100));
         } else {
+            owner.set_remote_link_hint(RemoteLinkHint::Failed);
             tab.set_remote_link_hint(RemoteLinkHint::Failed);
         }
         assert_eq!(
@@ -605,9 +606,11 @@ fn attempting_foreground_has_a_bounded_host_wake() {
     insert(&owner, "cached");
     let tab = open(1, false);
     tab.set_non_durable_client();
+    owner.set_remote_link_hint(RemoteLinkHint::Attempting);
     tab.set_remote_link_hint(RemoteLinkHint::Attempting);
     connect(&tab, &owner);
     let scheduler = Rc::new(Earliest::default());
+    owner.set_tick_scheduler(Some(scheduler.clone()));
     tab.set_tick_scheduler(Some(scheduler.clone()));
     let mut stream = subscribe(&tab, opts(60_000));
     for _ in 0..3 {
@@ -667,9 +670,11 @@ fn restarted_attempt_rearms_after_the_hosts_older_timer() {
     insert(&owner, "cached");
     let tab = open(1, false);
     tab.set_non_durable_client();
+    owner.set_remote_link_hint(RemoteLinkHint::Attempting);
     tab.set_remote_link_hint(RemoteLinkHint::Attempting);
     connect(&tab, &owner);
     let scheduler = Rc::new(Earliest::default());
+    owner.set_tick_scheduler(Some(scheduler.clone()));
     tab.set_tick_scheduler(Some(scheduler.clone()));
     let mut stream = subscribe(&tab, opts(60_000));
     for _ in 0..3 {
@@ -679,6 +684,7 @@ fn restarted_attempt_rearms_after_the_hosts_older_timer() {
     std::thread::sleep(
         original.saturating_duration_since(Instant::now()) + Duration::from_millis(20),
     );
+    owner.set_remote_link_hint(RemoteLinkHint::Attempting);
     tab.set_remote_link_hint(RemoteLinkHint::Attempting);
     assert!(scheduler.0.borrow_mut().take().unwrap() <= Instant::now());
     block_on(tab.tick()).unwrap();
@@ -693,6 +699,7 @@ fn restarted_attempt_rearms_after_the_hosts_older_timer() {
             <= jazz::db::REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(10)
     );
     assert!(stream.try_next_event().is_none());
+    owner.set_remote_link_hint(RemoteLinkHint::Failed);
     tab.set_remote_link_hint(RemoteLinkHint::Failed);
     assert_eq!(
         opening(&mut stream, &[&tab, &owner, &tab]),
