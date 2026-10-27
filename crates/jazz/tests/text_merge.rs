@@ -301,6 +301,44 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
     net.assert_everywhere(row, "body", "Hi! Hello! big world");
 }
 
+/// A chain link that left the column alone stores the value the authority
+/// held, edits its writer never saw included: the next link's base passes
+/// it by, to what the writer last saw of the column.
+#[test]
+fn a_chain_link_that_left_the_column_alone_hides_no_missed_edit() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "Hello"), ("title", "seed")]);
+    net.offline(0);
+    let title = net.edit(0, row, &[("title", "greeting")]);
+    let body = net.edit(0, row, &[("body", "Hello world")]);
+    let bob = net.edit(1, row, &[("body", "Oh Hello")]);
+    net.settle(1, bob);
+    net.online(0);
+    net.settle(0, title);
+    net.settle(0, body);
+    net.assert_everywhere(row, "body", "Oh Hello world");
+    net.assert_everywhere(row, "title", "greeting");
+}
+
+/// The same chain where the writer went on to merge: the second link
+/// authored the column, so the third merges over it as sent.
+#[test]
+fn a_chain_merges_over_the_last_link_that_authored_the_column() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "one"), ("title", "seed")]);
+    net.offline(0);
+    let first = net.edit(0, row, &[("body", "one two")]);
+    let title = net.edit(0, row, &[("title", "numbers")]);
+    let third = net.edit(0, row, &[("body", "one two three")]);
+    let bob = net.edit(1, row, &[("body", "zero one")]);
+    net.settle(1, bob);
+    net.online(0);
+    for tx in [first, title, third] {
+        net.settle(0, tx);
+    }
+    net.assert_everywhere(row, "body", "zero one two three");
+}
+
 #[test]
 fn only_a_write_that_missed_an_edit_to_the_column_merges() {
     let mut net = Net::new(2);
@@ -394,6 +432,9 @@ fn large_values_merge_edits_at_both_ends() {
     net.online(1);
     net.settle(1, bob);
     net.assert_everywhere(row, "body", &format!("Preface. {base} The end."));
+    // The merged value is stored as a local write's would be: chunked.
+    let stored = net.core.stored_bytes_for_test("docs", row, "body").unwrap();
+    assert!(stored < 64 * 1024, "{stored} bytes stored inline");
 }
 
 #[test]

@@ -27,9 +27,11 @@ use crate::options::{Error, ErrorCode};
 use crate::schema::TextFormat;
 use std::collections::HashMap;
 
-/// Past this many edit steps in one diff the changed middle is treated as
-/// one replacement, so a rewrite costs linear time.
-const MAX_EDIT_DISTANCE: usize = 4096;
+/// Past this many edit steps, one search of a diff stops looking for the
+/// shortest edit and splits where it got furthest instead: the diff stays
+/// a fine-grained (if not minimal) one, and a heavily edited value costs
+/// time in proportion to its size times this bound, not its size squared.
+const MAX_EDIT_DISTANCE: usize = 256;
 
 fn malformed(message: impl std::fmt::Display) -> Error {
     Error::new(
@@ -46,9 +48,10 @@ pub(crate) struct Edit {
     pub insert: String,
 }
 
-/// The edit that turns `from` into `to`: their differing middle, past the
-/// common prefix and suffix (none when they are equal).
-pub(crate) fn edits(from: &str, to: &str) -> Vec<Edit> {
+/// The edits that turn `from` into `to`, token by token past their common
+/// prefix and suffix (none when they are equal), so a value changed in a few
+/// places keeps only those places.
+pub(crate) fn edits(format: TextFormat, from: &str, to: &str) -> Vec<Edit> {
     if from == to {
         return Vec::new();
     }
@@ -71,11 +74,30 @@ pub(crate) fn edits(from: &str, to: &str) -> Vec<Edit> {
     while !from.is_char_boundary(from.len() - suffix) || !to.is_char_boundary(to.len() - suffix) {
         suffix -= 1;
     }
-    vec![Edit {
-        start: prefix,
-        end: from.len() - suffix,
-        insert: to[prefix..to.len() - suffix].to_owned(),
-    }]
+    let (old, new) = (
+        &from[prefix..from.len() - suffix],
+        &to[prefix..to.len() - suffix],
+    );
+    let (old_tokens, new_tokens) = (tokenize(format, old), tokenize(format, new));
+    let offsets = |tokens: &[&str]| {
+        let mut at = 0;
+        let mut offsets = Vec::with_capacity(tokens.len() + 1);
+        offsets.push(0);
+        for token in tokens {
+            at += token.len();
+            offsets.push(at);
+        }
+        offsets
+    };
+    let (old_at, new_at) = (offsets(&old_tokens), offsets(&new_tokens));
+    diff(&old_tokens, &new_tokens)
+        .into_iter()
+        .map(|hunk| Edit {
+            start: prefix + old_at[hunk.old.0],
+            end: prefix + old_at[hunk.old.1],
+            insert: new[new_at[hunk.new.0]..new_at[hunk.new.1]].to_owned(),
+        })
+        .collect()
 }
 
 /// `value` with `edits` (ordered, disjoint, at char boundaries) applied.
@@ -252,7 +274,11 @@ fn resolve(base: &[&str], start: usize, end: usize, cluster: &[Change], out: &mu
     let unions = cluster
         .iter()
         .all(|change| change.deletes_only() || change.inserts_only());
-    if one_side || unions {
+    // A side that only inserts replaces nothing: the other side's
+    // replacements and its inserts all apply.
+    let inserts_beside = cluster.iter().filter(|c| c.held).all(Change::inserts_only)
+        || cluster.iter().filter(|c| !c.held).all(Change::inserts_only);
+    if one_side || unions || inserts_beside {
         // Deletes unioned, inserts kept in base order (held first).
         let mut deleted = vec![false; end - start];
         for change in cluster {
@@ -357,7 +383,8 @@ fn diff_range(
 
 /// A split point (x, y) on an optimal edit path of `a` into `b` that is
 /// neither (0, 0) nor the end, found by the forward and reverse Myers
-/// searches meeting; `None` past [`MAX_EDIT_DISTANCE`].
+/// searches meeting, or past [`MAX_EDIT_DISTANCE`] the furthest point the
+/// forward search reached.
 fn middle_snake(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
     let (n, m) = (a.len() as isize, b.len() as isize);
     let max = ((n + m + 1) / 2).min(MAX_EDIT_DISTANCE as isize);
@@ -417,7 +444,21 @@ fn middle_snake(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
             k += 2;
         }
     }
-    None
+    // Too costly to find the shortest edit: split where the forward search
+    // got furthest. The part before it costs at most `max` edits; the rest
+    // is diffed on its own.
+    let mut best: Option<(isize, isize)> = None;
+    let mut k = -max;
+    while k <= max {
+        let x = forward[(k + offset) as usize];
+        let y = x - k;
+        let on_grid = (0..=n).contains(&x) && (0..=m).contains(&y);
+        if on_grid && best.is_none_or(|(bx, by)| x + y > bx + by) {
+            best = Some((x, y));
+        }
+        k += 2;
+    }
+    best.and_then(|(x, y)| split(x, y, x, y, n, m))
 }
 
 /// A split strictly inside the problem: the snake's start, or its end when
@@ -448,8 +489,42 @@ fn tokenize(format: TextFormat, text: &str) -> Vec<&str> {
     tokens
 }
 
-/// The byte length of the token `rest` starts with (at least one char).
+/// How far a tag, link destination or entity is looked for (each search
+/// also stops at what cannot be inside one): an unclosed `<`, `](` or `&`
+/// is then one char, and cutting a value stays linear.
+const TAG_MAX_BYTES: usize = 512;
+const ENTITY_MAX_BYTES: usize = 32;
+
+/// The byte length of the token `rest` starts with (at least one char),
+/// with the marks, joiners and modifiers that complete its last character.
 fn token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
+    let len = base_token_len(format, rest, line_start);
+    len + grapheme_tail(&rest[len..])
+}
+
+/// How much of `rest` continues the character before it: combining marks,
+/// variation selectors and emoji modifiers, and after a zero-width joiner
+/// the character it joins (with its own tail).
+fn grapheme_tail(rest: &str) -> usize {
+    let mut at = 0;
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{200d}' {
+            at += c.len_utf8();
+            match chars.next() {
+                Some(joined) => at += joined.len_utf8(),
+                None => break,
+            }
+        } else if extends(c) {
+            at += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    at
+}
+
+fn base_token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
     let first = rest.chars().next().expect("non-empty");
     let run = |pred: &dyn Fn(char) -> bool| -> usize {
         rest.char_indices()
@@ -459,16 +534,24 @@ fn token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
     match format {
         TextFormat::Html => {
             if first == '<'
-                && let Some(end) = rest.find('>')
+                && let Some(end) = rest
+                    .bytes()
+                    .take(TAG_MAX_BYTES)
+                    .skip(1)
+                    .position(|b| b == b'>' || b == b'<')
+                    .map(|at| at + 1)
+                && rest.as_bytes()[end] == b'>'
             {
                 return end + 1;
             }
             if first == '&'
-                && let Some(end) = rest.find(';')
-                && end <= 32
-                && rest[1..end]
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '#')
+                && let Some(end) = rest
+                    .bytes()
+                    .take(ENTITY_MAX_BYTES)
+                    .skip(1)
+                    .position(|b| !(b.is_ascii_alphanumeric() || b == b'#'))
+                    .map(|at| at + 1)
+                && rest.as_bytes()[end] == b';'
             {
                 return end + 1;
             }
@@ -487,8 +570,13 @@ fn token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
                 }
             }
             if rest.starts_with("](")
-                && let Some(end) = rest.find(')')
-                && !rest[..end].contains('\n')
+                && let Some(end) = rest
+                    .bytes()
+                    .take(TAG_MAX_BYTES)
+                    .skip(2)
+                    .position(|b| matches!(b, b')' | b'\n' | b'[' | b']'))
+                    .map(|at| at + 2)
+                && rest.as_bytes()[end] == b')'
             {
                 return end + 1;
             }
@@ -498,11 +586,70 @@ fn token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
         }
         TextFormat::Plain => {}
     }
-    if first.is_alphanumeric() {
-        run(&|c| c.is_alphanumeric())
+    if word(first) {
+        run(&|c| word(c) || extends(c))
     } else {
         first.len_utf8()
     }
+}
+
+/// Whether `c` belongs to a word: an ASCII letter or digit, or any other
+/// character outside the punctuation, symbol and space blocks and the
+/// scripts written without spaces between words (whose characters are
+/// tokens of their own, as are emoji). The tables are fixed here, not taken
+/// from the toolchain's Unicode version, so every authority cuts a value
+/// the same way.
+fn word(c: char) -> bool {
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric();
+    }
+    let c = c as u32;
+    let not_word: &[(u32, u32)] = &[
+        (0x0080, 0x00BF), // Latin-1 controls, punctuation and symbols
+        (0x00D7, 0x00D7), // ×
+        (0x00F7, 0x00F7), // ÷
+        (0x0E00, 0x0FFF), // Thai, Lao, Tibetan
+        (0x1000, 0x109F), // Myanmar
+        (0x1680, 0x1680), // Ogham space
+        (0x1780, 0x17FF), // Khmer
+        (0x2000, 0x2BFF), // spaces, punctuation, symbols, arrows, math, shapes
+        (0x2E00, 0x2E7F), // supplemental punctuation
+        (0x2E80, 0x303F), // CJK radicals, ideographic description, CJK punctuation
+        (0x3040, 0x31FF), // kana, bopomofo, CJK strokes
+        (0x3400, 0x4DBF), // CJK extension A
+        (0x4E00, 0x9FFF), // CJK unified ideographs
+        (0xA000, 0xA4CF), // Yi
+        (0xF900, 0xFAFF), // CJK compatibility ideographs
+        (0xFE30, 0xFE4F), // CJK compatibility forms
+        (0xFE50, 0xFE6F), // small form variants
+        (0xFF00, 0xFF0F), // fullwidth punctuation
+        (0xFF1A, 0xFF20),
+        (0xFF3B, 0xFF40),
+        (0xFF5B, 0xFF65),
+        (0xFF66, 0xFF9F),   // halfwidth kana
+        (0xFFF0, 0xFFFF),   // specials
+        (0x1F000, 0x1FAFF), // emoji and pictographs
+        (0x20000, 0x3FFFF), // CJK extensions B on
+    ];
+    !not_word.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
+}
+
+/// Whether `c` completes the character before it rather than starting one:
+/// a combining mark, variation selector, emoji skin-tone modifier or tag.
+fn extends(c: char) -> bool {
+    let c = c as u32;
+    let marks: &[(u32, u32)] = &[
+        (0x0300, 0x036F),
+        (0x1AB0, 0x1AFF),
+        (0x1DC0, 0x1DFF),
+        (0x20D0, 0x20FF),
+        (0xFE00, 0xFE0F),
+        (0xFE20, 0xFE2F),
+        (0x1F3FB, 0x1F3FF),
+        (0xE0020, 0xE007F),
+        (0xE0100, 0xE01EF),
+    ];
+    marks.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
 }
 
 #[cfg(test)]
@@ -564,7 +711,7 @@ mod tests {
             ("a\nb\nc", "a\nB\nc\nd"),
         ];
         for (from, to) in cases {
-            let edits = edits(from, to);
+            let edits = edits(TextFormat::Plain, from, to);
             assert_eq!(apply(from, &edits).unwrap(), to, "{from:?} -> {to:?}");
             let entries = vec![("body".to_owned(), edits.clone())];
             assert_eq!(decode_in(&encode_in(&entries)).unwrap(), entries);
@@ -604,6 +751,107 @@ mod tests {
             ),
             "<p>zero one <b>two</b></p>"
         );
+    }
+
+    #[test]
+    fn an_insert_beside_a_replacement_keeps_both() {
+        // The held write replaces "two three"; the incoming one inserts
+        // inside it. Neither replaces what the other did.
+        assert_eq!(
+            merge(
+                "one two three four",
+                "one 2-3 four",
+                "one two and three four"
+            ),
+            "one 2-3and  four"
+        );
+    }
+
+    #[test]
+    fn unspaced_scripts_and_graphemes_tokenize_by_character() {
+        let tokens = tokenize(TextFormat::Plain, "日本語の文章です");
+        assert_eq!(tokens.len(), 8);
+        // Two inserts into one sentence both land.
+        assert_eq!(
+            merge(
+                "日本語の文章です",
+                "日本語の長い文章です",
+                "日本語の文章でした"
+            ),
+            "日本語の長い文章でした"
+        );
+        assert_eq!(
+            tokenize(TextFormat::Plain, "cafe\u{301} au lait")[0],
+            "cafe\u{301}"
+        );
+        assert_eq!(tokenize(TextFormat::Plain, "👍🏽!"), vec!["👍🏽", "!"]);
+        assert_eq!(
+            tokenize(TextFormat::Plain, "👩\u{200d}💻 x")[0],
+            "👩\u{200d}💻"
+        );
+    }
+
+    #[test]
+    fn unclosed_delimiters_are_one_char_and_cutting_stays_linear() {
+        assert_eq!(
+            tokenize(TextFormat::Html, "< b then\n<p>")[..3],
+            ["<", " ", "b"]
+        );
+        assert!(tokenize(TextFormat::Html, "a<p>b").contains(&"<p>"));
+        assert_eq!(tokenize(TextFormat::Html, "&amp x;")[0], "&");
+        assert_eq!(tokenize(TextFormat::Markdown, "](x\ny)")[0], "]");
+        for (format, unit) in [
+            (TextFormat::Html, "1 < 2 "),
+            (TextFormat::Html, "a & b "),
+            (TextFormat::Markdown, "]( x "),
+        ] {
+            let text = unit.repeat(400_000 / unit.len());
+            let started = std::time::Instant::now();
+            let tokens = tokenize(format, &text);
+            assert_eq!(tokens.concat(), text);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "{unit:?} took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    #[test]
+    fn stored_edits_keep_only_the_changed_places() {
+        let from = format!("start {} end", "middle ".repeat(10_000));
+        let to = format!("begin {} finish", "middle ".repeat(10_000));
+        let edits = edits(TextFormat::Plain, &from, &to);
+        assert_eq!(apply(&from, &edits).unwrap(), to);
+        assert!(edits.iter().map(|e| e.insert.len()).sum::<usize>() < 20);
+    }
+
+    #[test]
+    fn heavily_edited_values_lose_no_edits() {
+        // Distinct words, so every edit lands in a token of its own.
+        let words: Vec<String> = (0..60_000).map(|i| format!("w{i}")).collect();
+        let base = words.join(" ");
+        let edited = |side: char, every: usize, from: usize| {
+            let mut out = words.clone();
+            let mut markers = Vec::new();
+            for i in (from..out.len()).step_by(every) {
+                let marker = format!("{side}{i}");
+                out[i] = format!("{} {marker}", out[i]);
+                markers.push(marker);
+            }
+            (out.join(" "), markers)
+        };
+        // Thousands of edits a side: far past one search's bound.
+        let (held, held_markers) = edited('H', 13, 0);
+        let (incoming, incoming_markers) = edited('I', 17, 5);
+        let merged = merge(&base, &held, &incoming);
+        let words: std::collections::HashSet<&str> = merged.split(' ').collect();
+        let lost = held_markers
+            .iter()
+            .chain(&incoming_markers)
+            .filter(|marker| !words.contains(marker.as_str()))
+            .count();
+        assert_eq!(lost, 0, "{lost} edits lost");
     }
 
     /// A small deterministic generator, so the property test needs no
@@ -676,7 +924,7 @@ mod tests {
             let (held, held_inserts) = random_edit(&mut rng, &base, 'H', held_deletes);
             let (incoming, incoming_inserts) = random_edit(&mut rng, &base, 'I', incoming_deletes);
             for (from, to) in [(&base, &held), (&base, &incoming), (&held, &incoming)] {
-                let edits = edits(from, to);
+                let edits = edits(TextFormat::Plain, from, to);
                 assert_eq!(&apply(from, &edits).unwrap(), to);
             }
             let merged = merge(&base, &held, &incoming);

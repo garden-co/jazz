@@ -3526,7 +3526,7 @@ impl Inner {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                     match self.text_merged(table, row, held, at, column, value)? {
-                        Some(merged) => merged,
+                        Some(merged) => Value::String(merged),
                         None => continue,
                     }
                 }
@@ -3567,7 +3567,7 @@ impl Inner {
         at: Option<(&[u8], u64)>,
         column: &crate::values::Column,
         value: &Value,
-    ) -> Result<Option<Value>, Error> {
+    ) -> Result<Option<String>, Error> {
         let Some((key, seq)) = at else {
             return Ok(None);
         };
@@ -3577,7 +3577,11 @@ impl Inner {
         };
         let merged = self.text_merge(table, row, held, (key, seq), built, column, value)?;
         let sent = match &merged {
-            Some((merged, incoming)) => crate::text_merge::edits(merged, incoming),
+            Some((merged, incoming)) => crate::text_merge::edits(
+                column.merge.text_format().expect("a text strategy"),
+                merged,
+                incoming,
+            ),
             None => Vec::new(),
         };
         self.text_in
@@ -3585,11 +3589,13 @@ impl Inner {
             .entry(version)
             .or_default()
             .insert(column.stored.clone(), sent);
-        Ok(merged.map(|(merged, _)| Value::String(merged)))
+        Ok(merged.map(|(merged, _)| merged))
     }
 
     /// [`Self::text_merged`]'s merge, with the write's value: `None` when
-    /// there is nothing to merge or the merge leaves the value as sent.
+    /// there is nothing to merge or the merge leaves the value as sent. The
+    /// fast path reads no value: whether to merge is decided first, from
+    /// the row's `_base` and `_cols` alone.
     #[allow(clippy::too_many_arguments)]
     fn text_merge(
         &self,
@@ -3601,24 +3607,29 @@ impl Inner {
         column: &crate::values::Column,
         value: &Value,
     ) -> Result<Option<(String, String)>, Error> {
-        let Some(current) = held
-            .map(|held| self.cell_at(table, row, held, &column.name))
-            .transpose()?
-            .flatten()
-        else {
+        let Some(held) = held else {
             return Ok(None);
         };
-        let current = self.logical_text(&column.name, &current)?;
+        let current = |db: &Self| -> Result<Option<String>, Error> {
+            db.cell_at(table, row, held, &column.name)?
+                .map(|current| db.logical_text(&column.name, &current))
+                .transpose()
+        };
         let earlier = self
             .text_in
             .borrow()
             .get(&(table.stored.clone(), row, key.to_vec()))
             .and_then(|columns| columns.get(&column.stored).cloned());
-        let base = match earlier {
+        let (base, current) = match earlier {
             // Built on an earlier write of the same upload, as sent.
-            Some(sent) => crate::text_merge::apply(&current, &sent)?,
+            Some(sent) => {
+                let Some(current) = current(self)? else {
+                    return Ok(None);
+                };
+                (crate::text_merge::apply(&current, &sent)?, current)
+            }
             None => {
-                let Some(base) =
+                let Some((base, on)) =
                     self.merge_base((&table.stored, row, key), built, seq, &column.stored)?
                 else {
                     return Ok(None);
@@ -3626,15 +3637,18 @@ impl Inner {
                 let Some(base) = from_sql(&column.ty, base.as_ref(), &self.chunks)? else {
                     return Ok(None);
                 };
-                let base = self.logical_text(&column.name, &base)?;
-                match built {
-                    // A base on a commit is its value as sent, not as merged.
-                    sync::Built::On(on) => crate::text_merge::apply(
+                let mut base = self.logical_text(&column.name, &base)?;
+                // A base on a commit is its value as sent, not as merged.
+                if let Some(on) = on {
+                    base = crate::text_merge::apply(
                         &base,
                         &self.sent_edits((&table.stored, row, key), on, &column.stored)?,
-                    )?,
-                    sync::Built::Seq(_) => base,
+                    )?;
                 }
+                let Some(current) = current(self)? else {
+                    return Ok(None);
+                };
+                (base, current)
             }
         };
         let incoming = self.logical_text(&column.name, value)?;
@@ -3685,6 +3699,7 @@ impl Inner {
     /// text merges made back to the values as sent (`_jazz_text_in`, made
     /// on the first merge that changes a value).
     pub(crate) fn record_text_in(&self, seq: u64) -> Result<(), Error> {
+        let mut created = false;
         for ((table, row, key), edits) in std::mem::take(&mut *self.text_in.borrow_mut()) {
             let entries: Vec<_> = edits
                 .into_iter()
@@ -3693,7 +3708,10 @@ impl Inner {
             if entries.is_empty() {
                 continue;
             }
-            self.conn.execute_batch(TEXT_IN_DDL).map_err(storage)?;
+            if !created {
+                self.conn.execute_batch(TEXT_IN_DDL).map_err(storage)?;
+                created = true;
+            }
             self.exec(
                 "INSERT OR REPLACE INTO _jazz_text_in (t, id, k, seq, edits) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
