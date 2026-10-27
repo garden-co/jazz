@@ -69,6 +69,7 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::BranchMove => "branch_move",
         Reason::MissingChunks => "missing_chunks",
         Reason::PermissionsHeadMissing => "permissions_head_missing",
+        Reason::PredecessorRejected => "predecessor_rejected",
     }
 }
 

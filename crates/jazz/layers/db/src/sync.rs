@@ -57,7 +57,11 @@ use super::*;
 #[path = "large_link.rs"]
 mod large_link;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
+
+#[path = "sync_conflicts.rs"]
+mod conflicts;
 pub use crate::wire::TransportError;
+pub use conflicts::WriteConflict;
 pub use large_link::{CellDelta, WireDelta};
 
 /// Wall-clock Unix ms.
@@ -436,6 +440,33 @@ fn echo_digest(image: &Image) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
+/// What the writer of a row version built it on (SPEC 4 §4.6, "Base of a
+/// write"): the version of the row its image was, in names the receiver
+/// knows. A write over no held image (an insert, a blind write) sends none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireBase {
+    /// The commit's first op that writes the row.
+    pub op: u32,
+    /// The row's branch key (empty unbranched).
+    pub key: Vec<u8>,
+    pub on: BuiltOn,
+}
+
+/// The version a write was built on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BuiltOn {
+    /// An accepted version, by its upstream seq. From a relay's session it
+    /// may be the relay's own unsettled version (a seq from `LOCAL_BASE`
+    /// up), which the relay renames to the commit that wrote it.
+    Seq(u64),
+    /// The sender's own unsettled commit `back` txs before this one: the
+    /// writer saw that commit as it sent it, and what that was built on.
+    Own { back: u64 },
+    /// An unsettled commit by its sender's (node, tx), as a relay names one
+    /// of its own commits.
+    Commit { node: [u8; 16], tx: u64 },
+}
+
 /// A row of a commit's `expect` the server did not ship (see
 /// `SyncMessage::Fate`), with the authority's [`STAMPS`] for it: `None`
 /// where its version has no such cell.
@@ -717,6 +748,15 @@ pub enum SyncMessage {
         /// The ops' chunked cells that travel as edits extending a value
         /// that crossed the link before; only on the wire (SPEC 19.8).
         deltas: Vec<CellDelta>,
+        /// The base of each row the commit writes over an image its
+        /// writer held (SPEC 4 §4.6); a row it inserted, or wrote without
+        /// holding, has none. Only the authority's conflict derivation
+        /// reads it (INV-HIST-21).
+        bases: Vec<WireBase>,
+        /// The session commit a relay uploads this one for, as (node, tx),
+        /// when it is not the sender's own: the writer its bases' unnamed
+        /// `pending` nodes stand for.
+        origin: Option<([u8; 16], u64)>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -893,6 +933,68 @@ struct Pending {
     expected: Vec<Image>,
 }
 
+/// A replica's unsettled commits, in commit order, with the pending txs of
+/// each row they write (so an upload finds a row's newest pending commit
+/// without scanning the queue).
+#[derive(Default)]
+struct PendingQueue {
+    commits: Vec<Pending>,
+    by_row: HashMap<RowKey, BTreeSet<u64>>,
+}
+
+impl std::ops::Deref for PendingQueue {
+    type Target = [Pending];
+
+    fn deref(&self) -> &[Pending] {
+        &self.commits
+    }
+}
+
+impl PendingQueue {
+    fn push(&mut self, pending: Pending) {
+        for row in &pending.rows {
+            self.by_row
+                .entry(row.clone())
+                .or_default()
+                .insert(pending.tx);
+        }
+        self.commits.push(pending);
+    }
+
+    fn pop(&mut self) {
+        if let Some(pending) = self.commits.pop() {
+            self.unindex(&pending);
+        }
+    }
+
+    fn remove(&mut self, tx: u64) {
+        if let Some(at) = self.commits.iter().position(|p| p.tx == tx) {
+            let pending = self.commits.remove(at);
+            self.unindex(&pending);
+        }
+    }
+
+    fn unindex(&mut self, pending: &Pending) {
+        for row in &pending.rows {
+            if let Some(txs) = self.by_row.get_mut(row) {
+                txs.remove(&pending.tx);
+                if txs.is_empty() {
+                    self.by_row.remove(row);
+                }
+            }
+        }
+    }
+
+    fn get_mut(&mut self, tx: u64) -> Option<&mut Pending> {
+        self.commits.iter_mut().find(|p| p.tx == tx)
+    }
+
+    /// The newest pending commit that writes `row`.
+    fn newest(&self, row: &RowKey) -> Option<u64> {
+        self.by_row.get(row).and_then(|txs| txs.last().copied())
+    }
+}
+
 /// A row an accepted commit wrote that the writer said it holds.
 struct Echo {
     tx: u64,
@@ -960,7 +1062,7 @@ pub(crate) struct Client {
     remote: HashMap<String, Remote>,
     remote_ids: HashMap<u64, String>,
     outbox: Vec<SyncMessage>,
-    pending: Vec<Pending>,
+    pending: PendingQueue,
     unsent: Vec<SyncMessage>,
     /// Commits sent but not settled, for resending after a reconnect.
     sent: Vec<SyncMessage>,
@@ -1010,6 +1112,13 @@ pub(crate) struct Client {
     /// A new session has not yet been told which rows this replica holds:
     /// the next send reads them and puts the `Hold` right after `Schema`.
     hold_owed: bool,
+}
+
+/// A session's commit a relay uploads as its own, for its upload: the
+/// session commit's (node, tx) and its bases in this store's terms.
+pub(crate) struct Relayed {
+    origin: ([u8; 16], u64),
+    bases: Vec<WireBase>,
 }
 
 /// A session's commit a relay uploads as its own: (session, the session's
@@ -1762,6 +1871,16 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
     })
 }
 
+/// The watch key marking a row the client declared holding on resume
+/// (`Hold`), apart from the rows a session watches because it shipped them.
+fn held_key(table: &str, id: &[u8; 16]) -> u64 {
+    wk((
+        table.to_owned(),
+        "\0held".to_owned(),
+        watch_key(&Sql::Blob(id.to_vec())),
+    ))
+}
+
 /// The image filter for one row version. `+_seq` keeps the planner on
 /// the row-id index: after a bulk commit every row shares one `_seq`, and
 /// the `_seq` index would scan them all for each lookup.
@@ -1799,7 +1918,7 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
-        support.extend(self.inherited_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
+        support.extend(self.policy_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
         for via in &query.reachable {
             // Seed rows that reference the rows the walk starts from.
             if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
@@ -1841,6 +1960,80 @@ impl Inner {
                 outer_array: crate::compile::is_array(parent, &array.outer_column),
                 inner_array: crate::compile::is_array(child, &array.inner_column),
                 nested: self.array_support(child, &array.nested_arrays)?,
+            });
+        }
+        Ok(support)
+    }
+
+    /// The rows a read of `table` rests on under its read policy: the
+    /// parents it inherits from and the rows its correlated `EXISTS`
+    /// clauses consult. A replica (or a backend reading for a request's
+    /// session) evaluates the policy locally over them.
+    fn policy_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+    ) -> Result<Vec<Support>, Error> {
+        let mut support = self.inherited_support(table, depth)?;
+        support.extend(self.exists_support(table, depth)?);
+        Ok(support)
+    }
+
+    /// The rows of each table a correlated `EXISTS` in `table`'s read
+    /// policy consults, `depth` levels down: those whose correlated column
+    /// equals the read row's, as if the reader had read them itself. An
+    /// uncorrelated `EXISTS` has no per-row support.
+    fn exists_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+    ) -> Result<Vec<Support>, Error> {
+        use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
+        /// The `(inner, outer)` columns an `EXISTS` condition correlates.
+        fn correlation(condition: &PolicyExpr) -> Option<(&str, &str)> {
+            match condition {
+                PolicyExpr::Cmp {
+                    column,
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(path),
+                } => match path.as_slice() {
+                    [outer_row, outer] if outer_row == "__jazz_outer_row" => Some((column, outer)),
+                    _ => None,
+                },
+                PolicyExpr::And(parts) => parts.iter().find_map(correlation),
+                _ => None,
+            }
+        }
+        fn clauses<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p PolicyExpr)>) {
+            match policy {
+                PolicyExpr::Exists { table, condition } => out.push((table, condition)),
+                PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+                    parts.iter().for_each(|part| clauses(part, out))
+                }
+                PolicyExpr::Not(part) => clauses(part, out),
+                _ => {}
+            }
+        }
+        let mut support = Vec::new();
+        if depth == 0 {
+            return Ok(support);
+        }
+        let mut exists = Vec::new();
+        if let Some(policy) = table.policy(Operation::Select) {
+            clauses(policy, &mut exists);
+        }
+        for (consulted, condition) in exists {
+            let Some((inner, outer)) = correlation(condition) else {
+                continue;
+            };
+            let consulted = self.schema.table(consulted)?;
+            support.push(Support::Array {
+                table: consulted.stored.clone(),
+                inner: consulted.stored_name(inner).to_owned(),
+                outer: table.stored_name(outer).to_owned(),
+                outer_array: crate::compile::is_array(table, outer),
+                inner_array: crate::compile::is_array(consulted, inner),
+                nested: self.policy_support(consulted, depth - 1)?,
             });
         }
         Ok(support)
@@ -2125,9 +2318,11 @@ impl Inner {
                 "id".to_owned(),
                 watch_key(&Sql::Blob(found.id.to_vec())),
             )));
-            // Not watched yet, so the replica does not hold it (rows it
-            // declared on resume are watched already).
-            let ship = fresh || unwatched;
+            // Not watched yet, so the replica does not hold it; or a new
+            // correlation's row, unless the replica declared holding it on
+            // resume (`Hold` re-ships it if stale).
+            let declared = watch.contains(&held_key(table, &found.id));
+            let ship = unwatched || fresh && !declared;
             if nested.is_empty() {
                 if ship {
                     out.push(found);
@@ -2365,6 +2560,9 @@ impl Inner {
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
                         "_del" => image.deleted = r.get::<_, i64>(i)? != 0,
                         "_c" => image.content = r.get::<_, i64>(i)? != 0,
+                        // The authority's record of what the version was
+                        // built on; never replicated.
+                        "_base" | "_cols" => {}
                         _ => image
                             .cells
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
@@ -2679,7 +2877,7 @@ impl Inner {
             return Ok(());
         }
         let client = self.client.as_mut().expect("client");
-        let Some(pending) = client.pending.iter_mut().find(|p| p.tx == tx) else {
+        let Some(pending) = client.pending.get_mut(tx) else {
             return Ok(());
         };
         let expected = std::mem::take(&mut pending.expected);
@@ -2725,7 +2923,9 @@ impl Inner {
     }
 
     /// The settled image a local write at `seq` superseded: the newest
-    /// server version in history (none if the row is new).
+    /// upstream version in history (none if the row is new). A
+    /// non-durable client's upstream versions include its relay's
+    /// unsettled ones, below its own local seqs.
     fn settled_before(
         &self,
         table: &str,
@@ -2733,7 +2933,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
-        let base = LOCAL_BASE as i64;
+        let base = self.local_base() as i64;
         Ok(self
             .images_where(
                 table,
@@ -3323,7 +3523,7 @@ impl Client {
             remote: HashMap::new(),
             remote_ids: HashMap::new(),
             outbox: Vec::new(),
-            pending: Vec::new(),
+            pending: PendingQueue::default(),
             unsent: Vec::new(),
             fates: HashMap::new(),
             local_fates: HashSet::new(),
@@ -3590,6 +3790,7 @@ impl Db {
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
+        relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
@@ -3617,18 +3818,46 @@ impl Db {
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq)?;
         let mut shadows = Vec::new();
+        // What this replica built each row it wrote on (SPEC 4 §4.6): its
+        // newest pending commit to the row, else the settled image under
+        // its pending writes.
+        let mut bases = Vec::new();
+        let by_row = inner.row_ops(&ops);
         for (table, row, key) in &rows {
-            let shadowed = inner
-                .client
-                .as_ref()
-                .is_some_and(|c| c.shadow.contains_key(&(table.clone(), *row, key.clone())));
-            if !shadowed {
-                shadows.push((
-                    (table.clone(), *row, key.clone()),
-                    inner.settled_before(table, *row, key)?,
-                ));
+            let row_key = (table.clone(), *row, key.clone());
+            let client = inner.client.as_ref().expect("client");
+            let settled = match client.shadow.get(&row_key) {
+                Some(image) => image.as_ref().map(|image| image.seq),
+                None => {
+                    let image = inner.settled_before(table, *row, key)?;
+                    let seq = image.as_ref().map(|image| image.seq);
+                    shadows.push((row_key.clone(), image));
+                    seq
+                }
+            };
+            // This replica sends the commit: its predecessor goes by how
+            // far back it is.
+            let on = match client.pending.newest(&row_key) {
+                Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
+                None => settled.map(BuiltOn::Seq),
+            };
+            if relayed.is_none()
+                && let Some(on) = on
+                && let Some(&op) = by_row
+                    .get(&(table.clone(), *row))
+                    .and_then(|ops| ops.first())
+            {
+                bases.push(WireBase {
+                    op: op as u32,
+                    key: key.clone(),
+                    on,
+                });
             }
         }
+        let (bases, origin) = match relayed {
+            Some(relayed) => (relayed.bases, Some(relayed.origin)),
+            None => (bases, None),
+        };
         let wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
         // Each written row as this replica now holds it, so the authority
         // can skip echoing a version that is exactly this.
@@ -3675,6 +3904,8 @@ impl Db {
                     session: session_claims,
                     expect,
                     deltas: Vec::new(),
+                    bases,
+                    origin,
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
@@ -3715,7 +3946,7 @@ impl Db {
     fn settle_locally(&self, tx: u64) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if let Some(client) = inner.client.as_mut() {
-            client.pending.retain(|p| p.tx != tx);
+            client.pending.remove(tx);
         }
         drop(inner);
         self.rebase()
@@ -4434,7 +4665,7 @@ impl Db {
                         let serializable = client.sent.iter().any(|m| {
                             matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
                         });
-                        client.pending.retain(|p| p.tx != tx);
+                        client.pending.remove(tx);
                         client.stored.remove(&tx);
                         client.sent.retain(
                             |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
@@ -6062,6 +6293,7 @@ impl Db {
                                     "id".to_owned(),
                                     watch_key(&Sql::Blob(id.to_vec())),
                                 )));
+                                watch.insert(held_key(&stored, &id));
                                 if now != seq || !can {
                                     touched.push((stored.clone(), RowUuid::from_bytes(id), key));
                                 }
@@ -6387,6 +6619,8 @@ impl Db {
                 session,
                 expect,
                 deltas: _,
+                bases,
+                origin,
             } => {
                 let identity = self.inner.borrow().sessions[index].identity;
                 if !self.inner.borrow().claim_node(node, &identity)? {
@@ -6404,6 +6638,19 @@ impl Db {
                     });
                     return Ok(());
                 }
+                // The session commit a relay's carries, when the link may
+                // write as its node (a trusted link, or one whose identity
+                // writes as that node too); otherwise the sender's own. The
+                // bases are in the sender's terms either way.
+                let writer = match origin {
+                    Some(origin)
+                        if policy.is_none()
+                            || self.inner.borrow().claim_node(origin.0, &identity)? =>
+                    {
+                        origin
+                    }
+                    _ => (node, tx),
+                };
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
@@ -6413,7 +6660,14 @@ impl Db {
                         .and_then(|who| {
                             let vouched = vouched(policy, who, session);
                             self.with_claims(vouched, || {
-                                db.authorize_commit(who, policy, kind, ops, (node, tx))
+                                db.authorize_commit(
+                                    who,
+                                    policy,
+                                    kind,
+                                    ops,
+                                    (node, tx),
+                                    (bases, writer),
+                                )
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
@@ -6586,6 +6840,7 @@ impl Db {
         mut kind: WireKind,
         ops: Vec<WireOp>,
         origin: ([u8; 16], u64),
+        (bases, writer): (Vec<WireBase>, ([u8; 16], u64)),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
@@ -6696,6 +6951,26 @@ impl Db {
                 }
             }
         }
+        // What each row was built on (SPEC 4 §4.6), before anything is
+        // applied: a base on a rejected commit rejects the upload. A relay
+        // renames the bases for its upstream; the authority resolves them.
+        let by_row = self.inner().row_ops(&ops);
+        let (bases, built) = {
+            let inner = self.inner();
+            let resolved = if relay {
+                inner
+                    .relay_bases(origin, &ops, bases)
+                    .map(|bases| (bases, HashMap::new()))
+            } else {
+                inner
+                    .resolve_bases(origin, &ops, &bases)
+                    .map(|built| (Vec::new(), built))
+            };
+            match resolved {
+                Ok(resolved) => resolved,
+                Err(error) => return Err((error, mentioned(&inner))),
+            }
+        };
         let (seq, mark) = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
@@ -6731,12 +7006,30 @@ impl Db {
         // The relay's own upload record and the rows the sender hears about
         // are read before the commit is released, so a storage error
         // rejects it whole instead of leaving it applied but not relayed.
+        // The authority keeps what each version was built on (INV-HIST-21);
+        // a relay passes the bases on instead.
         let finished = if relay {
-            self.record_upload(ops.clone(), seq, upload)
+            self.record_upload(
+                ops.clone(),
+                seq,
+                upload,
+                Some(Relayed {
+                    origin: writer,
+                    bases,
+                }),
+            )
         } else {
             Ok(())
         }
-        .and_then(|()| self.inner.borrow().written_rows(&ops, seq));
+        .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
+        .and_then(|rows| {
+            if !relay {
+                self.inner
+                    .borrow()
+                    .record_bases(&ops, &by_row, &built, seq, &rows)?;
+            }
+            Ok(rows)
+        });
         let mut inner = self.inner();
         match finished {
             Ok(rows) => {

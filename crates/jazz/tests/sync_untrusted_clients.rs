@@ -207,6 +207,8 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
         session: None,
         expect: Vec::new(),
         deltas: Vec::new(),
+        bases: Vec::new(),
+        origin: None,
     });
     block_on(server.tick()).unwrap();
     assert_eq!(fates(&m_down), vec![(tx + 1, false)]);
@@ -282,6 +284,8 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         session: None,
         expect: Vec::new(),
         deltas: Vec::new(),
+        bases: Vec::new(),
+        origin: None,
     });
     block_on(server.tick()).unwrap();
     assert_eq!(fates(&m_down), vec![(LOCAL_BASE + 1, false)]);
@@ -312,6 +316,8 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
             session: None,
             expect: Vec::new(),
             deltas: Vec::new(),
+            bases: Vec::new(),
+            origin: None,
         });
     }
     block_on(server.tick()).unwrap();
@@ -353,6 +359,8 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
         session: None,
         expect: Vec::new(),
         deltas: Vec::new(),
+        bases: Vec::new(),
+        origin: None,
     });
     block_on(server.tick()).unwrap();
     assert_eq!(fates(&r_down), vec![(LOCAL_BASE + 1, true)]);

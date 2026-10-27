@@ -22,8 +22,10 @@ use jazz_types::{ids, local_executor, object, records};
 
 /// The public schema and policy vocabulary.
 mod tools {
+    pub use jazz_model::model::json_schema::CompiledSchema;
     pub use jazz_model::model::public_schema::{
-        CmpOp, Operation, PolicyExpr, PolicyValue, TablePolicies, Value,
+        CmpOp, ColumnType, Operation, PolicyExpr, PolicyValue, TablePolicies, Value,
+        json_schema_failure,
     };
     pub use jazz_model::model::transaction::OpenTransactionId;
 }

@@ -235,6 +235,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty,
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         });
     }
@@ -247,6 +248,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         });
     }

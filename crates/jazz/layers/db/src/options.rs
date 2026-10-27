@@ -423,11 +423,14 @@ pub enum Reason {
     /// The server holds commits from an untrusted session until it has a
     /// published permissions head to check them by (code `WriteRejected`).
     PermissionsHeadMissing,
+    /// The write was built on an unsettled write the authority rejected,
+    /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
+    PredecessorRejected,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 10] = [
+    pub const ALL: [Reason; 11] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -438,6 +441,7 @@ impl Reason {
         Reason::BranchMove,
         Reason::MissingChunks,
         Reason::PermissionsHeadMissing,
+        Reason::PredecessorRejected,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -458,6 +462,7 @@ impl Reason {
             Reason::BranchMove => "branch_move",
             Reason::MissingChunks => "missing_chunks",
             Reason::PermissionsHeadMissing => "permissions_head_missing",
+            Reason::PredecessorRejected => "predecessor_rejected",
         }
     }
 

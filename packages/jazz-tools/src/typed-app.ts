@@ -1529,9 +1529,14 @@ export class TypedTableQueryBuilder<
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
 
-    const needsExplicitSeed =
-      this._unionVal !== undefined || this._hops.length > 0 || this._gatherVal !== undefined;
     const seedSource = options.start === undefined ? this : this.where(options.start);
+    // The seed's own filters travel in an explicit seed: the gather's
+    // top-level conditions filter its output.
+    const needsExplicitSeed =
+      this._unionVal !== undefined ||
+      this._hops.length > 0 ||
+      this._gatherVal !== undefined ||
+      seedSource._conditions.length > 0;
     const clone = needsExplicitSeed
       ? this._clone<TInclude, TSelection, TRequired, TDeleted>()
       : seedSource._clone<TInclude, TSelection, TRequired, TDeleted>();
