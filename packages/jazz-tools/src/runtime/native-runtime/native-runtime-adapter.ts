@@ -76,7 +76,11 @@ import {
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
-import { nativeCoreErrorCode } from "./native-error-code.js";
+import {
+  nativeCoreErrorCode,
+  nativeCoreErrorReason,
+  type NativeCoreErrorReason,
+} from "./native-error-code.js";
 import { asUnsupportedStorageCodecsError } from "../unsupported-storage-codecs-error.js";
 import {
   WebSocketCarrier,
@@ -5021,8 +5025,8 @@ function queuedWriteRejection(
   } = {
     kind: "rejected",
     transactionId,
-    code: rejectionCode(message),
-    reason: rejectionReason(message),
+    code: rejectionCode(nativeCoreErrorReason(error)),
+    reason: rejectionReason(message, nativeCoreErrorReason(error)),
     message,
   };
   // Worker transport intentionally carries only the enumerable structured
@@ -5082,40 +5086,42 @@ function contextualError(context: string, error: unknown): Error {
   return new Error(`${context}: ${cause.message}`, { cause });
 }
 
-function rejectionCode(message: string): string {
-  if (message.includes("AuthorizationDenied")) return "permission_denied";
-  if (message.includes("SerializationConflict")) return "serialization_conflict";
-  // The engine's stable prefix for a policy denial.
-  if (/^(?:WriteRejected:\s*)?authorization_denied(?::|$)/.test(message))
-    return "permission_denied";
-  if (message.includes("CausalityViolation")) return "causality_violation";
-  if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
-  if (message.includes("Cascade")) return "cascade_rejected";
-  return "write_rejected";
+/**
+ * The rejection code of each core reason a rejected wait can carry. Reasons
+ * with no code of their own are a plain `write_rejected`.
+ */
+const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>> = {
+  authorization_denied: "permission_denied",
+  client_clock_too_far_ahead: "client_clock_too_far_ahead",
+  serialization_conflict: "serialization_conflict",
+  row_already_deleted: "write_rejected",
+  row_already_exists: "write_rejected",
+  row_not_deleted: "write_rejected",
+  missing_required: "write_rejected",
+  branch_move: "write_rejected",
+  missing_chunks: "write_rejected",
+  permissions_head_missing: "write_rejected",
+};
+
+/** A rejected wait's code, from the core reason every binding carries on it. */
+function rejectionCode(reason: NativeCoreErrorReason | undefined): string {
+  return reason === undefined ? "write_rejected" : REJECTION_CODES_BY_REASON[reason];
 }
 
 /**
- * Fallback readable reasons for structured authority rejections, used only
- * when the core diagnostic does not carry its own readable reason (older
- * native bindings). The core appends ` (reason: …)` with the same text it puts
- * on `onMutationError` events, so waits and events agree.
+ * Readable reasons for authority rejections whose diagnostic is an internal
+ * detail, the same text `onMutationError` events carry.
  */
 const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
   permission_denied: "Write rejected by server authorization",
   serialization_conflict: "Serializable transaction conflicted with another write",
-  causality_violation: "Transaction violated causal ordering",
   client_clock_too_far_ahead: "Client clock is too far ahead",
-  cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",
 };
 
-function rejectionReason(message: string): string {
+function rejectionReason(message: string, coreReason: NativeCoreErrorReason | undefined): string {
   const reason = extractWriteRejectedReason(message);
   if (reason === null) return message;
-  const readable = /^transaction .* was rejected: .* \(reason: (.*)\)$/s.exec(reason)?.[1];
-  if (readable) return readable;
-  const fallback = READABLE_REJECTION_REASONS[rejectionCode(reason)];
-  if (fallback) return fallback;
-  return reason || "Write rejected";
+  return READABLE_REJECTION_REASONS[rejectionCode(coreReason)] ?? (reason || "Write rejected");
 }
 
 /** Whether a native error is a core `TransactionConflict` error, decided by its stable core code. */
