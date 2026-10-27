@@ -6915,7 +6915,7 @@ impl Db {
             if !relay {
                 let inner = self.inner.borrow();
                 inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_text_in(seq)?;
+                inner.record_text_in(seq, origin.0, &built, &rows)?;
             }
             Ok(rows)
         });

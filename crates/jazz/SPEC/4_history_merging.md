@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column and for `_deletion`, Core MUST apply each accepted write to the row's post-image as a patch in the order it accepts the writes: every cell the write authored takes the write's value (last arrival wins), every cell it did not author keeps the row's value, and nothing a write authored is dropped. Concurrent writes to different cells of one row therefore all apply, and a write that does not author `_deletion` keeps the row's deletion state, so an edit made over an image older than an accepted delete leaves the row deleted.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
-- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a non-nullable string user column and MUST store a plain string; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise the write's value stands as sent. For a version whose value a merge changed, Core MUST keep the edits back to the value as sent (`_jazz_text_in`).
+- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a non-nullable string user column and MUST store a plain string; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. For a version whose value a merge changed, Core MUST keep the edits back to the value as sent (`_jazz_text_in`) while its sender may still build on it.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
@@ -181,6 +181,15 @@ own: the result may be less than minimal, but stays fine-grained, so a
 heavily edited value loses no side's edits to the bound, and merging costs
 time linear in the value's size times the bound.
 
+A merge may also spend only a fixed budget of diff work, counted in search
+steps (each diagonal a diff search visits and each token it slides over;
+`MERGE_WORK_BUDGET`, 100 million: a 1 MB value with 10,000 scattered edits
+a side takes about a fifth of it). A merge that would spend more stops,
+and the write's value stands as sent, exactly as the later write wins two
+overlapping replacements. The budget counts work, not time, so every Core
+reaches the same result; the conflict analysis reports the column as
+overlapping either way.
+
 From `The cat sat.`, a concurrent `The black cat sat.` and `The cat
 slept.` merge to `The black cat slept.` in either order. When a merge
 changes a write's value, Core keeps for the merged version (in
@@ -189,7 +198,11 @@ such merge) the token-level edits from the merged value back to the value
 as sent, per column: a later write built on that commit (an offline
 chain) is merged over what its writer saw, the value as sent. A later write
 of the same upload to the row was built on the earlier one as sent, and
-merges over it the same way. A write built on a rejected commit is rejected
+merges over it the same way. Only a commit's sender builds on it
+unsettled, and a sender's commits arrive in order, so once one of its
+writes to a row is built on an accepted version (or on none), its older
+entries for that row are dropped: a row keeps entries only for its
+writers' current unsettled chains. A write built on a rejected commit is rejected
 too (§4.6), so a base is always a value Core accepted. The merge is
 token-level, not tree-aware: it keeps markup tokens whole but does not
 check that merged markdown or HTML is well formed. Conflict analysis

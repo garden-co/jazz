@@ -661,8 +661,8 @@ fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
 /// Where the authority keeps, for a row version whose text merge changed
 /// its write's values, the edits back to the values as sent (SPEC 4 §4.3).
 const TEXT_IN_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_text_in (t TEXT NOT NULL, \
-     id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, edits BLOB NOT NULL, \
-     PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;";
+     id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, node BLOB NOT NULL, \
+     edits BLOB NOT NULL, PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;";
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
@@ -3665,15 +3665,7 @@ impl Inner {
         seq: u64,
         column: &str,
     ) -> Result<Vec<crate::text_merge::Edit>, Error> {
-        let exists = self
-            .conn
-            .cached_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_text_in'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(storage)?;
-        if exists == 0 {
+        if !self.text_in_exists()? {
             return Ok(Vec::new());
         }
         let sent: Option<Vec<u8>> = self
@@ -3697,10 +3689,37 @@ impl Inner {
 
     /// Keep, for each row version the upload at `seq` wrote, the edits its
     /// text merges made back to the values as sent (`_jazz_text_in`, made
-    /// on the first merge that changes a value).
-    pub(crate) fn record_text_in(&self, seq: u64) -> Result<(), Error> {
-        let mut created = false;
-        for ((table, row, key), edits) in std::mem::take(&mut *self.text_in.borrow_mut()) {
+    /// on the first merge that changes a value), and drop the entries its
+    /// sender `node` can no longer build on.
+    ///
+    /// Only a commit's own sender builds on it unsettled, and its commits
+    /// arrive in order. Once one of them writes a row over an accepted
+    /// version (or over none), every later one it sends is built on that
+    /// write or a newer one, and a chain walk stops at the first accepted
+    /// version: its older entries for the row are dead. So a row keeps
+    /// entries only for its writers' current unsettled chains.
+    pub(crate) fn record_text_in(
+        &self,
+        seq: u64,
+        node: [u8; 16],
+        built: &HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
+        rows: &[(String, RowUuid, Vec<u8>)],
+    ) -> Result<(), Error> {
+        let text_in = std::mem::take(&mut *self.text_in.borrow_mut());
+        let mut exists = self.text_in_exists()?;
+        if exists {
+            for row_key @ (table, row, key) in rows {
+                if matches!(built.get(row_key), Some(sync::Built::On(_))) {
+                    continue;
+                }
+                self.exec(
+                    "DELETE FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND node = ?4",
+                    rusqlite::params![table, row.0.as_bytes().to_vec(), key, node.to_vec()],
+                )
+                .map_err(storage)?;
+            }
+        }
+        for ((table, row, key), edits) in text_in {
             let entries: Vec<_> = edits
                 .into_iter()
                 .filter(|(_, edits)| !edits.is_empty())
@@ -3708,17 +3727,18 @@ impl Inner {
             if entries.is_empty() {
                 continue;
             }
-            if !created {
+            if !exists {
                 self.conn.execute_batch(TEXT_IN_DDL).map_err(storage)?;
-                created = true;
+                exists = true;
             }
             self.exec(
-                "INSERT OR REPLACE INTO _jazz_text_in (t, id, k, seq, edits) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO _jazz_text_in (t, id, k, node, seq, edits) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 rusqlite::params![
                     table,
                     row.0.as_bytes().to_vec(),
                     key,
+                    node.to_vec(),
                     seq as i64,
                     crate::text_merge::encode_in(&entries)
                 ],
@@ -3726,6 +3746,33 @@ impl Inner {
             .map_err(storage)?;
         }
         Ok(())
+    }
+
+    /// Whether `_jazz_text_in` exists yet (it is made on the first merge
+    /// that changes a value).
+    fn text_in_exists(&self) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_text_in'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .map_err(storage)
+    }
+
+    /// How many `_jazz_text_in` entries the store keeps.
+    #[cfg(feature = "testing")]
+    pub(crate) fn text_in_entries(&self) -> Result<u64, Error> {
+        if !self.text_in_exists()? {
+            return Ok(0);
+        }
+        self.conn
+            .cached_row("SELECT count(*) FROM _jazz_text_in", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as u64)
+            .map_err(storage)
     }
 
     /// The whole string a text column's value holds.

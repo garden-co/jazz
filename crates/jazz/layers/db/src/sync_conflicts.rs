@@ -626,6 +626,12 @@ impl Db {
         crate::values::from_sql(ty, cell.as_ref(), &inner.chunks)
     }
 
+    /// How many `_jazz_text_in` entries this store keeps.
+    #[cfg(feature = "testing")]
+    pub fn text_in_entries_for_test(&self) -> Result<u64, Error> {
+        self.inner().text_in_entries()
+    }
+
     /// How many bytes column `column` of `table`'s unbranched row `row`
     /// stores inline now: a chunked value keeps only its descriptor.
     #[cfg(feature = "testing")]

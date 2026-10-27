@@ -90,7 +90,15 @@ pub(crate) fn edits(format: TextFormat, from: &str, to: &str) -> Vec<Edit> {
         offsets
     };
     let (old_at, new_at) = (offsets(&old_tokens), offsets(&new_tokens));
-    diff(&old_tokens, &new_tokens)
+    let Ok(hunks) = diff(&old_tokens, &new_tokens, &mut Work::new(MERGE_WORK_BUDGET)) else {
+        // Past the budget: the one edit over the whole differing middle.
+        return vec![Edit {
+            start: prefix,
+            end: from.len() - suffix,
+            insert: new.to_owned(),
+        }];
+    };
+    hunks
         .into_iter()
         .map(|hunk| Edit {
             start: prefix + old_at[hunk.old.0],
@@ -180,8 +188,21 @@ pub(crate) fn decode_in(mut bytes: &[u8]) -> Result<Vec<(String, Vec<Edit>)>, Er
     Ok(entries)
 }
 
-/// The merge of `held` and `incoming`, both made from `base`.
+/// The merge of `held` and `incoming`, both made from `base`, within
+/// [`MERGE_WORK_BUDGET`].
 pub(crate) fn merge3(format: TextFormat, base: &str, held: &str, incoming: &str) -> String {
+    merge3_within(format, base, held, incoming, MERGE_WORK_BUDGET)
+}
+
+/// [`merge3`] within `budget` diff steps: past them the merge stops and
+/// `incoming` stands as sent, as for overlapping replacements.
+pub(crate) fn merge3_within(
+    format: TextFormat,
+    base: &str,
+    held: &str,
+    incoming: &str,
+    budget: u64,
+) -> String {
     if held == base {
         return incoming.to_owned();
     }
@@ -191,8 +212,13 @@ pub(crate) fn merge3(format: TextFormat, base: &str, held: &str, incoming: &str)
     let base_tokens = tokenize(format, base);
     let held_tokens = tokenize(format, held);
     let incoming_tokens = tokenize(format, incoming);
-    let ours = diff(&base_tokens, &held_tokens);
-    let mut theirs = diff(&base_tokens, &incoming_tokens);
+    let mut work = Work::new(budget);
+    let (Ok(ours), Ok(mut theirs)) = (
+        diff(&base_tokens, &held_tokens, &mut work),
+        diff(&base_tokens, &incoming_tokens, &mut work),
+    ) else {
+        return incoming.to_owned();
+    };
     // A change both made applies once. Hunks of one diff never share a base
     // span (touching ones are coalesced), so each has at most one twin.
     let mine: HashMap<(usize, usize), (usize, usize)> =
@@ -317,8 +343,35 @@ struct Hunk {
     new: (usize, usize),
 }
 
+/// The diff work one merge may spend (see [`Work`]), well under a second
+/// on a current server: a 1 MB value with 10,000 scattered edits a side
+/// takes about a fifth of it. Past it the merge stops and the write's value
+/// stands as sent (SPEC 4 §4.3). Fixed, so every authority decides alike.
+pub(crate) const MERGE_WORK_BUDGET: u64 = 100_000_000;
+
+/// The diff work left to a merge, counted in search steps: each diagonal
+/// a Myers search visits and each token a snake slides over.
+pub(crate) struct Work {
+    left: u64,
+}
+
+impl Work {
+    pub(crate) fn new(budget: u64) -> Self {
+        Work { left: budget }
+    }
+
+    fn spend(&mut self, steps: u64) -> Result<(), OverBudget> {
+        self.left = self.left.checked_sub(steps).ok_or(OverBudget)?;
+        Ok(())
+    }
+}
+
+/// A diff ran out of [`Work`].
+#[derive(Debug)]
+pub(crate) struct OverBudget;
+
 /// The hunks that turn `old` into `new` (Myers, linear space), coalesced.
-fn diff(old: &[&str], new: &[&str]) -> Vec<Hunk> {
+fn diff(old: &[&str], new: &[&str], work: &mut Work) -> Result<Vec<Hunk>, OverBudget> {
     // Tokens as small ids, so comparisons are integer compares.
     let mut ids: HashMap<&str, u32> = HashMap::new();
     let mut a = Vec::with_capacity(old.len());
@@ -330,7 +383,7 @@ fn diff(old: &[&str], new: &[&str]) -> Vec<Hunk> {
         }
     }
     let mut hunks = Vec::new();
-    diff_range(&a, &b, 0, a.len(), 0, b.len(), &mut hunks);
+    diff_range(&a, &b, 0, a.len(), 0, b.len(), &mut hunks, work)?;
     // Coalesce touching hunks.
     let mut out: Vec<Hunk> = Vec::with_capacity(hunks.len());
     for hunk in hunks {
@@ -342,9 +395,10 @@ fn diff(old: &[&str], new: &[&str]) -> Vec<Hunk> {
             _ => out.push(hunk),
         }
     }
-    out
+    Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn diff_range(
     a: &[u32],
     b: &[u32],
@@ -353,7 +407,8 @@ fn diff_range(
     mut b0: usize,
     mut b1: usize,
     out: &mut Vec<Hunk>,
-) {
+    work: &mut Work,
+) -> Result<(), OverBudget> {
     while a0 < a1 && b0 < b1 && a[a0] == b[b0] {
         a0 += 1;
         b0 += 1;
@@ -369,25 +424,30 @@ fn diff_range(
                 new: (b0, b1),
             });
         }
-        return;
+        return Ok(());
     }
-    match middle_snake(&a[a0..a1], &b[b0..b1]) {
+    match middle_snake(&a[a0..a1], &b[b0..b1], work)? {
         Some((x, y)) => {
-            diff_range(a, b, a0, a0 + x, b0, b0 + y, out);
-            diff_range(a, b, a0 + x, a1, b0 + y, b1, out);
+            diff_range(a, b, a0, a0 + x, b0, b0 + y, out, work)?;
+            diff_range(a, b, a0 + x, a1, b0 + y, b1, out, work)?;
         }
         None => out.push(Hunk {
             old: (a0, a1),
             new: (b0, b1),
         }),
     }
+    Ok(())
 }
 
 /// A split point (x, y) on an optimal edit path of `a` into `b` that is
 /// neither (0, 0) nor the end, found by the forward and reverse Myers
 /// searches meeting, or past [`MAX_EDIT_DISTANCE`] the furthest point the
 /// forward search reached.
-fn middle_snake(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
+fn middle_snake(
+    a: &[u32],
+    b: &[u32],
+    work: &mut Work,
+) -> Result<Option<(usize, usize)>, OverBudget> {
     let (n, m) = (a.len() as isize, b.len() as isize);
     let max = ((n + m + 1) / 2).min(MAX_EDIT_DISTANCE as isize);
     let delta = n - m;
@@ -397,6 +457,8 @@ fn middle_snake(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
     let mut forward = vec![0isize; size];
     let mut reverse = vec![0isize; size];
     for d in 0..=max {
+        // Each diagonal visited both ways, and each token slid over.
+        let mut steps = 2 * (d as u64 + 1);
         let mut k = -d;
         while k <= d {
             let i = (k + offset) as usize;
@@ -411,12 +473,14 @@ fn middle_snake(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
                 x += 1;
                 y += 1;
             }
+            steps += (x - x0) as u64;
             forward[i] = x;
             let rk = delta - k;
             if odd && rk > -d && rk < d {
                 let ri = (rk + offset) as usize;
                 if forward[i] + reverse[ri] >= n {
-                    return split(x0, y0, x, y, n, m);
+                    work.spend(steps)?;
+                    return Ok(split(x0, y0, x, y, n, m));
                 }
             }
             k += 2;
@@ -430,21 +494,25 @@ fn middle_snake(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
                 reverse[i - 1] + 1
             };
             let mut y = x - k;
+            let start = x;
             while x < n && y < m && a[(n - x - 1) as usize] == b[(m - y - 1) as usize] {
                 x += 1;
                 y += 1;
             }
+            steps += (x - start) as u64;
             reverse[i] = x;
             let fk = delta - k;
             if !odd && fk >= -d && fk <= d {
                 let fi = (fk + offset) as usize;
                 if forward[fi] + reverse[i] >= n {
+                    work.spend(steps)?;
                     let (fx, fy) = (n - x, m - y);
-                    return split(fx, fy, fx, fy, n, m);
+                    return Ok(split(fx, fy, fx, fy, n, m));
                 }
             }
             k += 2;
         }
+        work.spend(steps)?;
     }
     // Too costly to find the shortest edit: split where the forward search
     // got furthest. The part before it costs at most `max` edits; the rest
@@ -460,7 +528,7 @@ fn middle_snake(a: &[u32], b: &[u32]) -> Option<(usize, usize)> {
         }
         k += 2;
     }
-    best.and_then(|(x, y)| split(x, y, x, y, n, m))
+    Ok(best.and_then(|(x, y)| split(x, y, x, y, n, m)))
 }
 
 /// A split strictly inside the problem: the snake's start, or its end when
@@ -861,6 +929,25 @@ mod tests {
         }
     }
 
+    /// The diff steps [`merge3`] spends on these values.
+    fn work_of(base: &str, held: &str, incoming: &str) -> u64 {
+        let tokens = |text| tokenize(TextFormat::Plain, text);
+        let (base, held, incoming) = (tokens(base), tokens(held), tokens(incoming));
+        let mut work = Work::new(u64::MAX);
+        diff(&base, &held, &mut work).unwrap();
+        diff(&base, &incoming, &mut work).unwrap();
+        u64::MAX - work.left
+    }
+
+    #[test]
+    fn past_the_work_budget_the_incoming_value_stands() {
+        let (base, held, incoming) = ("a b c d e", "a B c d e", "a b c D e");
+        let needed = work_of(base, held, incoming);
+        let within = |budget| merge3_within(TextFormat::Plain, base, held, incoming, budget);
+        assert_eq!(within(needed), "a B c D e");
+        assert_eq!(within(needed - 1), incoming);
+    }
+
     #[test]
     fn dissimilar_large_values_merge_in_linear_time() {
         // Every token differs: one hunk per token on each side.
@@ -870,11 +957,8 @@ mod tests {
         assert!(base.len() > 900_000, "{}", base.len());
         let started = std::time::Instant::now();
         let merged = merge(&base, &held, &incoming);
-        assert!(
-            merged.contains("i119999 "),
-            "{:?}",
-            &merged[merged.len() - 80..]
-        );
+        // Every span overlaps: the incoming value, merged or past the budget.
+        assert_eq!(merged, incoming);
         let limit = if cfg!(debug_assertions) { 60 } else { 5 };
         assert!(
             started.elapsed() < std::time::Duration::from_secs(limit),
@@ -910,6 +994,8 @@ mod tests {
         // Thousands of edits a side: far past one search's bound.
         let (held, held_markers) = edited('H', 13, 0);
         let (incoming, incoming_markers) = edited('I', 17, 5);
+        // Far inside the budget.
+        assert!(work_of(&base, &held, &incoming) < MERGE_WORK_BUDGET / 4);
         let merged = merge(&base, &held, &incoming);
         let words: std::collections::HashSet<&str> = merged.split(' ').collect();
         let lost = held_markers

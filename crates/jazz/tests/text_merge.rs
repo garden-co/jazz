@@ -299,6 +299,13 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
     // Carol's "!" and alice's " world" both landed after "Hello": the
     // held value's insert goes first.
     net.assert_everywhere(row, "body", "Hi! Hello! big world");
+    // The merges kept what alice's chain sent, for the links after them.
+    assert!(net.core.text_in_entries_for_test().unwrap() > 0);
+    // Her next write is built on a settled version: nothing can build on
+    // her old chain any more, and its entries go.
+    let next = net.edit(0, row, &[("body", "Hi! Hello! big world.")]);
+    net.settle(0, next);
+    assert_eq!(net.core.text_in_entries_for_test().unwrap(), 0);
 }
 
 /// A chain link that left the column alone stores the value the authority
