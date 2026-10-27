@@ -10,6 +10,8 @@ type ForegroundCommand = Relay.NativeForegroundCommand;
 type ForegroundResponse = Relay.NativeForegroundResponse;
 type ForegroundMutationKind = Extract<ForegroundCommand, { type: "directMutation" }>["mutation"];
 type NativeConnectionStatus = Extract<ForegroundResponse, { type: "nativeConnectionStatus" }>;
+/** An upstream connection failure other than a refused credential (#4337). */
+export type NativeUpstreamFailure = { reason: string; retrying: boolean };
 type ForegroundMutationOptions = {
   rowId?: Uint8Array;
   branch?: unknown;
@@ -49,6 +51,12 @@ export type NativeForegroundModule = Pick<
 export class NativeForegroundDb {
   private closed = false;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
+  private authRejectedCallback: ((reason: string) => void) | undefined;
+  /** The sequence of the refusal last reported, so each is reported once. */
+  private reportedAuthRejection = 0;
+  private upstreamFailureCallback: ((failure: NativeUpstreamFailure | null) => void) | undefined;
+  /** The upstream failure last reported, so each change is reported once. */
+  private reportedUpstreamFailure: { sequence: number; retrying: boolean } | null = null;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
 
   constructor(
@@ -74,6 +82,27 @@ export class NativeForegroundDb {
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
     this.assertOpen();
     this.mutationErrorCallback = callback;
+  }
+
+  /**
+   * Observe the upstream refusing the scope's credential. The refusal is auth
+   * state, not a failed tick: local ticks keep running, and the tick that
+   * first sees a refusal reports it once, so the app can renew the
+   * credential (#4248, #4296).
+   */
+  onAuthRejected(callback: (reason: string) => void): void {
+    this.assertOpen();
+    this.authRejectedCallback = callback;
+  }
+
+  /**
+   * Observe the scope's upstream connection failing for a reason other than
+   * its credential, and recovering (`null`). A failure is connection state,
+   * not a failed tick: local ticks keep running (#4337).
+   */
+  onUpstreamFailure(callback: (failure: NativeUpstreamFailure | null) => void): void {
+    this.assertOpen();
+    this.upstreamFailureCallback = callback;
   }
 
   all(
@@ -138,17 +167,42 @@ export class NativeForegroundDb {
   tick(): void {
     this.assertOpen();
     this.runtime.tick();
-    if (this.mutationErrorCallback) {
-      const response = this.execute({ type: "drainMutationErrors" });
-      if (response.type === "operationError") throw foregroundOperationError(response);
-      if (response.type !== "mutationErrors")
-        return unexpected("drainMutationErrors", response.type);
-      const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
-      for (const event of events)
-        queueMicrotask(() => {
-          if (!this.closed) this.mutationErrorCallback?.(event);
-        });
+    if (!this.mutationErrorCallback && !this.authRejectedCallback && !this.upstreamFailureCallback)
+      return;
+    // One call drains everything a tick reports.
+    const response = this.execute({ type: "drainTickEvents" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "tickEvents") return unexpected("drainTickEvents", response.type);
+    const rejection = response.authRejection;
+    if (rejection && rejection.sequence !== this.reportedAuthRejection) {
+      this.reportedAuthRejection = rejection.sequence;
+      queueMicrotask(() => {
+        if (!this.closed) this.authRejectedCallback?.(rejection.reason);
+      });
     }
+    const failure = response.upstreamFailure;
+    const reported = this.reportedUpstreamFailure;
+    if (
+      failure
+        ? failure.sequence !== reported?.sequence || failure.retrying !== reported.retrying
+        : reported
+    ) {
+      this.reportedUpstreamFailure = failure && {
+        sequence: failure.sequence,
+        retrying: failure.retrying,
+      };
+      const change = failure && { reason: failure.reason, retrying: failure.retrying };
+      queueMicrotask(() => {
+        if (!this.closed) this.upstreamFailureCallback?.(change);
+      });
+    }
+    // The drain claims mutation errors; with no observer they are dropped.
+    if (!this.mutationErrorCallback) return;
+    const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
+    for (const event of events)
+      queueMicrotask(() => {
+        if (!this.closed) this.mutationErrorCallback?.(event);
+      });
   }
 
   close(): boolean {
