@@ -254,6 +254,9 @@ pub struct Ctx<'a> {
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
     pub history_origin: Option<[u8; 16]>,
+    /// How many of a write check's grounded rows (see [`Cut::grounded`])
+    /// the compiled SQL reads, summed over every table reference.
+    pub overlaid_rows: usize,
     next_alias: usize,
 }
 
@@ -339,6 +342,7 @@ impl<'a> Ctx<'a> {
             settled_only: false,
             preps: Vec::new(),
             history_origin: None,
+            overlaid_rows: 0,
             next_alias: 0,
         }
     }
@@ -396,6 +400,7 @@ impl<'a> Ctx<'a> {
             Some(grounded) => match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
                 None => ("0".to_owned(), "0".to_owned()),
                 Some(ids) => {
+                    self.overlaid_rows += ids.len();
                     let ids = ids
                         .iter()
                         .map(|id| self.bind(Sql::Blob(id.to_vec())))

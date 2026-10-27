@@ -2716,10 +2716,25 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
+        self.holds_counting(table, row, key, cut, policy)
+            .map(|(holds, _)| holds)
+    }
+
+    /// [`Inner::holds_at`], also returning how many grounded rows of a
+    /// write check's unit the check read.
+    fn holds_counting(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(bool, usize), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
         let condition = policy(&mut ctx)?;
+        let overlaid = ctx.overlaid_rows;
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
@@ -2735,7 +2750,7 @@ impl Inner {
                 .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
                 .map_err(storage)
         })?;
-        Ok(value != 0)
+        Ok((value != 0, overlaid))
     }
 
     /// The current version of each of `ids`' rows in `table`: (id, branch
@@ -2871,6 +2886,9 @@ impl Inner {
     /// passes is grounded, and from the next round on its row shows its
     /// end state to the others. A write that never passes rejects the
     /// unit. A row the unit leaves deleted has no end state to check.
+    /// Once every write is grounded, a write whose pass the rest of the
+    /// unit could have taken away is checked again against the unit's
+    /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
         self.ground(pending, seq)
@@ -2887,6 +2905,10 @@ impl Inner {
         }
         let mut pending = live;
         let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
+        // Each write with the round it passed in.
+        let mut rounds: Vec<(DeferredCheck, usize)> = Vec::with_capacity(pending.len());
+        let mut round = 0;
+        let mut evidence = EvidenceBudget::default();
         loop {
             let cut = Cut {
                 seq: seq.saturating_sub(1),
@@ -2897,48 +2919,14 @@ impl Inner {
             let mut passed = Vec::new();
             let mut failed = Vec::new();
             for check in pending {
-                let table = schema.table(&check.table)?;
-                let session = self.session(check.author);
-                let holds =
-                    self.holds_at(table, check.row, &check.key, Some(cut.clone()), |ctx| {
-                        match check.check {
-                            WriteCheck::Insert => {
-                                ctx.operation_policy(table, Operation::Insert, "a", &session)
-                            }
-                            WriteCheck::Restore => {
-                                ctx.operation_policy(table, Operation::Update, "a", &session)
-                            }
-                            // Without a WITH CHECK, the new row must pass
-                            // USING, as in Postgres.
-                            WriteCheck::WithCheck { .. } => {
-                                let update = &table.policies.update;
-                                let clause = update.with_check.as_ref().or(update.using.as_ref());
-                                ctx.policy_clause(clause, table, "a", &session)
-                            }
-                        }
-                    })?;
-                if holds {
+                if self.write_check_holds(&schema, &check, cut.clone(), &mut evidence)? {
                     passed.push(check);
                 } else {
                     failed.push(check);
                 }
             }
-            if failed.is_empty() {
-                return Ok(());
-            }
-            if passed.is_empty() {
-                let check = &failed[0];
-                return Err(match check.check {
-                    WriteCheck::Insert => denied(format_args!(
-                        "INSERT policy denied the new row in `{}`",
-                        check.table
-                    )),
-                    WriteCheck::WithCheck { upsert } => denied(format_args!(
-                        "{} policy (WITH CHECK) denied the new row",
-                        if upsert { "UPSERT" } else { "UPDATE" }
-                    )),
-                    WriteCheck::Restore => denied("RESTORE policy denied the restored row"),
-                });
+            if !failed.is_empty() && passed.is_empty() {
+                return Err(write_check_denied(&failed[0]));
             }
             for check in passed {
                 let stored = schema.table(&check.table)?.stored.clone();
@@ -2946,9 +2934,143 @@ impl Inner {
                     .entry(stored)
                     .or_default()
                     .insert(*check.row.0.as_bytes());
+                rounds.push((check, round));
+            }
+            if failed.is_empty() {
+                break;
             }
             pending = failed;
+            round += 1;
         }
+        self.post_state_pass(&schema, rounds, grounded, seq, &mut evidence)
+    }
+
+    /// Check `check`'s policy on the rows `cut` shows.
+    fn write_check_holds(
+        &self,
+        schema: &Schema,
+        check: &DeferredCheck,
+        cut: Cut,
+        evidence: &mut EvidenceBudget,
+    ) -> Result<bool, Error> {
+        let table = schema.table(&check.table)?;
+        let session = self.session(check.author);
+        let (holds, read) =
+            self.holds_counting(table, check.row, &check.key, Some(cut), |ctx| {
+                match check.check {
+                    WriteCheck::Insert => {
+                        ctx.operation_policy(table, Operation::Insert, "a", &session)
+                    }
+                    WriteCheck::Restore => {
+                        ctx.operation_policy(table, Operation::Update, "a", &session)
+                    }
+                    // Without a WITH CHECK, the new row must pass USING, as in
+                    // Postgres.
+                    WriteCheck::WithCheck { .. } => {
+                        let update = &table.policies.update;
+                        let clause = update.with_check.as_ref().or(update.using.as_ref());
+                        ctx.policy_clause(clause, table, "a", &session)
+                    }
+                }
+            })?;
+        evidence.charge(read)?;
+        Ok(holds)
+    }
+
+    /// The unit is accepted only if every write's policy also holds on the
+    /// state the whole unit leaves behind (SPEC 7, INV-RLS-9): committed
+    /// state overlaid with every write of the unit but the row under
+    /// check, which is never evidence for itself. A write is checked again
+    /// only when the writes grounded with or after it could have taken its
+    /// pass away: any of them, under a policy that is not monotone in the
+    /// rows present, or else one that replaced a row's earlier content. A
+    /// unit that only adds rows under monotone policies is checked once
+    /// per write.
+    fn post_state_pass(
+        &self,
+        schema: &Schema,
+        rounds: Vec<(DeferredCheck, usize)>,
+        grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        seq: u64,
+        evidence: &mut EvidenceBudget,
+    ) -> Result<(), Error> {
+        // Per round: how many writes passed in it, and how many of those
+        // replaced a row's earlier content.
+        let last = rounds.iter().map(|(_, r)| *r).max().unwrap_or(0);
+        let mut written = vec![0usize; last + 2];
+        let mut replaced = vec![0usize; last + 2];
+        for (check, round) in &rounds {
+            written[*round] += 1;
+            if check.replaces() {
+                replaced[*round] += 1;
+            }
+        }
+        // Suffix sums: writes grounded in a round at or after each round.
+        for r in (0..=last).rev() {
+            written[r] += written[r + 1];
+            replaced[r] += replaced[r + 1];
+        }
+        let mut monotone: HashMap<(String, u8), bool> = HashMap::new();
+        for (check, round) in &rounds {
+            let others = written[*round] - 1;
+            let others_replacing = replaced[*round] - usize::from(check.replaces());
+            if others == 0 {
+                continue;
+            }
+            let key = (check.table.clone(), check.check.kind());
+            let grows = match monotone.get(&key) {
+                Some(grows) => *grows,
+                None => {
+                    let grows = self.write_policy_is_monotone(schema, check)?;
+                    monotone.insert(key, grows);
+                    grows
+                }
+            };
+            if grows && others_replacing == 0 {
+                continue;
+            }
+            let table = schema.table(&check.table)?;
+            let mut overlay = grounded.clone();
+            if let Some(ids) = overlay.get_mut(&table.stored) {
+                ids.remove(check.row.0.as_bytes());
+            }
+            let cut = Cut {
+                seq: seq.saturating_sub(1),
+                own: seq,
+                extra: Vec::new(),
+                grounded: Some(Arc::new(overlay)),
+            };
+            if !self.write_check_holds(schema, check, cut, evidence)? {
+                return Err(write_check_denied(check));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `check`'s policy can only go from denied to allowed as rows
+    /// are added: then a pass survives the unit's later inserts and
+    /// restores, and only its updates can take it away.
+    fn write_policy_is_monotone(
+        &self,
+        schema: &Schema,
+        check: &DeferredCheck,
+    ) -> Result<bool, Error> {
+        let table = schema.table(&check.table)?;
+        let governing = schema.policies_from.as_deref().unwrap_or(schema);
+        let Some(table) = governing.by_stored(&table.stored) else {
+            return Ok(true);
+        };
+        let policy = match check.check {
+            WriteCheck::Insert => table.policy(Operation::Insert),
+            WriteCheck::Restore => table.policy(Operation::Update),
+            WriteCheck::WithCheck { .. } => {
+                let update = &table.policies.update;
+                update.with_check.as_ref().or(update.using.as_ref())
+            }
+        };
+        Ok(policy.is_none_or(|policy| {
+            policy_is_monotone(governing, table, policy, &mut BTreeSet::new())
+        }))
     }
 
     /// Whether `row`'s current version on branch `key` is a tombstone.
@@ -3962,6 +4084,159 @@ struct DeferredCheck {
     key: Vec<u8>,
     author: AuthorSubject,
     check: WriteCheck,
+}
+
+impl WriteCheck {
+    fn kind(&self) -> u8 {
+        match self {
+            WriteCheck::Insert => 0,
+            WriteCheck::WithCheck { .. } => 1,
+            WriteCheck::Restore => 2,
+        }
+    }
+}
+
+impl DeferredCheck {
+    /// Whether this write replaces content the row had before the unit
+    /// (an insert or a restore only adds a row to what policies read).
+    fn replaces(&self) -> bool {
+        matches!(self.check, WriteCheck::WithCheck { .. })
+    }
+}
+
+/// The most rows of its own writes a unit's write checks may read, summed
+/// over every check (SPEC 7): past it, the unit is rejected as not
+/// supported yet instead of being decided at unbounded cost.
+const WRITE_CHECK_EVIDENCE_BUDGET: usize = 262_144;
+
+/// The rows of its own writes a unit's write checks have read so far.
+#[derive(Default)]
+struct EvidenceBudget {
+    read: usize,
+}
+
+impl EvidenceBudget {
+    fn charge(&mut self, rows: usize) -> Result<(), Error> {
+        self.read = self.read.saturating_add(rows);
+        if self.read > WRITE_CHECK_EVIDENCE_BUDGET {
+            return Err(rejected(format!(
+                "Reading more than {WRITE_CHECK_EVIDENCE_BUDGET} rows of a transaction's own \
+                 writes in its write-policy checks is not supported yet"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn write_check_denied(check: &DeferredCheck) -> Error {
+    match check.check {
+        WriteCheck::Insert => denied(format_args!(
+            "INSERT policy denied the new row in `{}`",
+            check.table
+        )),
+        WriteCheck::WithCheck { upsert } => denied(format_args!(
+            "{} policy (WITH CHECK) denied the new row",
+            if upsert { "UPSERT" } else { "UPDATE" }
+        )),
+        WriteCheck::Restore => denied("RESTORE policy denied the restored row"),
+    }
+}
+
+/// Whether `policy` (of `table`) can only go from denied to allowed as rows
+/// are added to the tables it reads. A `NOT` over anything that reads rows
+/// is non-monotone, as is a relation that can drop rows when others appear
+/// (a left join, an offset or a limit). Inherited policies are followed; a
+/// cycle adds nothing new.
+fn policy_is_monotone(
+    schema: &Schema,
+    table: &Table,
+    policy: &PolicyExpr,
+    seen: &mut BTreeSet<(String, u8)>,
+) -> bool {
+    let inherited = |schema: &Schema,
+                     target: Option<&Table>,
+                     operation: Operation,
+                     seen: &mut BTreeSet<(String, u8)>| {
+        let Some(target) = target else {
+            return true;
+        };
+        if !seen.insert((target.name.clone(), operation as u8)) {
+            return true;
+        }
+        target
+            .policy(operation)
+            .is_none_or(|policy| policy_is_monotone(schema, target, policy, seen))
+    };
+    match policy {
+        PolicyExpr::Not(inner) => !policy_reads_rows(inner),
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts
+            .iter()
+            .all(|part| policy_is_monotone(schema, table, part, seen)),
+        PolicyExpr::Exists {
+            table: target,
+            condition,
+        } => {
+            let target = schema.tables.get(target).unwrap_or(table);
+            policy_is_monotone(schema, target, condition, seen)
+        }
+        PolicyExpr::ExistsRel { rel } => relation_is_monotone(rel),
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+            ..
+        } => {
+            let target = table
+                .references
+                .get(via_column)
+                .and_then(|name| schema.tables.get(name));
+            inherited(schema, target, *operation, seen)
+        }
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            ..
+        } => inherited(schema, schema.tables.get(source_table), *operation, seen),
+        _ => true,
+    }
+}
+
+/// Whether `policy` reads rows other than the one under check.
+fn policy_reads_rows(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Not(inner) => policy_reads_rows(inner),
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(policy_reads_rows),
+        PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsRel { .. }
+        | PolicyExpr::Inherits { .. }
+        | PolicyExpr::InheritsReferencing { .. } => true,
+        _ => false,
+    }
+}
+
+fn relation_is_monotone(rel: &crate::query::RelationExpr) -> bool {
+    use crate::query::{RelationExpr, RelationJoinKind};
+    match rel {
+        RelationExpr::TableScan { .. } => true,
+        RelationExpr::Filter { input, .. }
+        | RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. } => relation_is_monotone(input),
+        RelationExpr::Union { inputs } => inputs.iter().all(|arm| relation_is_monotone(&arm.input)),
+        RelationExpr::Join {
+            left,
+            right,
+            join_kind,
+            ..
+        } => {
+            matches!(join_kind, RelationJoinKind::Inner)
+                && relation_is_monotone(left)
+                && relation_is_monotone(right)
+        }
+        RelationExpr::Gather { seed, step, .. } => {
+            relation_is_monotone(seed) && relation_is_monotone(step)
+        }
+        RelationExpr::Offset { .. } | RelationExpr::Limit { .. } => false,
+    }
 }
 
 /// Which branch a write addresses.
