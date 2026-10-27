@@ -1058,6 +1058,10 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     pump(&[(&up, &down)]);
     assert_eq!(titles(&worker), ["kept"]);
     assert_eq!(*refused.borrow(), [update.tx_id]);
+    // Neither the relay nor the authority keeps the tab's refused payload
+    // (INV-TX-9): only the store that made a write retries it.
+    assert!(worker.db.rejected_transactions().unwrap().is_empty());
+    assert!(server.db.rejected_transactions().unwrap().is_empty());
 }
 
 #[test]

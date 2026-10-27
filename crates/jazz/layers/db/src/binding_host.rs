@@ -1475,10 +1475,20 @@ impl Binding {
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
-        self.hooks
-            .report(self.node, self.db.take_upstream_rejections());
+        let rejections = self.db.take_upstream_rejections();
+        let own: Vec<u64> = rejections
+            .iter()
+            .filter(|rejection| rejection.writer == *self.node.as_bytes())
+            .map(|rejection| rejection.seq)
+            .collect();
+        self.hooks.report(self.node, rejections);
+        // Reported: the retry store lets go of their payloads.
+        let discarded = own
+            .into_iter()
+            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result?;
+        Ok(discarded?)
     }
 
     /// Make this store the optimistic, non-durable foreground of a durable

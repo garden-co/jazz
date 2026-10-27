@@ -900,6 +900,19 @@ pub(crate) struct Link {
     pub(crate) detached: bool,
 }
 
+/// A commit of this store's that the authority refused, kept with its
+/// payload so it can be retried (INV-TX-9).
+#[derive(Clone, Debug)]
+pub struct RejectedTransaction {
+    /// The commit's local seq (its transaction time).
+    pub seq: u64,
+    /// Why the authority refused it.
+    pub error: Error,
+    pub serializable: bool,
+    /// The writes it made, as it uploaded them.
+    pub ops: Vec<WireOp>,
+}
+
 /// Handle for a connected upstream.
 #[derive(Debug)]
 pub struct Upstream(u64);
@@ -2640,7 +2653,8 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
-    CREATE TABLE IF NOT EXISTS _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER NOT NULL) WITHOUT ROWID;";
+    CREATE TABLE IF NOT EXISTS _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER NOT NULL) WITHOUT ROWID;\
+    CREATE TABLE IF NOT EXISTS _jazz_rejected (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL);";
 
 type RowKey = (String, RowUuid, Vec<u8>);
 
@@ -2743,6 +2757,62 @@ impl Inner {
             rusqlite::params![tx as i64, encode(commit), encode(&rows)],
         )
         .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Move refused commit `tx`'s payload from the upload queue into the
+    /// retry store.
+    fn retain_rejected(&self, tx: u64, error: &Error, serializable: bool) -> Result<(), Error> {
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_rejected (tx, commit_msg, error, serializable) \
+             SELECT tx, commit_msg, ?2, ?3 FROM _jazz_pending WHERE tx = ?1",
+            rusqlite::params![tx as i64, encode(&wire_error(error)), serializable],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// The refused commits in the retry store, oldest first.
+    pub(crate) fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT tx, commit_msg, error, serializable FROM _jazz_rejected ORDER BY tx",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        let decode = |e: postcard::Error| Error::new(ErrorCode::Storage, e.to_string());
+        rows.into_iter()
+            .map(|(seq, commit, error, serializable)| {
+                let ops = match postcard::from_bytes::<SyncMessage>(&commit).map_err(decode)? {
+                    SyncMessage::Commit { ops, .. } => ops,
+                    _ => Vec::new(),
+                };
+                Ok(RejectedTransaction {
+                    seq,
+                    error: from_wire_error(postcard::from_bytes(&error).map_err(decode)?),
+                    serializable,
+                    ops,
+                })
+            })
+            .collect()
+    }
+
+    /// Drop refused commit `tx` from the retry store.
+    pub(crate) fn discard_rejected(&self, tx: u64) -> Result<(), Error> {
+        self.exec("DELETE FROM _jazz_rejected WHERE tx = ?1", [tx as i64])
+            .map_err(storage)?;
         Ok(())
     }
 
@@ -4309,6 +4379,14 @@ impl Db {
                         let relayed = client.relayed_fates.contains_key(&tx);
                         if let Err(error) = &result {
                             let origins = inner.relayed_origins(tx)?;
+                            // The originating store keeps its own refused
+                            // payload, for a host that reports refusals,
+                            // until the host has (INV-TX-9). A relay keeps
+                            // none of its sessions'.
+                            if inner.upstream_rejections.is_some() && !relayed && origins.is_empty()
+                            {
+                                inner.retain_rejected(tx, error, serializable)?;
+                            }
                             for &(node, session_tx) in &origins {
                                 let refused = Err(wire_error(error));
                                 inner.record_fate(node, session_tx, &refused)?;

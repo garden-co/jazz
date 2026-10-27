@@ -49,10 +49,10 @@ use crate::values::{
     in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, RelationSnapshot,
-    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireError, WireKind, WireOp, WireTarget, WireTransport, WireTransportAdapter,
-    decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, RejectedTransaction,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, Upstream, WireError, WireKind, WireOp, WireTarget, WireTransport,
+    WireTransportAdapter, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -1131,6 +1131,21 @@ impl Db {
             let mut inner = db.inner.borrow_mut();
             inner.seq = seq;
             inner.load_client()?;
+            // Refusals kept for a host that had not reported them yet.
+            let writer = *inner.identity.node.as_bytes();
+            let retained: Vec<UpstreamRejection> = inner
+                .rejected_transactions()?
+                .into_iter()
+                .map(|rejected| UpstreamRejection {
+                    writer,
+                    seq: rejected.seq,
+                    error: rejected.error,
+                    serializable: rejected.serializable,
+                })
+                .collect();
+            if !retained.is_empty() {
+                inner.upstream_rejections = Some(retained);
+            }
             if inner.client.is_some() {
                 inner.seq = inner.seq.max(LOCAL_BASE);
             }
@@ -1163,9 +1178,24 @@ impl Db {
 
     /// Keep the uploads the authority refuses, for a host that tells its
     /// caller of the ones no wait claimed.
+    /// Refused commits of this store's own are kept in its retry store
+    /// until [`Db::discard_rejected_transaction`]; a reopened store that
+    /// still holds some tracks again and reports them anew.
     pub fn track_upstream_rejections(&self) {
         let mut inner = self.inner.borrow_mut();
         inner.upstream_rejections.get_or_insert_with(Vec::new);
+    }
+
+    /// This store's own commits the authority refused, with their payloads,
+    /// oldest first (INV-TX-9). Kept only while
+    /// [`Db::track_upstream_rejections`] is on, until discarded.
+    pub fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
+        self.inner.borrow_mut().rejected_transactions()
+    }
+
+    /// Drop a refused commit's payload once its refusal was reported.
+    pub fn discard_rejected_transaction(&self, seq: u64) -> Result<(), Error> {
+        self.inner.borrow_mut().discard_rejected(seq)
     }
 
     /// The uploads the authority refused since the last call, by the node
