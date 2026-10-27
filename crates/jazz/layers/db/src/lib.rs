@@ -36,6 +36,7 @@ pub mod db;
 #[cfg(feature = "durable-object-limits")]
 mod durable_object_limits;
 pub mod format;
+pub mod host;
 pub(crate) mod large;
 pub(crate) mod merge;
 pub mod names;
