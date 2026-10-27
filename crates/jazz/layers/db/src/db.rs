@@ -1280,6 +1280,21 @@ impl Db {
         Ok((compiled.sql.clone(), plan.join(" | ")))
     }
 
+    /// Diagnostics: SQLite's query plan for the INSERT check a commit
+    /// would run on `row` of `table` as `author`, with `grounded` rows of
+    /// that table overlaid as a later grounding round sees them.
+    #[doc(hidden)]
+    pub fn explain_write_check_plan(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+        grounded: &[RowUuid],
+    ) -> Result<String, Error> {
+        self.inner()
+            .explain_write_check(table, row, author, grounded)
+    }
+
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
         self.prepare_query_bound(query, BTreeMap::new())
     }
@@ -2720,6 +2735,25 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
+        let (sql, params, preps) = self.policy_check(table, row, key, cut, policy)?;
+        let value: i64 = self.with_preps(&preps, |_| {
+            self.conn
+                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .map_err(storage)
+        })?;
+        Ok(value != 0)
+    }
+
+    /// The statement [`Inner::holds_at`] runs: the policy SQL boolean for
+    /// one stored row, its parameters, and the preps it needs.
+    fn policy_check(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
@@ -2734,12 +2768,44 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        let value: i64 = self.with_preps(&preps, |_| {
-            self.conn
-                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .map_err(storage)
+        Ok((sql, params, preps))
+    }
+
+    /// SQLite's plan for the INSERT check a unit ending now would run on
+    /// `row` (SPEC 7): its policy reads committed state, overlaid with the
+    /// `grounded` rows of the same table, as a later round sees them.
+    fn explain_write_check(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+        grounded: &[RowUuid],
+    ) -> Result<String, Error> {
+        let table = self.schema.table(table)?;
+        let own = self.seq + 1;
+        let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
+        let cut = Cut {
+            seq: self.seq,
+            own,
+            extra: Vec::new(),
+            grounded: Some(Arc::new(BTreeMap::from([(table.stored.clone(), ids)]))),
+        };
+        let session = self.session(author);
+        let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
+            ctx.operation_policy(table, Operation::Insert, "a", &session)
         })?;
-        Ok(value != 0)
+        let mut statement = self
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(params_from_iter(params.iter()), |r| r.get::<_, String>(3))
+            .map_err(storage)?;
+        let mut plan = Vec::new();
+        for row in rows {
+            plan.push(row.map_err(storage)?);
+        }
+        Ok(plan.join(" | "))
     }
 
     /// The current version of each of `ids`' rows in `table`: (id, branch
