@@ -66,16 +66,17 @@ impl StoredAccountRegistry {
         self.ensure_available()?;
         // Fence cached admission even if a second owner only performs reads.
         // The successful absence read is this decision's linearization point.
-        self.poisoned = true;
+        // A failed read decides nothing and changes nothing: this lookup
+        // fails, the next one reads again.
         if self
             .storage
             .get(&command_key(self.revision))
             .map_err(unavailable)?
             .is_some()
         {
+            self.poisoned = true;
             return Err(unavailable("account authority advanced elsewhere"));
         }
-        self.poisoned = false;
         Ok(self.state.login(principal)?.clone())
     }
 
@@ -188,6 +189,24 @@ mod tests {
         // Recovery replays the journal the first owner wrote.
         let mut reopened = StoredAccountRegistry::open(journal()).unwrap();
         assert!(reopened.login(&principal("alice")).is_ok());
+    }
+
+    #[test]
+    fn a_failed_lookup_read_leaves_the_registry_available() {
+        let store = crate::runtime::AppStore::memory().unwrap();
+        let mut registry =
+            StoredAccountRegistry::open(store.kv(crate::kv::ACCOUNTS).unwrap()).unwrap();
+        let assigned = registry
+            .login_or_register(&principal("alice"))
+            .unwrap()
+            .assignment;
+        registry.storage.fail_next_read();
+        assert!(matches!(
+            registry.login(&principal("alice")),
+            Err(RegistryError::Unavailable(_))
+        ));
+        // A read changes nothing: the next lookup reads again.
+        assert_eq!(registry.login(&principal("alice")).unwrap(), assigned);
     }
 
     #[test]

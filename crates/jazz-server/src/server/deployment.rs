@@ -244,10 +244,14 @@ pub(crate) async fn deploy(
     // All graph, schema, permission, lens, physical mapping, and encoding
     // validation has completed. Cross-store write failure recovery is not
     // implemented here; this flow currently assumes writes succeed.
-    let response = state
-        .catalogue_store
-        .commit_deployment(staged)
-        .map_err(DeployError::internal)?;
+    // The write waits for the app's store thread (behind the runtime job or
+    // tick in progress): not on an async worker.
+    let committing = Arc::clone(&state);
+    let response =
+        tokio::task::spawn_blocking(move || committing.catalogue_store.commit_deployment(staged))
+            .await
+            .map_err(DeployError::internal)?
+            .map_err(DeployError::internal)?;
     let runtime = state
         .start_core_server_shell(initial_schema)
         .map_err(DeployError::internal)?;

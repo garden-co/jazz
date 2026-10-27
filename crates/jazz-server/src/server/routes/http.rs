@@ -416,6 +416,18 @@ pub(super) async fn internal_shutdown_handler(
 }
 
 pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    // A runtime that failed and could not restart serves no sync: ask to be
+    // restarted.
+    if let Some(fault) = state.store.as_ref().and_then(|store| store.fault()) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "unhealthy",
+                "reason": fault
+            })),
+        )
+            .into_response();
+    }
     let mut phase = state.shutdown.phase();
     if !state.shutdown.is_shutting_down() && phase.is_running() {
         return Json(serde_json::json!({

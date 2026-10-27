@@ -31,14 +31,6 @@ const PRE_SQLITE_STORES: [&str; 3] = [
     "catalogue.rocksdb",
     "accounts.rocksdb",
 ];
-/// Side files of unreleased builds that kept the catalogue and the account
-/// journal beside the store. Their state is not in `jazz.sqlite`, so a data
-/// directory holding one is refused rather than served without it.
-const SPLIT_SQLITE_FILES: [&str; 3] = [
-    "catalogue.sqlite",
-    "accounts.sqlite",
-    "jazz.catalogue.sqlite",
-];
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -303,17 +295,6 @@ impl ServerBuilder {
 }
 
 fn refuse_pre_sqlite_data_dir(path: &std::path::Path) -> Result<(), String> {
-    if let Some(split) = SPLIT_SQLITE_FILES
-        .iter()
-        .find(|file| path.join(file).exists())
-    {
-        return Err(format!(
-            "data dir '{}' holds {split} from an unreleased build that kept the catalogue and \
-             account journal beside the store; this server keeps them inside {STORE_FILE}. \
-             Start from an empty data dir",
-            path.display()
-        ));
-    }
     let started = path.join(STORE_FILE).exists();
     match PRE_SQLITE_STORES.iter().find(|dir| path.join(dir).exists()) {
         Some(old) if !started => Err(format!(
@@ -1169,9 +1150,12 @@ mod tests {
 
             assert!(built.state.runtime().is_some());
             assert!(data_dir.path().join(STORE_FILE).exists());
-            for split in SPLIT_SQLITE_FILES {
-                assert!(!data_dir.path().join(split).exists(), "one file per app");
-            }
+            let files: Vec<String> = std::fs::read_dir(data_dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+                .collect();
+            assert_eq!(files, vec![STORE_FILE.to_owned()], "one file per app");
             assert_eq!(
                 built.shutdown().await,
                 crate::server::ShutdownPhase::StorageClosed,
@@ -1232,7 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn a_data_dir_from_another_layout_is_refused_and_left_unchanged() {
         let app_id = AppId::from_name("refused-data-dir");
-        for old in PRE_SQLITE_STORES.iter().chain(SPLIT_SQLITE_FILES.iter()) {
+        for old in PRE_SQLITE_STORES.iter() {
             let data_dir = tempfile::TempDir::new().expect("temp data dir");
             let old_path = data_dir.path().join(old);
             if old.ends_with(".rocksdb") {

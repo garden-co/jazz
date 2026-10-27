@@ -16,19 +16,20 @@ pub mod auth_admission;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::kv::HostKv;
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
     TransportError, WireError, block_on,
 };
-use jazz::host::{HostTable, HostTables, StoreFile};
+use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::{
     CatalogueSnapshot, CurrentWriteSchema, MigrationLens, PhysicalIdentityManifest,
@@ -134,12 +135,14 @@ const IDLE_TICK: Duration = Duration::from_secs(1);
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
 
 /// About how long one tick may take. Each tick serves as many sessions as
-/// the recent per-session cost fits in it (at least one); the round
-/// continues in the next tick, after the host work queued meanwhile
-/// (logins, catalogue writes) ran. A session's queued messages (up to its
-/// budget) are still taken in one tick: clients rely on a read sent just
-/// before their writes being answered after them. Smaller ticks cost no
-/// throughput: each message commits on its own either way.
+/// the recent per-session cost fits in it (at least one). A round serves
+/// every session with inbound messages once, over as many ticks as that
+/// takes, before any is served again: a session waits at most a round, and
+/// host work queued meanwhile (catalogue writes, registrations) runs
+/// between the ticks. A served session's queued messages (up to
+/// [`INBOUND_MESSAGES_PER_TICK`]) are taken in one tick: clients rely on a
+/// read sent just before their writes being answered after them. Smaller
+/// ticks cost no throughput: each message commits on its own either way.
 const TICK_SLICE: Duration = Duration::from_millis(4);
 
 /// The runtime catalogue's host table, and its one key.
@@ -150,22 +153,35 @@ type Job = Box<dyn FnOnce(&mut Owner) + Send>;
 /// Work on the store's host tables, before or after the runtime opened.
 pub(crate) type HostJob = Box<dyn FnOnce(&dyn HostTables) + Send>;
 
+/// After a panic the runtime restarts on the store at most this often; a
+/// second panic sooner leaves it stopped and the store reports the fault.
+const RESTART_INTERVAL: Duration = Duration::from_secs(60);
+
 /// What the store thread is asked to do. Host work has its own queue, which
-/// the thread drains before every runtime job and tick: a login or
-/// catalogue write waits for at most the one job or tick slice in progress.
+/// the thread runs before every runtime job and tick, up to a tick slice of
+/// work at a time: a host write waits for at most the one job or tick slice
+/// in progress, and runtime ticks still run while host work keeps coming.
 enum Work {
     /// Host work is queued.
     Host,
     Owner(Job),
     Start(Start),
+    /// Stop the runtime; the store keeps serving its host tables.
+    Stop(std_mpsc::Sender<()>),
     Close,
+}
+
+/// What the runtime is opened with.
+#[derive(Clone)]
+struct Runtime {
+    schema: JazzSchema,
+    any_stored_catalogue: bool,
+    awaiting_permissions: bool,
 }
 
 /// Open the runtime on the store.
 struct Start {
-    schema: JazzSchema,
-    any_stored_catalogue: bool,
-    awaiting_permissions: bool,
+    runtime: Runtime,
     reply: std_mpsc::Sender<Result<(), String>>,
 }
 
@@ -180,23 +196,88 @@ pub struct AppStore {
 struct StoreThread {
     work: Mutex<Option<std_mpsc::Sender<Work>>>,
     host: std_mpsc::Sender<HostJob>,
+    /// Committed host tables, read without waiting for the store's thread.
+    /// An in-memory store lives as long as this connection to it.
+    reader: Arc<HostReader>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     tick_queued: Arc<AtomicBool>,
+    fault: Arc<Mutex<Option<String>>>,
+    /// Tests: runtime ticks so far.
+    #[cfg(test)]
+    ticks: Arc<AtomicU64>,
+}
+
+/// The file a store lives in.
+#[derive(Clone)]
+enum Source {
+    File(PathBuf),
+    /// An in-memory store shared by name within this process.
+    Memory(String),
+}
+
+impl Source {
+    fn new(storage: &StorageConfig) -> Self {
+        static NEXT_MEMORY_STORE: AtomicU64 = AtomicU64::new(0);
+        match storage {
+            StorageConfig::InMemory => Self::Memory(format!(
+                "jazz-server-{}-{}",
+                std::process::id(),
+                NEXT_MEMORY_STORE.fetch_add(1, Ordering::Relaxed)
+            )),
+            StorageConfig::SQLite { path } => Self::File(path.clone()),
+        }
+    }
+
+    fn open(&self) -> Result<StoreFile, String> {
+        match self {
+            Self::Memory(name) => StoreFile::shared_memory(name),
+            Self::File(path) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|error| format!("create {}: {error}", parent.display()))?;
+                }
+                // Every commit (rows, catalogue, account journal) is durable
+                // when it returns.
+                StoreFile::open(
+                    path,
+                    FileOptions {
+                        synchronous_full: true,
+                        ..FileOptions::default()
+                    },
+                )
+            }
+        }
+        .map_err(|error| format!("open server store: {error}"))
+    }
+
+    fn reader(&self) -> Result<HostReader, String> {
+        match self {
+            Self::Memory(name) => HostReader::shared_memory(name),
+            Self::File(path) => HostReader::open(path, None),
+        }
+        .map_err(|error| format!("open server store reader: {error}"))
+    }
 }
 
 impl AppStore {
     /// Open the store `storage` names on its own thread.
     pub fn open(storage: &StorageConfig) -> Result<Self, String> {
-        let storage = storage.clone();
+        let source = Source::new(storage);
         let (work, receiver) = std_mpsc::channel::<Work>();
         let (host, host_jobs) = std_mpsc::channel::<HostJob>();
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
-        let owner_ticks = Arc::clone(&tick_queued);
+        let fault = Arc::new(Mutex::new(None));
+        let (thread_source, thread_ticks, thread_fault) =
+            (source.clone(), Arc::clone(&tick_queued), Arc::clone(&fault));
+        #[cfg(test)]
+        let ticks = Arc::new(AtomicU64::new(0));
+        #[cfg(test)]
+        let thread_tick_count = Arc::clone(&ticks);
         let join = thread::Builder::new()
             .name("jazz-server-store".to_owned())
             .spawn(move || {
-                let file = match open_file(&storage) {
+                let file = match thread_source.open() {
                     Ok(file) => {
                         let _ = opened_tx.send(Ok(()));
                         file
@@ -206,18 +287,45 @@ impl AppStore {
                         return;
                     }
                 };
-                serve(file, &storage, receiver, host_jobs, &owner_ticks);
+                StoreLoop {
+                    source: thread_source,
+                    work: receiver,
+                    host: host_jobs,
+                    backlog: VecDeque::new(),
+                    tick_queued: thread_ticks,
+                    fault: thread_fault,
+                    state: State::Idle(Ok(file)),
+                    started: None,
+                    restarted: None,
+                    #[cfg(test)]
+                    ticks: thread_tick_count,
+                }
+                .run();
             })
             .map_err(|error| format!("failed to spawn server store thread: {error}"))?;
-        opened_rx
+        let opened = opened_rx
             .recv()
-            .map_err(|_| "server store thread exited before opening".to_owned())??;
+            .map_err(|_| "server store thread exited before opening".to_owned())
+            .and_then(|opened| opened)
+            .and_then(|()| source.reader());
+        let reader = match opened {
+            Ok(reader) => Arc::new(reader),
+            Err(error) => {
+                drop(work);
+                let _ = join.join();
+                return Err(error);
+            }
+        };
         Ok(Self {
             inner: Arc::new(StoreThread {
                 work: Mutex::new(Some(work)),
                 host,
+                reader,
                 join: Mutex::new(Some(join)),
                 tick_queued,
+                fault,
+                #[cfg(test)]
+                ticks,
             }),
         })
     }
@@ -231,11 +339,19 @@ impl AppStore {
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
+            Arc::clone(&self.inner.reader),
             HostSender {
                 host: self.inner.host.clone(),
                 wake: self.sender()?,
             },
         ))
+    }
+
+    /// Why the runtime stopped serving, if it failed (panicked) and could
+    /// not be restarted. The host tables stay available; the server
+    /// reports itself unhealthy so it is restarted.
+    pub fn fault(&self) -> Option<String> {
+        self.inner.fault.lock().ok().and_then(|fault| fault.clone())
     }
 
     fn sender(&self) -> Result<std_mpsc::Sender<Work>, String> {
@@ -253,9 +369,9 @@ impl AppStore {
             .map_err(|_| "server store thread is not running".to_owned())
     }
 
-    /// Open the runtime on this store, once. `any_stored_catalogue`: reopen
-    /// with whatever catalogue the store holds (a catalogue-driven server),
-    /// not only one that admits `schema`. `awaiting_permissions`: until the
+    /// Open the runtime on this store. `any_stored_catalogue`: reopen with
+    /// whatever catalogue the store holds (a catalogue-driven server), not
+    /// only one that admits `schema`. `awaiting_permissions`: until the
     /// first schema activation, session reads wait and session writes are
     /// rejected.
     pub fn start_runtime(
@@ -265,14 +381,33 @@ impl AppStore {
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
     ) -> Result<ServerRuntimeHandle, String> {
+        self.start(
+            schema,
+            role,
+            any_stored_catalogue,
+            awaiting_permissions,
+            false,
+        )
+    }
+
+    fn start(
+        &self,
+        schema: JazzSchema,
+        role: NodeRole,
+        any_stored_catalogue: bool,
+        awaiting_permissions: bool,
+        owns_store: bool,
+    ) -> Result<ServerRuntimeHandle, String> {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
         let (reply, started) = std_mpsc::channel();
         self.send(Work::Start(Start {
-            schema,
-            any_stored_catalogue,
-            awaiting_permissions,
+            runtime: Runtime {
+                schema,
+                any_stored_catalogue,
+                awaiting_permissions,
+            },
             reply,
         }))?;
         started
@@ -282,6 +417,7 @@ impl AppStore {
         Ok(ServerRuntimeHandle {
             inner: Arc::new(Inner {
                 store: self.clone(),
+                owns_store,
                 activity,
                 next_session: AtomicU64::new(1),
                 edges: Mutex::new(HashMap::new()),
@@ -289,10 +425,24 @@ impl AppStore {
         })
     }
 
+    /// Stop the runtime and wait for it; the host tables stay available.
+    pub fn stop_runtime(&self) -> Result<(), String> {
+        let (reply, stopped) = std_mpsc::channel();
+        self.send(Work::Stop(reply))?;
+        stopped
+            .recv()
+            .map_err(|_| "server store thread exited while stopping the runtime".to_owned())
+    }
+
     /// Stop and join the store thread (and the runtime on it); the file is
-    /// closed when this returns. Host tables are unavailable afterwards.
+    /// closed, its WAL checkpointed, when this returns. Host tables are
+    /// unavailable afterwards.
     /// Safe to call more than once.
     pub fn close(&self) -> Result<(), String> {
+        // Before the store's connection, so that one closes last and
+        // checkpoints the WAL into the file. (An in-memory store is gone
+        // once both are.)
+        self.inner.reader.close();
         let work = self
             .inner
             .work
@@ -330,30 +480,7 @@ impl HostSender {
     }
 }
 
-fn open_file(storage: &StorageConfig) -> Result<StoreFile, String> {
-    match storage {
-        StorageConfig::InMemory => StoreFile::memory(),
-        StorageConfig::SQLite { path } => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|error| format!("create {}: {error}", parent.display()))?;
-            }
-            // Every commit (rows, catalogue, account journal) is durable
-            // when it returns.
-            StoreFile::open(
-                path,
-                FileOptions {
-                    synchronous_full: true,
-                    ..FileOptions::default()
-                },
-            )
-        }
-    }
-    .map_err(|error| format!("open server store: {error}"))
-}
-
-/// Host tables of a store that could not be reopened after the runtime
-/// failed to open on it.
+/// Host tables of a store that could not be opened: each use reports why.
 struct Unavailable(String);
 
 impl HostTables for Unavailable {
@@ -393,60 +520,263 @@ impl Unavailable {
     }
 }
 
-/// The store thread before the runtime opens: host-table work only.
-fn serve(
-    file: StoreFile,
-    storage: &StorageConfig,
+/// The store thread.
+struct StoreLoop {
+    source: Source,
     work: std_mpsc::Receiver<Work>,
     host: std_mpsc::Receiver<HostJob>,
-    tick_queued: &AtomicBool,
-) {
-    let mut file: Result<StoreFile, Unavailable> = Ok(file);
-    while let Ok(next) = work.recv() {
-        match next {
-            Work::Host => {
-                while let Ok(job) = host.try_recv() {
-                    match &file {
-                        Ok(file) => job(file),
-                        Err(unavailable) => job(unavailable),
-                    }
+    /// Host work taken off the queue but not run yet (a tick slice ended).
+    backlog: VecDeque<HostJob>,
+    tick_queued: Arc<AtomicBool>,
+    fault: Arc<Mutex<Option<String>>>,
+    state: State,
+    /// What the running runtime was opened with, to restart it.
+    started: Option<Runtime>,
+    restarted: Option<Instant>,
+    #[cfg(test)]
+    ticks: Arc<AtomicU64>,
+}
+
+// One per store: its size does not matter.
+#[allow(clippy::large_enum_variant)]
+enum State {
+    /// No runtime: the host tables on the file, or why it could not be
+    /// opened (tried again on the next host work).
+    Idle(Result<StoreFile, String>),
+    Running(Owner),
+}
+
+impl StoreLoop {
+    fn run(mut self) {
+        loop {
+            let inbound = self.owner().is_some_and(|owner| owner.inbound_pending());
+            let busy = inbound || !self.backlog.is_empty();
+            let first = if busy {
+                match self.work.try_recv() {
+                    Ok(next) => Some(next),
+                    Err(std_mpsc::TryRecvError::Empty) => None,
+                    Err(std_mpsc::TryRecvError::Disconnected) => break,
                 }
-            }
-            // No runtime handle exists before the runtime starts.
-            Work::Owner(_) => {}
-            Work::Start(start) => {
-                let current = std::mem::replace(
-                    &mut file,
-                    Err(Unavailable("server store is being opened".to_owned())),
-                );
-                let opened = current
-                    .map_err(|unavailable| unavailable.0)
-                    .and_then(|current| {
-                        Owner::open(
-                            start.schema,
-                            current,
-                            start.any_stored_catalogue,
-                            start.awaiting_permissions,
-                        )
-                    });
-                match opened {
-                    Ok(owner) => {
-                        let _ = start.reply.send(Ok(()));
-                        owner.run(work, host, tick_queued);
-                        return;
-                    }
-                    Err(error) => {
-                        let _ = start.reply.send(Err(error));
-                        // The failed open consumed the connection; the host
-                        // tables stay reachable on a new one.
-                        file = open_file(storage).map_err(Unavailable);
-                    }
+            } else if self.owner().is_some() {
+                match self.work.recv_timeout(IDLE_TICK) {
+                    Ok(next) => Some(next),
+                    Err(std_mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
                 }
+            } else {
+                match self.work.recv() {
+                    Ok(next) => Some(next),
+                    Err(_) => break,
+                }
+            };
+            let deadline = Instant::now() + TICK_SLICE;
+            // Host work alone does not tick the runtime: a login must not
+            // change when sessions' messages are taken.
+            let mut tick = inbound || (first.is_none() && !busy);
+            let mut next = first;
+            while let Some(item) = next.take() {
+                self.host_work(deadline);
+                tick |= !matches!(item, Work::Host);
+                if !self.handle(item) {
+                    self.stop();
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                next = self.work.try_recv().ok();
             }
-            Work::Close => return,
+            self.host_work(deadline);
+            if tick && self.owner().is_some() {
+                self.tick_queued.store(false, Ordering::Release);
+                self.on_owner(Owner::tick);
+                #[cfg(test)]
+                self.ticks.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.stop();
+    }
+
+    fn owner(&self) -> Option<&Owner> {
+        match &self.state {
+            State::Running(owner) => Some(owner),
+            State::Idle(_) => None,
         }
     }
+
+    /// Run queued host work, ahead of runtime work, until `deadline`.
+    fn host_work(&mut self, deadline: Instant) {
+        self.backlog.extend(self.host.try_iter());
+        while Instant::now() < deadline
+            && let Some(job) = self.backlog.pop_front()
+        {
+            self.host_job(job);
+        }
+    }
+
+    fn host_job(&mut self, job: HostJob) {
+        if let State::Idle(Err(_)) = self.state {
+            self.state = State::Idle(self.source.open());
+        }
+        let ran = match &self.state {
+            State::Idle(Ok(file)) => catch_unwind(AssertUnwindSafe(|| job(file))),
+            State::Idle(Err(error)) => {
+                job(&Unavailable(error.clone()));
+                Ok(())
+            }
+            State::Running(owner) => catch_unwind(AssertUnwindSafe(|| job(&owner.db))),
+        };
+        if let Err(panic) = ran {
+            let panic = panic_message(&*panic);
+            match self.state {
+                State::Running(_) => self.fault(format!("host work panicked: {panic}")),
+                // Nothing but the connection holds state: open it afresh.
+                State::Idle(_) => {
+                    tracing::error!(%panic, "server store host work panicked");
+                    self.state = State::Idle(Err(String::new()));
+                    self.state = State::Idle(self.source.open());
+                }
+            }
+        }
+    }
+
+    /// Do `work`; false once the store is to close.
+    fn handle(&mut self, work: Work) -> bool {
+        match work {
+            // Run before every item.
+            Work::Host => {}
+            // Without a runtime the job is dropped, and its caller told so.
+            Work::Owner(job) => self.on_owner(job),
+            Work::Start(start) => {
+                let started = match &self.state {
+                    State::Running(_) => Err("the server runtime is already running".to_owned()),
+                    State::Idle(_) => self.open_runtime(start.runtime),
+                };
+                let _ = start.reply.send(started);
+            }
+            Work::Stop(reply) => {
+                self.stop();
+                let _ = reply.send(());
+            }
+            Work::Close => return false,
+        }
+        true
+    }
+
+    /// Open the runtime on the file. If it fails, the file is opened afresh
+    /// for the host tables: the failed open consumed the connection, and the
+    /// store (even an in-memory one) outlives it.
+    fn open_runtime(&mut self, runtime: Runtime) -> Result<(), String> {
+        let file = match std::mem::replace(&mut self.state, State::Idle(Err(String::new()))) {
+            State::Idle(file) => file,
+            State::Running(owner) => {
+                self.state = State::Running(owner);
+                return Err("the server runtime is already running".to_owned());
+            }
+        };
+        let opened = file.and_then(|file| {
+            catch_unwind(AssertUnwindSafe(|| {
+                Owner::open(
+                    runtime.schema.clone(),
+                    file,
+                    runtime.any_stored_catalogue,
+                    runtime.awaiting_permissions,
+                )
+            }))
+            .unwrap_or_else(|panic| {
+                Err(format!(
+                    "opening the runtime panicked: {}",
+                    panic_message(&*panic)
+                ))
+            })
+        });
+        match opened {
+            Ok(owner) => {
+                self.state = State::Running(owner);
+                self.started = Some(runtime);
+                Ok(())
+            }
+            Err(error) => {
+                self.state = State::Idle(self.source.open());
+                Err(error)
+            }
+        }
+    }
+
+    /// Run `f` on the runtime, if one is running.
+    fn on_owner(&mut self, f: impl FnOnce(&mut Owner)) {
+        let State::Running(owner) = &mut self.state else {
+            return;
+        };
+        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| f(owner))) {
+            self.fault(format!(
+                "server runtime panicked: {}",
+                panic_message(&*panic)
+            ));
+        }
+    }
+
+    /// The runtime panicked: its state can no longer be trusted. Close its
+    /// sessions (clients reconnect), reopen the file (rolling back whatever
+    /// the panic left uncommitted) and restart the runtime on it, as a
+    /// process restart would. A second panic within [`RESTART_INTERVAL`]
+    /// leaves it stopped and recorded in [`AppStore::fault`]; the host
+    /// tables stay available either way.
+    fn fault(&mut self, panic: String) {
+        let awaiting_permissions = self.owner().map(|owner| owner.awaiting_permissions);
+        let started = self.started.take();
+        self.stop();
+        tracing::error!(%panic, "server runtime failed");
+        let restart = match (started, awaiting_permissions) {
+            (Some(mut runtime), Some(awaiting_permissions))
+                if self
+                    .restarted
+                    .is_none_or(|restarted| restarted.elapsed() >= RESTART_INTERVAL) =>
+            {
+                runtime.awaiting_permissions = awaiting_permissions;
+                self.restarted = Some(Instant::now());
+                self.open_runtime(runtime)
+            }
+            _ => Err("it failed again within a minute of restarting".to_owned()),
+        };
+        match restart {
+            Ok(()) => tracing::warn!("server runtime restarted after a failure"),
+            Err(error) => {
+                let fault = format!("{panic}; not restarted: {error}");
+                tracing::error!(%fault, "server runtime stopped");
+                if let Ok(mut slot) = self.fault.lock() {
+                    *slot = Some(fault);
+                }
+            }
+        }
+    }
+
+    /// Stop the runtime, if one is running: close its sessions and reopen
+    /// the file for the host tables.
+    fn stop(&mut self) {
+        let State::Running(owner) =
+            std::mem::replace(&mut self.state, State::Idle(Err(String::new())))
+        else {
+            return;
+        };
+        self.started = None;
+        // A runtime that panicked may panic again on its way down; the file
+        // is reopened either way.
+        let _ = catch_unwind(AssertUnwindSafe(move || owner.close()));
+        self.state = State::Idle(self.source.open());
+    }
 }
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_owned()
+    }
+}
+
 /// One activation: a schema and the migration lenses into it (its new
 /// columns' defaults, and the tables and columns it renames).
 type Step = (JazzSchema, Vec<MigrationLens>);
@@ -459,6 +789,8 @@ pub struct ServerRuntimeHandle {
 
 struct Inner {
     store: AppStore,
+    /// The store was opened for this runtime alone: shutdown closes it.
+    owns_store: bool,
     activity: watch::Sender<u64>,
     next_session: AtomicU64,
     edges: Mutex<HashMap<ServerSession, Edge>>,
@@ -547,11 +879,12 @@ impl ServerRuntimeHandle {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
-        AppStore::open(&storage)?.start_runtime(
+        AppStore::open(&storage)?.start(
             schema,
             role,
             any_stored_catalogue,
             awaiting_permissions,
+            true,
         )
     }
 
@@ -704,13 +1037,26 @@ impl ServerRuntimeHandle {
         let _ = self.send(Box::new(move |owner| owner.close_session(session)));
     }
 
-    /// Stop and join the owner thread; the store is closed when this returns.
+    /// Stop the runtime and wait for it. A runtime started on a store of its
+    /// own also closes the store (it is closed when this returns); one
+    /// started on an [`AppStore`] leaves the store's host tables to it.
     /// Safe to call more than once.
     pub async fn shutdown(&self) -> Result<(), String> {
         let store = self.inner.store.clone();
-        tokio::task::spawn_blocking(move || store.close())
-            .await
-            .map_err(|error| format!("server runtime shutdown task failed: {error}"))?
+        let owns_store = self.inner.owns_store;
+        tokio::task::spawn_blocking(move || {
+            if owns_store {
+                store.close()
+            } else {
+                // A closed store has no runtime left to stop.
+                store.stop_runtime().or_else(|error| match store.sender() {
+                    Err(_) => Ok(()),
+                    Ok(_) => Err(error),
+                })
+            }
+        })
+        .await
+        .map_err(|error| format!("server runtime shutdown task failed: {error}"))?
     }
 
     // ---- catalogue ---------------------------------------------------------
@@ -843,6 +1189,15 @@ impl ServerRuntimeHandle {
         result
     }
 
+    /// Tests: run `f` on the runtime's database.
+    #[cfg(test)]
+    pub(crate) async fn with_db_for_test<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Db) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        self.run(move |owner| f(&owner.db)).await
+    }
+
     fn edges(&self) -> Result<std::sync::MutexGuard<'_, HashMap<ServerSession, Edge>>, String> {
         self.inner
             .edges
@@ -929,10 +1284,13 @@ struct OwnerSession {
 struct SessionQueues {
     inbound: RefCell<VecDeque<SyncMessage>>,
     outbound: RefCell<VecDeque<SyncMessage>>,
-    /// Inbound messages the engine may still take this round.
+    /// Inbound messages the engine may still take in the tick serving this
+    /// session.
     budget: std::cell::Cell<usize>,
-    /// The tick in progress took a message from this session.
+    /// The tick in progress serves this session.
     served: std::cell::Cell<bool>,
+    /// A tick of this round served this session already.
+    done: std::cell::Cell<bool>,
     slice: Rc<TickSlice>,
 }
 
@@ -984,6 +1342,21 @@ impl TickSlice {
     }
 }
 
+/// Before a tick: a round ends once every session with inbound messages
+/// was served in it (a time slice can end a tick mid-round); until then,
+/// only sessions it did not serve yet are served.
+fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> + Clone) {
+    let round_over = sessions
+        .clone()
+        .all(|queues| queues.done.get() || queues.inbound.borrow().is_empty());
+    for queues in sessions {
+        if round_over {
+            queues.done.set(false);
+        }
+        queues.served.set(false);
+    }
+}
+
 /// The engine's side of one session.
 struct SessionTransport(Rc<SessionQueues>);
 
@@ -994,18 +1367,24 @@ impl Transport for SessionTransport {
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        let budget = self.0.budget.get();
-        if budget == 0 || self.0.inbound.borrow().is_empty() {
+        let queues = &self.0;
+        if queues.inbound.borrow().is_empty() {
             return None;
         }
-        if !self.0.served.get() {
-            if !self.0.slice.take() {
+        if !queues.served.get() {
+            if queues.done.get() || !queues.slice.take() {
                 return None;
             }
-            self.0.served.set(true);
+            queues.served.set(true);
+            queues.done.set(true);
+            queues.budget.set(INBOUND_MESSAGES_PER_TICK);
         }
-        let message = self.0.inbound.borrow_mut().pop_front()?;
-        self.0.budget.set(budget - 1);
+        let budget = queues.budget.get();
+        if budget == 0 {
+            return None;
+        }
+        let message = queues.inbound.borrow_mut().pop_front()?;
+        queues.budget.set(budget - 1);
         Some(message)
     }
 }
@@ -1228,69 +1607,11 @@ impl Owner {
         Ok(owner)
     }
 
-    fn run(
-        mut self,
-        work: std_mpsc::Receiver<Work>,
-        host: std_mpsc::Receiver<HostJob>,
-        tick_queued: &AtomicBool,
-    ) {
-        'serve: loop {
-            // Inbound work left over from a budgeted tick runs next, after
-            // any jobs that arrived meanwhile.
-            let wait = if self.inbound_pending() {
-                Duration::ZERO
-            } else {
-                IDLE_TICK
-            };
-            let mut next = match work.recv_timeout(wait) {
-                Ok(next) => Some(next),
-                Err(std_mpsc::RecvTimeoutError::Timeout) => None,
-                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-            // Host work alone does not tick the runtime: a login must not
-            // change when sessions' messages are taken.
-            let mut runtime_work = next.is_none();
-            while let Some(item) = next.take() {
-                self.drain_host(&host);
-                runtime_work |= !matches!(item, Work::Host);
-                if !self.handle(item) {
-                    break 'serve;
-                }
-                next = work.try_recv().ok();
-            }
-            self.drain_host(&host);
-            if !runtime_work {
-                continue;
-            }
-            tick_queued.store(false, Ordering::Release);
-            self.tick();
-        }
+    /// Close every session (their streams end) and the store's runtime.
+    fn close(mut self) {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
-    }
-
-    /// Host work queued so far, ahead of any runtime work.
-    fn drain_host(&self, host: &std_mpsc::Receiver<HostJob>) {
-        while let Ok(job) = host.try_recv() {
-            job(&self.db);
-        }
-    }
-
-    /// Do `work`; false once the store is to close.
-    fn handle(&mut self, work: Work) -> bool {
-        match work {
-            Work::Owner(job) => job(self),
-            // Drained before every item.
-            Work::Host => {}
-            Work::Start(start) => {
-                let _ = start
-                    .reply
-                    .send(Err("the server runtime is already running".to_owned()));
-            }
-            Work::Close => return false,
-        }
-        true
     }
 
     fn open_session(
@@ -1308,8 +1629,9 @@ impl Owner {
         let queues = Rc::new(SessionQueues {
             inbound: RefCell::default(),
             outbound: RefCell::default(),
-            budget: std::cell::Cell::new(INBOUND_MESSAGES_PER_TICK),
+            budget: std::cell::Cell::new(0),
             served: std::cell::Cell::new(false),
+            done: std::cell::Cell::new(false),
             slice: Rc::clone(&self.slice),
         });
         let subscriber = self.db.accept_subscriber_with_claims(
@@ -1405,19 +1727,7 @@ impl Owner {
     /// large batch gets its first answers out early and other sessions are
     /// served between its parts.
     fn tick(&mut self) {
-        // A round ends when no session with inbound left has budget left
-        // (a time slice can end a tick mid-round); then every session gets a
-        // new budget. Until then, sessions a cut-short tick did not reach
-        // are served first.
-        let round_over = self.sessions.values().all(|session| {
-            session.queues.budget.get() == 0 || session.queues.inbound.borrow().is_empty()
-        });
-        for session in self.sessions.values() {
-            if round_over {
-                session.queues.budget.set(INBOUND_MESSAGES_PER_TICK);
-            }
-            session.queues.served.set(false);
-        }
+        start_tick(self.sessions.values().map(|session| &*session.queues));
         let started = std::time::Instant::now();
         let ticked = block_on(self.db.tick());
         self.slice.ticked(started.elapsed());
@@ -1573,55 +1883,246 @@ mod tests {
 
     const PROBE: HostTable = HostTable::new("probe");
 
-    /// A login or catalogue write arriving during a long runtime job (or
-    /// tick) runs as soon as it ends, ahead of runtime work queued before
-    /// it, and finishes.
+    fn host_sender(store: &AppStore) -> HostSender {
+        HostSender {
+            host: store.inner.host.clone(),
+            wake: store.sender().unwrap(),
+        }
+    }
+
+    /// Hold the store thread in a runtime job until the returned sender
+    /// sends (or drops).
+    fn hold(runtime: &ServerRuntimeHandle) -> std_mpsc::Sender<()> {
+        let (entered, running) = std_mpsc::channel();
+        let (release, released) = std_mpsc::channel::<()>();
+        runtime
+            .send(Box::new(move |_| {
+                entered.send(()).unwrap();
+                let _ = released.recv();
+            }))
+            .unwrap();
+        running.recv().unwrap();
+        release
+    }
+
+    /// A host write arriving during a long runtime job (or tick) runs as
+    /// soon as it ends, ahead of runtime work queued before it, and
+    /// finishes. Reads (a login's) do not wait for it at all: they see what
+    /// was committed.
     #[test]
     fn host_work_runs_ahead_of_queued_runtime_work() {
         let store = AppStore::memory().unwrap();
         let runtime = store
             .start_runtime(schema(), NodeRole::Core, false, false)
             .unwrap();
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let (entered, long_job_running) = std_mpsc::channel();
-        let (release, released) = std_mpsc::channel::<()>();
-        runtime
-            .send(Box::new(move |_| {
-                entered.send(()).unwrap();
-                released.recv().unwrap();
-            }))
+        let kv = store.kv(PROBE).unwrap();
+        kv.write_many(&[(b"before".to_vec(), b"1".to_vec())])
             .unwrap();
-        long_job_running.recv().unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let release = hold(&runtime);
         for _ in 0..3 {
             let order = Arc::clone(&order);
             runtime
                 .send(Box::new(move |_| order.lock().unwrap().push("runtime")))
                 .unwrap();
         }
-        let host = store.kv(PROBE).unwrap();
         let order_host = Arc::clone(&order);
-        HostSender {
-            host: store.inner.host.clone(),
-            wake: store.sender().unwrap(),
-        }
-        .send(Box::new(move |tables: &dyn HostTables| {
-            tables
-                .host_put_many(PROBE, &[(b"k".to_vec(), b"v".to_vec())])
-                .unwrap();
-            order_host.lock().unwrap().push("host");
-        }))
-        .unwrap();
-        // A blocking caller (the account owner's login) waits for the long
-        // job, then finishes.
-        let login = std::thread::spawn(move || host.get(b"k"));
+        host_sender(&store)
+            .send(Box::new(move |tables: &dyn HostTables| {
+                tables
+                    .host_put_many(PROBE, &[(b"k".to_vec(), b"v".to_vec())])
+                    .unwrap();
+                order_host.lock().unwrap().push("host");
+            }))
+            .unwrap();
+        // A blocking writer (a registration) waits for the long job, then
+        // finishes.
+        let writer = store.kv(PROBE).unwrap();
+        let write =
+            std::thread::spawn(move || writer.write_many(&[(b"w".to_vec(), b"w".to_vec())]));
+        // Meanwhile reads answer at once, from committed state.
+        assert_eq!(kv.get(b"before").unwrap(), Some(b"1".to_vec()));
+        assert_eq!(kv.get(b"k").unwrap(), None);
         release.send(()).unwrap();
-        assert_eq!(login.join().unwrap().unwrap(), Some(b"v".to_vec()));
+        write.join().unwrap().unwrap();
+        assert_eq!(kv.get(b"k").unwrap(), Some(b"v".to_vec()));
+        assert_eq!(kv.get(b"w").unwrap(), Some(b"w".to_vec()));
         block_on(runtime.run(|_| Ok(()))).unwrap();
         assert_eq!(
             *order.lock().unwrap(),
             vec!["host", "runtime", "runtime", "runtime"]
         );
         store.close().unwrap();
+    }
+
+    /// Host work that never stops coming does not stop the runtime: each
+    /// round of host work is cut at a tick slice and a tick runs.
+    #[test]
+    fn ticks_keep_running_under_constant_host_work() {
+        let store = AppStore::memory().unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false, false)
+            .unwrap();
+        // A session with more inbound messages than many ticks take.
+        block_on(runtime.run(|owner| {
+            let (output, _) = tokio_mpsc::unbounded_channel();
+            owner.open_session(
+                ServerSession(1),
+                AuthorSubject::SYSTEM,
+                BTreeMap::new(),
+                output,
+                Arc::default(),
+            );
+            let mut inbound = owner.sessions[&ServerSession(1)]
+                .queues
+                .inbound
+                .borrow_mut();
+            inbound.extend((0..100_000).map(|id| SyncMessage::Unsubscribe { id }));
+            Ok(())
+        }))
+        .unwrap();
+        // Keep a backlog of host work queued for the whole window.
+        let host = host_sender(&store);
+        let flooding = Arc::new(AtomicBool::new(true));
+        let flood = {
+            let flooding = Arc::clone(&flooding);
+            std::thread::spawn(move || {
+                while flooding.load(Ordering::Relaxed) {
+                    for _ in 0..8 {
+                        host.send(Box::new(|_: &dyn HostTables| {
+                            std::thread::sleep(Duration::from_millis(1))
+                        }))
+                        .unwrap();
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let before = store.inner.ticks.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(300));
+        let during = store.inner.ticks.load(Ordering::Relaxed) - before;
+        flooding.store(false, Ordering::Relaxed);
+        flood.join().unwrap();
+        assert!(during >= 10, "{during} ticks in 300ms of host work");
+        store.close().unwrap();
+    }
+
+    /// A runtime job that panics restarts the runtime on the store, as a
+    /// process restart would; the host tables stay available throughout. A
+    /// second panic soon after leaves the runtime stopped, the fault
+    /// recorded, and the host tables still available.
+    #[test]
+    fn a_panicking_runtime_restarts_and_host_tables_stay_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap();
+        let kv = store.kv(PROBE).unwrap();
+        kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false, false)
+            .unwrap();
+        let panicked = block_on(runtime.run::<()>(|_| panic!("injected runtime failure")));
+        assert!(panicked.is_err(), "the job's caller hears it failed");
+        // Restarted: runtime work and host work both go on.
+        block_on(runtime.run(|owner| block_on(owner.db.tick()).map_err(|error| error.to_string())))
+            .unwrap();
+        kv.write_many(&[(b"b".to_vec(), b"2".to_vec())]).unwrap();
+        assert_eq!(store.fault(), None);
+
+        let _ = block_on(runtime.run::<()>(|_| panic!("injected runtime failure")));
+        assert!(block_on(runtime.run(|_| Ok(()))).is_err(), "no runtime");
+        let fault = store.fault().expect("a second failure is recorded");
+        assert!(fault.contains("injected runtime failure"), "{fault}");
+        kv.write_many(&[(b"c".to_vec(), b"3".to_vec())]).unwrap();
+        assert_eq!(
+            kv.prefix(b"").unwrap(),
+            vec![
+                (b"a".to_vec(), b"1".to_vec()),
+                (b"b".to_vec(), b"2".to_vec()),
+                (b"c".to_vec(), b"3".to_vec())
+            ]
+        );
+        store.close().unwrap();
+    }
+
+    /// A runtime that fails to open leaves the store as it was, even an
+    /// in-memory one: the host tables keep what they held.
+    #[test]
+    fn a_failed_runtime_start_keeps_the_host_tables() {
+        let store = AppStore::memory().unwrap();
+        let kv = store.kv(PROBE).unwrap();
+        kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
+        store
+            .kv(RUNTIME_CATALOGUE)
+            .unwrap()
+            .write_many(&[(CATALOGUE_KEY.to_vec(), b"not a catalogue".to_vec())])
+            .unwrap();
+        let error = store
+            .start_runtime(schema(), NodeRole::Core, false, false)
+            .err()
+            .expect("an undecodable catalogue fails the start");
+        assert!(error.contains("decode runtime catalogue"), "{error}");
+        assert_eq!(kv.get(b"a").unwrap(), Some(b"1".to_vec()));
+        kv.write_many(&[(b"b".to_vec(), b"2".to_vec())]).unwrap();
+        assert_eq!(kv.get(b"b").unwrap(), Some(b"2".to_vec()));
+        store.close().unwrap();
+    }
+
+    /// With room for one session per tick, every session with messages is
+    /// served once per round: one that keeps sending does not keep the
+    /// others waiting.
+    #[test]
+    fn every_waiting_session_is_served_once_per_round() {
+        let slice = Rc::new(TickSlice::default());
+        slice.cap.set(1);
+        let sessions: Vec<Rc<SessionQueues>> = (0..3)
+            .map(|_| {
+                Rc::new(SessionQueues {
+                    inbound: RefCell::default(),
+                    outbound: RefCell::default(),
+                    budget: std::cell::Cell::new(0),
+                    served: std::cell::Cell::new(false),
+                    done: std::cell::Cell::new(false),
+                    slice: Rc::clone(&slice),
+                })
+            })
+            .collect();
+        let push = |session: usize, count: u64| {
+            sessions[session]
+                .inbound
+                .borrow_mut()
+                .extend((0..count).map(|id| SyncMessage::Unsubscribe { id }));
+        };
+        push(1, 1);
+        push(2, 20);
+        let mut served = Vec::new();
+        for _ in 0..4 {
+            // Session 0 sends a little before every tick.
+            push(0, 2);
+            start_tick(sessions.iter().map(|queues| &**queues));
+            // The engine asks every session, in a fixed order.
+            let mut tick = Vec::new();
+            for (index, queues) in sessions.iter().enumerate() {
+                let mut transport = SessionTransport(Rc::clone(queues));
+                let taken = std::iter::from_fn(|| transport.try_recv()).count();
+                if taken > 0 {
+                    tick.push((index, taken));
+                }
+            }
+            slice.taken.set(0);
+            served.push(tick);
+        }
+        assert_eq!(
+            served,
+            vec![
+                vec![(0, 2)],
+                vec![(1, 1)],
+                // At most a tick's budget at once.
+                vec![(2, INBOUND_MESSAGES_PER_TICK)],
+                // A new round: session 0's messages waited only one round.
+                vec![(0, 6)],
+            ]
+        );
     }
 
     #[test]

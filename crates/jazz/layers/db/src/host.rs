@@ -12,12 +12,16 @@
 //! [`StoreFile`] reaches them before a [`Db`] is opened on the file (a
 //! server reads its catalogue to know which schema to open with), and
 //! [`Db`] reaches them afterwards. Both go through the one connection, so
-//! host writes and row writes never contend for the file.
+//! host writes and row writes never contend for the file. A [`HostReader`]
+//! reads committed host tables from another thread without waiting for
+//! that connection.
 //!
 //! [`FileOptions::synchronous_full`]: crate::db::FileOptions::synchronous_full
 //! [`Db`]: crate::db::Db
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -150,6 +154,95 @@ impl StoreFile {
         crate::format::admit(&conn)?;
         Ok(Self { conn, path: None })
     }
+
+    /// An in-memory store this process shares by `name`: it lives while any
+    /// connection to it is open, so a host keeping one can reopen the store
+    /// (or read it with a [`HostReader`]) without losing it.
+    pub fn shared_memory(name: &str) -> Result<Self, Error> {
+        let conn =
+            Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
+        crate::format::admit(&conn)?;
+        Ok(Self { conn, path: None })
+    }
+}
+
+/// Reads committed host tables on a connection of its own, so a reader on
+/// another thread never waits for work on the store's connection (a WAL
+/// file serves readers beside its writer). It sees every write that
+/// returned before the read began.
+pub struct HostReader {
+    conn: Mutex<Option<Connection>>,
+}
+
+impl HostReader {
+    /// Read the file at `path`, which a [`StoreFile`] opened already.
+    pub fn open(path: &Path, vfs: Option<&'static str>) -> Result<Self, Error> {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+        let conn = match vfs {
+            None => Connection::open_with_flags(path, flags),
+            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+        }
+        .map_err(storage)?;
+        Self::with(conn)
+    }
+
+    /// Read the store [`StoreFile::shared_memory`] opened by `name`.
+    pub fn shared_memory(name: &str) -> Result<Self, Error> {
+        Self::with(
+            Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?,
+        )
+    }
+
+    fn with(conn: Connection) -> Result<Self, Error> {
+        // A WAL reader waits only while another connection recovers the
+        // log.
+        conn.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
+        Ok(Self {
+            conn: Mutex::new(Some(conn)),
+        })
+    }
+
+    fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| Error::new(ErrorCode::Storage, "host reader lock poisoned"))?;
+        match &*conn {
+            Some(conn) => f(conn),
+            None => Err(Error::new(ErrorCode::Storage, "host reader is closed")),
+        }
+    }
+
+    /// The value at `key`.
+    pub fn get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.read(|conn| get(conn, table, key))
+    }
+
+    /// Every pair whose key starts with `prefix`, in key order.
+    pub fn prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
+        self.read(|conn| prefix_scan(conn, table, prefix))
+    }
+
+    /// Close the connection; reads fail afterwards. Close readers before
+    /// the store's own connection, which then checkpoints the WAL as the
+    /// file's last connection.
+    pub fn close(&self) {
+        if let Ok(mut conn) = self.conn.lock() {
+            conn.take();
+        }
+    }
+}
+
+/// SQLite's `memdb` VFS shares a database whose name starts with `/`
+/// between the process's connections.
+fn shared_memory_uri(name: &str) -> String {
+    format!("file:/{name}?vfs=memdb")
+}
+
+fn uri_flags() -> rusqlite::OpenFlags {
+    rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_URI
 }
 
 impl HostTables for StoreFile {

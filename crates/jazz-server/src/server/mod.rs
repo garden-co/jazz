@@ -14,6 +14,8 @@ mod catalogue;
 mod catalogue_entry;
 mod catalogue_payload_codec;
 mod catalogue_storage;
+#[cfg(test)]
+mod data_dir_corpus;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub(crate) mod deployment;
 pub mod routes;

@@ -2,14 +2,16 @@
 //! state (the schema catalogue and the account journal): one host table in
 //! the app's store file (see [`jazz::host`]).
 //!
-//! Every call runs on the store's thread, on the one connection the
-//! runtime's rows use too, and waits for it. The store commits with
-//! `synchronous = FULL`, so a returned write is durable and `flush` has
-//! nothing left to do.
+//! Writes run on the store's thread, on the one connection the runtime's
+//! rows use too, and wait for it (at most the one runtime job or tick slice
+//! in progress). The store commits with `synchronous = FULL`, so a returned
+//! write is durable and `flush` has nothing left to do. Reads see what was
+//! committed when they begin, on a connection of their own: they never wait
+//! for the runtime.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 
-use jazz::host::{HostPair, HostTable, HostTables};
+use jazz::host::{HostPair, HostReader, HostTable, HostTables};
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
@@ -21,20 +23,31 @@ pub(crate) const ACCOUNTS: HostTable = HostTable::new("accounts");
 
 pub(crate) struct HostKv {
     table: HostTable,
+    reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
     /// Tests: the next conditional write commits and then reports an error,
     /// the ambiguous outcome a failed flush has.
     #[cfg(test)]
     fail_next_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Tests: the next read fails.
+    #[cfg(test)]
+    fail_next_read: std::sync::atomic::AtomicBool,
 }
 
 impl HostKv {
-    pub(crate) fn new(table: HostTable, store: crate::runtime::HostSender) -> Self {
+    pub(crate) fn new(
+        table: HostTable,
+        reader: Arc<HostReader>,
+        store: crate::runtime::HostSender,
+    ) -> Self {
         Self {
             table,
+            reader,
             store,
             #[cfg(test)]
             fail_next_write: Default::default(),
+            #[cfg(test)]
+            fail_next_read: Default::default(),
         }
     }
 
@@ -54,8 +67,16 @@ impl HostKv {
     }
 
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
-        let key = key.to_vec();
-        self.call(move |tables, table| tables.host_get(table, &key))
+        #[cfg(test)]
+        if self
+            .fail_next_read
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected read failure".to_owned());
+        }
+        self.reader
+            .get(self.table, key)
+            .map_err(|error| error.to_string())
     }
 
     /// Write `value` unless `key` exists; returns the existing value if so.
@@ -71,6 +92,13 @@ impl HostKv {
             return Err("injected failure after the write committed".to_owned());
         }
         Ok(existing)
+    }
+
+    /// Tests: fail the next read.
+    #[cfg(test)]
+    pub(crate) fn fail_next_read(&self) {
+        self.fail_next_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Tests: the switch that fails the next conditional write.
@@ -93,8 +121,9 @@ impl HostKv {
 
     /// Every pair whose key starts with `prefix`, in key order.
     pub(crate) fn prefix(&self, prefix: &[u8]) -> KvResult<Vec<HostPair>> {
-        let prefix = prefix.to_vec();
-        self.call(move |tables, table| tables.host_prefix(table, &prefix))
+        self.reader
+            .prefix(self.table, prefix)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -129,7 +158,10 @@ mod tests {
                 .write_many(&[(b"a:1".to_vec(), b"other".to_vec())])
                 .unwrap();
             store.close().unwrap();
-            assert!(kv.get(b"a:1").is_err(), "a closed store answers nothing");
+            assert!(
+                kv.write_many(&[(b"c".to_vec(), b"c".to_vec())]).is_err(),
+                "a closed store takes no writes"
+            );
         }
         // One file per app.
         let files: Vec<_> = std::fs::read_dir(dir.path())
