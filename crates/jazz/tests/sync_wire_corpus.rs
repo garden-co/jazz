@@ -201,10 +201,27 @@ impl Transport for Recording {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message).unwrap() {
             let decoded: SyncMessage = postcard::from_bytes(&frame).unwrap();
-            self.recorded
-                .borrow_mut()
+            // The pinned Commit is the first that relays a session's write
+            // over a held image and a pending predecessor (bases, origin),
+            // else the first.
+            let relayed = matches!(
+                &decoded,
+                SyncMessage::Commit { bases, origin: Some(_), .. }
+                    if bases.iter().any(|base| base.seq.is_some() && base.pending.is_some())
+            );
+            let mut recorded = self.recorded.borrow_mut();
+            let pinned = recorded
                 .entry(variant(&decoded))
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
+            let pinned_relayed = matches!(
+                postcard::from_bytes(&pinned.1),
+                Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
+                    if bases.iter().any(|base: &jazz::db::WireBase| base.seq.is_some() && base.pending.is_some())
+            );
+            if relayed && !pinned_relayed {
+                *pinned = (self.peer.to_owned(), frame.clone());
+            }
+            drop(recorded);
             self.outbound.borrow_mut().push_back(decoded);
         }
         Ok(())
@@ -422,7 +439,15 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let tab = open(0x54, user(1), false);
     tab.set_non_durable_client();
     connect(&tab, &worker, user(1), &recorded);
-    block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default())).unwrap();
+    let tabs = block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default()))
+        .unwrap()
+        .row_uuid();
+    pump(&[&tab, &worker, &server, &worker, &tab]);
+    // Commit with bases and an origin: the tab edits its note twice before
+    // the first edit settles, and the worker relays both.
+    for body in [6, 7] {
+        block_on(tab.update("notes", tabs, note(1, vec![body]), UpdateOptions::default())).unwrap();
+    }
     pump(&[&tab, &worker, &server, &worker, &tab]);
 
     // Refused: a subscription the server cannot serve. No replica sends

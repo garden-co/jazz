@@ -19,10 +19,12 @@ use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, RemoteLinkHint, SubscriptionStream, UpdateOptions,
-    Upstream, WriteConflict, block_on,
+    Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts,
+    RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream, WireBase, WireKind,
+    WireOp, WireTarget, WriteConflict, WriteTarget, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::BranchSelector;
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -44,8 +46,19 @@ fn schema() -> JazzSchema {
                     .column("note", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
+            .table(
+                TableSchemaBuilder::new("drafts")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
             .build(),
     )
+}
+
+fn draft_branch() -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xd5; 16])))])
 }
 
 fn open(node: u8, author: AuthorSubject) -> Db {
@@ -93,8 +106,13 @@ struct Net {
 
 impl Net {
     fn new(clients: usize) -> Self {
+        Self::around(open(CORE, AuthorSubject::SYSTEM), clients)
+    }
+
+    /// `clients` direct clients around authority `core`.
+    fn around(core: Db, clients: usize) -> Self {
         let mut net = Net {
-            core: open(CORE, AuthorSubject::SYSTEM),
+            core,
             worker: None,
             clients: Vec::new(),
         };
@@ -108,20 +126,24 @@ impl Net {
     /// after the `direct` direct clients.
     fn with_worker(direct: usize, tabs: usize) -> Self {
         let mut net = Self::new(direct);
+        net.add_worker();
+        for i in 0..tabs {
+            net.add_client(WORKER + 1 + i as u8, Some(0));
+        }
+        net
+    }
+
+    fn add_worker(&mut self) {
         let worker = open(WORKER, author(WORKER));
         worker.set_remote_link_hint(RemoteLinkHint::Live);
-        net.worker = Some(Client {
+        self.worker = Some(Client {
             node: WORKER,
             db: worker,
             up: None,
             via: None,
             _todos: None,
         });
-        net.connect_worker();
-        for i in 0..tabs {
-            net.add_client(WORKER + 1 + i as u8, Some(0));
-        }
-        net
+        self.connect_worker();
     }
 
     fn add_client(&mut self, node: u8, via: Option<usize>) {
@@ -277,7 +299,7 @@ impl Net {
     }
 
     fn conflicts(&self, row: RowUuid) -> Vec<WriteConflict> {
-        self.core.write_conflicts("todos", row, &[]).unwrap()
+        self.core.write_conflicts("todos", row, None).unwrap()
     }
 
     fn conflict(&self, row: RowUuid, writer: Writer) -> WriteConflict {
@@ -692,4 +714,266 @@ fn a_tabs_write_through_its_worker_is_flagged_over_a_write_it_never_saw() {
         other_conflict.overlapping.is_empty(),
         "the other tab wrote only the note"
     );
+}
+
+#[test]
+fn a_session_shipped_a_relays_unsettled_version_saw_it_and_what_it_was_made_over() {
+    // A raw relay link: what a worker uploads for its tabs, with the bases
+    // a tab sends when its image is the worker's unsettled version.
+    let core = open(CORE, AuthorSubject::SYSTEM);
+    let (mut relay, server_side) = duplex();
+    core.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let relay_node = [0x77; 16];
+    let row = block_on(core.insert(
+        "todos",
+        cells(&[("title", "seed"), ("note", "seed")]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let seed = core.write_conflicts("todos", row, None).unwrap()[0].seq;
+    // Accepted before the relay's first upload, which never saw it.
+    block_on(core.update(
+        "todos",
+        row,
+        cells(&[("title", "core")]),
+        Default::default(),
+    ))
+    .unwrap();
+    let commit = |tx: u64, origin: Writer, title: &str, seen: u64| SyncMessage::Commit {
+        node: relay_node,
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp::Update {
+            table: "todos".to_owned(),
+            row: *row.0.as_bytes(),
+            cells: cells(&[("title", title)]),
+            target: WireTarget::Root,
+            at: None,
+        }],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        bases: vec![WireBase {
+            op: 0,
+            key: Vec::new(),
+            seq: Some(seen),
+            pending: None,
+        }],
+        origin: Some(origin),
+    };
+    let first: Writer = ([0xa1; 16], LOCAL_BASE + 1);
+    let second: Writer = ([0xa2; 16], LOCAL_BASE + 1);
+    let unknown: Writer = ([0xa3; 16], LOCAL_BASE + 1);
+    relay
+        .send(commit(LOCAL_BASE + 1, first, "first", seed))
+        .unwrap();
+    // The second session was shipped the relay's version of the first.
+    relay
+        .send(commit(LOCAL_BASE + 2, second, "second", LOCAL_BASE + 1))
+        .unwrap();
+    // A version the relay never uploaded: nothing accepted was seen.
+    relay
+        .send(commit(LOCAL_BASE + 3, unknown, "unknown", LOCAL_BASE + 99))
+        .unwrap();
+    block_on(core.tick()).unwrap();
+
+    let conflicts = core.write_conflicts("todos", row, None).unwrap();
+    let find = |writer: Writer| {
+        conflicts
+            .iter()
+            .find(|conflict| conflict.writer == writer)
+            .unwrap_or_else(|| panic!("no accepted write by {writer:?}"))
+    };
+    let core_write = conflicts[1].writer;
+    assert_eq!(core_write.0, [CORE; 16]);
+    assert_eq!(writers(&find(first).overlapping), vec![core_write]);
+    let second_conflict = find(second);
+    assert!(second_conflict.maybe_conflicting);
+    assert_eq!(
+        writers(&second_conflict.overlapping),
+        vec![core_write],
+        "the first session's write was in the version it was shipped; the core's was not"
+    );
+    assert_eq!(second_conflict.resolved_base, Some(seed));
+    let unknown_conflict = find(unknown);
+    assert!(unknown_conflict.maybe_conflicting);
+    assert_eq!(unknown_conflict.resolved_base, None);
+    assert_eq!(
+        unknown_conflict.overlapping.len(),
+        4,
+        "every earlier version counts against a write over no accepted version"
+    );
+}
+
+#[test]
+fn a_session_the_relay_may_not_write_as_is_not_its_writer_and_carries_no_base() {
+    // A direct client claims a node first; a tab behind the worker then
+    // uses the same node, which the worker's identity may not write as.
+    let mut net = Net::new(0);
+    net.add_client(WORKER + 1, None);
+    let row = net.seed(0);
+    net.add_worker();
+    net.add_client(WORKER + 1, Some(0));
+    // The tab writes over the seed; a write it never saw lands first.
+    net.worker_offline();
+    let tab_write =
+        block_on(
+            net.db(1)
+                .update("todos", row, cells(&[("title", "tab")]), Default::default()),
+        )
+        .unwrap();
+    net.edit_settled(0, row, &[("title", "claimer")]);
+    net.worker_online();
+    net.pump();
+    assert_eq!(
+        net.title(row),
+        Some(Value::String("tab".to_owned())),
+        "the tab's edit landed"
+    );
+    let _ = tab_write;
+
+    let conflicts = net.conflicts(row);
+    assert_eq!(
+        conflicts
+            .iter()
+            .filter(|conflict| conflict.writer.0 == [WORKER + 1; 16])
+            .count(),
+        2,
+        "only the claiming client's seed and edit name its node: the tab's commit is the worker's"
+    );
+    let worker = conflicts
+        .iter()
+        .find(|conflict| conflict.writer.0 == [WORKER; 16])
+        .expect("the worker wrote the tab's edit");
+    assert!(
+        !worker.maybe_conflicting,
+        "the session's base is dropped with it: a write without one is never flagged"
+    );
+}
+
+#[test]
+fn the_authoritys_own_write_counts_against_a_client_and_authors_every_column() {
+    let mut net = Net::new(1);
+    let row = net.seed(0);
+    net.offline(0);
+    let client = net.edit(0, row, &[("note", "client")]);
+    block_on(net.core.update(
+        "todos",
+        row,
+        cells(&[("title", "core")]),
+        Default::default(),
+    ))
+    .unwrap();
+    net.online(0);
+    net.settle(0, client.1);
+
+    let conflict = net.conflict(row, client);
+    assert!(conflict.maybe_conflicting);
+    let overlapping = writers(&conflict.overlapping);
+    assert_eq!(overlapping.len(), 1, "{overlapping:?}");
+    assert_eq!(
+        overlapping[0].0, [CORE; 16],
+        "the authority's write authors the note too"
+    );
+}
+
+#[test]
+fn a_branched_rows_writes_are_derived_on_its_branch() {
+    let mut net = Net::new(1);
+    let branch = draft_branch();
+    let row = RowUuid::from_bytes([0xd6; 16]);
+    let insert = block_on(net.db(0).insert(
+        "drafts",
+        cells(&[("title", "seed")]),
+        InsertOptions {
+            row_id: Some(row),
+            target: ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    net.settle(0, insert.mergeable_tx_id());
+    net.pump();
+    net.offline(0);
+    let on_branch = UpdateOptions {
+        target: WriteTarget::BranchView {
+            head: branch.clone(),
+            base: None,
+        },
+        ..Default::default()
+    };
+    let edit = block_on(net.db(0).update(
+        "drafts",
+        row,
+        cells(&[("title", "client")]),
+        on_branch.clone(),
+    ))
+    .unwrap();
+    block_on(
+        net.core
+            .update("drafts", row, cells(&[("title", "core")]), on_branch),
+    )
+    .unwrap();
+    net.online(0);
+    net.settle(0, edit.mergeable_tx_id());
+
+    let conflicts = net
+        .core
+        .write_conflicts("drafts", row, Some(&branch))
+        .unwrap();
+    let client = conflicts
+        .iter()
+        .find(|conflict| conflict.writer == net.writer(0, edit.mergeable_tx_id()))
+        .expect("the client's edit landed on the branch");
+    assert!(client.maybe_conflicting);
+    assert_eq!(client.overlapping.len(), 1);
+    assert_eq!(client.overlapping[0].1.0, [CORE; 16]);
+    assert!(
+        net.core
+            .write_conflicts("drafts", row, None)
+            .unwrap()
+            .is_empty(),
+        "the row has no unbranched versions"
+    );
+}
+
+#[test]
+fn a_reopened_authority_still_derives_what_it_recorded() {
+    let dir = std::env::temp_dir().join(format!("jazz-maybe-conflicting-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("core.sqlite");
+    let open_core = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([CORE; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let mut net = Net::around(open_core(), 2);
+    let row = net.seed(0);
+    net.offline(1);
+    let alice = net.edit_settled(0, row, &[("title", "alice")]);
+    let bob = net.edit(1, row, &[("title", "bob")]);
+    net.online(1);
+    net.settle(1, bob.1);
+    let before = net.conflicts(row);
+    drop(net);
+
+    let core = open_core();
+    let after = core.write_conflicts("todos", row, None).unwrap();
+    assert_eq!(after, before);
+    let bob_conflict = after.iter().find(|c| c.writer == bob).unwrap();
+    assert!(bob_conflict.maybe_conflicting);
+    assert_eq!(writers(&bob_conflict.overlapping), vec![alice]);
+    drop(core);
+    let _ = std::fs::remove_dir_all(&dir);
 }

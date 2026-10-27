@@ -460,19 +460,27 @@ columns has an empty conflict analysis.
 On SQLite a commit carries, beside its operations, the base of each row it
 writes over an image its writer held (`WireBase`: the row, by the index of
 the commit's first op that writes it and its branch key; the settled seq;
-and the pending predecessor's `(tx, node)`, the node left out when it is the
-commit's writer; an insert or a write over no held image carries none). A relay forwards its sessions' bases and names the session as
-the commit's origin, so each session stays its own writer; a base naming a
-relay's unsettled version is moved down to the settled version under it.
+and the pending predecessor, as how many txs before the writer's own tx when
+it is the writer's, or by full `(node, tx)` otherwise; an insert or a write
+over no held image carries none). A relay forwards its sessions' bases
+unchanged and names the session as the commit's origin, so each session
+stays its own writer; when the relay may not write as the session's node,
+the relay is the writer and the session's bases are dropped. A base seq at
+or above the local base names the sending relay's unsettled version at that
+commit tx, which it shipped the session: the authority resolves it to where
+that commit landed, and the writer has seen that version and what that
+version's write had seen (never a foreign write accepted between them). A
+base naming a relay commit that never landed has seen no accepted version.
 The authority keeps, beside each row version an accepted upload wrote, its
-writer, its base with the predecessor's full id, and its authored stored
-columns as a bitmask over per-table column codes (`_jazz_writes`, with the
-codes interned in `_jazz_columns`; both created with the first accepted
-upload). Its own writes are not kept there: they are
-made over the current image, so they are never maybe conflicting, and in
-another write's analysis they author every column. The flag and the walk are
-derived on demand (`Db::write_conflicts`, behind the `testing` feature); no
-public read API or TypeScript surface carries them yet.
+writer, its resolved base with the predecessor's full id (the node left
+empty when it is the writer's), and its authored stored columns as a bitmask
+over per-table column codes (`_jazz_writes`, with the codes interned in
+`_jazz_columns`; both created with the first accepted upload). Its own
+writes are not kept there: they are made over the current image, so they
+are never maybe conflicting, and in another write's analysis they author
+every column. The flag and the walk are derived on demand
+(`Db::write_conflicts`, behind the `testing` feature); no public read API or
+TypeScript surface carries them yet.
 
 **Across schema versions.** Core merges every write into the row one
 physical column at a time, whatever schema version it was authored under

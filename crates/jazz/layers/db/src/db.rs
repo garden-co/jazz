@@ -51,7 +51,7 @@ use crate::values::{
 pub use sync::{
     Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireBase, WireError, WireKind, WireOp, WireTarget, WireTransport,
+    Upstream, WireBase, WireError, WireKind, WireOp, WirePending, WireTarget, WireTransport,
     WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
 };
