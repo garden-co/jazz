@@ -4418,13 +4418,15 @@ impl Db {
         }
         let client = inner.client.as_mut().expect("client");
         let mut out = std::mem::take(&mut client.outbox);
-        // Commits staged since the last send go ahead of the one-shot reads
-        // asked since, so a read sees the writer's own earlier writes.
-        let first_fetch = out
+        // Commits staged since the last send go ahead of the reads asked
+        // since (and what was queued after them, in order). The server
+        // applies a session's messages in arrival order, so a read sees the
+        // writer's own earlier writes however its ticks are sliced.
+        let first_read = out
             .iter()
-            .position(|m| matches!(m, SyncMessage::Fetch { .. }))
+            .position(|m| matches!(m, SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. }))
             .unwrap_or(out.len());
-        let fetches = out.split_off(first_fetch);
+        let reads = out.split_off(first_read);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
@@ -4457,7 +4459,7 @@ impl Db {
             out.extend(batches);
             out.push(commit);
         }
-        out.extend(fetches);
+        out.extend(reads);
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
         let mut out = out.into_iter();
