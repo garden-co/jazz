@@ -5,14 +5,14 @@ use jazz::account_registry::{
     Principal,
 };
 
-use crate::kv::SqliteKv;
+use crate::kv::HostKv;
 
 const PREFIX: &[u8] = b"account-command:v1:";
 
 /// A single authority owns this journal. Conditional append additionally fails
 /// closed if two owners accidentally attempt to advance the same revision.
 pub(crate) struct StoredAccountRegistry {
-    storage: SqliteKv,
+    storage: HostKv,
     state: AccountRegistry,
     revision: u64,
     poisoned: bool,
@@ -40,7 +40,7 @@ pub(crate) enum RegistryError {
 impl StoredAccountRegistry {
     /// Recover committed commands in order, rejecting gaps and unknown codecs.
     /// The supplied store must be exclusive to this application registry.
-    pub(crate) fn open(storage: SqliteKv) -> Result<Self, RegistryError> {
+    pub(crate) fn open(storage: HostKv) -> Result<Self, RegistryError> {
         let mut state = AccountRegistry::default();
         let mut revision = 0u64;
         for (key, bytes) in storage.prefix(b"account-command:").map_err(unavailable)? {
@@ -66,16 +66,17 @@ impl StoredAccountRegistry {
         self.ensure_available()?;
         // Fence cached admission even if a second owner only performs reads.
         // The successful absence read is this decision's linearization point.
-        self.poisoned = true;
+        // A failed read decides nothing and changes nothing: this lookup
+        // fails, the next one reads again.
         if self
             .storage
             .get(&command_key(self.revision))
             .map_err(unavailable)?
             .is_some()
         {
+            self.poisoned = true;
             return Err(unavailable("account authority advanced elsewhere"));
         }
-        self.poisoned = false;
         Ok(self.state.login(principal)?.clone())
     }
 
@@ -171,22 +172,49 @@ mod tests {
     #[test]
     fn a_second_owner_of_the_same_journal_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("accounts.sqlite");
-        let mut first = StoredAccountRegistry::open(SqliteKv::open(&path).unwrap()).unwrap();
-        let mut second = StoredAccountRegistry::open(SqliteKv::open(&path).unwrap()).unwrap();
+        let storage = crate::runtime::StorageConfig::data_dir(dir.path());
+        let journal = || {
+            crate::runtime::AppStore::open(&storage)
+                .unwrap()
+                .kv(crate::kv::ACCOUNTS)
+                .unwrap()
+        };
+        let mut first = StoredAccountRegistry::open(journal()).unwrap();
+        let mut second = StoredAccountRegistry::open(journal()).unwrap();
         first.login_or_register(&principal("alice")).unwrap();
         assert!(matches!(
             second.login_or_register(&principal("bob")),
             Err(RegistryError::Unavailable(_))
         ));
         // Recovery replays the journal the first owner wrote.
-        let mut reopened = StoredAccountRegistry::open(SqliteKv::open(&path).unwrap()).unwrap();
+        let mut reopened = StoredAccountRegistry::open(journal()).unwrap();
         assert!(reopened.login(&principal("alice")).is_ok());
     }
 
     #[test]
+    fn a_failed_lookup_read_leaves_the_registry_available() {
+        let store = crate::runtime::AppStore::memory().unwrap();
+        let mut registry =
+            StoredAccountRegistry::open(store.kv(crate::kv::ACCOUNTS).unwrap()).unwrap();
+        let assigned = registry
+            .login_or_register(&principal("alice"))
+            .unwrap()
+            .assignment;
+        registry.storage.fail_next_read();
+        assert!(matches!(
+            registry.login(&principal("alice")),
+            Err(RegistryError::Unavailable(_))
+        ));
+        // A read changes nothing: the next lookup reads again.
+        assert_eq!(registry.login(&principal("alice")).unwrap(), assigned);
+    }
+
+    #[test]
     fn a_journal_with_a_gap_is_rejected() {
-        let kv = SqliteKv::memory().unwrap();
+        let kv = crate::runtime::AppStore::memory()
+            .unwrap()
+            .kv(crate::kv::ACCOUNTS)
+            .unwrap();
         let command = AccountCommand::Register {
             principal: principal("alice"),
             account: AccountId(uuid::Uuid::from_u128(1)),
