@@ -12,10 +12,10 @@
 //!   replica also holds its worker's unsettled versions at the worker's
 //!   local seqs, and the two numberings must never meet.
 //! * A row touched by a pending (unsettled) local transaction keeps its
-//!   settled image in the shadow. Server images for it update the shadow;
-//!   a rebase restores every shadowed row and replays the pending
-//!   transactions in order. Settling or rejecting a transaction is a rebase
-//!   without it. Linear history: the authority orders commits by arrival.
+//!   upstream baseline in history, below this replica's local sequence range.
+//!   A transient cache selects that image during a tick; a rebase restores it
+//!   and replays pending transactions in order. Settling or rejecting one
+//!   is a rebase without it. Linear history: the authority orders commits by arrival.
 //! * The server keeps one fan-out subscription per client query (under the
 //!   client's identity, so policies apply there) and sends row images for
 //!   rows entering or changing in it. A row leaving it is sent again if the
@@ -1058,11 +1058,8 @@ pub(crate) struct Client {
     /// Commits the relay this non-durable replica writes through holds
     /// in its store, their fate still to come ([`SyncMessage::Stored`]).
     stored: HashSet<u64>,
-    shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
-    /// Shadow rows changed since `_jazz_shadow` was last written: it is
-    /// written by row, so a commit's cost does not grow with the pending
-    /// rows ahead of it.
-    shadow_dirty: HashSet<(String, RowUuid, Vec<u8>)>,
+    /// Transient cache reconstructed from pending row keys and history.
+    baselines: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
     /// The `known` cut last written to `_jazz_meta`.
@@ -2397,7 +2394,7 @@ impl Inner {
     }
 
     /// Every settled row version in the replica (pending local versions sit
-    /// above `LOCAL_BASE`; their settled images are in the shadow), by
+    /// above `LOCAL_BASE`; their upstream baselines are in history), by
     /// stored table.
     /// The `Hold` a new session starts with: every settled row the replica
     /// holds, whether or not a live query still reads it. The session
@@ -2406,7 +2403,7 @@ impl Inner {
     fn hold(&self) -> Result<Option<SyncMessage>, Error> {
         let client = self.client.as_ref().expect("client");
         let mut rows: Vec<(String, [u8; 16], Vec<u8>, u64)> = client
-            .shadow
+            .baselines
             .iter()
             .filter_map(|((table, row, key), image)| {
                 image
@@ -2776,11 +2773,11 @@ impl Inner {
     /// whether to rebase.
     fn receive_eviction(&mut self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let client = self.client.as_mut().expect("client");
-        let shadowed = (table.to_owned(), row, key.to_vec());
-        match client.shadow.get_mut(&shadowed) {
-            Some(shadow) => {
-                *shadow = None;
-                client.shadow_dirty.insert(shadowed);
+        let overlaid = (table.to_owned(), row, key.to_vec());
+        match client.baselines.get_mut(&overlaid) {
+            Some(baseline) => {
+                *baseline = None;
+                self.evict(table, row, key)?;
                 Ok(true)
             }
             None => {
@@ -2843,18 +2840,24 @@ impl Inner {
         Ok(out.into_iter().collect())
     }
 
-    /// The settled image a local write at `seq` superseded: the newest
-    /// upstream version in history (none if the row is new). A
-    /// non-durable client's upstream versions include its relay's
-    /// unsettled ones, below its own local seqs.
-    fn settled_before(
+    /// The upstream image beneath pending local writes. A replay that
+    /// leaves the row untouched keeps it current; otherwise snapshot()
+    /// preserved it in history. The row/branch/sequence primary key bounds
+    /// the lookup independently of unrelated rows and older versions.
+    fn upstream_baseline(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
-        let base = self.local_base() as i64;
+        let base = self.local_base();
+        if let Some(image) = self.current_image(table, row, key)?
+            && image.seq < base
+        {
+            return Ok(Some(image));
+        }
+        let base = base as i64;
         Ok(self
             .images_where(
                 table,
@@ -2873,7 +2876,6 @@ impl Inner {
 /// write from its upload record, or a server commit from its dedupe entry.
 pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, rows BLOB NOT NULL);\
-    CREATE TABLE IF NOT EXISTS _jazz_shadow (t TEXT NOT NULL, id BLOB NOT NULL, k BLOB NOT NULL, image BLOB, PRIMARY KEY (t, id, k));\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
@@ -2988,32 +2990,6 @@ impl Inner {
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
         self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
-        Ok(())
-    }
-
-    /// Write the shadow rows changed since the last write.
-    fn persist_shadow(&mut self) -> Result<(), Error> {
-        let Some(client) = &self.client else {
-            return Ok(());
-        };
-        for shadowed in &client.shadow_dirty {
-            let (table, row, key) = shadowed;
-            let id = row.0.as_bytes().to_vec();
-            match client.shadow.get(shadowed) {
-                Some(image) => self.exec(
-                    "INSERT OR REPLACE INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![table, id, key, image.as_ref().map(encode)],
-                ),
-                None => self.exec(
-                    "DELETE FROM _jazz_shadow WHERE t = ?1 AND id = ?2 AND k = ?3",
-                    rusqlite::params![table, id, key],
-                ),
-            }
-            .map_err(storage)?;
-        }
-        if let Some(client) = self.client.as_mut() {
-            client.shadow_dirty.clear();
-        }
         Ok(())
     }
 
@@ -3299,8 +3275,7 @@ impl Inner {
         Ok(cut)
     }
 
-    /// Reload a replica's sync state after a restart: pending commits are
-    /// resent on the next connection (the server dedupes them).
+    /// Reload pending commits and their history baselines after a restart.
     pub(crate) fn load_client(&mut self) -> Result<(), Error> {
         if self.meta("client")?.is_none() {
             return Ok(());
@@ -3385,36 +3360,14 @@ impl Inner {
             });
             client.unsent.push(commit);
         }
-        let mut statement = self
-            .conn
-            .prepare("SELECT t, id, k, image FROM _jazz_shadow")
-            .map_err(storage)?;
-        let shadow = statement
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                    r.get::<_, Option<Vec<u8>>>(3)?,
-                ))
-            })
-            .map_err(storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
-        drop(statement);
-        for (table, id, key, image) in shadow {
-            let image = image
-                .map(|bytes| postcard::from_bytes(&bytes))
-                .transpose()
-                .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-            client.shadow.insert(
-                (
-                    table,
-                    RowUuid::from_bytes(id.try_into().unwrap_or([0; 16])),
-                    key,
-                ),
-                image,
-            );
+        let keys: BTreeSet<RowKey> = client
+            .pending
+            .iter()
+            .flat_map(|pending| pending.rows.iter().cloned())
+            .collect();
+        for (table, row, key) in keys {
+            let image = self.upstream_baseline(&table, row, &key)?;
+            client.baselines.insert((table, row, key), image);
         }
         self.client = Some(client);
         Ok(())
@@ -3449,8 +3402,7 @@ impl Client {
             fates: HashMap::new(),
             local_fates: HashSet::new(),
             stored: HashSet::new(),
-            shadow: HashMap::new(),
-            shadow_dirty: HashSet::new(),
+            baselines: HashMap::new(),
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
@@ -3635,13 +3587,13 @@ impl Db {
             for &row in &stale {
                 let id = row.0.as_bytes().to_vec();
                 for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
-                    let shadowed = inner.client.as_ref().is_some_and(|client| {
+                    let overlaid = inner.client.as_ref().is_some_and(|client| {
                         client
-                            .shadow
+                            .baselines
                             .contains_key(&(table.clone(), row, image.key.clone()))
                     });
                     let in_view = head.as_ref().is_none_or(|head| *head == image.key);
-                    if in_view && image.seq <= through && !shadowed {
+                    if in_view && image.seq <= through && !overlaid {
                         evict.push((row, image.key));
                     }
                 }
@@ -3738,7 +3690,7 @@ impl Db {
             .filter(|_| session)
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq)?;
-        let mut shadows = Vec::new();
+        let mut baselines = Vec::new();
         // What this replica built each row it wrote on (SPEC 4 §4.6): its
         // newest pending commit to the row, else the settled image under
         // its pending writes.
@@ -3747,12 +3699,12 @@ impl Db {
         for (table, row, key) in &rows {
             let row_key = (table.clone(), *row, key.clone());
             let client = inner.client.as_ref().expect("client");
-            let settled = match client.shadow.get(&row_key) {
+            let settled = match client.baselines.get(&row_key) {
                 Some(image) => image.as_ref().map(|image| image.seq),
                 None => {
-                    let image = inner.settled_before(table, *row, key)?;
+                    let image = inner.upstream_baseline(table, *row, key)?;
                     let seq = image.as_ref().map(|image| image.seq);
-                    shadows.push((row_key.clone(), image));
+                    baselines.push((row_key.clone(), image));
                     seq
                 }
             };
@@ -3799,9 +3751,8 @@ impl Db {
             expected.push(image);
         }
         let client = inner.client.as_mut().expect("client");
-        let added: Vec<RowKey> = shadows.iter().map(|(key, _)| key.clone()).collect();
-        client.shadow.extend(shadows);
-        client.shadow_dirty.extend(added.iter().cloned());
+        let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
+        client.baselines.extend(baselines);
         match wire {
             Ok(wire) => {
                 let kind = match kind {
@@ -3834,15 +3785,13 @@ impl Db {
                     rows: rows.clone(),
                     expected,
                 });
-                let persisted = inner
-                    .persist_pending(seq, &commit, &rows)
-                    .and_then(|()| inner.persist_shadow());
+                let persisted = inner.persist_pending(seq, &commit, &rows);
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
                     client.pending.pop();
                     for key in &added {
-                        client.shadow.remove(key);
+                        client.baselines.remove(key);
                     }
                     return Err(error);
                 }
@@ -4416,7 +4365,7 @@ impl Db {
     }
 
     /// Client half of a tick: apply what the server sent, rebase if a
-    /// pending transaction settled or a shadowed row changed, then send.
+    /// pending transaction settled or an overlaid row changed, then send.
     fn client_tick(&self) -> Result<(), Error> {
         if self.inner.borrow().client.is_none() {
             return Ok(());
@@ -4442,7 +4391,6 @@ impl Db {
     fn client_apply(&self) -> Result<(), Error> {
         let mut rebase = false;
         let mut answered_remotes = Vec::new();
-        let mut shadow_changed = false;
         {
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
@@ -4482,9 +4430,8 @@ impl Db {
                             let Some(image) = image_in(&names, image) else {
                                 continue;
                             };
-                            let shadowed = inner.receive_image(image)?;
-                            rebase |= shadowed;
-                            shadow_changed |= shadowed;
+                            let overlaid = inner.receive_image(image)?;
+                            rebase |= overlaid;
                         }
                     }
                     SyncMessage::Evict { table, id, key } => {
@@ -4661,8 +4608,6 @@ impl Db {
         }
         if rebase {
             self.rebase()?;
-        } else if shadow_changed {
-            self.inner.borrow_mut().persist_shadow()?;
         }
         // A settled answer lists its result's rows: cached rows the
         // replica's view of that result holds and the server's lacks lost
@@ -4780,14 +4725,14 @@ impl Db {
         self.inner.borrow_mut().fan.flush_settled();
     }
 
-    /// Restore every shadowed row to its settled image and replay the
+    /// Restore every overlaid row to its upstream baseline and replay the
     /// pending transactions, in order, over them.
     fn rebase(&self) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return Ok(());
         };
-        let shadow = std::mem::take(&mut client.shadow);
+        let baseline = std::mem::take(&mut client.baselines);
         let pending: Vec<(u64, Vec<StagedOp>)> = client
             .pending
             .iter()
@@ -4798,7 +4743,7 @@ impl Db {
             .iter()
             .flat_map(|p| p.rows.iter().cloned())
             .collect();
-        for ((table, row, key), image) in &shadow {
+        for ((table, row, key), image) in &baseline {
             match image {
                 Some(image) => {
                     inner.drop_row(table, *row, key, image.seq)?;
@@ -4815,11 +4760,11 @@ impl Db {
             end_savepoint(&inner.conn, "replay", replayed.is_ok())?;
         }
         let client = inner.client.as_mut().expect("client");
-        let (kept, dropped): (HashMap<_, _>, HashMap<_, _>) =
-            shadow.into_iter().partition(|(row, _)| keep.contains(row));
-        client.shadow = kept;
-        client.shadow_dirty.extend(dropped.into_keys());
-        inner.persist_shadow()
+        client.baselines = baseline
+            .into_iter()
+            .filter(|(row, _)| keep.contains(row))
+            .collect();
+        Ok(())
     }
 }
 
@@ -5003,7 +4948,7 @@ impl Inner {
     }
 
     /// Apply one server image; returns whether a rebase is needed (the row
-    /// is shadowed by a pending write).
+    /// is overlaid by a pending write).
     fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
         // Two tiers number local seqs: relays from `LOCAL_BASE`, the
         // non-durable foregrounds behind them from `NON_DURABLE_BASE`. An
@@ -5018,10 +4963,9 @@ impl Inner {
         }
         let row = RowUuid::from_bytes(image.id);
         let client = self.client.as_mut().expect("client");
-        let shadowed = (image.table.clone(), row, image.key.clone());
-        if let Some(shadow) = client.shadow.get_mut(&shadowed) {
-            client.shadow_dirty.insert(shadowed);
-            match shadow {
+        let overlaid = (image.table.clone(), row, image.key.clone());
+        if let Some(baseline) = client.baselines.get_mut(&overlaid) {
+            match baseline {
                 Some(old) if old.seq >= image.seq && old.seq < LOCAL_BASE => {
                     self.put_image(&image, true)?;
                     return Ok(false);
@@ -5043,7 +4987,7 @@ impl Inner {
                         self.put_image(&older, true)?;
                     }
                 }
-                None => *shadow = Some(image),
+                None => *baseline = Some(image),
             }
             return Ok(true);
         }
@@ -7259,7 +7203,7 @@ impl Db {
 }
 
 impl Db {
-    /// Test diagnostics: pending txs, shadowed rows, fates.
+    /// Test diagnostics: pending txs, overlaid rows, fates.
     pub fn sync_debug(&self) -> String {
         let inner = self.inner.borrow();
         let Some(client) = &inner.client else {
@@ -7267,7 +7211,7 @@ impl Db {
         };
         let base = inner.local_base();
         format!(
-            "pending {:?} sent {} unsent {} shadow {:?} fates {:?} connected {}",
+            "pending {:?} sent {} unsent {} baseline {:?} fates {:?} connected {}",
             client
                 .pending
                 .iter()
@@ -7276,7 +7220,7 @@ impl Db {
             client.sent.len(),
             client.unsent.len(),
             client
-                .shadow
+                .baselines
                 .keys()
                 .map(|(t, r, _)| (t.clone(), *r))
                 .collect::<Vec<_>>(),

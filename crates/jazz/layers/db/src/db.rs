@@ -983,7 +983,7 @@ impl Db {
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
     /// says otherwise). Reopening restores rows, history, the commit seq
-    /// and, for a replica, its pending uploads and shadow; they are resent
+    /// and, for a replica, its pending uploads and history baselines; they are resent
     /// on the next connection.
     pub async fn open_at(
         config: DbConfig,
