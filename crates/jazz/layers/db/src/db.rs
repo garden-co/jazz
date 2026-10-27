@@ -461,6 +461,9 @@ struct Inner {
     /// Sessions the server ended for what they sent, with why, until the
     /// host takes them ([`Db::take_closed_subscribers`]).
     closed: Vec<(sync::SubscriberId, Error)>,
+    /// Query statements that ran slow, until the host takes them
+    /// ([`Db::take_slow_queries`]).
+    slow: RefCell<crate::slow::SlowLog>,
     /// Subscribers accepted so far (each one's generation).
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
@@ -1128,6 +1131,7 @@ impl Db {
                 sessions: Vec::new(),
                 column_codes: RefCell::default(),
                 closed: Vec::new(),
+                slow: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
@@ -1295,6 +1299,23 @@ impl Db {
             plan.push(row.map_err(storage)?);
         }
         Ok((compiled.sql.clone(), plan.join(" | ")))
+    }
+
+    /// Query shapes that ran at or over the slow-query threshold since
+    /// the last call, slowest total first, and how many further shapes the
+    /// window had no room for. See [`crate::slow`].
+    pub fn take_slow_queries(&self) -> (Vec<crate::slow::SlowQuery>, u64) {
+        self.inner.borrow().slow.borrow_mut().take()
+    }
+
+    /// Record query runs taking at least `threshold` (`None`: none).
+    /// Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
+    pub fn set_slow_query_threshold(&self, threshold: Option<std::time::Duration>) {
+        self.inner
+            .borrow()
+            .slow
+            .borrow_mut()
+            .set_threshold(threshold);
     }
 
     /// Diagnostics: SQLite's query plan for the INSERT check a commit
@@ -2325,13 +2346,41 @@ impl Inner {
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        self.with_preps(&compiled.preps, |ties| {
+        let started = web_time::Instant::now();
+        let mut run = crate::slow::Run::default();
+        let rows = self.with_preps(&compiled.preps, |ties| {
             let sql = match &compiled.ranked_sql {
                 Some(ranked) if ties => ranked,
                 _ => &compiled.sql,
             };
-            self.execute_sql(sql, compiled, table)
-        })
+            self.execute_sql(sql, compiled, table, &mut run)
+        })?;
+        run.elapsed = started.elapsed();
+        let mut slow = self.slow.borrow_mut();
+        if slow.is_slow(run.elapsed) {
+            run.rows = rows.len() as u64;
+            slow.record(table, &compiled.sql, run, || {
+                self.query_plan(&compiled.sql, &compiled.params)
+                    .unwrap_or_else(|error| format!("(no plan: {error})"))
+            });
+        }
+        Ok(rows)
+    }
+
+    /// SQLite's plan for `sql`, one step per line.
+    fn query_plan(&self, sql: &str, params: &[Sql]) -> Result<String, Error> {
+        let mut statement = self
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .map_err(storage)?;
+        let steps = statement
+            .query_map(params_from_iter(params.iter()), |r| r.get::<_, String>(3))
+            .map_err(storage)?;
+        let mut plan = Vec::new();
+        for step in steps {
+            plan.push(step.map_err(storage)?);
+        }
+        Ok(plan.join("\n"))
     }
 
     /// Answer `preps` into `_jazz_lv_scratch`, run `body` (told whether a
@@ -2363,8 +2412,12 @@ impl Inner {
         sql: &str,
         compiled: &Compiled,
         table: &str,
+        run: &mut crate::slow::Run,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
+        // Cached statements keep counting across runs: start this one at 0.
+        statement.reset_status(rusqlite::StatementStatus::FullscanStep);
+        statement.reset_status(rusqlite::StatementStatus::Sort);
         let names: Arc<str> = Arc::from(table);
         let types: Arc<[ValueType]> = compiled
             .projection
@@ -2470,6 +2523,9 @@ impl Inner {
                 union_arm,
             });
         }
+        drop(rows);
+        run.scanned += statement.reset_status(rusqlite::StatementStatus::FullscanStep) as u64;
+        run.sorted |= statement.reset_status(rusqlite::StatementStatus::Sort) > 0;
         if blocked {
             return Err(crate::large::missing());
         }

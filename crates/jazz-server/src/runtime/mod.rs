@@ -127,6 +127,23 @@ pub struct ServerSession(u64);
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
 const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+/// How often slow queries are reported: each report sums a shape's slow
+/// runs since the last, so a hot slow query logs one line per window.
+const SLOW_QUERY_REPORT: Duration = Duration::from_secs(10);
+
+/// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
+/// else jazz-db's default.
+fn slow_query_threshold() -> Option<Duration> {
+    match std::env::var("JAZZ_SLOW_QUERY_MS")
+        .ok()
+        .and_then(|ms| ms.trim().parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(jazz::slow::DEFAULT_SLOW_QUERY_THRESHOLD),
+    }
+}
+
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
 const IDLE_TICK: Duration = Duration::from_secs(1);
@@ -1270,6 +1287,8 @@ struct Owner {
     /// No permissions head is published yet: session reads wait in
     /// `OwnerSession::held` and session commits are rejected.
     awaiting_permissions: bool,
+    /// When slow queries were last reported.
+    slow_reported: std::time::Instant,
 }
 
 struct OwnerSession {
@@ -1595,12 +1614,14 @@ impl Owner {
         let db = block_on(Db::open_file(config(genesis), file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
+        db.set_slow_query_threshold(slow_query_threshold());
         let mut owner = Self {
             db,
             sessions: HashMap::new(),
             slice: Rc::default(),
             catalogue: Catalogue::new(&schema),
             awaiting_permissions,
+            slow_reported: std::time::Instant::now(),
         };
         if let Some(snapshot) = stored {
             owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
@@ -1608,6 +1629,37 @@ impl Owner {
         }
         owner.catalogue.persist(&owner.db)?;
         Ok(owner)
+    }
+
+    /// Log the query shapes that ran slow since the last report. Each one
+    /// held the store's only writer for its whole run, delaying every
+    /// session, so the line says how long, what SQLite did, and how to make
+    /// it fast.
+    fn report_slow_queries(&self) {
+        let (shapes, dropped) = self.db.take_slow_queries();
+        for shape in shapes {
+            let hint = shape.hint().unwrap_or_default();
+            tracing::warn!(
+                table = %shape.table,
+                runs = shape.runs,
+                total_ms = shape.total.as_millis() as u64,
+                slowest_ms = shape.slowest.as_millis() as u64,
+                rows = shape.rows,
+                scanned = shape.scanned,
+                sorted = shape.sorted,
+                plan = %shape.plan,
+                sql = %shape.sql,
+                %hint,
+                "slow query on {}: {} run(s), slowest {} ms, blocking the writer {} ms in total",
+                shape.table,
+                shape.runs,
+                shape.slowest.as_millis(),
+                shape.total.as_millis(),
+            );
+        }
+        if dropped > 0 {
+            tracing::warn!(dropped, "more slow query shapes than one report holds");
+        }
     }
 
     /// Close every session (their streams end) and the store's runtime.
@@ -1737,6 +1789,10 @@ impl Owner {
         self.slice.ticked(started.elapsed());
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
+        }
+        if self.slow_reported.elapsed() >= SLOW_QUERY_REPORT {
+            self.slow_reported = std::time::Instant::now();
+            self.report_slow_queries();
         }
         for (subscriber, error) in self.db.take_closed_subscribers() {
             let Some(id) = self
