@@ -368,6 +368,7 @@ struct Inner {
     conn: Connection,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
+    retired: bool,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -1090,6 +1091,7 @@ impl Db {
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
+                retired: false,
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1215,6 +1217,7 @@ impl Db {
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         self.sync_tick()?;
         let mut inner = self.inner();
         inner.fan.collect();
@@ -1269,6 +1272,31 @@ impl Db {
     /// a new storage owner starts with mutation admission open.
     pub fn stop_mutation_admission(&self) {
         self.inner().mutation_admission_closed = true;
+    }
+
+    /// Revoke the owner connection before releasing its external storage lease.
+    /// Retained views, streams and transports may still own Db clones, but none
+    /// may read or write this file after retirement. SQLite's authorizer also
+    /// expires statements already in the preparation cache. This is a one-way
+    /// runtime fence, not a stored application policy.
+    pub fn retire_storage_owner(&self) -> Result<(), Error> {
+        let mut inner = self.inner();
+        inner
+            .conn
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Deny
+            }))
+            .map_err(storage)?;
+        inner.retired = true;
+        Ok(())
+    }
+
+    pub(crate) fn ensure_storage_owner_active(&self) -> Result<(), Error> {
+        if self.inner.borrow().retired {
+            Err(Error::new(ErrorCode::Storage, "storage owner is retired"))
+        } else {
+            Ok(())
+        }
     }
 
     // ---- preparation ----------------------------------------------------
