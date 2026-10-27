@@ -201,23 +201,21 @@ export function withPlainNumbers(value: unknown): unknown {
 }
 
 /**
- * JSON Schema equality: numbers compare by value, objects ignore key order.
- * With `signedZero`, 0 and -0.0 differ, as they do in the native runtime's
- * hashed `uniqueItems` check for arrays of more than 15 items.
+ * JSON Schema equality: numbers compare by value (so 0 equals -0.0), objects
+ * ignore key order.
  */
-export function jsonEqual(a: unknown, b: unknown, signedZero = false): boolean {
+export function jsonEqual(a: unknown, b: unknown): boolean {
   if (isJsonNumber(a)) {
     if (!isJsonNumber(b)) return false;
     const left = numericValue(a);
     const right = numericValue(b);
-    if (signedZero && left === 0 && right === 0) return Object.is(left, right);
     // `==` compares a `bigint` with a double exactly.
     // eslint-disable-next-line eqeqeq
     return left == right;
   }
   if (Array.isArray(a)) {
     if (!Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((entry, index) => jsonEqual(entry, b[index], signedZero));
+    return a.every((entry, index) => jsonEqual(entry, b[index]));
   }
   if (typeof a === "object" && a !== null) {
     if (typeof b !== "object" || b === null || Array.isArray(b) || isJsonNumber(b)) return false;
@@ -226,11 +224,7 @@ export function jsonEqual(a: unknown, b: unknown, signedZero = false): boolean {
     return aKeys.every(
       (key) =>
         Object.prototype.hasOwnProperty.call(b, key) &&
-        jsonEqual(
-          (a as Record<string, unknown>)[key],
-          (b as Record<string, unknown>)[key],
-          signedZero,
-        ),
+        jsonEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
     );
   }
   return a === b;
