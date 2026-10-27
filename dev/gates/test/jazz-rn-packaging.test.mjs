@@ -39,7 +39,10 @@ async function packPrebuildPayloadFixtures(directory) {
     await mkdir(source, { recursive: true });
     await writeFile(
       join(source, "package.json"),
-      JSON.stringify({ name: `jazz-rn-${platform}`, version: packageJson.version }),
+      JSON.stringify({
+        name: `jazz-rn-${platform}`,
+        version: packageJson.version,
+      }),
     );
     await mkdir(join(source, platform), { recursive: true });
     await writeFile(join(source, platform, "jazz-native-relay.manifest.json"), "{}\n");
@@ -220,8 +223,9 @@ test("jazz-rn relay production builds are SQLite-only on every artifact target",
       }),
     );
     const dependencies = productionDependencyNames(metadata, "jazz-native-relay");
-    assert.ok(dependencies.has("jazz-storage-sqlite"), `${target} relay must retain SQLite`);
-    for (const forbidden of ["jazz-storage-rocksdb", "jazz-benchmark-guard", "tempfile"])
+    assert.ok(dependencies.has("jazz-db"), `${target} relay must run on jazz-db`);
+    assert.ok(dependencies.has("libsqlite3-sys"), `${target} relay must retain SQLite`);
+    for (const forbidden of ["jazz-benchmark-guard", "tempfile"])
       assert.ok(!dependencies.has(forbidden), `${target} relay must exclude ${forbidden}`);
   }
 });
@@ -2433,13 +2437,10 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       "--",
       "Cargo.lock",
       "Cargo.toml",
-      "crates/groove",
-      "crates/idb-tree",
       "crates/jazz",
       "crates/jazz-compression",
       "crates/jazz-native-relay",
       "crates/jazz-native-transport",
-      "crates/jazz-storage-sqlite",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
     ],
     { cwd: sourceRoot, encoding: "utf8" },
@@ -2575,7 +2576,14 @@ ${
     await writeFile(
       destination,
       `${JSON.stringify(
-        { format: 2, nativeRelayAbi, sourceRevision, nativeSourceFingerprint, ...extra, files },
+        {
+          format: 2,
+          nativeRelayAbi,
+          sourceRevision,
+          nativeSourceFingerprint,
+          ...extra,
+          files,
+        },
         null,
         2,
       )}\n`,
@@ -2619,7 +2627,10 @@ ${
             process.execPath,
             [verifier.pathname, "--package-root", packageRoot, "android"],
             {
-              env: { ...environment, JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk },
+              env: {
+                ...environment,
+                JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk,
+              },
               stdio: "pipe",
             },
           ),
@@ -2628,7 +2639,7 @@ ${
     }
 
     for (const transitiveInput of [
-      "crates/idb-tree/",
+      "crates/jazz/layers/db/",
       "crates/jazz-compression/",
       "crates/jazz-native-transport/",
     ]) {
@@ -3091,13 +3102,10 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   for (const nativeInput of [
     "Cargo.lock",
     "Cargo.toml",
-    "crates/groove",
-    "crates/idb-tree",
     "crates/jazz",
     "crates/jazz-compression",
     "crates/jazz-native-relay",
     "crates/jazz-native-transport",
-    "crates/jazz-storage-sqlite",
   ]) {
     assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);
     assert.ok(verifier.includes(nativeInput), `artifact verifier omits ${nativeInput}`);

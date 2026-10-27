@@ -133,6 +133,7 @@ const mocks = vi.hoisted(() => {
           onServerTransportError: vi.fn(),
           onRemoteLinkStateChange: vi.fn(),
           remoteLinkState: vi.fn(() => "connected"),
+          setRemoteLinkHint: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
           retirePeerTransport: vi.fn(async (transport: Transport) => {
@@ -2253,7 +2254,7 @@ describe("broker worker context initialization", () => {
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
     // Only the worker's physical-owner admission may grant relay serving.
     // It carries the exact admitted owner into the host-only WASM open.
-    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.storageOwner);
+    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.dbName);
     // NativeRuntimeAdapter is the final runtime boundary. It must receive the
     // persisted physical-replica identity, not a process constant or a node
     // intended for a different open attempt.
@@ -2310,7 +2311,7 @@ describe("broker worker context initialization", () => {
       selfSignedClientProof.token,
       selfSignedClientProof.appId,
       selfSignedClientProof.claimedAuthor,
-      initOptions.storageOwner,
+      initOptions.dbName,
     );
     expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
   });

@@ -209,7 +209,7 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .with_app_id(app_id)
         .with_admin_secret(ADMIN_SECRET)
         .with_data_dir(data_dir.path())
-        .with_storage_factory(jazz_testkit::persistent_storage_factory())
+        .with_persistent_storage()
         .start()
         .await
         .expect("start test server");
@@ -234,7 +234,7 @@ async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend()
         .with_app_id(app_id)
         .with_admin_secret(ADMIN_SECRET)
         .with_data_dir(data_dir.path())
-        .with_storage_factory(jazz_testkit::persistent_storage_factory())
+        .with_persistent_storage()
         .start()
         .await
         .expect("start test server");

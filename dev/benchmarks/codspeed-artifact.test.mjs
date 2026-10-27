@@ -143,7 +143,7 @@ test("multi-bench workloads seal and install every bench executable", async () =
     assert.equal(manifest.contract.features, null);
     assert.deepEqual(await verify("big-label", identity), manifest);
     // A bundle sealed for one workload never verifies as another.
-    await assert.rejects(verify("groove-ivm", identity));
+    await assert.rejects(verify("band-chat", identity));
     await rm(path.join(bundle, "loads"));
     await assert.rejects(verify("big-label", identity));
   } finally {
@@ -171,7 +171,6 @@ test("each workload builds and runs exactly what it measured on the macro runner
     "music-agent": native("music-agent"),
     "big-label": "--package jazz-example-big-label-benchmark --bench ingest_walltime --bench loads",
     "permissioned-resources": native("permissioned-resources"),
-    "groove-ivm": "--package groove --bench pull_vs_snapshot --bench steady_state",
   };
   assert.deepEqual(workloads, Object.keys(previous));
   for (const [workload, args] of Object.entries(previous)) {
@@ -288,7 +287,6 @@ test("measurement keeps each workload's former thread stack and timeout", () => 
     "music-agent": { min_stack: stack, timeout: 20 },
     "big-label": { min_stack: "", timeout: 25 },
     "permissioned-resources": { min_stack: stack, timeout: 20 },
-    "groove-ivm": { min_stack: "", timeout: 40 },
   });
 
   const cli = (action) =>
@@ -333,8 +331,8 @@ test("workload groups share jobs without changing what each workload measures", 
     }).trim();
   assert.deepEqual(JSON.parse(cli("groups")), groups);
   assert.deepEqual(JSON.parse(cli("group-measure")), groupMeasureSettings());
-  assert.equal(cli("group-workloads", "engine"), "groove-ivm");
-  assert.equal(cli("run-command", "engine"), runCommand("engine"));
+  assert.equal(cli("group-workloads", "stage-plan"), "stage-plan");
+  assert.equal(cli("run-command", "stage-plan"), runCommand("stage-plan"));
 });
 
 test("workflow separates grouped native builds from unchanged CodSpeed measurement", async () => {
@@ -462,9 +460,9 @@ test("the nightly suite measures only the nightly extras, never a merge case", a
   // The perf timeline admits scheduled main runs, so a nightly run that
   // re-measured a merge case would add a second point at the same commit.
   assert.deepEqual(suiteWorkloads("merge"), workloads);
-  assert.deepEqual(suiteWorkloads("nightly"), ["stage-plan", "band-book", "groove-ivm"]);
+  assert.deepEqual(suiteWorkloads("nightly"), ["stage-plan", "band-book"]);
   assert.deepEqual(suiteGroups("merge"), groups);
-  assert.deepEqual(suiteGroups("nightly"), ["stage-plan", "docs-and-access", "engine"]);
+  assert.deepEqual(suiteGroups("nightly"), ["stage-plan", "docs-and-access"]);
   assert.deepEqual(groupWorkloads("docs-and-access", "nightly"), ["band-book"]);
   assert.deepEqual(groupWorkloads("live-apps", "nightly"), []);
   for (const workload of workloads.filter((w) => !suiteWorkloads("nightly").includes(w))) {
@@ -480,23 +478,6 @@ test("the nightly suite measures only the nightly extras, never a merge case", a
       `${workload} nightly re-measures a merge target`,
     );
   }
-  // Groove's sweep runs the same executables with GROOVE_BENCH_SWEEP=1, which
-  // makes them skip the merge cases (see crates/groove/benches).
-  assert.deepEqual(buildArgs("groove-ivm", "nightly"), buildArgs("groove-ivm", "merge"));
-  assert.equal(
-    runCommand("engine", "nightly"),
-    "env -u RUST_MIN_STACK GROOVE_BENCH_SWEEP=1 cargo codspeed run -m walltime --package groove --bench pull_vs_snapshot --bench steady_state",
-  );
-  assert.doesNotMatch(runCommand("engine", "merge"), /GROOVE_BENCH_SWEEP/);
-  const groove = await Promise.all(
-    ["pull_vs_snapshot", "steady_state"].map((bench) =>
-      readFile(path.join(root, `crates/groove/benches/${bench}.rs`), "utf8"),
-    ),
-  );
-  for (const source of groove) {
-    // Swept IVM sizes exclude the largest, the size merges measure.
-    assert.match(source, /if sweep\(\) \{\n\s+[A-Z_]+\[\.\.[A-Z_]+\.len\(\) - 1\]\.to_vec\(\)/);
-  }
   assert.deepEqual(Object.keys(groupMeasureSettings("nightly")), suiteGroups("nightly"));
   for (const group of suiteGroups("nightly")) {
     assert.equal(
@@ -505,7 +486,7 @@ test("the nightly suite measures only the nightly extras, never a merge case", a
     );
   }
   // A merge bundle never verifies as a nightly one, or the reverse.
-  assert.notDeepEqual(contractFor("groove-ivm", "merge"), contractFor("groove-ivm", "nightly"));
+  assert.notDeepEqual(contractFor("stage-plan", "merge"), contractFor("stage-plan", "nightly"));
   const previous = process.cwd();
   const dir = await mkdtemp(path.join(os.tmpdir(), "jazz-codspeed-artifact-nightly-"));
   process.chdir(dir);
@@ -533,7 +514,7 @@ test("the nightly suite measures only the nightly extras, never a merge case", a
     }).trim();
   assert.equal(cli("suite"), "nightly");
   assert.equal(cli("build-args", "band-book"), buildArgs("band-book", "nightly").join(" "));
-  assert.equal(cli("run-command", "engine"), runCommand("engine", "nightly"));
+  assert.equal(cli("run-command", "stage-plan"), runCommand("stage-plan", "nightly"));
   assert.deepEqual(JSON.parse(cli("group-measure")), groupMeasureSettings("nightly"));
   assert.deepEqual(JSON.parse(cli("groups")), suiteGroups("nightly"));
   assert.deepEqual(JSON.parse(cli("matrix")), suiteWorkloads("nightly"));

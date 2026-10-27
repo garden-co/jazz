@@ -3,14 +3,10 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, SerializableTxOps, UpdateOptions,
-    block_on,
-};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, UpdateOptions, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -38,11 +34,8 @@ pub struct Fixture {
 impl Fixture {
     pub fn new(order_count: usize) -> Self {
         let schema = schema();
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x6a; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -645,7 +638,8 @@ fn schema() -> JazzSchema {
                     .fk_column("warehouse_id", "warehouses")
                     .column("name", ColumnType::Text)
                     .column("next_order_number", ColumnType::Integer)
-                    .index_only(["warehouse_id", "name"]),
+                    .index_only(["warehouse_id", "name"])
+                    .composite_index(["warehouse_id", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("items")
@@ -661,7 +655,8 @@ fn schema() -> JazzSchema {
                     .fk_column("item_id", "items")
                     .column("on_hand", ColumnType::Integer)
                     .column("reorder_level", ColumnType::Integer)
-                    .index_only(["warehouse_id", "item_id", "on_hand"]),
+                    .index_only(["warehouse_id", "item_id", "on_hand"])
+                    .composite_index(["warehouse_id", "on_hand"]),
             )
             .table(
                 TableSchemaBuilder::new("customers")
@@ -669,7 +664,8 @@ fn schema() -> JazzSchema {
                     .fk_column("district_id", "districts")
                     .column("name", ColumnType::Text)
                     .column("balance_cents", ColumnType::Integer)
-                    .index_only(["warehouse_id", "district_id", "name"]),
+                    .index_only(["warehouse_id", "district_id", "name"])
+                    .composite_index(["warehouse_id", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("orders")
@@ -686,7 +682,8 @@ fn schema() -> JazzSchema {
                         "district_id",
                         "status",
                         "order_number",
-                    ]),
+                    ])
+                    .composite_index(["warehouse_id", "order_number"]),
             )
             .table(
                 TableSchemaBuilder::new("order_lines")

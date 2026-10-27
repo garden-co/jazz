@@ -101,12 +101,16 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmDb;
-    /** Host-only relay open; `storageOwner` is supplied by broker ownership admission. */
+    /**
+     * Host-only relay open; `database` is the physical database name admitted by broker
+     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
+     * to pick the SQLite VFS (IndexedDB, with the file named after `database`, by default).
+     */
     static openBrowser(
       pageStore: unknown,
       schema: Uint8Array,
       config: Uint8Array,
-      storageOwner: string,
+      database: string,
     ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
       pageStore: unknown,
@@ -115,7 +119,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
-      storageOwner: string,
+      database: string,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
@@ -135,7 +139,10 @@ declare module "jazz-wasm" {
       head?: unknown,
       base?: unknown,
     ): StreamingMutation;
-    static destroyBrowserStorage(namespace: string): Promise<void>;
+    /** Delete a durable browser store; no database may have it open. */
+    static destroyBrowserStorage(storage: unknown, database: string): Promise<void>;
+    /** Resolves once every commit so far is in the browser store's backing storage. */
+    flush(): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;
     captureSnapshot(): Uint8Array | PendingNativeRead;

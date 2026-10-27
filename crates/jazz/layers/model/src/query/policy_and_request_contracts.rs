@@ -538,7 +538,7 @@ pub enum RecursionBound {
     /// Stop after at most this many recursive steps. The seed is at depth zero,
     /// so `MaxDepth(0)` evaluates the seed without traversing an edge. Unified
     /// lowering must carry depth through the recursive relation and filter by
-    /// it; this is not the same as groove's internal safety cap.
+    /// it; this is not the same as the fixpoint safety cap.
     MaxDepth(usize),
 }
 

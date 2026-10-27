@@ -146,7 +146,6 @@ fn write_top_table(report: &pprof::Report, path: &PathBuf, elapsed: std::time::D
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ThreadClass {
     Foreground,
-    RocksDbBackground,
     Other,
 }
 
@@ -187,11 +186,7 @@ fn write_thread_tables(report: &pprof::Report, path: &PathBuf, elapsed: std::tim
     writeln!(file, "\n## Thread Classes\n").expect("write profile thread table");
     writeln!(file, "| Class | Samples | Sample % |").expect("write profile thread table");
     writeln!(file, "| --- | ---: | ---: |").expect("write profile thread table");
-    for class in [
-        ThreadClass::Foreground,
-        ThreadClass::RocksDbBackground,
-        ThreadClass::Other,
-    ] {
+    for class in [ThreadClass::Foreground, ThreadClass::Other] {
         let samples = class_samples.get(&class).copied().unwrap_or_default();
         writeln!(
             file,
@@ -220,11 +215,7 @@ fn write_thread_tables(report: &pprof::Report, path: &PathBuf, elapsed: std::tim
         .expect("write profile thread table");
     }
 
-    for class in [
-        ThreadClass::Foreground,
-        ThreadClass::RocksDbBackground,
-        ThreadClass::Other,
-    ] {
+    for class in [ThreadClass::Foreground, ThreadClass::Other] {
         let class_total = class_samples.get(&class).copied().unwrap_or_default();
         writeln!(file, "\n## {} Top Self-Time\n", thread_class_name(class))
             .expect("write profile thread table");
@@ -257,31 +248,14 @@ fn write_thread_tables(report: &pprof::Report, path: &PathBuf, elapsed: std::tim
 
 #[cfg(feature = "profiling")]
 fn classify_thread_sample(frames: &pprof::Frames) -> ThreadClass {
-    let thread = frames.thread_name_or_id().to_ascii_lowercase();
-    if thread.contains("rocksdb")
-        || thread.contains("rocks")
-        || thread.contains("flush")
-        || thread.contains("compact")
-    {
-        return ThreadClass::RocksDbBackground;
-    }
-
     let mut saw_foreground_symbol = false;
     for frame in &frames.frames {
         for symbol in frame {
             let name = symbol.name();
             let lower = name.to_ascii_lowercase();
-            if lower.contains("background")
-                || lower.contains("bgthread")
-                || lower.contains("threadpoolimpl")
-                || lower.contains("flushjob")
-                || lower.contains("compactionjob")
-            {
-                return ThreadClass::RocksDbBackground;
-            }
             if lower.contains("jazz_sim")
                 || lower.contains("jazz::")
-                || lower.contains("groove::")
+                || lower.contains("jazz_db::")
                 || lower.contains("s1_saas")
                 || lower.contains("s3_permissions")
                 || lower.contains("s4_order_processing")
@@ -302,7 +276,6 @@ fn classify_thread_sample(frames: &pprof::Frames) -> ThreadClass {
 fn thread_class_name(class: ThreadClass) -> &'static str {
     match class {
         ThreadClass::Foreground => "foreground",
-        ThreadClass::RocksDbBackground => "rocksdb_background",
         ThreadClass::Other => "other",
     }
 }

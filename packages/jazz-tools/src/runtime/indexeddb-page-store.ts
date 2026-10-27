@@ -58,22 +58,14 @@ export const INDEXEDDB_PAGE_CHECKSUM = "xxh3-64-le";
 export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
 
 /**
- * The closed Jazz schema-storage profile carried by a browser durable root.
- * These are opaque to IndexedDB: the Rust/JS layer that writes each family
- * owns its interpretation, while the adapter only proves that this root was
- * opened with the exact epoch-one inventory.
+ * The closed Jazz storage profile carried by a browser durable root: the
+ * worker's SQLite file (on the IndexedDB VFS) is in Jazz SQLite storage
+ * format 1, which the engine also stamps inside the file
+ * (`jazz::format::STORAGE_FORMAT`). A root written by an older storage format
+ * declares other codec families and fails manifest admission with an
+ * `UnsupportedStorageCodecsError` before anything in it is read or changed.
  */
-export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = [
-  // Interned author columns: the node-local `authors` Groove dictionary. A
-  // browser root written before them lacks this family and fails manifest
-  // admission instead of decoding full authors as dictionary codes.
-  "groove.dictionary.v1",
-  "groove.durable-index.v2",
-  "groove.large-value.v2",
-  "groove.ordered-chunk-storage.v2",
-  "groove.ordered-kv.v1",
-  "jazz.node-storage.v2",
-] as const;
+export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = ["jazz.sqlite-storage.v1"] as const;
 
 /**
  * The entire browser physical-open contract. Keep this exact shape pinned:

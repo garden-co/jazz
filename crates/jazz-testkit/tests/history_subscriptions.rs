@@ -57,10 +57,7 @@ async fn next(stream: &mut SubscriptionStream) -> OrderedRowDelta {
 
 fn history(row: ObjectId) -> Query {
     Query::from("history.tasks")
-        .filter(eq(
-            col("id"),
-            lit(jazz::groove::records::Value::Uuid(*row.uuid())),
-        ))
+        .filter(eq(col("id"), lit(jazz::records::Value::Uuid(*row.uuid()))))
         .order_by("$acceptedAt", OrderDirection::Asc)
 }
 
@@ -97,10 +94,7 @@ async fn history_subscription_tracks_locally_retained_versions() {
             assert!(initial.added[0].row.get("$transactionId").is_none());
             assert!(initial.added[0].row.get("$acceptedAt").is_none());
             let page = Query::from("history.tasks")
-                .filter(eq(
-                    col("id"),
-                    lit(jazz::groove::records::Value::Uuid(*row.uuid())),
-                ))
+                .filter(eq(col("id"), lit(jazz::records::Value::Uuid(*row.uuid()))))
                 .select(["title"])
                 .order_by("$acceptedAt", OrderDirection::Desc)
                 .limit(1);
@@ -561,7 +555,7 @@ async fn history_grouped_count_filters_version_values() {
                 .query(
                     query.filter(eq(
                         col("title"),
-                        lit(jazz::groove::records::Value::String("first".into())),
+                        lit(jazz::records::Value::String("first".into())),
                     )),
                     ReadTier::LocalOnly,
                 )
@@ -761,7 +755,7 @@ async fn history_count_combines_selected_rows_without_duplicate_contributions() 
             let query = Query::from("history.tasks")
                 .filter(jazz::query::in_list(
                     col("id"),
-                    [a, b, a].map(|id| lit(jazz::groove::records::Value::Uuid(*id.uuid()))),
+                    [a, b, a].map(|id| lit(jazz::records::Value::Uuid(*id.uuid()))),
                 ))
                 .count();
             let rows = alice
@@ -1013,7 +1007,7 @@ async fn history_join_two_histories_preserves_version_pairs() {
                 )
                 .filter(eq(
                     col("a.id"),
-                    lit(jazz::groove::records::Value::Uuid(*row.uuid())),
+                    lit(jazz::records::Value::Uuid(*row.uuid())),
                 ));
             let rows = alice
                 .query(query.clone(), ReadTier::LocalOnly)
@@ -1461,7 +1455,7 @@ async fn mixed_current_history_subscription(tier: ReadTier) {
                 .flat_join("tasks", "history.tasks.id", "tasks.id")
                 .filter(eq(
                     col("history.tasks.title"),
-                    lit(jazz::groove::records::Value::String("first".into())),
+                    lit(jazz::records::Value::String("first".into())),
                 ));
             let rows = alice
                 .query(historical_root, ReadTier::Remote)
@@ -1577,10 +1571,7 @@ async fn include_deleted_subscription_fetches_current_content() {
                 .connect()
                 .await;
             let query = Query::from("tasks")
-                .filter(eq(
-                    col("id"),
-                    lit(jazz::groove::records::Value::Uuid(*row.uuid())),
-                ))
+                .filter(eq(col("id"), lit(jazz::records::Value::Uuid(*row.uuid()))))
                 .select(["title"]);
             let mut stream = alice
                 .subscribe_with_opts(
@@ -1873,7 +1864,7 @@ async fn deletion_metadata_respects_read_policy() {
                 in_list(
                     col("id"),
                     rows.iter()
-                        .map(|row| lit(jazz::groove::records::Value::Uuid(*row.uuid()))),
+                        .map(|row| lit(jazz::records::Value::Uuid(*row.uuid()))),
                 )
             };
             let columns = [

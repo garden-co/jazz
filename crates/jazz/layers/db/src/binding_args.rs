@@ -7,13 +7,13 @@
 use std::collections::BTreeMap;
 
 use crate::db::ReadTier;
-use crate::groove::records::Value;
 use crate::ids::{AuthorSubject, RowUuid};
-use crate::model::policy_claims::{
+use crate::records::Value;
+use crate::tx::DurabilityTier;
+use jazz_model::model::policy_claims::{
     MAX_SAFE_JS_INTEGER, NumericClaimOrigin, canonical_policy_binding_claims,
     json_value_to_policy_claim,
 };
-use crate::tx::DurabilityTier;
 
 /// Parse a 16-byte row id.
 pub fn row_uuid(bytes: &[u8]) -> Result<RowUuid, String> {

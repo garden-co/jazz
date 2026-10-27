@@ -1110,14 +1110,9 @@ async function initialize(context: RuntimeContext): Promise<void> {
           proof.token,
           proof.appId,
           proof.claimedAuthor,
-          physicalOwner.storageOwner,
+          options.dbName,
         )
-      : await wasmModule.WasmDb.openBrowser(
-          context.pageStore,
-          schema,
-          config,
-          physicalOwner.storageOwner,
-        );
+      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config, options.dbName);
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -1309,6 +1304,8 @@ function carriesCredential(authJson: string): boolean {
 
 function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
+  // A worker with no server has the last word on its tabs' writes.
+  if (!requestedUrl) context.runtime?.setRemoteLinkHint("none");
   if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
   // A retained account's tabs open before the provider supplies a credential.
@@ -2018,6 +2015,10 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   context.disposePageStoreInvalidation?.();
   context.disposePageStoreInvalidation = null;
   context.pageStore = null;
+  // The SQLite file lives in its VFS's own IndexedDB store, outside the
+  // page store's root the tab just destroyed.
+  const wasmModule = await wasmModulePromise;
+  await wasmModule?.WasmDb.destroyBrowserStorage(undefined, context.options.dbName);
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
   context.disposeAuxiliaryTrace?.();

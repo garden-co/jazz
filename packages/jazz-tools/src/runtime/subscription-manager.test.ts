@@ -698,7 +698,7 @@ describe("SubscriptionManager", () => {
       index: 0,
       row: includedRootRow(rootId, title),
     });
-    // Groove's ordered root key for this occurrence: root UUID, then the
+    // The ordered root key for this occurrence: root UUID, then the
     // union-arm label ahead of the joined UUID it discriminates.
     const orderedRoot = [
       10,

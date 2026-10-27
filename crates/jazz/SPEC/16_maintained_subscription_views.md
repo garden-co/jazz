@@ -641,9 +641,9 @@ Maintained-lowering gaps:
   edges, ordering/limit boundaries, and policy visibility must converge with the
   corresponding one-shot relation snapshot, and serving code must not compensate
   by recursively subscribing to coarse child shapes for sync coverage;
-- relation delivery is covered by the active
-  `groove/SPEC/INVARIANTS.md::INV-INC-1` mechanism canary in
-  `crates/jazz/tests/incremental_delivery_canary.rs`. The canary is at the
+- relation delivery is covered by the active `INV-PERF-9` canary
+  `include_live::renaming_a_sender_updates_exactly_their_messages`
+  (`crates/jazz/tests/include_live.rs`). The canary is at the
   `Db` facade level because the current `jazz-tools::JazzClient` subscription
   surface rejects relation/include queries as non-simple table queries;
 - application-column projection is a materialization concern layered over the
@@ -657,7 +657,7 @@ Window limitations:
 - root `limit`/`offset` windows without explicit `order_by` are supported by
   injecting the ch. 6 default ascending row-id order before lowering through
   `TopBy`; this applies to both prepared bindings and policy-routed maintained
-  views. Explicit order keys retain ascending row id as their stable tie-break.
+  views. Explicit order keys break ties by row id in the last key's direction (ch. 6).
 - The same rule applies to every non-recursive relation-local window, including
   an `array_subquery`: without child `order_by`, each parent/correlation group
   is ordered by ascending child row id before its child-local `offset` and

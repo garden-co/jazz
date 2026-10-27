@@ -2,23 +2,23 @@
 //!
 //! An append derived from an already published descriptor must produce the
 //! exact logical value, keep rejecting invalid input, and validate only what
-//! it added before its staging receipt is issued. The scale check uses
-//! Groove's test-only `finalize_validation_bytes_for_test` counter: it is the
+//! it added before it is admitted. The scale check uses
+//! the test-only `finalize_validation_bytes_for_test` counter: it is the
 //! one internal hook here, because "how much of the value was re-read" has no
 //! public observable other than elapsed time, which cannot prove scaling.
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema};
+use jazz::db::LargeValueUpdateSplice;
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions};
-use jazz::groove::large_values::{
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::large_values::{
     INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES, MAX_EDIT_COUNT, finalize_validation_bytes_for_test,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 fn open_db(node: u8) -> Db {
@@ -32,17 +32,13 @@ fn open_db(node: u8) -> Db {
             )
             .build(),
     );
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    jazz::block_on(Db::open(DbConfig {
+    jazz::block_on(Db::open(DbConfig::new(
         schema,
-        storage: TestStorage::new(&refs),
-        identity: DbIdentity {
+        DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
-        id_source: None,
-    }))
+    )))
     .expect("open db")
 }
 
@@ -174,9 +170,12 @@ fn splices_across_consolidation_keep_exact_text() {
             "docs",
             row,
             "body",
-            offset as u64,
-            delete as u64,
-            insert.clone().into_bytes(),
+            LargeValueUpdateSplice {
+                at: offset as u64,
+                delete: delete as u64,
+                insert: insert.clone().into_bytes(),
+            },
+            Default::default(),
         ))
         .expect("splice");
         expected.splice(offset..offset + delete, insert.into_bytes());
@@ -242,10 +241,9 @@ fn local_append_validation_does_not_scale_with_value_size() {
     let (small_insert, small_append) = validation_bytes(0x34, 128 * 1024, appends);
     let (large_insert, large_append) = validation_bytes(0x35, 1024 * 1024, appends);
 
-    // Control: a fresh value is still fully re-read before its receipt, so
-    // the counter observes this thread's finalization work.
-    assert!(small_insert >= 128 * 1024, "{small_insert}");
-    assert!(large_insert >= 1024 * 1024, "{large_insert}");
+    // A value built by this store is trusted as built, so its insert reads
+    // nothing back; uploaded values are fully validated on admission instead.
+    assert_eq!((small_insert, large_insert), (0, 0));
 
     // A derived append re-reads only its newly staged nodes and the base
     // branches/ranges needed to prove reuse and replay its tail. That is

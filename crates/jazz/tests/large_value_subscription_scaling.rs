@@ -8,7 +8,7 @@
 //! that selected only file names therefore downloaded each file completely,
 //! and published none of its rows until the last chunk had arrived.
 //!
-//! As in `large_value_read_scaling`, these tests observe Groove's test-only
+//! As in `large_value_read_scaling`, these tests observe the test-only
 //! count of complete large-value rebuilds (`full_materializations_for_test`):
 //! the public rows are the same either way, and the defect is precisely the
 //! work those rows do not show. Each count is compared with the same write
@@ -17,22 +17,21 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema};
 use jazz::block_on;
+use jazz::db::CurrentRow;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, SubscriptionEvent,
-    SubscriptionOutputRow, SubscriptionStream, UpdateOptions,
+    Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, PreparedQuery, ReadOpts,
+    SubscriptionEvent, SubscriptionOutputRow, SubscriptionStream, UpdateOptions,
 };
-use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
-use jazz::groove::large_values::{LEAF_MAX_BYTES, full_materializations_for_test};
-use jazz::groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
+use jazz::large_values::{LEAF_MAX_BYTES, full_materializations_for_test};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, gte, lit};
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::records::Value;
+use jazz::result_tree::ResultRelation;
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -57,26 +56,14 @@ fn files_schema() -> JazzSchema {
 }
 
 fn open_db(schema: JazzSchema, seed: u8) -> Db {
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([seed; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
     )))
     .expect("open db")
-}
-
-fn table(schema: &JazzSchema) -> TableSchema {
-    schema
-        .tables()
-        .iter()
-        .find(|table| table.name == FILES)
-        .expect("files table")
-        .clone()
 }
 
 /// Deterministic bytes spanning several chunk leaves.
@@ -182,8 +169,8 @@ fn next_delta(subscription: &mut SubscriptionStream) -> Delta {
     }
 }
 
-fn name(table: &TableSchema, row: &CurrentRow) -> Option<Value> {
-    row.cell(table, "name")
+fn name(row: &CurrentRow) -> Option<Value> {
+    row.cell("name")
 }
 
 /// A listing subscription that projects the large columns away never
@@ -198,7 +185,6 @@ fn name(table: &TableSchema, row: &CurrentRow) -> Option<Value> {
 #[test]
 fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let schema = files_schema();
-    let table = table(&schema);
     let db = open_db(schema, 0x81);
 
     // Baselines: the same writes while no subscription is open.
@@ -223,7 +209,7 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let mut names = opening
         .added
         .iter()
-        .map(|published| match name(&table, published) {
+        .map(|published| match name(published) {
             Some(Value::String(listed)) => listed,
             other => panic!("expected a listed name, got {other:?}"),
         })
@@ -231,8 +217,8 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     names.sort();
     assert_eq!(names, ["a.bin", "b.bin"]);
     for published in &opening.added {
-        assert_eq!(published.cell(&table, "contents"), None);
-        assert_eq!(published.cell(&table, "notes"), None);
+        assert_eq!(published.cell("contents"), None);
+        assert_eq!(published.cell("notes"), None);
     }
 
     let (added, rebuilds) = counting(|| {
@@ -252,10 +238,10 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
         vec![row(0x85)]
     );
     assert_eq!(
-        name(&table, &added.added[0]),
+        name(&added.added[0]),
         Some(Value::String("c.bin".to_owned()))
     );
-    assert_eq!(added.added[0].cell(&table, "contents"), None);
+    assert_eq!(added.added[0].cell("contents"), None);
 
     let (renamed, rebuilds) = counting(|| {
         rename_file(&db, row(0x84), "b2.bin");
@@ -273,7 +259,7 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
         .collect::<Vec<_>>();
     assert_eq!(renamed_rows.len(), 1, "the renamed row is republished once");
     assert_eq!(
-        name(&table, renamed_rows[0]),
+        name(renamed_rows[0]),
         Some(Value::String("b2.bin".to_owned()))
     );
 
@@ -297,7 +283,6 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
 #[test]
 fn listing_and_content_subscriptions_keep_their_own_representation() {
     let schema = files_schema();
-    let table = table(&schema);
     let db = open_db(schema, 0x91);
     let first = contents(0x92, 3);
     insert_file(&db, row(0x92), "first.bin", &first);
@@ -308,12 +293,9 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
     let viewed = next_delta(&mut viewer);
     assert!(listed.reset && viewed.reset);
     assert_eq!(listed.added.len(), 1);
-    assert_eq!(listed.added[0].cell(&table, "contents"), None);
+    assert_eq!(listed.added[0].cell("contents"), None);
     assert_eq!(viewed.added.len(), 1);
-    assert_eq!(
-        viewed.added[0].cell(&table, "contents"),
-        Some(Value::Bytes(first))
-    );
+    assert_eq!(viewed.added[0].cell("contents"), Some(Value::Bytes(first)));
 
     let added = contents(0x93, 4);
     insert_file(&db, row(0x93), "d.bin", &added);
@@ -327,7 +309,7 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
             .collect::<Vec<_>>(),
         vec![row(0x93)]
     );
-    assert_eq!(listed.added[0].cell(&table, "contents"), None);
+    assert_eq!(listed.added[0].cell("contents"), None);
     assert_eq!(
         viewed
             .added
@@ -336,10 +318,7 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
             .collect::<Vec<_>>(),
         vec![row(0x93)]
     );
-    assert_eq!(
-        viewed.added[0].cell(&table, "contents"),
-        Some(Value::Bytes(added))
-    );
+    assert_eq!(viewed.added[0].cell("contents"), Some(Value::Bytes(added)));
 
     let replaced = contents(0x94, 5);
     replace_contents(&db, row(0x93), &replaced);
@@ -351,7 +330,7 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
         .find(|published| published.row_uuid() == row(0x93))
         .expect("the viewer republishes the changed file");
     assert_eq!(
-        changed.cell(&table, "contents"),
+        changed.cell("contents"),
         Some(Value::Bytes(replaced.clone()))
     );
 
@@ -364,13 +343,10 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
         .find(|published| published.row_uuid() == row(0x93))
         .expect("listed");
     assert_eq!(
-        changed.cell(&table, "notes"),
+        changed.cell("notes"),
         Some(Value::String(large_notes("d.bin")))
     );
-    assert_eq!(
-        changed.cell(&table, "contents"),
-        Some(Value::Bytes(replaced))
-    );
+    assert_eq!(changed.cell("contents"), Some(Value::Bytes(replaced)));
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +431,6 @@ struct Event {
     added: Vec<SubscriptionOutputRow>,
     updated: Vec<SubscriptionOutputRow>,
     removed: Vec<RowUuid>,
-    terminal_operations: Vec<TerminalOperation>,
 }
 
 fn next_event(subscription: &mut SubscriptionStream) -> Event {
@@ -465,7 +440,6 @@ fn next_event(subscription: &mut SubscriptionStream) -> Event {
             added,
             updated,
             removed,
-            terminal_operations,
             ..
         }) => Event {
             reset,
@@ -475,7 +449,6 @@ fn next_event(subscription: &mut SubscriptionStream) -> Event {
                 .into_iter()
                 .map(|removed| removed.row_uuid)
                 .collect(),
-            terminal_operations,
         },
         other => panic!("expected a subscription delta, got {other:?}"),
     }
@@ -520,11 +493,12 @@ impl OrderedRows {
     }
 }
 
-/// The child array of one parent, folded from the parent rows a subscription
-/// publishes and from its descendant edits under `relation`.
+/// The child array of one parent, as the subscription's query returns it.
+/// This store serves includes through result trees, so each check reads
+/// the tree after the subscription has seen the change.
 struct IncludedRows {
     relation: &'static str,
-    children: Vec<OwnedRecord>,
+    children: Vec<CurrentRow>,
 }
 
 impl IncludedRows {
@@ -535,121 +509,31 @@ impl IncludedRows {
         }
     }
 
-    fn apply(&mut self, event: Event) {
-        for parent in event.added.iter().chain(&event.updated) {
-            let (descriptor, raw) = parent.encoded_record();
-            match unwrap_nullable(
-                descriptor
-                    .bind(raw)
-                    .get(self.relation)
-                    .expect("parent carries its include"),
-            ) {
-                Value::Array(children) => {
-                    self.children = children
-                        .into_iter()
-                        .map(|child| match unwrap_nullable(child) {
-                            Value::Record(child) => child,
-                            other => panic!("expected an included record, got {other:?}"),
-                        })
-                        .collect();
-                }
-                other => panic!("expected an included array, got {other:?}"),
+    fn read(&mut self, db: &Db, prepared: &PreparedQuery) {
+        let tree = block_on(db.all_result_tree(prepared, opts())).expect("result tree");
+        let parent = tree.roots.into_iter().next().expect("one parent");
+        match parent.relations.get(self.relation) {
+            Some(ResultRelation::Array(children)) => {
+                self.children = children.iter().map(|child| child.row.clone()).collect();
             }
+            other => panic!("expected an included array, got {other:?}"),
         }
-        for operation in event.terminal_operations {
-            if operation.path != [TerminalPathSegment::Collection(self.relation.to_owned())] {
-                continue;
-            }
-            let child_descriptor = included_descriptor(&operation.root_descriptor, self.relation);
-            match operation.edit {
-                TerminalEdit::Insert { index, value, .. } => {
-                    let index = index.min(self.children.len());
-                    self.children
-                        .insert(index, OwnedRecord::new(value, child_descriptor));
-                }
-                TerminalEdit::Update { key, value } => {
-                    let position = self.position(&key);
-                    self.children[position] = OwnedRecord::new(value, child_descriptor);
-                }
-                TerminalEdit::Remove { key } => {
-                    let position = self.position(&key);
-                    self.children.remove(position);
-                }
-                TerminalEdit::Move { key, index } => {
-                    let position = self.position(&key);
-                    let child = self.children.remove(position);
-                    let index = index.min(self.children.len());
-                    self.children.insert(index, child);
-                }
-            }
-        }
-    }
-
-    /// A child edit key encodes the child's row identity, its first field.
-    fn position(&self, key: &[u8]) -> usize {
-        self.children
-            .iter()
-            .position(|child| {
-                let id = child_id(child);
-                key.windows(16).any(|window| window == id.0.as_bytes())
-            })
-            .expect("the edit addresses a published child")
     }
 
     fn ids(&self) -> Vec<RowUuid> {
-        self.children.iter().map(child_id).collect()
+        self.children.iter().map(CurrentRow::row_uuid).collect()
     }
 
     fn cell(&self, id: RowUuid, column: &str) -> Option<Value> {
         let child = self
             .children
             .iter()
-            .find(|child| child_id(child) == id)
+            .find(|child| child.row_uuid() == id)
             .expect("the child is included");
-        record_cell(child, column)
-    }
-}
-
-fn unwrap_nullable(value: Value) -> Value {
-    match value {
-        Value::Nullable(Some(inner)) => unwrap_nullable(*inner),
-        other => other,
-    }
-}
-
-fn included_descriptor(root: &RecordDescriptor, relation: &str) -> RecordDescriptor {
-    let index = root
-        .field_index(relation)
-        .expect("the root descriptor names its include");
-    let mut ty = &root.fields()[index].value_type;
-    loop {
-        match ty {
-            ValueType::Nullable(inner) | ValueType::Array(inner) => ty = &**inner,
-            ValueType::Record(descriptor) => return **descriptor,
-            other => panic!("expected an included record type, got {other:?}"),
-        }
-    }
-}
-
-fn child_id(child: &OwnedRecord) -> RowUuid {
-    match unwrap_nullable(child.get_idx(0).expect("child identity")) {
-        Value::Uuid(id) => RowUuid(id),
-        other => panic!("expected a child row id, got {other:?}"),
-    }
-}
-
-/// An included column by its public name, whatever carrier spelling the
-/// collector gives it; `None` when the include does not carry the column.
-fn record_cell(record: &OwnedRecord, column: &str) -> Option<Value> {
-    let index = record.descriptor().fields().iter().position(|field| {
-        field
-            .name
-            .as_deref()
-            .is_some_and(|name| name == column || name.ends_with(&format!("_{column}")))
-    })?;
-    match unwrap_nullable(record.get_idx(index).expect("included cell")) {
-        Value::Nullable(None) => None,
-        value => Some(value),
+        child
+            .cells()
+            .find(|(name, _)| *name == column)
+            .and_then(|(_, value)| value.cloned())
     }
 }
 
@@ -667,16 +551,17 @@ fn an_include_that_selects_a_large_column_receives_it_in_full() {
     let first = contents(0xa3, 3);
     insert_entry(&db, row(0xa3), folder, "a.bin", &sorting_notes("a"), &first);
 
-    let mut viewer = subscribe(
-        &db,
-        Query::from(FOLDERS).array_subquery(
-            ArraySubquery::new(ENTRIES, ENTRIES, "folder_id", "id").select(["name", "contents"]),
-        ),
+    let query = Query::from(FOLDERS).array_subquery(
+        ArraySubquery::new(ENTRIES, ENTRIES, "folder_id", "id").select(["name", "contents"]),
     );
+    let prepared = db.prepare_query(&query).expect("prepare include");
+    let mut viewer = subscribe(&db, query);
+    // The subscription opens over the large include; the checks read the
+    // include's rows from the result tree.
     let mut included = IncludedRows::new(ENTRIES);
     let opening = next_event(&mut viewer);
     assert!(opening.reset);
-    included.apply(opening);
+    included.read(&db, &prepared);
     assert_eq!(included.ids(), vec![row(0xa3)]);
     assert_eq!(
         included.cell(row(0xa3), "contents"),
@@ -691,7 +576,7 @@ fn an_include_that_selects_a_large_column_receives_it_in_full() {
         row(0xa3),
         BTreeMap::from([("contents".to_owned(), Value::Bytes(replaced.clone()))]),
     );
-    included.apply(next_event(&mut viewer));
+    included.read(&db, &prepared);
     assert_eq!(included.ids(), vec![row(0xa3)]);
     assert_eq!(
         included.cell(row(0xa3), "contents"),
@@ -722,19 +607,18 @@ fn an_include_ordered_by_a_large_column_keeps_its_window() {
         );
     }
 
-    let mut listing = subscribe(
-        &db,
-        Query::from(FOLDERS).array_subquery(
-            ArraySubquery::new(ENTRIES, ENTRIES, "folder_id", "id")
-                .select(["name"])
-                .order_by("notes", OrderDirection::Asc)
-                .limit(2),
-        ),
+    let query = Query::from(FOLDERS).array_subquery(
+        ArraySubquery::new(ENTRIES, ENTRIES, "folder_id", "id")
+            .select(["name"])
+            .order_by("notes", OrderDirection::Asc)
+            .limit(2),
     );
+    let prepared = db.prepare_query(&query).expect("prepare include");
+    let mut listing = subscribe(&db, query);
     let mut included = IncludedRows::new(ENTRIES);
     let opening = next_event(&mut listing);
     assert!(opening.reset);
-    included.apply(opening);
+    included.read(&db, &prepared);
     assert_eq!(included.ids(), vec![row(0xb4), row(0xb3)]);
     for id in included.ids() {
         assert_eq!(included.cell(id, "notes"), None);
@@ -747,7 +631,7 @@ fn an_include_ordered_by_a_large_column_keeps_its_window() {
         row(0xb5),
         BTreeMap::from([("notes".to_owned(), Value::String(sorting_notes("b")))]),
     );
-    included.apply(next_event(&mut listing));
+    included.read(&db, &prepared);
     assert_eq!(
         included.ids(),
         vec![row(0xb4), row(0xb5)],
@@ -774,7 +658,6 @@ fn an_include_ordered_by_a_large_column_keeps_its_window() {
 #[test]
 fn a_listing_filtered_and_ordered_by_a_large_column_keeps_its_order() {
     let schema = files_schema();
-    let table = table(&schema);
     let db = open_db(schema, 0xc1);
     for (seed, prefix) in [(0xc2, "a"), (0xc3, "c"), (0xc4, "e"), (0xc5, "d")] {
         let write = block_on(db.insert(
@@ -834,14 +717,14 @@ fn a_listing_filtered_and_ordered_by_a_large_column_keeps_its_order() {
     let names = rows
         .rows
         .iter()
-        .map(|listed| name(&table, listed))
+        .map(|listed| name(listed))
         .collect::<Vec<_>>();
     assert_eq!(
         names,
         ["e.bin", "c.bin", "d2.bin", "a.bin"].map(|listed| Some(Value::String(listed.to_owned())))
     );
     for listed in &rows.rows {
-        assert_eq!(listed.cell(&table, "contents"), None);
-        assert_eq!(listed.cell(&table, "notes"), None);
+        assert_eq!(listed.cell("contents"), None);
+        assert_eq!(listed.cell("notes"), None);
     }
 }

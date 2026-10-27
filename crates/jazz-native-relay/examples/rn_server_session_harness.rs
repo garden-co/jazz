@@ -43,9 +43,7 @@ async fn run() {
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .with_data_dir(server_storage.path())
-        .with_storage_factory(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        ))
+        .with_persistent_storage()
         .with_schema(schema.clone())
         .with_jwks_url(issuer.endpoint())
         .start()
@@ -61,7 +59,6 @@ async fn run() {
         server_url: core.base_url(),
         data_dir: observer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
-        storage_factory: None,
         account_id: None,
         jwt_token: Some(TestJwtIssuer::jwt_for_user("rn-device-core-observer")),
         backend_secret: None,
@@ -133,9 +130,7 @@ async fn run() {
         .with_port(server_port)
         .with_app_id(app_id)
         .with_data_dir(server_storage.path())
-        .with_storage_factory(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        ))
+        .with_persistent_storage()
         .with_schema(schema.clone())
         .with_jwks_url(issuer.endpoint())
         .with_admin_secret(admin_secret)
@@ -150,7 +145,6 @@ async fn run() {
         server_url: core.base_url(),
         data_dir: writer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
-        storage_factory: None,
         account_id: None,
         jwt_token: Some(TestJwtIssuer::jwt_for_user(
             "rn-device-core-recovery-writer",

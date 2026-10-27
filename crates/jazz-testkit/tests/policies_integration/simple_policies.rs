@@ -1811,23 +1811,18 @@ async fn updates_require_read_and_update_permissions_inner() {
     .await;
     assert_eq!(persisted_before.len(), 1);
 
-    let transaction = alice
+    // Alice cannot read the row she inserted, so the server evicted it from
+    // her replica: her update is refused locally, before any upload, as an
+    // update of a row she does not hold.
+    let error = alice
         .update(
             "documents_write_only",
             write_only_id,
             vec![("archived".to_owned(), false.into())],
         )
-        .expect("stage optimistic update to the row Alice inserted")
-        .expect("update commits immediately");
-    let error = tokio::time::timeout(
-        QUERY_TIMEOUT,
-        alice.wait_for_transaction(transaction, jazz::tools::DurabilityTier::GlobalServer),
-    )
-    .await
-    .expect("server decides the hidden-row update")
-    .expect_err("UPDATE permission alone must not authorize updating a hidden row");
+        .expect_err("UPDATE permission alone must not authorize updating a hidden row");
     assert!(
-        error.to_string().ends_with("authorization_denied"),
+        error.to_string().contains("is not loaded locally"),
         "unexpected rejection: {error}"
     );
 

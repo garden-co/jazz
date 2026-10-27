@@ -35,19 +35,15 @@ CodSpeed history; the workloads and their correctness checks are unchanged.
 ## Nightly cases (`benches/nightly.rs`)
 
 Scaling sweeps that explain a cost but do not need a receipt on every PR keep
-their former W1 names: bounded activity page (profile S, 9,000 RocksDB, and the
+their former W1 names: bounded activity page (profile S, 9,000 file-backed, and the
 memory sweep), comments scaling, indexed update without a subscription, point
 subscribe without a policy, the 900-row policy attach and resubscribe. The
 nightly CodSpeed run measures them on main; the benchmark smoke gate compiles
 them on every PR; run them locally with
 `cargo bench -p jazz-example-stage-plan-benchmark --bench nightly`.
 
-The `_sqlite` cases repeat the per-merge storage-bound cases (add, check off,
-bulk complete and reopen the task list; open the board and a task's detail;
-the 30,000-row activity page; move a card) on SQLite with WAL and
-`synchronous=NORMAL`, the store the native relay uses on React Native, Swift and
-Kotlin. They replace the SQLite engine runs of the retired realistic benchmark
-workflow, so a SQLite-only regression shows up in the nightly history.
+Durable cases (the `_rocksdb` nightly names and the walltime cases listed
+above) use a file-backed SQLite database with WAL and `synchronous=NORMAL`.
 
 Dropped because a CodSpeed case above measures the same operation: the
 in-memory twins of the board, task-detail, profile-S activity page and
@@ -61,7 +57,7 @@ point; and the 0- and 10-list crew dashboards.
 todo example: its schema, deterministic rows, driver, assertions, and profiling
 support. The four wall-time cases finish with 1,500 tasks:
 
-- Reopen (`stage_plan_reopen_1500`): open an already seeded RocksDB worker, publish to an empty memory
+- Reopen (`stage_plan_reopen_1500`): open an already seeded file-backed worker, publish to an empty memory
   foreground, ingest, and query the tasks.
 - Bulk complete (`stage_plan_bulk_complete_1350`): mark 1,350 tasks done in one transaction, including foreground
   authoring, upload encoding, worker ingest and delivery back to the foreground.
@@ -72,7 +68,7 @@ support. The four wall-time cases finish with 1,500 tasks:
   encode/decode and foreground application path before the next insert. IDs are
   deterministic caller-supplied IDs; new rows have no predecessor version.
 
-Setup is outside each measured closure. RocksDB uses WAL without fsync. This is
+Setup is outside each measured closure. The worker store uses WAL without fsync. This is
 an in-process native worker/foreground workload, not browser or IndexedDB timing;
 it excludes JS scheduling and authentication bootstrap. Each measured operation
 ends with one read of all tasks, including after the entire sequential loop.
@@ -93,8 +89,8 @@ CodSpeed cases have fixed sizes. Keep allocator, optimization profile and machin
 architecture equal when comparing numbers. CodSpeed ARM64 results establish a
 separate baseline from local x86 measurements.
 
-`JAZZ_TODO_WORKLOAD` defaults to `batch` (the original memory/RocksDB diagnostic
-and raw-storage controls). Sequential diagnostics use RocksDB and retain the
+`JAZZ_TODO_WORKLOAD` defaults to `batch` (the memory/file-backed diagnostic
+and raw-storage controls). Sequential diagnostics use a file-backed worker and retain the
 existing `batch_*` phase labels for each one-row transaction. Their `rows` field
 is the current table size, allowing phase costs to be grouped by growing table
 size. `JAZZ_BATCH_ROWS` is the final size for inserts (20..=4096); setup seeds
@@ -106,7 +102,7 @@ throughout; their timings are not a pure insert-vs-update primitive comparison.
 
 ## Hot-row history diagnostic (#2981)
 
-`stage-plan-tasks-history-depth` keeps the same todo schema, RocksDB WAL worker, memory
+`stage-plan-tasks-history-depth` keeps the same todo schema, file-backed WAL worker, memory
 foreground and complete wire roundtrip. It compares `spread` (round-robin
 updates) with `hot` (one repeatedly edited row). Both explicitly name the last
 authored version of the target row as parent. Optional `stale-parent` instead
@@ -123,7 +119,7 @@ JAZZ_HISTORY_ROWS=1500 JAZZ_HISTORY_UPDATES=2000 JAZZ_HISTORY_WINDOW=500 \
 
 JSONL windows report phase medians and average logical storage/history reads
 per update, plus source and process provenance. Authoring and author persistence
-are memory-backed; worker ingest/publication is RocksDB-backed. `upload` and
+are memory-backed; worker ingest/publication is file-backed. `upload` and
 `publish` include their wire encode/decode. `roundtrip` includes all phases and
 measurement bookkeeping, not window validation/printing or fixture setup.
 These are diagnostic timings, not CodSpeed cases or browser throughput claims.

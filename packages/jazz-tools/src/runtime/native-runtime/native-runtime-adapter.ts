@@ -2946,14 +2946,16 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
-   * A session supplies the subject for a trusted-serving host; it never turns
-   * an ordinary client mutation into a policy-enforcing local admission.
+   * A write with a session is that session's: the authority checks it as the
+   * session over a backend link, or as the link's own identity otherwise. A
+   * client's own session is the runtime itself, so it writes as the runtime.
+   * A trusted-serving host writes as its peer when no session is given.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
-    if (this.trustedBackend && !session) return undefined;
-    return this.readAuthorizationHost === "trusted-serving"
-      ? (session?.identity ?? this.peerIdentity)
-      : undefined;
+    const serving = this.readAuthorizationHost === "trusted-serving";
+    if (!session) return serving && !this.trustedBackend ? this.peerIdentity : undefined;
+    const own = !this.trustedBackend && !serving && sameBytes(session.identity, this.peerIdentity);
+    return own ? undefined : session.identity;
   }
 
   /** External provenance is accepted only by the explicit backend runtime;
@@ -4864,7 +4866,7 @@ function terminalBytes(bytes: NativeTerminalBytes): Uint8Array {
   return bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
 }
 
-/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+/** Decode the leading UUID key field from the ordered record-key carrier. */
 function terminalPayloadRowId(encoded: NativeTerminalBytes): string {
   const bytes = terminalBytes(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {
@@ -5083,6 +5085,9 @@ function contextualError(context: string, error: unknown): Error {
 function rejectionCode(message: string): string {
   if (message.includes("AuthorizationDenied")) return "permission_denied";
   if (message.includes("SerializationConflict")) return "serialization_conflict";
+  // The engine's stable prefix for a policy denial.
+  if (/^(?:WriteRejected:\s*)?authorization_denied(?::|$)/.test(message))
+    return "permission_denied";
   if (message.includes("CausalityViolation")) return "causality_violation";
   if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
   if (message.includes("Cascade")) return "cascade_rejected";

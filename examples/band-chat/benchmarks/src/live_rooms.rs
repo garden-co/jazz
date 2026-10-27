@@ -1,11 +1,8 @@
 //! Many open room views, one new message: the cost of a write that only one
 //! of many live subscriptions of the same query shape needs to see.
 //!
-//! Moved from `crates/jazz/benches/route_subscription_curve.rs`
-//! (`matching_write_fanout[100]`), reframed in BandChat terms. The fixture,
-//! query shape, write and assertions are unchanged: routes are rooms,
-//! documents are messages, `updated_at` is `sent_at`. The crate bench keeps
-//! the scale receipt (`JAZZ_ROUTE_CURVE_RECEIPT`) for diagnosis.
+//! In BandChat terms: routes are rooms, documents are messages, `updated_at`
+//! is `sent_at`.
 //!
 //! 1,001 rooms. The busy room holds 1,000 messages; every other room holds
 //! one. `ROOMS_OPEN` room views bind one prepared shape (room = param, newest
@@ -20,10 +17,9 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SeededRowIdSource, SubscriptionEvent,
     SubscriptionStream, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -90,20 +86,6 @@ impl LiveRoomsFixture {
         }
         let stats = self.db.runtime_stats_for_test();
         assert_eq!(stats.active_subscriptions, self.rooms_open);
-        let receipts = self.db.maintained_subscription_size_receipts_for_test();
-        assert_eq!(receipts.len(), self.rooms_open);
-        let total = |field: &dyn Fn(usize) -> usize| (0..receipts.len()).map(field).sum::<usize>();
-        let source_witnesses = total(&|i| receipts[i].footprint.version_identities)
-            + total(&|i| receipts[i].footprint.versions_bytes);
-        assert_eq!(
-            source_witnesses, 0,
-            "storage-backed room views retain source witnesses"
-        );
-        assert!(
-            total(&|i| receipts[i].footprint.replacement_entries) > 0
-                && total(&|i| receipts[i].footprint.replacements_bytes) > 0,
-            "storage-backed room views must retain replacement witnesses"
-        );
         OpenRooms {
             fixture: self,
             streams,
@@ -236,17 +218,15 @@ fn open_db(seed: u64) -> Db {
                 TableSchemaBuilder::new(MESSAGES)
                     .column("room", ColumnType::Uuid)
                     .column("sent_at", ColumnType::Timestamp)
-                    .column("body", ColumnType::Text),
+                    .column("body", ColumnType::Text)
+                    .composite_index(["room", "sent_at"]),
             )
             .build(),
     )
     .expect("live-rooms schema compiles");
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes((0x7600_u128 + seed as u128).to_be_bytes()),
                 author: WRITER,

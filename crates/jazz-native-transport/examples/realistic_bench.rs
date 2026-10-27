@@ -358,9 +358,6 @@ async fn connect_client(
         server_url: server_url.unwrap_or("").to_string(),
         data_dir,
         storage: jazz::tools::ClientStorage::Persistent,
-        storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        )),
         account_id: None,
         jwt_token: None,
         backend_secret: None,

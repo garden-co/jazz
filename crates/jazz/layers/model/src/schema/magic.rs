@@ -3,7 +3,7 @@
 
 pub use crate::ids::AuthorField;
 use crate::ids::AuthorSubject;
-use groove::records::ValueType;
+use jazz_types::records::ValueType;
 
 /// The row event whose provenance a column exposes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

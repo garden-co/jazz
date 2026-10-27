@@ -8,15 +8,14 @@ use std::collections::BTreeMap;
 
 use std::cell::Cell;
 
+use jazz::db::CurrentRow;
 use jazz::db::{
     Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream,
     UpdateOptions, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -238,8 +237,10 @@ impl Fixture {
             "cursors",
             row_id(3, 1),
             BTreeMap::from([
-                ("x".into(), Value::I32(step)),
-                ("y".into(), Value::I32(step * 2)),
+                // Off the seeded positions, so every move changes the row:
+                // a write that leaves the cells as they were shows no delta.
+                ("x".into(), Value::I32(1_000 + step)),
+                ("y".into(), Value::I32(1_000 + step * 2)),
             ]),
             UpdateOptions::default(),
         ))
@@ -272,7 +273,7 @@ impl Fixture {
     pub fn ordered_z_indices(&self) -> Vec<i32> {
         self.read(&self.ordered_shapes)
             .into_iter()
-            .map(|row| match row.cell(&self.shapes, "z_index") {
+            .map(|row| match row.cell("z_index") {
                 Some(Value::I32(value)) => value,
                 value => panic!("unexpected z_index: {value:?}"),
             })
@@ -316,7 +317,8 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("layers")
                     .fk_column("canvas", "canvases")
                     .column("z_index", ColumnType::Integer)
-                    .index_only(["canvas", "z_index"]),
+                    .index_only(["canvas", "z_index"])
+                    .composite_index(["canvas", "z_index"]),
             )
             .table(
                 TableSchemaBuilder::new("shapes")
@@ -329,7 +331,9 @@ fn schema() -> JazzSchema {
                     // Mirrors the app's `indexOnly([canvasId, zIndex])` and
                     // `indexOnly([layerId, zIndex])` paths. Do not collapse
                     // this to an imagined triple-key workload.
-                    .index_only(["canvas", "layer", "z_index"]),
+                    .index_only(["canvas", "layer", "z_index"])
+                    .composite_index(["canvas", "z_index"])
+                    .composite_index(["layer", "z_index"]),
             )
             .table(
                 TableSchemaBuilder::new("cursors")
@@ -337,20 +341,23 @@ fn schema() -> JazzSchema {
                     .column("editor", ColumnType::Integer)
                     .column("x", ColumnType::Integer)
                     .column("y", ColumnType::Integer)
-                    .index_only(["canvas", "editor"]),
+                    .index_only(["canvas", "editor"])
+                    .composite_index(["canvas", "editor"]),
             )
             .table(
                 TableSchemaBuilder::new("assets")
                     .fk_column("canvas", "canvases")
                     .column("name", ColumnType::Text)
                     .column("byte_length", ColumnType::Integer)
-                    .index_only(["canvas", "name"]),
+                    .index_only(["canvas", "name"])
+                    .composite_index(["canvas", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("checkpoints")
                     .fk_column("canvas", "canvases")
                     .column("label", ColumnType::Text)
-                    .index_only(["canvas", "label"]),
+                    .index_only(["canvas", "label"])
+                    .composite_index(["canvas", "label"]),
             )
             .build(),
     )
@@ -365,11 +372,8 @@ fn open_db() -> (BenchDb, TableSchema) {
         .find(|table| table.name == "shapes")
         .expect("shapes table")
         .clone();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
             author: AuthorSubject::SYSTEM,
