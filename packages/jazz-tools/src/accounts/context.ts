@@ -163,8 +163,14 @@ export async function createAccountDbWithRuntimeSource(
     };
     const schedule = (token: string) => {
       const expires = parseJwtPayload(token)?.exp;
-      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
+      if (typeof expires !== "number" || !Number.isFinite(expires)) return;
+      // Already expired, as when the app slept past its renewal timer (mobile
+      // platforms suspend timers in the background): renew now rather than
+      // leave nothing to renew it (#4248).
+      if (expires * 1000 <= Date.now()) {
+        renew();
         return;
+      }
       // A token that lives to its scheduled refresh ends any renewal streak.
       scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)), () =>
         renewals.reset(),

@@ -127,6 +127,25 @@ describe("account context authority", () => {
     }
   });
 
+  it("renews again when a renewal hands back an already-expired token", async () => {
+    const config = await localAccountConfig("local-first-expired-renewal-token");
+    const db = await createDb(config);
+    try {
+      const payload = Buffer.from(
+        JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 60 }),
+      ).toString("base64url");
+      const refresh = vi
+        .spyOn(db, "refreshAccountAuth")
+        .mockResolvedValueOnce(`x.${payload}.x` as never);
+      failAuth(db, "expired");
+      // The expired token schedules nothing: it is renewed again at once.
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2), { timeout: 5_000 });
+      await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
+    } finally {
+      await db.shutdown();
+    }
+  });
+
   it("spaces out account renewals a server keeps rejecting as expired", async () => {
     const config = await localAccountConfig("local-first-renewal-backoff");
     const db = await createDb(config);

@@ -425,6 +425,34 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   );
 });
 
+it("decodes the native connection status with a refused credential's reason", () => {
+  const relay = loadRelay(null);
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 1, 0))).toEqual({
+    type: "nativeConnectionStatus",
+    configured: true,
+    explicitlyOffline: false,
+    connected: true,
+    authRejected: null,
+  });
+  const reason = Array.from("token expired", (char) => char.charCodeAt(0));
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 0, 1, reason.length, ...reason)),
+  ).toEqual({
+    type: "nativeConnectionStatus",
+    configured: true,
+    explicitlyOffline: false,
+    connected: false,
+    authRejected: "token expired",
+  });
+  // A status from before the reason existed, or one cut short, fails closed.
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 1))).toThrow(
+    "unknown or malformed command response",
+  );
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 0, 0, 7))).toThrow(
+    "unknown or malformed command response",
+  );
+});
+
 it("decodes a core operation error with its stable code beside the unchanged reason", () => {
   const relay = loadRelay(null);
   const code = Array.from("not_observed", (char) => char.charCodeAt(0));

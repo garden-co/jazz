@@ -200,6 +200,8 @@ export type NativeForegroundResponse =
       configured: boolean;
       explicitlyOffline: boolean;
       connected: boolean;
+      /** The upstream refused the scope's credential, with its reason. */
+      authRejected: string | null;
     }
   | { type: "probe"; abiVersion: number }
   | { type: "ticked" }
@@ -704,14 +706,18 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
   }
   if (
     tag === 16 &&
-    bytes.length === 4 &&
-    bytes.subarray(1).every((value) => value === 0 || value === 1)
+    bytes.length >= 5 &&
+    bytes.subarray(1, 5).every((value) => value === 0 || value === 1) &&
+    (bytes[4] === 1 || bytes.length === 5)
   ) {
+    // Three flags, then postcard `Option<String>`: 0, or 1 and the string.
     return {
       type: "nativeConnectionStatus",
       configured: bytes[1] === 1,
       explicitlyOffline: bytes[2] === 1,
       connected: bytes[3] === 1,
+      authRejected:
+        bytes[4] === 1 ? decodeForegroundString(bytes.subarray(5), "auth rejection") : null,
     };
   }
   if (tag === 14 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
