@@ -53,8 +53,12 @@ use jazz_types::time::{GlobalTime, TxTime};
 use serde::{Deserialize, Serialize};
 
 use super::*;
+
+#[path = "large_link.rs"]
+mod large_link;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 pub use crate::wire::TransportError;
+pub use large_link::{CellDelta, WireDelta};
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
@@ -340,6 +344,10 @@ pub enum Cell {
     /// descriptor and is interned again where it lands (never as chunk
     /// bytes).
     Large(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// A chunked large value as the edits extending one that crossed the
+    /// link before: only on the wire, where the link makes it
+    /// [`Cell::Large`] again (SPEC 19.8).
+    Delta(WireDelta),
 }
 
 impl From<Sql> for Cell {
@@ -363,7 +371,7 @@ impl From<&Cell> for Sql {
             Cell::Text(v) => Sql::Text(v.clone()),
             Cell::Blob(v) => Sql::Blob(v.clone()),
             // Not a stored cell until interned ([`Inner::stored_cells`]).
-            Cell::Large(_) => Sql::Null,
+            Cell::Large(_) | Cell::Delta(_) => Sql::Null,
         }
     }
 }
@@ -706,6 +714,9 @@ pub enum SyncMessage {
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
         expect: Vec<Expect>,
+        /// The ops' chunked cells that travel as edits extending a value
+        /// that crossed the link before; only on the wire (SPEC 19.8).
+        deltas: Vec<CellDelta>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -1297,7 +1308,7 @@ struct FirstLoadWait {
 impl Session {
     fn new(transport: Box<dyn Transport>, identity: AuthorSubject) -> Self {
         Self {
-            transport,
+            transport: large_link::LargeLink::wrap(transport),
             identity,
             claims: None,
             subs: BTreeMap::new(),
@@ -3346,7 +3357,7 @@ impl Db {
         self.become_replica();
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
-        client.transport = Some(transport);
+        client.transport = Some(large_link::LargeLink::wrap(transport));
         let mut link = client.hint.get();
         link.detached = false;
         if !link.reported {
@@ -3663,6 +3674,7 @@ impl Db {
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
                     expect,
+                    deltas: Vec::new(),
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
@@ -6374,6 +6386,7 @@ impl Db {
                 author,
                 session,
                 expect,
+                deltas: _,
             } => {
                 let identity = self.inner.borrow().sessions[index].identity;
                 if !self.inner.borrow().claim_node(node, &identity)? {

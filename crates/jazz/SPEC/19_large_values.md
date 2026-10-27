@@ -14,7 +14,7 @@ trivially, mergeable ones through their merge strategy), so most edits extend
 the newest version. One edit then costs its few encoded bytes in the epoch
 plus a few-byte cell in the version. A write that does not extend the newest
 version starts a new epoch. Every store keeps its own epochs; sync carries
-values as edits against a version the receiver holds, or as a tree.
+values as edits extending a value the receiver was sent, or as a tree.
 
 Everything about a large value is authorized through the row that holds it:
 its edits travel inside the row's commits, and its nodes are served only to
@@ -35,8 +35,9 @@ Invariant digest:
   edits to an epoch or publishes a new root, and the authority validates both.
 - `INV-CONTENT-6`: tree nodes are content-addressed and policy blind; equal
   content in one store is stored once.
-- `INV-CONTENT-7`: sync carries large values as edits against a base version
-  the receiver holds, or as a tree reference; epochs never cross the wire.
+- `INV-CONTENT-7`: sync carries large values as edits extending a value that
+  crossed the same link before, or as a tree reference; epochs never cross the
+  wire.
 - `INV-CONTENT-8`: collection never removes an epoch or node that a retained
   version, staging lease or receipt reaches.
 - `INV-CONTENT-9`: a chunk store holds only leaf bytes; metadata commits with
@@ -127,7 +128,7 @@ tests on `edits`.
 
 `INV-CONTENT-2`: an epoch's first `count` edits are never rewritten while any
 cell references a prefix that includes them. Appending is the only way an
-epoch grows, and truncation (§19.7) removes only edits no cell references.
+epoch grows; edits are never removed from an epoch a cell names.
 
 ### Edit encoding
 
@@ -260,48 +261,59 @@ encoding, that turn a's value into b's:
 | either side inline                                    | one replace of the whole value                                                                                                                                                   |
 
 The result need not be minimal when content moves. Reading it needs only the
-leaves in changed regions. Sync (§19.8), merge strategies, and the public
-delta API (§19.11) are built on it.
+leaves in changed regions. Merge strategies and the public
+delta API (§19.12) are built on it.
 
 `INV-CONTENT-10`: applying `delta(a, b)` to a's value yields b's value, and
 its cost is bounded by the changed regions plus the tree depth.
 
 ## 19.7 Local replicas
 
-A client or relay keeps its own epochs. Its optimistic writes append to them
-like any write. When the authority's outcome for a pending write arrives:
-
-- **accepted unchanged**: nothing changes;
-- **rejected, or accepted as a different value**: the replica truncates the
-  epoch back to its last accepted prefix (setting `count` and cutting
-  `edits`) and applies the authority's versions on top as received.
-
-Cascading rejection (a write built on a rejected write is rejected) ensures no
-retained cell references a truncated edit. A replica never rebases.
+A client or relay keeps its own epochs, and its optimistic writes intern like
+any write. When the authority rejects a pending write, or accepts it as a
+different value, the replica restores the settled version and replays its
+other pending writes over it. A replayed edit whose base is no longer its
+epoch's newest edit starts a new epoch (§19.4 case 3), at the cost of one
+epoch copy. The abandoned edits stay in their epoch until no cell names it.
+Epochs are never truncated, so no cell can name an edit that disappeared.
 
 ## 19.8 Sync
 
-A large-capable cell in a row-version message has one of three forms:
+A large-capable cell crosses the wire in one of three forms:
 
-| Form    | Contents                                                        | Used when                                                                        |
-| ------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| inline  | the TEXT or BLOB                                                | the value is inline                                                              |
-| `Delta` | edits relative to the same column at the message's base version | the receiver holds the base version and the edits insert at most 64 KiB in total |
-| `Tree`  | root hash, byte length, UTF-16 length, then edits               | otherwise                                                                        |
+| Form    | Contents                                                       |
+| ------- | -------------------------------------------------------------- |
+| inline  | the TEXT or BLOB                                               |
+| `Tree`  | the descriptor: root, its lengths and kind, then the edits     |
+| `Delta` | a root hash, how many edits it extends, then the further edits |
 
-**Client to authority.** A write's base is its existing base annotation
-(`Seq(s)` or `Pending(on)`), so `Delta` adds no field. A `Tree` whose nodes
-the authority may lack is preceded by the nodes, pushed under a receipt.
+**Link tables.** Each direction of a connection keeps a small table, from
+root hash to the edits of the last value on that root that crossed in that
+direction. Sender and receiver update their copies identically, in message
+order, for every chunked value that crosses: the value's entry becomes its
+encoded edits, moved to the front, and entries past `LINK_TABLE_BYTES` (16
+KiB of edits, counting a fixed overhead per entry) are dropped from the back.
+A value whose edits alone exceed the budget drops its root's entry. A value
+whose encoded edits extend its root's entry travels as `Delta`: the extending
+bytes, which are a byte range of the sender's epoch. Anything else travels as
+`Tree`. The receiver rebuilds the descriptor from its entry and the extending
+bytes, and interns it (§19.3), which appends to its own epoch. A `Delta` that
+names no entry, or an entry of a different length, is a protocol error that
+ends the connection.
 
-**Authority to subscribers.** The server records the last version of each row
-it sent a session, and a resuming session reports the versions it holds. A
-new version is sent as `Delta` from that version. For a subscriber at the
-newest version this is a byte range of one epoch, computed once per version
-and shared by every subscriber. A session holding no version gets `Tree`.
+So for a reader that follows a document, each new version costs the bytes of
+its edits; a new connection starts with empty tables and its first value per
+root as `Tree`. Tables live only in memory and hold no row, version or
+permission state: a value still crosses only inside the row version or commit
+that carries it (§19.9).
 
-**Receiving.** The receiver resolves the base to its own cell `(E′, n′)`,
-then applies §19.4 locally: append when `n′` is its newest, otherwise a new
-epoch. A `Tree` whose nodes it lacks is demand: the nodes are pulled.
+**Client to authority.** A commit carries its chunked values as `Tree` or
+`Delta` beside its ops. A `Tree` whose nodes the authority may lack is
+preceded by the nodes, pushed under a receipt. The authority admits the
+rebuilt descriptor as any other (§19.4).
+
+**Receiving.** A `Tree` whose nodes the receiver lacks is demand: the nodes
+are pulled.
 
 **Node pulls.** A pull names the row version it reads through (table, row,
 branch, version, column) and the node hash. The authority answers only when
@@ -309,14 +321,13 @@ the requester may read that version and the node is reachable from that
 version's root; otherwise it answers as for an absent node. A relay answers
 from its own store when it holds the node and forwards upstream otherwise.
 
-**History.** `__h` versions travel as consecutive `Delta`s, each against the
-one before.
-
-**Relays.** A worker is its tabs' authority for bases, deltas and pulls.
+**Relays.** A worker is its tabs' authority for pulls; each of its links has
+its own tables.
 
 `INV-CONTENT-7`: epoch ids, cells and materializations never cross the wire;
-a value crosses as inline bytes, as edits against a base the receiver holds,
-or as a tree reference whose nodes are pulled through a readable version.
+a value crosses as inline bytes, as a tree reference whose nodes are pulled
+through a readable version, or as edits extending a value that crossed the
+same link direction before.
 
 ## 19.9 Authorization
 

@@ -8,12 +8,12 @@ never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
 are stored, a rejection's reason name changed how fates are recorded, and
-large values moved to epochs with integer cells, BLOB bytes and key columns).
+large values moved to epochs with integer cells, BLOB bytes and key columns, and pending commits gained their large-value deltas).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `20d2507d882e659445552d61b98bde71c98e2141906bdef2416cf3ebfcc1904e`.
+  the SQLite file `daf48126fe3de2d792bc92547a13fedcb63a7457dd3d54eb011e87c397953ef9`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `4e500c1ffeeb3e0bcdb41f281f9f644d118b4dff1a22635b2266ac94274050b5`.
+  `1b89284a7404529cae055ee4745d2bcfc3250ecda948b2e757478f628fb79a57`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,

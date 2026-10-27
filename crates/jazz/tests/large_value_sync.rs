@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
-    SubscriptionStream, SyncMessage, Transport, TransportError, block_on,
+    SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -340,6 +340,115 @@ fn client_edits_push_their_new_nodes_before_the_commit() {
         log[push..].contains(&"commit"),
         "the push precedes a commit: {log:?}"
     );
+    for db in [&server, &alice, &bob] {
+        assert_eq!(
+            local_cell(db, "docs", 1, "body").unwrap(),
+            Some(Value::String(expected.clone()))
+        );
+    }
+}
+
+/// A duplex that keeps the encoded size of each commit and `Rows` it
+/// carries, and whether its chunked values crossed as deltas.
+struct Spy {
+    out: Wire,
+    inbound: Wire,
+    sizes: Rc<RefCell<Vec<(&'static str, usize, bool)>>>,
+}
+
+impl Transport for Spy {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        let entry = match &message {
+            SyncMessage::Commit { deltas, .. } => Some(("commit", !deltas.is_empty())),
+            SyncMessage::Rows { images } => {
+                let mut cells = images.iter().flat_map(|image| image.cells.iter());
+                let large = cells
+                    .clone()
+                    .any(|(_, cell)| matches!(cell, SyncCell::Large(_) | SyncCell::Delta(_)));
+                let delta = cells.any(|(_, cell)| matches!(cell, SyncCell::Delta(_)));
+                large.then_some(("rows", delta))
+            }
+            _ => None,
+        };
+        if let Some((kind, delta)) = entry {
+            let size = encode_frames(message.clone())
+                .unwrap()
+                .iter()
+                .map(Vec::len)
+                .sum();
+            self.sizes.borrow_mut().push((kind, size, delta));
+        }
+        self.out.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+type Sizes = Rc<RefCell<Vec<(&'static str, usize, bool)>>>;
+
+fn connect_spied(server: &Db, client: &Db, identity: AuthorSubject) -> (Sizes, Sizes) {
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let (sent, received) = (Sizes::default(), Sizes::default());
+    let _ = block_on(client.connect_upstream(Box::new(Spy {
+        out: up.clone(),
+        inbound: down.clone(),
+        sizes: sent.clone(),
+    })));
+    server.accept_subscriber(
+        Box::new(Spy {
+            out: down,
+            inbound: up,
+            sizes: received.clone(),
+        }),
+        identity,
+    );
+    (sent, received)
+}
+
+#[test]
+fn edits_cross_the_wire_as_their_own_bytes() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let bob = open(2, user(2));
+    let (alice_up, _) = connect_spied(&server, &alice, user(1));
+    let (_, bob_down) = connect_spied(&server, &bob, user(2));
+    let _bob_stream = subscribe(&bob, Query::from("docs"));
+    let _alice_stream = subscribe(&alice, Query::from("docs"));
+    let mut expected = text(4, LARGE);
+    insert(
+        &alice,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(expected.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice, &bob]);
+    // Each append extends the epoch the last one crossed in: it travels as
+    // its few bytes, not as the value's whole edit list.
+    for n in 0..200 {
+        let suffix = format!("<{n}>");
+        block_on(alice.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+        expected.push_str(&suffix);
+        pump(&server, &[&alice, &bob]);
+    }
+    for (wire, kind) in [(&alice_up, "commit"), (&bob_down, "rows")] {
+        let wire = wire.borrow();
+        let later: Vec<_> = wire.iter().filter(|(k, ..)| *k == kind).skip(2).collect();
+        assert!(later.len() >= 150, "{kind}: {wire:?}");
+        let deltas = later.iter().filter(|(_, _, delta)| *delta).count();
+        assert!(
+            deltas * 10 >= later.len() * 9,
+            "{kind}: mostly deltas: {wire:?}"
+        );
+        let small = later.iter().filter(|(_, size, _)| *size < 512).count();
+        assert!(small * 10 >= later.len() * 9, "{kind}: small: {wire:?}");
+    }
     for db in [&server, &alice, &bob] {
         assert_eq!(
             local_cell(db, "docs", 1, "body").unwrap(),
