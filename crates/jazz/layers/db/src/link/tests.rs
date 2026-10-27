@@ -429,6 +429,30 @@ fn disabled_and_revoked_wait_like_other_refusals() {
     }
 }
 
+/// Waits for the server stay pending while the link can still recover on its
+/// own or with a refreshed token, and fail once it cannot (#3923).
+#[test]
+fn only_unrecoverable_phases_are_terminal_for_waits() {
+    let mut alice = Host::configured();
+    assert!(!alice.link.phase().is_terminal());
+    alice.admit();
+    alice.network_down();
+    assert!(!alice.link.phase().is_terminal(), "a retrying outage");
+    alice.fire();
+    alice.refuse(AuthFailureReason::Expired);
+    assert!(!alice.link.phase().is_terminal(), "a renewable refusal");
+    for reason in [AuthFailureReason::Disabled, AuthFailureReason::Revoked] {
+        let mut bob = Host::configured();
+        bob.refuse(reason);
+        assert!(bob.link.phase().is_terminal());
+    }
+    alice.send(LinkInput::SetOffline(false));
+    alice.fail(LinkFailure::Fatal(
+        "protocol version 9 is not supported".into(),
+    ));
+    assert!(alice.link.phase().is_terminal());
+}
+
 /// A fatal failure stops the link: no retries, and a new credential does not
 /// restart it. Only an explicit reconnect does.
 #[test]

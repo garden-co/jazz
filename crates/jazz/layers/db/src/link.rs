@@ -110,6 +110,14 @@ impl AuthFailureReason {
         }
     }
 
+    /// Whether a new credential can fix it. A renewable refusal is a link
+    /// still retrying, so waits for the server stay pending across the
+    /// refresh; `Disabled` and `Revoked` are terminal for them. Matches
+    /// `isRenewableAuthFailure` in the TypeScript client.
+    pub fn is_renewable(self) -> bool {
+        matches!(self, Self::Expired | Self::Missing | Self::Invalid)
+    }
+
     /// The spelling the TypeScript `AuthFailureReason` uses.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -208,9 +216,21 @@ pub enum LinkPhase {
     /// The server refused the credential; nothing happens until a new one
     /// arrives or the application reconnects explicitly.
     AwaitingCredential(AuthFailureReason),
-    /// A fatal failure; nothing happens until an explicit reconnect. The one
-    /// phase in which waits for the server should fail rather than wait.
+    /// A fatal failure; nothing happens until an explicit reconnect.
     Stopped,
+}
+
+impl LinkPhase {
+    /// Whether the link has stopped trying on its own: waits for the server
+    /// fail instead of staying pending (#3923). An outage it is retrying,
+    /// and a refusal a new credential can fix, are not terminal.
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Stopped => true,
+            Self::AwaitingCredential(reason) => !reason.is_renewable(),
+            Self::NoServer | Self::Offline | Self::Connecting | Self::Live | Self::Backoff => false,
+        }
+    }
 }
 
 /// The link as observers see it.
@@ -223,8 +243,8 @@ pub struct LinkStatus {
     pub consecutive_failures: u32,
     /// The server has been unreachable for the reporting window. This is a
     /// report, not a verdict: pending waits for the server stay pending
-    /// across an outage and its reconnects (#3923); only a link that stops
-    /// for good ([`LinkPhase::Stopped`]) fails them.
+    /// across an outage and its reconnects (#3923); only a terminal phase
+    /// fails them (see [`LinkPhase::is_terminal`]).
     pub outage_published: bool,
 }
 
