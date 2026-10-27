@@ -279,3 +279,21 @@ fn failed_cleanup_is_retried_after_the_storage_lock_is_released() {
     assert_eq!(alice.large_value_nodes_for_test().unwrap(), durable);
     assert_eq!(bodies(&alice, "files"), ["c".repeat(LEAF_MAX_BYTES + 1)]);
 }
+
+/// Alice drops a staged upload, ticks while a callback transaction is open,
+/// and rolls that callback back. The next tick must still reclaim the upload:
+/// drop --> transactional cleanup --> rollback --> tick --> no staged nodes.
+#[test]
+fn rolled_back_maintenance_does_not_forget_dropped_uploads() {
+    let alice = open(1);
+    let upload = stage(&alice, b'a');
+    drop(upload);
+    let result = block_on(alice.transaction(async |_tx| {
+        alice.tick().await?;
+        Err::<(), _>(Error::new(ErrorCode::Query, "rollback callback"))
+    }));
+    assert!(result.is_err());
+    block_on(alice.tick()).unwrap();
+    // Staged bytes have no row representation; inspect the existing inventory.
+    assert_eq!(alice.large_value_nodes_for_test().unwrap(), (0, 0));
+}
