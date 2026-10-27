@@ -72,6 +72,10 @@ pub const LOCAL_BASE: u64 = 1 << 52;
 /// collide with its upstream relay's (from `LOCAL_BASE` up, which a relay
 /// ships to it for versions it has not settled). A relay would need 2^51
 /// local commits to reach it. Still below 2^53.
+///
+/// Two tiers only: a durable replica behind a durable relay numbers from
+/// `LOCAL_BASE` like the relay, so relaying to one is not supported (no
+/// shipped topology has it).
 pub const NON_DURABLE_BASE: u64 = LOCAL_BASE + (1 << 51);
 
 /// A message transport between a client and its server.
@@ -5453,24 +5457,35 @@ impl Db {
                     };
                     let mut bases = Vec::new();
                     for image in images.iter().filter(|image| own.contains(&image.seq)) {
-                        let row = RowUuid::from_bytes(image.id);
-                        if !shipped.insert((image.table.clone(), image.id, image.key.clone()))
-                            || !readable(&inner, &image.table, row, &image.key, policy)?
-                        {
+                        if !shipped.insert((image.table.clone(), image.id, image.key.clone())) {
                             continue;
                         }
                         let id = image.id.to_vec();
-                        bases.extend(
-                            inner
-                                .images_where(
-                                    &image.table,
-                                    true,
-                                    "id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC",
-                                    &[&id, &image.key, &(image.seq as i64)],
-                                )?
-                                .into_iter()
-                                .find(|base| !own.contains(&base.seq)),
-                        );
+                        let base = inner
+                            .images_where(
+                                &image.table,
+                                true,
+                                "id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC",
+                                &[&id, &image.key, &(image.seq as i64)],
+                            )?
+                            .into_iter()
+                            .find(|base| !own.contains(&base.seq));
+                        // Read access is the base version's own: the
+                        // session's pending write may be what lets it read
+                        // the row now.
+                        if let Some(base) = base {
+                            let row = RowUuid::from_bytes(base.id);
+                            if readable_version(
+                                &inner,
+                                &base.table,
+                                row,
+                                &base.key,
+                                base.seq,
+                                policy,
+                            )? {
+                                bases.push(base);
+                            }
+                        }
                     }
                     images.retain(|image| !own.contains(&image.seq));
                     for base in bases {
@@ -6525,6 +6540,23 @@ fn commit_who(
 }
 
 /// Whether `identity` may read a row of stored table `table`.
+/// [`readable`] for the version of the row at `seq`.
+fn readable_version(
+    inner: &Inner,
+    table: &str,
+    row: RowUuid,
+    key: &[u8],
+    seq: u64,
+    identity: Option<AuthorSubject>,
+) -> Result<bool, Error> {
+    let Some(author) = identity else {
+        return Ok(true);
+    };
+    let schema = inner.owner.clone();
+    let table = owned_table(&schema, table)?;
+    inner.check_version(table, row, key, seq, author, Operation::Select)
+}
+
 fn readable(
     inner: &Inner,
     table: &str,
@@ -6740,6 +6772,10 @@ impl Db {
     /// take seqs from [`NON_DURABLE_BASE`] up.
     pub fn set_non_durable_client(&self) {
         let mut inner = self.inner.borrow_mut();
+        debug_assert!(
+            inner.sessions.is_empty(),
+            "a non-durable client serves no sessions"
+        );
         inner.non_durable = true;
         if inner.client.is_some() {
             inner.raise_to_local_base();
@@ -6754,12 +6790,13 @@ impl Db {
         let Some(client) = &inner.client else {
             return "not a client".to_owned();
         };
+        let base = inner.local_base();
         format!(
             "pending {:?} sent {} unsent {} shadow {:?} fates {:?} connected {}",
             client
                 .pending
                 .iter()
-                .map(|p| p.tx - LOCAL_BASE)
+                .map(|p| p.tx - base)
                 .collect::<Vec<_>>(),
             client.sent.len(),
             client.unsent.len(),
@@ -6771,7 +6808,7 @@ impl Db {
             client
                 .fates
                 .iter()
-                .map(|(tx, r)| (tx - LOCAL_BASE, r.is_ok()))
+                .map(|(tx, r)| (tx.saturating_sub(base), r.is_ok()))
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )

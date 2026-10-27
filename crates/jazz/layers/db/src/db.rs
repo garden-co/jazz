@@ -2752,6 +2752,56 @@ impl Inner {
         Ok(value != 0)
     }
 
+    /// [`Inner::holds`] for `row` as of `cut`: the row under check and
+    /// the policy's other rows are each read as of `cut`.
+    fn holds_as_of(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Cut,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<bool, Error> {
+        let binding = BTreeMap::new();
+        let claims = Session::default();
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let condition = policy(&mut ctx)?;
+        let source = ctx.source(table)?;
+        let preps = std::mem::take(&mut ctx.preps);
+        let mut params = ctx.params;
+        params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+        params.push(Sql::Blob(key.to_vec()));
+        let sql = format!(
+            "SELECT COALESCE({condition}, 0) FROM {source} AS a WHERE a.id = ?{} AND a._b = ?{}",
+            params.len() - 1,
+            params.len()
+        );
+        let value: Option<i64> = self.with_preps(&preps, |_| {
+            self.conn
+                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .optional()
+                .map_err(storage)
+        })?;
+        Ok(value.is_some_and(|value| value != 0))
+    }
+
+    /// Whether `author` may `operation` the version of `row` at `seq`, with
+    /// the policy's other rows as they stood then too.
+    pub(crate) fn check_version(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
+        let session = self.session(author);
+        self.holds_as_of(table, row, key, Cut::at(seq), |ctx| {
+            ctx.operation_policy(table, operation, "a", &session)
+        })
+    }
+
     /// The current version of each of `ids`' rows in `table`: (id, branch
     /// key, seq, deleted, readable by `author`), in one query per chunk
     /// instead of one policy check per row.

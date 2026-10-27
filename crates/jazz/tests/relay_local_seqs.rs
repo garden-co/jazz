@@ -7,21 +7,26 @@
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 
 use duplex_transport::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, Image, LOCAL_BASE, NON_DURABLE_BASE, ReadOpts,
-    RemoteLinkHint, SyncMessage, Upstream, block_on,
+    RemoteLinkHint, SyncCell, SyncMessage, Transport, TransportError, Upstream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TableSchemaBuilder,
+    Value as PublicValue,
+};
 use jazz::tx::DurabilityTier;
 
-use crate::common::{allow_all_policies, compile_schema};
+use crate::common::{allow_all_policies, compile_schema, read_and_allow_all_writes};
 
 const WORKER: u8 = 0xa0;
 
@@ -37,9 +42,30 @@ fn schema() -> JazzSchema {
     )
 }
 
+/// Every note is readable but one whose body is "secret".
+fn secret_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(PolicyExpr::Cmp {
+                        column: "body".to_owned(),
+                        op: CmpOp::Ne,
+                        value: PolicyValue::Literal(PublicValue::Text("secret".into())),
+                    })),
+            )
+            .build(),
+    )
+}
+
 fn open(node: u8, author: AuthorSubject) -> Db {
+    open_in(schema(), node, author)
+}
+
+fn open_in(schema: JazzSchema, node: u8, author: AuthorSubject) -> Db {
     block_on(Db::open(DbConfig::new(
-        schema(),
+        schema,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -56,31 +82,68 @@ fn body(text: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([("body".to_owned(), Value::String(text.to_owned()))])
 }
 
+/// Records what one side sends.
+struct Tap {
+    inner: Box<dyn Transport>,
+    sent: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for Tap {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        self.sent.borrow_mut().push_back(message.clone());
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
 /// The authority, one worker, and its tabs (each connected as the worker's
 /// identity, as a browser's tabs are).
 struct Net {
     core: Db,
     worker: Db,
     worker_up: Option<Upstream>,
+    /// Whom the authority serves the worker as.
+    worker_as: AuthorSubject,
     tabs: Vec<Db>,
+    /// What the worker sent each tab.
+    to_tabs: Vec<Rc<RefCell<VecDeque<SyncMessage>>>>,
 }
 
 impl Net {
     fn new(tabs: usize) -> Self {
+        Self::with_schema(tabs, schema, author(WORKER))
+    }
+
+    /// Tabs of `tab_author` (a relay applies a session's read policy
+    /// unless the session is its own identity).
+    fn with_schema(tabs: usize, schema: fn() -> JazzSchema, tab_author: AuthorSubject) -> Self {
         let mut net = Net {
-            core: open(0xc0, AuthorSubject::SYSTEM),
-            worker: open(WORKER, author(WORKER)),
+            core: open_in(schema(), 0xc0, AuthorSubject::SYSTEM),
+            worker: open_in(schema(), WORKER, author(WORKER)),
             worker_up: None,
+            worker_as: author(WORKER),
             tabs: Vec::new(),
+            to_tabs: Vec::new(),
         };
         net.worker_online();
         for i in 0..tabs {
-            let tab = open(WORKER + 1 + i as u8, author(WORKER));
+            let tab = open_in(schema(), WORKER + 1 + i as u8, tab_author.clone());
             tab.set_non_durable_client();
             tab.set_remote_link_hint(RemoteLinkHint::Live);
             let (client_side, server_side) = duplex();
             block_on(tab.connect_upstream(client_side));
-            net.worker.accept_subscriber(server_side, author(WORKER));
+            let sent = Rc::default();
+            net.worker.accept_subscriber(
+                Box::new(Tap {
+                    inner: server_side,
+                    sent: Rc::clone(&sent),
+                }),
+                tab_author.clone(),
+            );
+            net.to_tabs.push(sent);
             net.tabs.push(tab);
         }
         net
@@ -89,7 +152,8 @@ impl Net {
     fn worker_online(&mut self) {
         let (client_side, server_side) = duplex();
         self.worker_up = Some(block_on(self.worker.connect_upstream(client_side)));
-        self.core.accept_subscriber(server_side, author(WORKER));
+        self.core
+            .accept_subscriber(server_side, self.worker_as.clone());
         self.worker.set_remote_link_hint(RemoteLinkHint::Live);
     }
 
@@ -168,12 +232,45 @@ impl Net {
     }
 }
 
-/// A tab with an unsettled write on a row receives another tab's unsettled
+/// A tab with unsettled writes on a row receives another tab's unsettled
 /// version of it from the worker, then writes the row again. Numbered from
-/// one base, the worker's version and the tab's write had the same seq, and
-/// the tab's next write failed to keep its version as history.
+/// one base, the other tab's version (at the worker's next seq) took the
+/// seq of the tab's next write, which then failed to keep its version as
+/// history.
 #[test]
 fn a_tab_writes_again_over_another_tabs_unsettled_version_from_its_worker() {
+    let mut net = Net::new(2);
+    let row = net.insert(net.tab(0), "seed");
+    let _watch = [net.watch(net.tab(0)), net.watch(net.tab(1))];
+    net.pump();
+    net.worker_offline();
+
+    let mut txs = Vec::new();
+    for (tab, text) in [(1, "b1"), (0, "a1"), (0, "a2"), (1, "b2"), (0, "a3")] {
+        txs.push(net.update(net.tab(tab), row, text));
+        net.pump();
+    }
+    for tx in &txs {
+        assert!(
+            *tx > NON_DURABLE_BASE,
+            "a tab numbers its writes in its own range"
+        );
+    }
+
+    net.worker_online();
+    net.settle(net.tab(0), txs[4]);
+    let expected = net.bodies(&net.core);
+    assert_eq!(expected, ["a3"]);
+    for db in [&net.worker, net.tab(0), net.tab(1)] {
+        assert_eq!(net.bodies(db), expected, "replicas converge");
+    }
+}
+
+/// The worker's version of a tab's own unsettled write, numbered from one
+/// base, took the seq of the tab's next write. The worker ships the tab no
+/// version of its own uploading writes, so the tab writes the row again.
+#[test]
+fn a_tab_writes_again_over_its_own_unsettled_write_at_its_worker() {
     let mut net = Net::new(2);
     net.worker_offline();
     // The tab's first commit is also the worker's first.
@@ -183,18 +280,11 @@ fn a_tab_writes_again_over_another_tabs_unsettled_version_from_its_worker() {
 
     // The worker orders the other tab's write second, and the tab's own
     // second write third.
-    let other = net.update(net.tab(1), row, "b1");
-    let own = net.update(net.tab(0), row, "a1");
+    net.update(net.tab(1), row, "b1");
+    net.update(net.tab(0), row, "a1");
     net.pump();
     let last = net.update(net.tab(0), row, "a2");
     net.pump();
-    for tx in [other, own, last] {
-        assert!(
-            tx > NON_DURABLE_BASE,
-            "a tab numbers its writes in its own range"
-        );
-    }
-    assert!(NON_DURABLE_BASE > LOCAL_BASE);
 
     net.worker_online();
     net.settle(net.tab(0), last);
@@ -365,4 +455,56 @@ fn a_tabs_row_stays_while_its_worker_settles_the_insert_under_its_update() {
         net.pump();
         assert_eq!(net.bodies(net.tab(0)), ["upd"], "seed {seed}");
     }
+}
+
+/// The version a relay ships under a session's own pending write passes the
+/// session's read policy as that version. Here another writer's version
+/// the session may not read lands at the relay under the session's update
+/// while it uploads: the relay ships the session no version of the row
+/// until the update settles. (A session of the relay's own identity reads
+/// everything the relay holds.)
+#[test]
+fn a_session_gets_no_unreadable_version_under_its_own_pending_write() {
+    let mut net = Net::with_schema(1, secret_schema, author(0x70));
+    net.worker_as = AuthorSubject::SYSTEM;
+    net.worker_offline();
+    net.worker_online();
+    let inserted = block_on(
+        net.tab(0)
+            .insert("notes", body("plain"), Default::default()),
+    )
+    .unwrap();
+    let row = inserted.row_uuid();
+    let _watch = net.watch(net.tab(0));
+    net.settle(net.tab(0), inserted.mergeable_tx_id());
+    net.to_tabs[0].borrow_mut().clear();
+
+    // The authority takes another writer's update first; the worker gets
+    // the tab's update before that version.
+    block_on(
+        net.core
+            .update("notes", row, body("secret"), Default::default()),
+    )
+    .unwrap();
+    block_on(net.core.tick()).unwrap();
+    let mine = net.update(net.tab(0), row, "mine");
+    block_on(net.tab(0).tick()).unwrap();
+    block_on(net.worker.tick()).unwrap();
+    block_on(net.tab(0).tick()).unwrap();
+    block_on(net.worker.tick()).unwrap();
+    block_on(net.tab(0).tick()).unwrap();
+
+    let secret = SyncCell::Text(b"secret".to_vec());
+    for message in net.to_tabs[0].borrow().iter() {
+        if let SyncMessage::Rows { images } = message {
+            for image in images {
+                assert!(
+                    !image.cells.iter().any(|(_, cell)| *cell == secret),
+                    "the worker shipped the tab a version it may not read: {image:?}"
+                );
+            }
+        }
+    }
+    net.settle(net.tab(0), mine);
+    assert_eq!(net.bodies(net.tab(0)), ["mine"]);
 }
