@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::groove::records::Value;
 use crate::ids::AuthorSubject;
 use crate::query::provider_claim_key;
+use jazz_types::records::Value;
 
 /// Construct the one canonical policy-binding vocabulary for an admitted
 /// identity and its provider claims.

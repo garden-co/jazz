@@ -3,12 +3,10 @@ name = "jazz-cli"
 version = "0.1.0"
 edition = "2024"
 autobins = false
-autotests = true
+autotests = false
 
 [features]
-default = ["rocksdb", "transport-compression-zstd", "heap-profiling"]
-rocksdb = ["dep:jazz-storage-rocksdb"]
-sqlite = []
+default = ["transport-compression-zstd", "heap-profiling"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
@@ -22,8 +20,6 @@ heap-profiling = ["dep:flate2", "dep:libc", "dep:mappings", "dep:prost", "dep:ru
 jazz = { workspace = true, default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server" }
 mimalloc = { version = "0.1", default-features = false }
-jazz-native-transport.workspace = true
-jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -54,6 +50,7 @@ rustc-demangle = { version = "0.1", optional = true }
 [dev-dependencies]
 base64 = "0.22"
 flate2 = "1"
+jazz-native-transport.workspace = true
 jazz-testkit = { path = "../jazz-testkit" }
 futures-util = "0.3"
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
@@ -69,10 +66,12 @@ tungstenite = { version = "0.29", default-features = false, features = ["handsha
 name = "jazz-tools"
 path = "src/bin/jazz-tools.rs"
 
-[[bin]]
-name = "jazz-server"
-path = "src/bin/jazz-server.rs"
-
 [[test]]
 name = "client_restart_integration"
+path = "tests/client_restart_integration.rs"
 required-features = ["test"]
+
+[[test]]
+name = "heap_sampler"
+path = "tests/heap_sampler.rs"
+

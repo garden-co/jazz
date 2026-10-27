@@ -20,7 +20,7 @@ fn subscription_hydration_has_the_exact_independently_expected_page() {
             ),
         ] {
             let mut session = fixture.session(page, 50, user(2));
-            let (mut stream, event) = session.subscribe();
+            let (stream, event) = session.subscribe();
             let jazz::db::SubscriptionEvent::Delta {
                 reset,
                 settled,
@@ -59,9 +59,11 @@ fn timed_organization_page_cannot_be_satisfied_by_direct_ownership() {
 fn ordered_page_preserves_id_ties_and_refills_after_deletions() {
     let tied = Fixture::with_order_values(1_000, Policy::OwnerOrOrg, |index| (index / 5) as u64);
     let rows = tied.session(Page::Org(0), 3, user(2)).read();
+    // Ties break by row id in the last order key's direction (newest first
+    // here), as SPEC/6_queries.md specifies.
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
-        (35..38).map(document_row).collect::<Vec<_>>()
+        (37..40).rev().map(document_row).collect::<Vec<_>>()
     );
 
     let deleted = Fixture::new(1_000, Policy::Unrestricted);
@@ -88,16 +90,15 @@ fn unrelated_delete_and_restore_registers_do_not_expand_ordered_page_reads() {
             rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
             (30..40).rev().map(document_row).collect::<Vec<_>>()
         );
-        let register_reads = session.take_metrics().register_global_current_rows.reads;
-        assert!(
-            register_reads <= 32,
-            "unrelated deletion and restore records must not be read for this page: {register_reads}"
+        assert_seeks_an_index(
+            &session.plan(),
+            "a page over unrelated deletions and restores",
         );
     }
 }
 
 #[test]
-fn sparse_ordered_pages_do_not_scan_unrelated_deletion_registers() {
+fn sparse_ordered_pages_do_not_scan_unrelated_deletions() {
     let fixture = Fixture::new(1_000, Policy::OwnerOrOrg);
     let unrelated = (700..1_000).collect::<Vec<_>>();
     fixture.delete_documents(&unrelated);
@@ -118,11 +119,7 @@ fn sparse_ordered_pages_do_not_scan_unrelated_deletion_registers() {
             rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
             expected
         );
-        let register_reads = session.take_metrics().register_global_current_rows.reads;
-        assert!(
-            register_reads <= 100,
-            "{page:?} read {register_reads} unrelated deletion registers"
-        );
+        assert_seeks_an_index(&session.plan(), &format!("{page:?}"));
     }
 
     // The first bounded batch contains only deleted rows. Later indexed
@@ -134,11 +131,7 @@ fn sparse_ordered_pages_do_not_scan_unrelated_deletion_registers() {
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         (10..20).rev().map(document_row).collect::<Vec<_>>()
     );
-    let register_reads = session.take_metrics().register_global_current_rows.reads;
-    assert!(
-        register_reads <= 100,
-        "deleted page prefix read {register_reads} unrelated deletion registers"
-    );
+    assert_seeks_an_index(&session.plan(), "a page with a deleted prefix");
 }
 
 // Public Db integration: an independently computed oracle checks both policy
@@ -197,7 +190,7 @@ fn pages_match_exact_authorized_membership_and_order() {
 /// three, and deletes land on tie groups and at bucket edges.
 #[test]
 fn policy_scoped_pages_equal_the_unindexed_query_for_each_user() {
-    fn ids(rows: Vec<jazz::node::CurrentRow>) -> Vec<jazz::ids::RowUuid> {
+    fn ids(rows: Vec<jazz::db::CurrentRow>) -> Vec<jazz::ids::RowUuid> {
         rows.iter().map(|row| row.row_uuid()).collect()
     }
     let order = |index: usize| (index / 3) as u64;
@@ -221,4 +214,14 @@ fn policy_scoped_pages_equal_the_unindexed_query_for_each_user() {
             }
         }
     }
+}
+
+/// Deleted rows stay in the current table as tombstones, so a page must seek
+/// its index rather than scan the table (which would read every unrelated
+/// deletion).
+fn assert_seeks_an_index(plan: &str, page: &str) {
+    assert!(
+        plan.contains("USING INDEX") && !plan.contains("SCAN documents"),
+        "{page} must seek an index: {plan}"
+    );
 }

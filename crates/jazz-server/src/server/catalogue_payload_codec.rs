@@ -306,9 +306,11 @@ fn decode_composite_indexes(
         let mut seen_columns = BTreeSet::new();
         for _ in 0..width {
             let column = read_string(data, offset, "composite_index_column")?;
-            if !declared.contains(column.as_str()) || !seen_columns.insert(column.clone()) {
+            let indexable = declared.contains(column.as_str())
+                || matches!(column.as_str(), "$createdAt" | "$updatedAt");
+            if !indexable || !seen_columns.insert(column.clone()) {
                 return Err(CatalogueEncodingError::DecodeError {
-                    message: "composite index columns must be distinct declared columns".to_owned(),
+                    message: "composite index columns must be distinct declared columns or provenance timestamps".to_owned(),
                 });
             }
             group.push(ColumnName::new(column));

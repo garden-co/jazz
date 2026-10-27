@@ -5,16 +5,17 @@ use std::thread;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
-use jazz::serving::StorageConfig;
+use crate::runtime::StorageConfig;
 use jazz::tools::AppId;
 
+mod account_store;
 mod accounts;
 mod builder;
 mod catalogue;
 mod catalogue_entry;
 mod catalogue_payload_codec;
 mod catalogue_storage;
-pub use jazz::serving::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub(crate) mod deployment;
 pub mod routes;
 pub(crate) mod runtime_catalogue;
@@ -108,7 +109,6 @@ pub struct ServerState {
     /// upgrades with `503`.
     pub(crate) max_websocket_connections: usize,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
-    pub(crate) storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
     /// Serializes durable-catalogue reconciliation into the local runtime shell.
     ///
     /// Catalogue storage can advance while a previous bridge is in flight, but
@@ -221,11 +221,7 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = ServerRuntimeHandle::start_with_storage(
-            schema,
-            storage_config,
-            self.storage_factory.clone(),
-        )?;
+        let started = ServerRuntimeHandle::start_awaiting_permissions(schema, storage_config)?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -474,7 +470,6 @@ mod tests {
             websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
             max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
             core_server_shell_storage_config: None,
-            storage_factory: None,
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             runtime_catalogue_before_publication_hook: StdMutex::new(None),
             runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),

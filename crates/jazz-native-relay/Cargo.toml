@@ -7,8 +7,7 @@ edition = "2024"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-jazz.workspace = true
-jazz-storage-sqlite.workspace = true
+jazz = { workspace = true, features = ["runtime"] }
 jazz-native-transport.workspace = true
 futures = "0.3"
 getrandom = "0.3"
@@ -19,8 +18,10 @@ thiserror = "2.0.17"
 url = "2"
 blake3 = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
+jazz = { workspace = true, features = ["testing"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 stacker = "0.1"
 libc = "0.2"
@@ -29,4 +30,3 @@ base64 = "0.22"
 jazz-server = { path = "../jazz-server", features = ["test"] }
 jazz-testkit = { path = "../jazz-testkit", default-features = false, features = ["scenarios"] }
 
-jazz-storage-rocksdb.workspace = true

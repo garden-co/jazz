@@ -61,8 +61,8 @@ bigLabelBenchmarks.push({
   description:
     "Open one maintained subscription on a label's newest 50 published releases and consume its initial result, from a persisted table holding every tenant's releases. Hydration must follow the label index: logical read counters are asserted outside timing.",
   fixture:
-    "100,000 releases in one table: 100 belong to the viewed label, the rest to other tenants. Reopened from RocksDB after seeding; LIMIT 50.",
-  storage: "RocksDB, reopened after seeding",
+    "100,000 releases in one table: 100 belong to the viewed label, the rest to other tenants. Reopened from the SQLite file after seeding; LIMIT 50.",
+  storage: "SQLite file, reopened after seeding",
   includes: [
     "Subscription creation and initial result consumption",
     "Row digest and logical read-counter collection",
@@ -84,18 +84,15 @@ for (const desks of [4, 6]) {
   bigLabelBenchmarks.push({
     name: `big_label_sign_off_first_edit[${desks}]`,
     title: `BigLabel · first release-plan edit under a ${branches}-branch sign-off policy`,
-    description: `Compile and hydrate the update authorization-support view a fresh authority needs for a session's first release-plan edit. The update policy requires a lead or a deputy grant on each of ${desks} sign-off desks (correlated exists checks), so it normalizes to ${branches} branches of ${desks} joins each.`,
+    description: `Compile and evaluate the update policy a fresh authority checks for a session's first release-plan edit. The update policy requires a lead or a deputy grant on each of ${desks} sign-off desks (correlated exists checks), so it normalizes to ${branches} branches of ${desks} joins each.`,
     fixture: `One release-plan table and ${desks * 2} empty grant tables; a fresh in-memory node per sample.`,
     storage: "In-memory Jazz node",
-    includes: [
-      "Update authorization-support scope compilation",
-      "Hydration of every support subscription",
-    ],
+    includes: ["Update policy compilation", "Evaluation of the policy for the edit"],
     excludes: ["Schema compilation and node opening", "Grant rows (tables are empty)"],
     work: {
       count: 1,
       unit: "first edits/s",
-      explanation: `One support scope (${branches} policy branches) compiled and hydrated per iteration.`,
+      explanation: `One policy (${branches} branches) compiled and evaluated per iteration.`,
     },
     source: loads,
   });

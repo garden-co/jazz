@@ -42,7 +42,7 @@ fn wequencer_open_pattern_views(bencher: divan::Bencher<'_, '_>, patterns: usize
 }
 
 /// Read a pad's current value after it was toggled `depth` times while
-/// offline, each edit settled locally on top of the last (RocksDB).
+/// offline, each edit settled locally on top of the last (SQLite file).
 #[divan::bench(args = [1_000, 10_000])]
 fn wequencer_pad_edit_history(bencher: divan::Bencher<'_, '_>, depth: usize) {
     let mut fixture = PadHistoryFixture::new(depth);

@@ -16,10 +16,9 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SeededRowIdSource, SubscriptionEvent,
     SubscriptionStream, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -37,45 +36,18 @@ pub struct PatternViewsFixture {
     query: Query,
 }
 
-/// Every view's stream plus the runtime and retained-state receipts the
-/// original route curve collected inside the timed attachment.
+/// Every view's stream plus the runtime receipt collected inside the timed
+/// attachment.
 pub struct OpenPatterns {
     pub streams: Vec<SubscriptionStream>,
     pub runtime: RuntimeReceipt,
-    pub retained: RetainedReceipt,
 }
 
 #[derive(Debug)]
 pub struct RuntimeReceipt {
-    pub graph_nodes: usize,
     pub active_subscriptions: usize,
     pub active_prepared_shapes: usize,
     pub active_shape_params: usize,
-    pub arrangement_count: usize,
-    pub arrangement_rows: usize,
-    pub arrangement_encoded_bytes: usize,
-    pub logical_nodes_requested: u64,
-    pub deduped_graph_nodes: usize,
-}
-
-#[derive(Debug)]
-pub struct RetainedReceipt {
-    pub subscriptions: usize,
-    pub root_rows: usize,
-    pub result_rows: usize,
-    pub version_identities: usize,
-    pub replacement_entries: usize,
-    pub maintained_heap_bytes: usize,
-    pub result_weights_bytes: usize,
-    pub result_payloads_bytes: usize,
-    pub versions_bytes: usize,
-    pub supporting_frontier_bytes: usize,
-    pub replacements_bytes: usize,
-    pub terminal_schemas_bytes: usize,
-    pub control_state_bytes: usize,
-    pub maintained_and_control_heap_bytes: usize,
-    pub snapshot_bytes: usize,
-    pub reset_frame_bytes: usize,
 }
 
 impl PatternViewsFixture {
@@ -96,8 +68,7 @@ impl PatternViewsFixture {
     }
 
     /// The timed operation: prepare, bind and subscribe every pattern view,
-    /// consume its exact initial page, then collect the runtime and retained
-    /// receipts and check the storage-backed witness contract.
+    /// consume its exact initial page, then collect the runtime receipt.
     pub fn open_all(self) -> OpenPatterns {
         let mut streams = Vec::with_capacity(self.patterns_open);
         let mut shape_id = None;
@@ -123,66 +94,17 @@ impl PatternViewsFixture {
             streams.push(stream);
         }
         let runtime = runtime_receipt(&self.db);
-        let retained = retained_receipt(&self.db);
         assert_eq!(runtime.active_subscriptions, self.patterns_open);
-        assert_eq!(retained.subscriptions, self.patterns_open);
-        // Storage-backed views drop source-version witnesses but must keep
-        // replacement witnesses for delete/restore winner delivery.
-        assert!(
-            retained.version_identities == 0 && retained.versions_bytes == 0,
-            "storage-backed pattern views retain source witnesses"
-        );
-        assert!(
-            retained.replacement_entries > 0 && retained.replacements_bytes > 0,
-            "storage-backed pattern views must retain replacement witnesses"
-        );
-        OpenPatterns {
-            streams,
-            runtime,
-            retained,
-        }
+        OpenPatterns { streams, runtime }
     }
 }
 
 fn runtime_receipt(db: &Db) -> RuntimeReceipt {
     let stats = db.runtime_stats_for_test();
     RuntimeReceipt {
-        graph_nodes: stats.graph_nodes,
         active_subscriptions: stats.active_subscriptions,
         active_prepared_shapes: stats.active_prepared_shapes,
         active_shape_params: stats.active_shape_params,
-        arrangement_count: stats.arrangement_count,
-        arrangement_rows: stats.arrangement_rows,
-        arrangement_encoded_bytes: stats.arrangement_encoded_bytes,
-        logical_nodes_requested: stats.logical_nodes_requested,
-        deduped_graph_nodes: stats.deduped_graph_nodes,
-    }
-}
-
-fn retained_receipt(db: &Db) -> RetainedReceipt {
-    let receipts = db.maintained_subscription_size_receipts_for_test();
-    macro_rules! sum {
-        ($($field:tt)+) => {
-            receipts.iter().map(|receipt| receipt.$($field)+).sum()
-        };
-    }
-    RetainedReceipt {
-        subscriptions: receipts.len(),
-        root_rows: sum!(root_rows),
-        result_rows: sum!(footprint.result_rows),
-        version_identities: sum!(footprint.version_identities),
-        replacement_entries: sum!(footprint.replacement_entries),
-        maintained_heap_bytes: sum!(footprint.maintained_heap_bytes),
-        result_weights_bytes: sum!(footprint.result_weights_bytes),
-        result_payloads_bytes: sum!(footprint.result_payloads_bytes),
-        versions_bytes: sum!(footprint.versions_bytes),
-        supporting_frontier_bytes: sum!(footprint.supporting_frontier_bytes),
-        replacements_bytes: sum!(footprint.replacements_bytes),
-        terminal_schemas_bytes: sum!(footprint.terminal_schemas_bytes),
-        control_state_bytes: sum!(footprint.control_state_bytes),
-        maintained_and_control_heap_bytes: sum!(footprint.total_heap_bytes),
-        snapshot_bytes: sum!(snapshot_bytes),
-        reset_frame_bytes: sum!(reset_frame_bytes),
     }
 }
 
@@ -223,17 +145,15 @@ fn open_db(seed: u64) -> Db {
                 TableSchemaBuilder::new(EDITS)
                     .column("pattern", ColumnType::Uuid)
                     .column("edited_at", ColumnType::Timestamp)
-                    .column("pad", ColumnType::Text),
+                    .column("pad", ColumnType::Text)
+                    .composite_index(["pattern", "edited_at"]),
             )
             .build(),
     )
     .expect("pattern-views schema compiles");
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes((0x7600_u128 + seed as u128).to_be_bytes()),
                 author: WRITER,

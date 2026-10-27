@@ -42,6 +42,7 @@ export const ciPartitionJobs = Object.freeze({
   "rust-workspace": "test-rust-workspace",
   "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
+  "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
   "react-native": "test-react-native",
 });
@@ -49,24 +50,21 @@ export const ciPartitionJobs = Object.freeze({
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 
-// Build with dev/t's exact selection (`--no-default-features`). Jazz's empty
-// `default` feature still sets `--cfg feature="default"`, so omitting the flag
-// compiles a second, otherwise identical lib-test unit after storage-compat's
-// dev/t corpus build in the same job.
-const m3DifferentialCommand = command(
-  "bounded maintained-vs-one-shot differential oracle",
-  "bash",
-  [
-    "-lc",
-    String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+// Build with dev/t's exact selection (`--no-default-features`, the same
+// features): the oracle's integration test then links the `jazz` library
+// storage-compat's dev/t receipts just built in the same job, instead of a
+// second, otherwise identical build of it.
+const differentialCommand = command("bounded maintained-vs-one-shot differential oracle", "bash", [
+  "-lc",
+  String.raw`set -euo pipefail
+test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     try {
       const message = JSON.parse(line);
-      if (message.reason === "compiler-artifact" && message.target.name === "jazz_node" && message.executable)
+      if (message.reason === "compiler-artifact" && message.target.name === "maintained_differential" && message.executable)
         executable = message.executable;
     } catch {}
   });
@@ -79,10 +77,9 @@ test -x "$test_binary"
 timeout 60s env \
   JAZZ_SEED=11 \
   JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 \
-  JAZZ_DIFFERENTIAL_STEP_COUNT=3 \
-  "$test_binary" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored`,
-  ],
-);
+  JAZZ_DIFFERENTIAL_STEP_COUNT=60 \
+  "$test_binary" maintained_one_shot_differential_oracle --exact --ignored`,
+]);
 
 /**
  * CI partitions are the source of truth for both CI and `--ci-equivalent`.
@@ -120,8 +117,6 @@ export const ciPartitions = Object.freeze({
       "check",
       "-p",
       "jazz-sim",
-      "-p",
-      "jazz-example-permissioned-resources-benchmark",
       "--lib",
       "--bins",
       "--tests",
@@ -138,15 +133,15 @@ export const ciPartitions = Object.freeze({
       // explicit here: the standalone smoke gate remains available to callers
       // that do not already run this partition.
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=cold_subscription_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=sync_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=sync_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=validation_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=validation_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=relation_include_delivery_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=relation_include_delivery_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=route_subscription_curve_correctness_smoke",
       "--require-nextest-test",
       "jazz-sim::scenario_smoke=s1_saas_smoke",
       "--require-nextest-test",
@@ -187,7 +182,7 @@ export const ciPartitions = Object.freeze({
       "dev/gates/test/nextest-partitions.test.mjs",
     ]),
   ]),
-  "rust-differential": Object.freeze([m3DifferentialCommand]),
+  "rust-differential": Object.freeze([differentialCommand]),
   typescript: Object.freeze([
     command("native correctness-artifact producer", "node", [
       "dev/gates/ensure-correctness-artifacts.mjs",
@@ -278,6 +273,18 @@ export const ciPartitions = Object.freeze({
   // again here only to open one IndexedDB fixture cost ~3 minutes per run.
   "storage-compat": Object.freeze([
     command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
+  ]),
+  // The whole suite on native SQLite with Cloudflare Durable Object SQLite's
+  // limits (100 bound parameters, 100 KB statements, expression depth 100,
+  // ...), so SQL that would fail there fails here. See
+  // dev/durable-objects/README.md.
+  "durable-object-limits": Object.freeze([
+    command("Durable Object SQLite limits", "cargo", [
+      "test",
+      "--workspace",
+      "--features",
+      "jazz/durable-object-limits",
+    ]),
   ]),
 });
 

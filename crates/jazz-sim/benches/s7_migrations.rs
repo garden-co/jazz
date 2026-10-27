@@ -1,540 +1,362 @@
-use std::cell::RefCell;
+//! S7 migration lenses: mixed-version clients against an authority that
+//! has moved along a schema chain.
+//!
+//! v1 `todos(title)` -> v2 renames `title` to `name` -> v3 adds `priority`
+//! (default 0) -> v4 renames the table to `tasks` and copies `name` into
+//! `search_name`. Clients on v1 and v4 write live; a v1 client that was
+//! offline since before the chain lands its queued write after the
+//! authority reached v4.
+//!
+//! Gates: every version reads the same rows under its own names, at the
+//! authority and on each client; the offline write is translated; the copy
+//! holds the seeded titles and the titles of rows v1 inserts, and stays a
+//! column of its own: a write of the title leaves it.
+
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::pin;
-use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
-use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Transport};
-use jazz::groove::records::Value;
-use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::{CurrentRow, NodeState};
-use jazz::protocol::{LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens};
+use jazz::db::{Db, ReadOpts, block_on};
+use jazz::ids::{AuthorSubject, RowUuid};
+use jazz::protocol::{LensOp, MigrationLens, TableLens};
 use jazz::query::Query;
-use jazz::schema::{JazzSchema, TableSchema};
-use jazz::tools::public_schema::{
-    ColumnType as PublicColumnType, SchemaBuilder, TableSchema as PublicTableSchema,
+use jazz::records::Value;
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz_sim::oracle::{self, Live, Rows};
+use jazz_sim::support::{
+    allow_all, cells, compile, config, insert, int, open, row, settle, text, user,
 };
-use jazz::tools::test_support::AllowAll;
-use jazz::tx::DurabilityTier;
-use jazz::wire::TransportError;
-use jazz_sim::fixture::{apply_sync_message_settled, settle_outcome};
-use jazz_sim::public_schema_fixture::compile_public_schema;
-use jazz_sim::{emit_json_line, metadata_fields};
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
-use serde_json::{Value as JsonValue, json};
+use jazz_sim::{
+    Latencies, PauseMode, PeerProfile, Sim, SimulatorTransportCodec, emit_summary, env_u64,
+    env_usize,
+};
+use serde_json::{Map, Value as JsonValue, json};
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
-    smoke();
+    let seed = env_u64("JAZZ_SEED", 0x5700_0001);
+    let rows = env_usize("JAZZ_S7_ROWS", 1_000);
+    run(seed, rows, true);
 }
 
+#[allow(dead_code)]
 pub fn smoke() {
-    let (schemas, lenses) = schema_chain();
-    let mut writer_v1 = open_client(node(1), schemas[0].clone());
-    let mut writer_v4 = open_client(node(4), schemas[3].clone());
-    let mut offline_v1 = open_client(node(5), schemas[0].clone());
-    let (_core_dir, mut core) = open_node(node(250), schemas[0].clone());
+    run(0x5700_0001, 8, false);
+}
 
-    publish_chain(&mut core, &schemas, &lenses);
+fn todos(table: &str, title: &str, priority: bool, copy: bool) -> JazzSchema {
+    let mut builder = TableSchemaBuilder::new(table).column(title, ColumnType::Text);
+    if priority {
+        builder = builder.column_with_default(
+            "priority",
+            ColumnType::BigInt,
+            jazz::tools::Value::BigInt(0),
+        );
+    }
+    if copy {
+        builder = builder.column("search_name", ColumnType::Text);
+    }
+    compile(
+        &SchemaBuilder::new()
+            .table(builder.policies(allow_all()))
+            .build(),
+    )
+}
 
-    let queued = commit_client_mergeable(
-        &mut offline_v1,
+/// The chain: (schema, table name, title column, has priority and copy).
+fn chain() -> Vec<(JazzSchema, &'static str, &'static str, bool, bool)> {
+    vec![
+        (
+            todos("todos", "title", false, false),
+            "todos",
+            "title",
+            false,
+            false,
+        ),
+        (
+            todos("todos", "name", false, false),
+            "todos",
+            "name",
+            false,
+            false,
+        ),
+        (
+            todos("todos", "name", true, false),
+            "todos",
+            "name",
+            true,
+            false,
+        ),
+        (
+            todos("tasks", "name", true, true),
+            "tasks",
+            "name",
+            true,
+            true,
+        ),
+    ]
+}
+
+fn lens(
+    from: &JazzSchema,
+    to: &JazzSchema,
+    source: &str,
+    target: &str,
+    ops: Vec<LensOp>,
+) -> MigrationLens {
+    MigrationLens::new(
+        from.version_id(),
+        to.version_id(),
+        vec![TableLens {
+            source_table: source.into(),
+            target_table: target.into(),
+            ops,
+        }],
+    )
+    .expect("lens")
+}
+
+fn lenses(schemas: &[JazzSchema]) -> Vec<MigrationLens> {
+    vec![
+        lens(
+            &schemas[0],
+            &schemas[1],
+            "todos",
+            "todos",
+            vec![LensOp::RenameColumn {
+                from: "title".into(),
+                to: "name".into(),
+            }],
+        ),
+        lens(
+            &schemas[1],
+            &schemas[2],
+            "todos",
+            "todos",
+            vec![LensOp::AddColumn {
+                column: "priority".into(),
+                default: Value::I64(0),
+            }],
+        ),
+        lens(
+            &schemas[2],
+            &schemas[3],
+            "todos",
+            "tasks",
+            vec![LensOp::CopyColumn {
+                from: "name".into(),
+                to: "search_name".into(),
+            }],
+        ),
+    ]
+}
+
+/// What a version reads for each row: its title column, and priority and
+/// the copy where it has them.
+fn expected(
+    version: &(JazzSchema, &'static str, &'static str, bool, bool),
+    titles: &BTreeMap<RowUuid, String>,
+    searches: &BTreeMap<RowUuid, String>,
+) -> Rows {
+    titles
+        .iter()
+        .map(|(id, title)| {
+            let mut values = cells([(version.2, text(title.clone()))]);
+            if version.3 {
+                values.insert("priority".to_owned(), int(0));
+            }
+            if version.4 {
+                values.insert("search_name".to_owned(), text(searches[id].clone()));
+            }
+            (*id, values)
+        })
+        .collect()
+}
+
+fn run(seed: u64, rows: usize, emit: bool) {
+    let versions = chain();
+    let schemas: Vec<JazzSchema> = versions.iter().map(|v| v.0.clone()).collect();
+    let mut sim = Sim::new(seed, SimulatorTransportCodec::WireFrames);
+    let core = block_on(Db::open_history_complete(config(
+        schemas[0].clone(),
+        0,
+        AuthorSubject::SYSTEM,
+    )))
+    .expect("open authority");
+    sim.add("core", core);
+    let link = PeerProfile::new("s7", 2, 1, 0);
+    let mut titles: BTreeMap<RowUuid, String> = BTreeMap::new();
+    // What v4's copy holds: the title a row was seeded or inserted with.
+    let mut searches: BTreeMap<RowUuid, String> = BTreeMap::new();
+
+    // An offline v1 client queues a write before the authority migrates.
+    sim.add("offline-v1", open(schemas[0].clone(), 5, user(5)));
+    sim.connect("offline-v1", "core", user(5), link.clone());
+    sim.pause("offline-v1", PauseMode::Disconnect);
+    let queued = row(0x70, 90);
+    insert(
+        sim.db("offline-v1"),
         "todos",
-        row(90),
-        BTreeMap::from([("title".to_owned(), v("offline-v1"))]),
+        queued,
+        cells([("title", text("offline-v1"))]),
     );
+    titles.insert(queued, "offline-v1".to_owned());
+    searches.insert(queued, "offline-v1".to_owned());
 
-    let v1_unit = commit_client_mergeable(
-        &mut writer_v1,
-        "todos",
-        row(1),
-        BTreeMap::from([("title".to_owned(), v("live-v1"))]),
+    // Seed rows on v1, then move the authority along the chain.
+    for n in 0..rows {
+        insert(
+            sim.db("core"),
+            "todos",
+            row(0x71, n as u64),
+            cells([("title", text(format!("seed-{n}")))]),
+        );
+        titles.insert(row(0x71, n as u64), format!("seed-{n}"));
+        searches.insert(row(0x71, n as u64), format!("seed-{n}"));
+    }
+    let migrate = Instant::now();
+    for (step, lens) in lenses(&schemas).into_iter().enumerate() {
+        block_on(
+            sim.db("core")
+                .activate_schema_with_lenses(schemas[step + 1].clone(), &[lens]),
+        )
+        .unwrap_or_else(|error| panic!("activate v{}: {error}", step + 2));
+    }
+    let migrate_us = migrate.elapsed().as_micros() as u64;
+
+    // Live clients on the oldest and the newest version.
+    for (name, n, version) in [("writer-v1", 1, 0), ("writer-v4", 4, 3)] {
+        sim.add(name, open(schemas[version].clone(), n, user(n)));
+        sim.connect(name, "core", user(n), link.clone());
+    }
+    let mut v1_live = Live::subscribe(
+        sim.db("writer-v1"),
+        &Query::from("todos"),
+        ReadOpts::default(),
     );
-    deliver_client_unit(&mut core, v1_unit);
+    let mut v4_live = Live::subscribe(
+        sim.db("writer-v4"),
+        &Query::from("tasks"),
+        ReadOpts::default(),
+    );
+    sim.settle();
 
-    let v4_unit = commit_client_mergeable(
-        &mut writer_v4,
+    let v1_row = row(0x70, 1);
+    let handle = insert(
+        sim.db("writer-v1"),
         "todos",
-        row(4),
-        BTreeMap::from([
-            ("name".to_owned(), v("live-v4")),
-            ("search_name".to_owned(), v("live-v4")),
+        v1_row,
+        cells([("title", text("live-v1"))]),
+    );
+    settle(&sim, sim.db("writer-v1"), &handle);
+    titles.insert(v1_row, "live-v1".to_owned());
+    searches.insert(v1_row, "live-v1".to_owned());
+    let v4_row = row(0x70, 4);
+    let handle = insert(
+        sim.db("writer-v4"),
+        "tasks",
+        v4_row,
+        cells([
+            ("name", text("live-v4")),
+            ("priority", int(0)),
+            ("search_name", text("live-v4")),
         ]),
     );
-    deliver_client_unit(&mut core, v4_unit);
-
-    // Phase 4: the client has been offline since v1; its queued write lands
-    // after the core has advanced to v4 and must be translated into v4 storage.
-    deliver_client_unit(&mut core, queued);
-
-    assert_eq!(
-        rows_for_schema(&mut core, &schemas[0]),
-        BTreeMap::from([
-            (row(1), BTreeMap::from([("title".to_owned(), v("live-v1"))])),
-            (row(4), BTreeMap::from([("title".to_owned(), v("live-v4"))])),
-            (
-                row(90),
-                BTreeMap::from([("title".to_owned(), v("offline-v1"))]),
-            ),
-        ])
-    );
-    assert_eq!(
-        rows_for_schema(&mut core, &schemas[3]),
-        BTreeMap::from([
-            (
-                row(1),
-                BTreeMap::from([
-                    ("name".to_owned(), v("live-v1")),
-                    ("search_name".to_owned(), v("live-v1")),
-                ]),
-            ),
-            (
-                row(4),
-                BTreeMap::from([
-                    ("name".to_owned(), v("live-v4")),
-                    ("search_name".to_owned(), v("live-v4")),
-                ]),
-            ),
-            (
-                row(90),
-                BTreeMap::from([
-                    ("name".to_owned(), v("offline-v1")),
-                    ("search_name".to_owned(), v("offline-v1")),
-                ]),
-            ),
-        ])
-    );
-    emit_lens_tax_metrics();
-}
-
-fn publish_chain(core: &mut NodeState, schemas: &[JazzSchema; 4], lenses: &[MigrationLens]) {
-    // Non-genesis schemas are admitted only as ordered lineage bundles.  The
-    // harness is the authority here, so it exercises the same trusted
-    // catalogue ingress used by a core after the sequencer has ordered them.
-    for (schema, lens) in schemas.iter().skip(1).zip(lenses) {
-        let publication = core
-            .author_schema_lineage_publication(
-                SchemaVersion::new(schema.clone()),
-                lens.clone(),
-                Vec::<String>::new(),
-                Vec::<String>::new(),
-            )
-            .expect("benchmark authority authors descendant lineage");
-        let outcome = jazz::db::block_on(core.apply_trusted_catalogue_message(
-            SyncMessage::PublishSchemaWithLens {
-                author: AuthorSubject::SYSTEM,
-                catalogue_seq: core.active_catalogue_seq() + 1,
-                publication: Box::new(publication),
-            },
-        ))
-        .unwrap();
-        settle_outcome(core, outcome).unwrap();
-    }
-    jazz::db::block_on(core.activate_schema_for_test(4, schemas[3].clone())).unwrap();
-}
-
-fn rows_for_schema(
-    core: &mut NodeState,
-    schema: &JazzSchema,
-) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
-    let shape = Query::from("todos").validate(schema).unwrap();
-    jazz::db::block_on(core.query_rows(
-        &shape,
-        &shape.bind(BTreeMap::new()).unwrap(),
-        DurabilityTier::Local,
+    settle(&sim, sim.db("writer-v4"), &handle);
+    titles.insert(v4_row, "live-v4".to_owned());
+    searches.insert(v4_row, "live-v4".to_owned());
+    // Each writer edits the other's row under its own names.
+    sim.settle();
+    v1_live.poll();
+    v4_live.poll();
+    let handle = block_on(sim.db("writer-v1").update(
+        "todos",
+        v4_row,
+        cells([("title", text("v4-edited-by-v1"))]),
+        Default::default(),
     ))
-    .unwrap()
-    .into_iter()
-    .map(|row| row_cells(row, &schema.tables[0]))
-    .collect()
-}
-
-struct ClientHarness {
-    _dir: tempfile::TempDir,
-    db: Db,
-    outbound: Rc<RefCell<Vec<SyncMessage>>>,
-    _upstream: Rc<futures::lock::Mutex<jazz::db::PeerConnection>>,
-}
-
-struct QueueTransport {
-    outbound: Rc<RefCell<Vec<SyncMessage>>>,
-}
-
-impl Transport for QueueTransport {
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.outbound.borrow_mut().push(message);
-        Ok(())
-    }
-
-    fn try_recv(&mut self) -> Option<SyncMessage> {
-        None
-    }
-}
-
-fn commit_client_mergeable(
-    client: &mut ClientHarness,
-    table: &str,
-    row: RowUuid,
-    cells: BTreeMap<String, Value>,
-) -> SyncMessage {
-    let tx = jazz::db::block_on(client.db.mergeable_tx()).unwrap();
-    jazz::db::block_on(tx.insert(
-        table,
-        cells,
-        jazz::db::InsertOptions {
-            row_id: Some(row),
-            ..Default::default()
-        },
+    .expect("v1 edits a v4 row");
+    settle(&sim, sim.db("writer-v1"), &handle);
+    titles.insert(v4_row, "v4-edited-by-v1".to_owned());
+    let handle = block_on(sim.db("writer-v4").update(
+        "tasks",
+        v1_row,
+        cells([("name", text("v1-edited-by-v4"))]),
+        Default::default(),
     ))
-    .unwrap();
-    jazz::db::block_on(tx.commit()).unwrap();
-    jazz::db::block_on(client.db.tick()).unwrap();
-    client
-        .outbound
-        .borrow_mut()
-        .pop()
-        .expect("db client should upload mergeable commit unit")
-}
+    .expect("v4 edits a v1 row");
+    settle(&sim, sim.db("writer-v4"), &handle);
+    titles.insert(v1_row, "v1-edited-by-v4".to_owned());
 
-fn deliver_client_unit(core: &mut NodeState, unit: SyncMessage) {
-    assert!(matches!(&unit, SyncMessage::CommitUnit { .. }));
-    apply_sync_message_settled(core, unit).unwrap();
-}
+    // The offline client comes back: its v1 write lands in v4 storage.
+    sim.resume("offline-v1");
+    sim.drive(
+        sim.db("offline-v1")
+            .wait_for_pending_writes(jazz::tx::DurabilityTier::Global),
+    )
+    .expect("the queued v1 write settles after the migration");
+    let mut offline_live = Live::subscribe(
+        sim.db("offline-v1"),
+        &Query::from("todos"),
+        ReadOpts::default(),
+    );
+    sim.settle();
 
-fn emit_lens_tax_metrics() {
-    const ROWS: usize = 128;
-    const READ_ITERS: usize = 64;
-
-    let (schemas, lenses) = schema_chain();
-    let (_core_dir, mut core) = open_node(node(251), schemas[0].clone());
-    publish_chain(&mut core, &schemas, &lenses);
-
-    let mut native_writer = open_client(node(40), schemas[3].clone());
-    for idx in 0..ROWS {
-        let value = format!("native-{idx}");
-        let unit = commit_client_mergeable(
-            &mut native_writer,
-            "todos",
-            row_from_u64(1_000 + idx as u64),
-            BTreeMap::from([
-                ("name".to_owned(), v(&value)),
-                ("search_name".to_owned(), v(value)),
-            ]),
-        );
-        apply_sync_message_settled(&mut core, unit).unwrap();
-    }
-
-    let native_read = measured_query_us(&mut core, &schemas[3], READ_ITERS, ROWS);
-    let one_hop_read = measured_query_us(&mut core, &schemas[2], READ_ITERS, ROWS);
-    let three_hop_read = measured_query_us(&mut core, &schemas[0], READ_ITERS, ROWS);
-
-    let mut read = metadata_fields("s7_migrations", "synchronous", 0x5700_0001, "s7-local");
-    read.insert("phase".to_owned(), json!("lens_read_latency"));
-    read.insert("rows".to_owned(), json!(ROWS));
-    read.insert("iterations".to_owned(), json!(READ_ITERS));
-    read.insert(
-        "native_p50_us".to_owned(),
-        json!(percentile(&native_read, 50)),
-    );
-    read.insert(
-        "native_p95_us".to_owned(),
-        json!(percentile(&native_read, 95)),
-    );
-    read.insert(
-        "one_hop_p50_us".to_owned(),
-        json!(percentile(&one_hop_read, 50)),
-    );
-    read.insert(
-        "one_hop_p95_us".to_owned(),
-        json!(percentile(&one_hop_read, 95)),
-    );
-    read.insert(
-        "three_hop_p50_us".to_owned(),
-        json!(percentile(&three_hop_read, 50)),
-    );
-    read.insert(
-        "three_hop_p95_us".to_owned(),
-        json!(percentile(&three_hop_read, 95)),
-    );
-    emit_json_line("s7_migrations", &JsonValue::Object(read).to_string());
-
-    let native_write = measured_write_us(&mut core, &schemas[3], 4_000, ROWS);
-    let one_hop_write = measured_write_us(&mut core, &schemas[2], 5_000, ROWS);
-    let three_hop_write = measured_write_us(&mut core, &schemas[0], 6_000, ROWS);
-
-    let mut write = metadata_fields("s7_migrations", "synchronous", 0x5700_0001, "s7-local");
-    write.insert("phase".to_owned(), json!("lens_write_translation"));
-    write.insert("rows".to_owned(), json!(ROWS));
-    write.insert(
-        "native_p50_us".to_owned(),
-        json!(percentile(&native_write, 50)),
-    );
-    write.insert(
-        "native_p95_us".to_owned(),
-        json!(percentile(&native_write, 95)),
-    );
-    write.insert(
-        "one_hop_p50_us".to_owned(),
-        json!(percentile(&one_hop_write, 50)),
-    );
-    write.insert(
-        "one_hop_p95_us".to_owned(),
-        json!(percentile(&one_hop_write, 95)),
-    );
-    write.insert(
-        "three_hop_p50_us".to_owned(),
-        json!(percentile(&three_hop_write, 50)),
-    );
-    write.insert(
-        "three_hop_p95_us".to_owned(),
-        json!(percentile(&three_hop_write, 95)),
-    );
-    emit_json_line("s7_migrations", &JsonValue::Object(write).to_string());
-}
-
-fn measured_query_us(
-    core: &mut NodeState,
-    schema: &JazzSchema,
-    iterations: usize,
-    expected_rows: usize,
-) -> Vec<u64> {
-    let shape = Query::from("todos").validate(schema).unwrap();
-    let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut timings = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let start = Instant::now();
-        let rows =
-            jazz::db::block_on(core.query_rows(&shape, &binding, DurabilityTier::Local)).unwrap();
-        timings.push(start.elapsed().as_micros() as u64);
-        assert_eq!(rows.len(), expected_rows);
-    }
-    timings.sort_unstable();
-    timings
-}
-
-fn measured_write_us(
-    core: &mut NodeState,
-    schema: &JazzSchema,
-    row_offset: u64,
-    rows: usize,
-) -> Vec<u64> {
-    let mut writer = open_client(node((row_offset / 1_000) as u8), schema.clone());
-    let mut timings = Vec::with_capacity(rows);
-    for idx in 0..rows {
-        let value = format!("write-{row_offset}-{idx}");
-        let cells = match schema.tables[0].columns[0].name() {
-            "title" => BTreeMap::from([("title".to_owned(), v(value))]),
-            "name" if schema.tables[0].columns.len() == 1 => {
-                BTreeMap::from([("name".to_owned(), v(value))])
-            }
-            "name" => BTreeMap::from([
-                ("name".to_owned(), v(&value)),
-                ("search_name".to_owned(), v(value)),
-            ]),
-            _ => unreachable!("s7 schema chain has known first column names"),
-        };
-        let unit = commit_client_mergeable(
-            &mut writer,
-            "todos",
-            row_from_u64(row_offset + idx as u64),
-            cells,
-        );
-        let start = Instant::now();
-        apply_sync_message_settled(core, unit).unwrap();
-        timings.push(start.elapsed().as_micros() as u64);
-    }
-    timings.sort_unstable();
-    timings
-}
-
-fn percentile(sorted: &[u64], pct: usize) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let idx = ((sorted.len() - 1) * pct) / 100;
-    sorted[idx]
-}
-
-fn row_cells(row: CurrentRow, table: &TableSchema) -> (RowUuid, BTreeMap<String, Value>) {
-    let cells = table
-        .columns
-        .iter()
-        .filter_map(|column| {
-            row.cell(table, column.name())
-                .map(|value| (column.name().to_owned(), value))
-        })
-        .collect();
-    (row.row_uuid(), cells)
-}
-
-fn schema_chain() -> ([JazzSchema; 4], Vec<MigrationLens>) {
-    let v1 = compile_public_schema(
-        SchemaBuilder::new()
-            .table(PublicTableSchema::builder("todos").column("title", PublicColumnType::Text))
-            .build()
-            .allow_all(),
-    );
-    let v2 = compile_public_schema(
-        SchemaBuilder::new()
-            .table(
-                PublicTableSchema::builder("todos")
-                    .column("title", PublicColumnType::Text)
-                    .column("body", PublicColumnType::Text),
-            )
-            .build()
-            .allow_all(),
-    );
-    let v3 = compile_public_schema(
-        SchemaBuilder::new()
-            .table(PublicTableSchema::builder("todos").column("name", PublicColumnType::Text))
-            .build()
-            .allow_all(),
-    );
-    let v4 = compile_public_schema(
-        SchemaBuilder::new()
-            .table(
-                PublicTableSchema::builder("todos")
-                    .column("name", PublicColumnType::Text)
-                    .column("search_name", PublicColumnType::Text),
-            )
-            .build()
-            .allow_all(),
-    );
-    let lenses = vec![
-        MigrationLens::new(
-            v1.version_id(),
-            v2.version_id(),
-            vec![TableLens {
-                source_table: "todos".to_owned(),
-                target_table: "todos".to_owned(),
-                ops: vec![LensOp::AddColumn {
-                    column: "body".to_owned(),
-                    default: v(""),
-                }],
-            }],
-        )
-        .expect("benchmark migration lens is valid"),
-        MigrationLens::new(
-            v2.version_id(),
-            v3.version_id(),
-            vec![TableLens {
-                source_table: "todos".to_owned(),
-                target_table: "todos".to_owned(),
-                ops: vec![
-                    LensOp::RenameColumn {
-                        from: "title".to_owned(),
-                        to: "name".to_owned(),
-                    },
-                    LensOp::DropColumn {
-                        column: "body".to_owned(),
-                        backwards_default: v(""),
-                    },
-                ],
-            }],
-        )
-        .expect("benchmark migration lens is valid"),
-        MigrationLens::new(
-            v3.version_id(),
-            v4.version_id(),
-            vec![TableLens {
-                source_table: "todos".to_owned(),
-                target_table: "todos".to_owned(),
-                ops: vec![LensOp::CopyColumn {
-                    from: "name".to_owned(),
-                    to: "search_name".to_owned(),
-                }],
-            }],
-        )
-        .expect("benchmark migration lens is valid"),
-    ];
-    ([v1, v2, v3, v4], lenses)
-}
-
-fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
-            .unwrap();
-    let node = jazz::db::block_on(NodeState::new_with_shared_test_catalogue(
-        node_uuid, schema, storage,
-    ))
-    .unwrap();
-    (temp_dir, node)
-}
-
-fn open_client(node_uuid: NodeUuid, schema: JazzSchema) -> ClientHarness {
-    let (dir, db) = open_db(
-        node_uuid,
-        schema.clone(),
-        AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]),
-    );
-    let outbound = Rc::new(RefCell::new(Vec::new()));
-    let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
-        outbound: Rc::clone(&outbound),
-    })));
-    ClientHarness {
-        _dir: dir,
-        db,
-        outbound,
-        _upstream: upstream,
-    }
-}
-
-fn open_db(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    author: AuthorSubject,
-) -> (tempfile::TempDir, Db) {
-    let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage =
-        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
-    let db = block_on(Db::open(DbConfig {
-        schema,
-        storage,
-        identity: DbIdentity {
-            node: node_uuid,
-            author,
-        },
-        id_source: Some(Box::new(SeededRowIdSource::new(u64::from(
-            node_uuid.as_bytes()[0],
-        )))),
-    }))
-    .unwrap();
-    (dir, db)
-}
-
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    let mut future = pin!(future);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(output) => return output,
-            Poll::Pending => std::thread::yield_now(),
+    // Every version reads the same rows under its own names at the authority.
+    let mut lens_tax = Map::new();
+    for (index, version) in versions.iter().enumerate() {
+        let view =
+            block_on(sim.db("core").register_schema_view(version.0.clone())).expect("schema view");
+        let mut read_latency = Latencies::default();
+        let mut read = Rows::new();
+        for _ in 0..if emit { 20 } else { 1 } {
+            let start = Instant::now();
+            read = oracle::read(&view, &Query::from(version.1), ReadOpts::default());
+            read_latency.record_duration_us(start.elapsed());
         }
+        assert_eq!(
+            read,
+            expected(version, &titles, &searches),
+            "the authority reads v{} correctly",
+            index + 1
+        );
+        lens_tax.insert(
+            format!("v{}", index + 1),
+            JsonValue::Object(read_latency.json_fields("read_us")),
+        );
     }
-}
+    // And each client, from its own replica.
+    v1_live.poll();
+    v4_live.poll();
+    offline_live.poll();
+    assert_eq!(
+        v1_live.rows,
+        expected(&versions[0], &titles, &searches),
+        "the v1 writer converged"
+    );
+    assert_eq!(
+        offline_live.rows,
+        expected(&versions[0], &titles, &searches),
+        "the late v1 client converged"
+    );
+    assert_eq!(
+        v4_live.rows,
+        expected(&versions[3], &titles, &searches),
+        "the v4 writer converged"
+    );
 
-fn node(byte: u8) -> NodeUuid {
-    NodeUuid::from_bytes([byte; 16])
-}
-
-fn row(byte: u8) -> RowUuid {
-    RowUuid::from_bytes([byte; 16])
-}
-
-fn row_from_u64(value: u64) -> RowUuid {
-    let mut bytes = [0; 16];
-    bytes[..8].copy_from_slice(&value.to_be_bytes());
-    RowUuid::from_bytes(bytes)
-}
-
-fn v(value: impl Into<String>) -> Value {
-    Value::String(value.into())
+    if emit {
+        let mut fields = sim.json_fields();
+        fields.insert("phase".to_owned(), json!("late_offline_client"));
+        fields.insert("rows".to_owned(), json!(titles.len()));
+        fields.insert("migrate_us".to_owned(), json!(migrate_us));
+        fields.insert("lens_tax".to_owned(), JsonValue::Object(lens_tax));
+        emit_summary(
+            "s7_migrations",
+            "deterministic",
+            seed,
+            "s7",
+            JsonValue::Object(fields),
+        );
+    }
 }

@@ -764,8 +764,11 @@ produces `[rowB, rowB]`, while a missing B produces `[rowA]`.
 
 Explicit `order_by` overrides the default primary ordering for the result boundary
 where it appears. Ordered row-valued results remain total and replay-stable:
-after the user-declared order terms, ties are broken by ascending row id unless
-the query surface later exposes an explicit, stable tie policy. Child-local
+after the user-declared order terms, ties are broken by row id in the direction
+of the last declared term (ascending when that term is ascending, descending when
+it is descending) unless the query surface later exposes an explicit, stable tie
+policy. Following the last term's direction lets one declared index, which ends
+in the row id, supply the whole order in either scan direction. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
 parents or sibling relation payloads. The row id used for relation defaults and explicit ordering ties
 is the child source row id, and its ordering is independently evaluated within
@@ -1061,12 +1064,11 @@ surface. The test plan below records additional intended coverage.
   whose input rows are inserted in non-key order. These cases should assert the
   lexicographic group-key order and explicit `orderBy` override/tie behavior.
 - Add a facade-level canary next to
-  `crates/jazz/tests/incremental_delivery_canary.rs` for a large unordered
+  `crates/jazz/tests/include_live.rs` for a large unordered
   relation/include result. It should subscribe through the public `Db` API,
   insert one child whose id belongs in the middle of the child relation, assert
   the complete touched-parent replacement's order, and pin the bounded
-  allocation/byte expectation for the collector exception to
-  `groove/SPEC/INVARIANTS.md::INV-INC-1`.
+  allocation/byte expectation for the collector exception to `INV-PERF-9`.
 - Keep Rust tests aligned with
   `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
   through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,

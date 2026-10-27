@@ -1038,7 +1038,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
                 let server = JazzServer::builder()
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");
@@ -1058,7 +1058,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
             let reopened = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_data_dir(data_dir.path())
-                .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                .with_persistent_storage()
                 .start()
                 .await
                 .expect("start test server");

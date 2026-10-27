@@ -1,15 +1,14 @@
 use std::collections::BTreeMap;
 
 use jazz::block_on;
+use jazz::db::CurrentRow;
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent,
     SubscriptionOutputRow,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{OrderDirection, Query};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 
@@ -29,11 +28,8 @@ fn open_db(group_type: ColumnType) -> Db {
         )
         .build();
     let schema = JazzSchema::new(&source).expect("compile public schema");
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x71; 16]),
             author: AuthorSubject::SYSTEM,
@@ -90,12 +86,8 @@ fn apply_event(rows: &mut Vec<SubscriptionOutputRow>, event: SubscriptionEvent, 
                 rows.clear();
             }
             rows.retain(|row| {
-                !removed
-                    .iter()
-                    .any(|item| item.occurrence_id == row.occurrence_id)
-                    && !updated
-                        .iter()
-                        .any(|item| item.occurrence_id == row.occurrence_id)
+                !removed.iter().any(|item| item.row_uuid == row.row_uuid())
+                    && !updated.iter().any(|item| item.row_uuid() == row.row_uuid())
             });
             let mut incoming = added.into_iter().chain(updated).collect::<Vec<_>>();
             incoming.sort_by_key(|row| row.index);
@@ -114,14 +106,15 @@ fn remember_identities(history: &mut Vec<SubscriptionOutputRow>, rows: &[Subscri
             .find(|previous| previous.row.cell_at(0) == row.row.cell_at(0))
         {
             assert_eq!(
-                previous.occurrence_id, row.occurrence_id,
+                previous.row_uuid(),
+                row.row_uuid(),
                 "surviving or reappearing group keeps its public occurrence identity"
             );
         } else {
             assert!(
                 history
                     .iter()
-                    .all(|previous| previous.occurrence_id != row.occurrence_id)
+                    .all(|previous| previous.row_uuid() != row.row_uuid())
             );
             history.push(row.clone());
         }

@@ -1,16 +1,15 @@
 //! Transaction, fate, durability, snapshot, and read-set vocabulary shared by
-//! the facade, node, and protocol layers. This module owns the semantic data
-//! structures for mergeable/serializable transactions and authority outcomes; the
-//! code that validates, stores, and syncs them lives in `jazz::node::ingest`,
-//! `jazz::node::open_tx`, and `jazz::protocol`. Merge and currency rules
-//! are grounded in `jazz/README.md`.
+//! the facade, database, and protocol layers. This module owns the semantic
+//! data structures for mergeable/serializable transactions and authority
+//! outcomes; the code that validates, stores, and syncs them lives in `jazz-db`
+//! (`jazz::db`). Merge and currency rules are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowAuthor, RowUuid, SchemaVersionId};
 use crate::model::branch::{BranchKey, SnapshotRef};
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalTime, TxTime};
-use groove::records::{OwnedRecord, Value};
+use jazz_types::records::{OwnedRecord, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Immutable transaction payload before upstream fate state are learned.
@@ -185,7 +184,7 @@ impl ContributionMergeProvenance {
 
     /// Reject non-canonical or incomplete provenance received from a helper.
     pub fn validate(&self) -> Result<(), &'static str> {
-        // These keys are later encoded into durable Groove records. Validate
+        // These keys are later encoded into durable records. Validate
         // every ordinary contribution coordinate before any caller can reach
         // the infallible `canonical_bytes` encoder through a transaction that
         // also happens to carry branch-write intent metadata.
@@ -444,9 +443,9 @@ pub struct TxId {
 }
 
 impl TxId {
-    /// Groove descriptor for the portable `(time, node UUID)` transaction identity.
-    pub fn value_type() -> groove::records::ValueType {
-        use groove::records::ValueType;
+    /// Record descriptor for the portable `(time, node UUID)` transaction identity.
+    pub fn value_type() -> jazz_types::records::ValueType {
+        use jazz_types::records::ValueType;
         ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid])
     }
 
@@ -469,6 +468,7 @@ pub enum TxKind {
     /// Mergeable transaction validated by CRDT-style merge rules.
     Mergeable,
     /// Serializable transaction validated by authority-side read sets.
+    #[serde(rename = "Exclusive")]
     Serializable,
 }
 
@@ -491,7 +491,8 @@ pub enum RejectionReason {
     /// Author or write policy rejected the transaction.
     AuthorizationDenied,
     /// Serializable validation detected a read/write conflict.
-    SerializationConflict,
+    #[serde(rename = "ExclusiveConflict")]
+    SerializableConflict,
     /// A version timestamp was not strictly greater than every parent.
     CausalityViolation,
     /// Transaction was rejected because an ancestor was rejected.
@@ -506,15 +507,14 @@ pub enum RejectionReason {
 impl RejectionReason {
     /// Physical payload type shared by transaction audit and retry records.
     #[doc(hidden)]
-    pub fn storage_value_type() -> groove::records::ValueType {
-        use groove::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
+    pub fn storage_value_type() -> jazz_types::records::ValueType {
+        use jazz_types::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
         ValueType::Enum(Box::new(
             EnumSchema::new(
                 "jazz_rejection_reason",
                 [
                     EnumCase::new("client_clock_too_far_ahead", RecordDescriptor::default()),
                     EnumCase::new("authorization_denied", RecordDescriptor::default()),
-                    // The stored case keeps the pre-rename spelling for format compatibility.
                     EnumCase::new("exclusive_conflict", RecordDescriptor::default()),
                     EnumCase::new("causality_violation", RecordDescriptor::default()),
                     EnumCase::new(
@@ -533,12 +533,12 @@ impl RejectionReason {
 
     /// Encode only the payload belonging to this rejection kind.
     #[doc(hidden)]
-    pub fn to_storage_value(&self) -> Result<Value, groove::records::Error> {
-        use groove::records::{EnumValue, ValueType};
+    pub fn to_storage_value(&self) -> Result<Value, jazz_types::records::Error> {
+        use jazz_types::records::{EnumValue, ValueType};
         let (tag, fields) = match self {
             Self::ClientClockTooFarAhead => (0, vec![]),
             Self::AuthorizationDenied => (1, vec![]),
-            Self::SerializationConflict => (2, vec![]),
+            Self::SerializableConflict => (2, vec![]),
             Self::CausalityViolation => (3, vec![]),
             Self::Cascade { root } => (
                 4,
@@ -561,8 +561,8 @@ impl RejectionReason {
 
     /// Decode the exact case payload; missing or unrelated fields are invalid.
     #[doc(hidden)]
-    pub fn from_storage_value(value: Value) -> Result<Self, groove::records::Error> {
-        use groove::records::{Error, ValueType};
+    pub fn from_storage_value(value: Value) -> Result<Self, jazz_types::records::Error> {
+        use jazz_types::records::{Error, ValueType};
         let Value::Enum(value) = value else {
             return Err(Error::NonCanonicalRecord);
         };
@@ -577,7 +577,7 @@ impl RejectionReason {
         match (value.tag(), fields.as_slice()) {
             (0, []) => Ok(Self::ClientClockTooFarAhead),
             (1, []) => Ok(Self::AuthorizationDenied),
-            (2, []) => Ok(Self::SerializationConflict),
+            (2, []) => Ok(Self::SerializableConflict),
             (3, []) => Ok(Self::CausalityViolation),
             (4, [root]) => Ok(Self::Cascade {
                 root: tx_id_from_value(root.clone()).map_err(|_| Error::NonCanonicalRecord)?,
@@ -1001,14 +1001,12 @@ pub struct PredicateRead {
 /// Canonical `jazz.aggregate-read-result.v1` bytes: the complete result of
 /// one serializable aggregate read, one entry per output group.
 ///
-/// The bytes are opaque at this layer; the node layer owns the encoder and the
-/// canonical decoder (`jazz::node::aggregate_read_result`). Two results are
-/// equal exactly when their bytes are equal, so the encoder is the only
-/// producer of comparable values.
+/// The bytes are opaque at this layer. Two results are equal exactly when
+/// their bytes are equal, so only the canonical encoder may produce them.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct AggregateReadResult(#[serde(with = "serde_bytes")] pub Vec<u8>);
 
-groove::define_record! {
+jazz_types::define_record! {
     struct HistoryRowRecord {
         0 => row_uuid: RowUuid,
         1 => tx_time: u64,
@@ -1022,18 +1020,18 @@ groove::define_record! {
     }
 }
 
-groove::define_record! {
+jazz_types::define_record! {
     struct RejectedTransactionRowRecord {
         0 => time: u64,
         1 => node_id: u64,
         2 => kind: TxKind,
         3 => made_by: RowAuthor,
-        4 => rejection_reason: groove::records::EnumValue,
+        4 => rejection_reason: jazz_types::records::EnumValue,
         5 => user_metadata: Option<String>,
     }
 }
 
-groove::define_record! {
+jazz_types::define_record! {
     struct RejectedVersionRowRecord {
         0 => tx_time: u64,
         1 => tx_node_id: u64,
@@ -1080,7 +1078,7 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
 }
 
 fn rejection_reason_from_rejected_record(
-    record: groove::records::BorrowedRecord<'_>,
+    record: jazz_types::records::BorrowedRecord<'_>,
 ) -> Result<RejectionReason, &'static str> {
     RejectionReason::from_storage_value(
         record
@@ -1093,7 +1091,7 @@ fn rejection_reason_from_rejected_record(
 #[cfg(test)]
 mod rejection_storage_tests {
     use super::*;
-    use groove::records::{EnumValue, RecordDescriptor, ValueType};
+    use jazz_types::records::{EnumValue, RecordDescriptor, ValueType};
 
     /// Alice's rejection keeps its exact case payload across storage.
     /// Codec-level coverage is needed to construct invalid bytes unavailable
@@ -1104,7 +1102,7 @@ mod rejection_storage_tests {
         for (reason, expected) in [
             (RejectionReason::ClientClockTooFarAhead, vec![0]),
             (RejectionReason::AuthorizationDenied, vec![1]),
-            (RejectionReason::SerializationConflict, vec![2]),
+            (RejectionReason::SerializableConflict, vec![2]),
             (RejectionReason::CausalityViolation, vec![3]),
             (
                 RejectionReason::Cascade { root },
@@ -1381,23 +1379,23 @@ mod contribution_tests {
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
-groove::impl_record_field_enum!(TxKind {
+jazz_types::impl_record_field_enum!(TxKind {
     TxKind::Mergeable = 0,
     TxKind::Serializable = 1,
 });
 // jazz.transaction-durability.v2: None=0, Local=1, Global=2.
 // The storage codec profile rejects earlier roots before these tags are read.
-groove::impl_record_field_enum!(DurabilityTier {
+jazz_types::impl_record_field_enum!(DurabilityTier {
     DurabilityTier::None = 0,
     DurabilityTier::Local = 1,
     DurabilityTier::Global = 2,
 });
 
-groove::impl_record_field_enum!(DeletionEvent {
+jazz_types::impl_record_field_enum!(DeletionEvent {
     DeletionEvent::Deleted = 0,
     DeletionEvent::Restored = 1,
 });
-groove::impl_record_field_enum!(MergeAspect {
+jazz_types::impl_record_field_enum!(MergeAspect {
     MergeAspect::Content = 0,
     MergeAspect::Deletion = 1,
 });

@@ -5,7 +5,6 @@
 //! renamed variant must not change what a TypeScript caller matches on.
 
 use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode};
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
@@ -72,11 +71,8 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
             .build(),
     )
     .expect("public schema compiles");
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let alice = jazz::db::block_on(Db::open(DbConfig {
         schema,
-        storage: TestStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),

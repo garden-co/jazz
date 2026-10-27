@@ -1,6 +1,5 @@
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
 import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
-import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
@@ -622,19 +621,20 @@ describe("IndexedDbPageStore", () => {
 
   it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
     const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
-    const withoutNodeFormat = required.filter(
-      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.node-storage.v2",
-    );
+    // The last Groove browser root's inventory (alpha.59).
+    const groove = [
+      "groove.dictionary.v1",
+      "groove.durable-index.v2",
+      "groove.large-value.v2",
+      "groove.ordered-chunk-storage.v2",
+      "groove.ordered-kv.v1",
+      "jazz.node-storage.v2",
+    ];
     for (const [requiredCodecIds, missing, unknown] of [
-      [withoutNodeFormat, ["groove.durable-index.v2", "jazz.node-storage.v2"], []],
+      [groove, ["jazz.sqlite-storage.v1"], groove],
+      [[], ["jazz.sqlite-storage.v1"], []],
       [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
-      [required.filter((codec) => codec !== "jazz.node-storage.v2"), ["jazz.node-storage.v2"], []],
-      [required.filter((codec) => codec !== "groove.dictionary.v1"), ["groove.dictionary.v1"], []],
-      [
-        [...required, "jazz.subscription-program-fact-key.v1"].sort(),
-        [],
-        ["jazz.subscription-program-fact-key.v1"],
-      ],
+      [["jazz.sqlite-storage.v2"], ["jazz.sqlite-storage.v1"], ["jazz.sqlite-storage.v2"]],
     ] as const) {
       const name = databaseName();
       await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });
@@ -699,24 +699,6 @@ describe("IndexedDbPageStore", () => {
     );
     expect(metadata).toMatchObject({ generation: 1, rootPageId: 4, nextPageId: 5 });
     expect(await store.readPage(4)).toEqual(new Uint8Array([8, 6, 7, 5, 3, 0, 9]));
-    store.close();
-  });
-
-  it("persists the Rust-owned v1 page fixture byte-for-byte", async () => {
-    const fixture = hexBytes(
-      await readFile(
-        new URL("../../../../crates/idb-tree/fixtures/page-v1-leaf.hex", import.meta.url),
-        "utf8",
-      ),
-    );
-    const name = databaseName();
-    const store = await IndexedDbPageStore.open(name);
-    await store.commit({
-      expectedGeneration: 0,
-      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
-      pages: new Map([[1, fixture]]),
-    });
-    expect(await store.readPage(1)).toEqual(fixture);
     store.close();
   });
 
@@ -842,14 +824,4 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
     tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
   });
-}
-
-function hexBytes(value: string): Uint8Array {
-  const trimmed = value.trim();
-  if (trimmed.length % 2 !== 0) throw new Error("hex fixture must have even length");
-  return Uint8Array.from(
-    Array.from({ length: trimmed.length / 2 }, (_, index) =>
-      Number.parseInt(trimmed.slice(index * 2, index * 2 + 2), 16),
-    ),
-  );
 }

@@ -75,8 +75,8 @@ const isKnownAdminStep = (step) =>
 
 function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const expectedJobs = new Set(Object.values(ciPartitionJobs));
-  // A job may host several partitions (storage-compat also runs the M3
-  // differential on the lib-test unit it just built); every run step must still
+  // A job may host several partitions (storage-compat also runs the
+  // differential oracle against the jazz build it just made); every run step must still
   // be one of that job's shared partition commands, each invoked exactly once.
   const jobCommands = new Map();
   for (const [partition, jobName] of Object.entries(ciPartitionJobs))
@@ -483,7 +483,7 @@ test("CI lint enforces SPEC issue links and propagates an unlinked question fail
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-spec-links-contract-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  for (const relative of ["dev/gates", "crates/jazz/SPEC", "crates/groove/SPEC"])
+  for (const relative of ["dev/gates", "crates/jazz/SPEC"])
     fs.mkdirSync(path.join(directory, relative), { recursive: true });
   fs.copyFileSync(
     path.join(root, "dev/gates/spec-open-questions.mjs"),

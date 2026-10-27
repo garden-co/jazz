@@ -5,17 +5,14 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, ReadOpts, SubscriptionEvent,
-};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::CurrentRow;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SubscriptionEvent};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{ArraySubquery, OrderDirection, Query};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -42,11 +39,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> Db {
     let schema = schema();
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x5e; 16]),
             author: AuthorSubject::SYSTEM,
@@ -96,20 +90,14 @@ fn by_rank(direction: OrderDirection) -> Query {
 /// Titles in result order. Also checks that the unselected order key is not
 /// returned.
 fn titles(rows: impl IntoIterator<Item = CurrentRow>) -> Vec<String> {
-    let schema = schema();
-    let table = schema
-        .tables()
-        .iter()
-        .find(|table| table.name.as_str() == "tasks")
-        .expect("tasks table");
     rows.into_iter()
         .map(|row| {
             assert_eq!(
-                row.cell(table, "rank"),
+                row.cell("rank"),
                 None,
                 "an unselected order key must not be returned"
             );
-            match row.cell(table, "title") {
+            match row.cell("title") {
                 Some(Value::String(title)) => title,
                 other => panic!("expected a title, got {other:?}"),
             }
@@ -295,11 +283,8 @@ fn float_literal_comparisons_match_numeric_order() {
         table = table.column(name, ColumnType::Double);
     }
     let schema = compile_schema(&SchemaBuilder::new().table(table).build());
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x6f; 16]),
             author: AuthorSubject::SYSTEM,
@@ -600,4 +585,86 @@ fn float_literal_comparisons_match_numeric_order() {
         failures.is_empty(),
         "prepared float predicates must preserve numeric semantics: {failures:#?}"
     );
+}
+
+/// Rows that tie on every order key come in row-id order, in the direction
+/// of the last key: a newest-first read lists tied rows by descending id, so
+/// a declared index (which ends in `id`) serves the whole order in one scan.
+/// Reads and maintained subscriptions agree, also for a row added later.
+#[test]
+fn ties_break_by_row_id_in_the_last_keys_direction() {
+    let db = open_db();
+    for (byte, title) in [(2u8, "two"), (1, "one"), (3, "three")] {
+        block_on(db.insert(
+            "tasks",
+            task_cells(title, 7),
+            InsertOptions {
+                row_id: Some(RowUuid::from_bytes([byte; 16])),
+                ..Default::default()
+            },
+        ))
+        .expect("insert task");
+    }
+    // Each pass adds a fourth tied row with a higher id, then deletes it.
+    for (direction, four, expected) in [
+        (
+            OrderDirection::Asc,
+            4u8,
+            vec!["one", "two", "three", "four"],
+        ),
+        (OrderDirection::Desc, 5, vec!["four", "three", "two", "one"]),
+    ] {
+        let query = by_rank(direction);
+        let read: Vec<_> = expected.iter().copied().filter(|t| *t != "four").collect();
+        assert_eq!(read_titles(&db, &query), read, "{direction:?} read");
+
+        let prepared = db.prepare_query(&query).expect("prepare query");
+        let mut subscription = block_on(db.subscribe(&prepared, local())).expect("subscribe");
+        let Some(SubscriptionEvent::Delta {
+            reset: true,
+            mut added,
+            ..
+        }) = block_on(subscription.next_event())
+        else {
+            panic!("expected an initial reset");
+        };
+        added.sort_by_key(|row| row.index);
+        assert_eq!(
+            titles(added.into_iter().map(|row| row.row)),
+            read,
+            "{direction:?} subscription"
+        );
+
+        let four = RowUuid::from_bytes([four; 16]);
+        block_on(db.insert(
+            "tasks",
+            task_cells("four", 7),
+            InsertOptions {
+                row_id: Some(four),
+                ..Default::default()
+            },
+        ))
+        .expect("insert tied task");
+        let Some(SubscriptionEvent::Delta { added, .. }) = block_on(subscription.next_event())
+        else {
+            panic!("expected a delta for the tied insert");
+        };
+        let index = added
+            .iter()
+            .find(|row| row.row.row_uuid() == four)
+            .expect("the tied row is added")
+            .index;
+        let position = expected.iter().position(|t| *t == "four").unwrap();
+        assert_eq!(
+            index as usize, position,
+            "{direction:?} subscription insert"
+        );
+        assert_eq!(
+            read_titles(&db, &query),
+            expected,
+            "{direction:?} read after insert"
+        );
+
+        block_on(db.delete("tasks", four, Default::default())).expect("delete tied task");
+    }
 }

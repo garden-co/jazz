@@ -127,7 +127,7 @@ runs:
       with:
         cache-on-failure: true
         cache-bin: ${{ inputs.rust-cache-bin }}
-        prefix-key: rocksdb-v1
+        prefix-key: rust-v1
         key: ${{ inputs.rust-cache-key != '' && inputs.rust-cache-key || format('repo-{0}', env.CACHE_SCOPE_REPOSITORY_ID) }}
 
     - name: Warn sccache unavailable on non-Linux runner

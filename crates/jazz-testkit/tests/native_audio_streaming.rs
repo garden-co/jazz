@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use jazz::groove::large_values::full_materializations_for_test;
+use jazz::full_materializations_for_test;
 use jazz::query::Query;
 use jazz::tools::test_support::AllowAll;
 use jazz::tools::{
@@ -101,7 +101,6 @@ async fn enrolled_native_audio_survives_offline_reopen() {
             context.admin_secret = None;
             context.backend_secret = None;
             context.storage = ClientStorage::Persistent;
-            context.storage_factory = Some(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory));
             context.data_dir = directory.path().join("project");
             enroll_test_context(&mut context).await.unwrap();
             let connector = Arc::new(jazz_native_transport::NativeWebSocketConnector);

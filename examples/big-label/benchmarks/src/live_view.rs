@@ -2,27 +2,22 @@
 //! maintained subscription whose initial hydration must follow the declared
 //! `label` index instead of scanning every tenant's releases.
 //!
-//! Moved from `crates/jazz/benches/selective_global_hydration.rs`
-//! (`maintained_subscription_hydration_100k`), reframed in BigLabel terms:
-//! documents are releases, the selected team is one label, the filler team is
-//! every other tenant. Fixture, query shape, timed work and read-bound
-//! assertions are unchanged. The crate bench keeps the JSONL scale receipt
-//! (`JAZZ_SELECTIVE_HYDRATION_RECEIPT`, including the 1M rung) for diagnosis.
+//! In BigLabel terms: documents are releases, the selected team is one label,
+//! the filler team is every other tenant. Selectivity is checked on the query
+//! plan.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, MergeableTxOps, PreparedQuery, ReadOpts, ReadTier, SeededRowIdSource,
+    Db, DbConfig, DbIdentity, FileOptions, PreparedQuery, ReadOpts, ReadTier, SeededRowIdSource,
     SubscriptionEvent, block_on,
 };
-use jazz::groove::db::StorageReadMetrics;
-use jazz::groove::records::Value;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit, param};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz_storage_rocksdb::RocksDbStorage;
 use sha2::{Digest, Sha256};
 
 const TABLE: &str = "catalogue";
@@ -32,7 +27,7 @@ const LABEL_RELEASES: usize = 100;
 const VIEW_ROWS: usize = 50;
 const SEED_BATCH_ROWS: usize = 1_000;
 
-/// A settled RocksDB database plus the prepared live-view query. The tempdir
+/// A settled file-backed database plus the prepared live-view query. The tempdir
 /// lives as long as the database, so every sample reads the same reopened
 /// persisted fixture. Built once per benchmark, outside the timed closure.
 pub struct LiveViewFixture {
@@ -42,17 +37,16 @@ pub struct LiveViewFixture {
     expected: Vec<RowUuid>,
 }
 
-/// What one hydration returned: rows, their digest, and logical read counts.
+/// What one hydration returned: rows and their digest.
 pub struct Hydration {
     pub row_count: usize,
     pub result_digest: String,
-    pub metrics: StorageReadMetrics,
 }
 
 impl LiveViewFixture {
     pub fn new(table_rows: usize) -> Self {
         assert!(table_rows >= LABEL_RELEASES);
-        let temp = tempfile::tempdir().expect("create live-view RocksDB directory");
+        let temp = tempfile::tempdir().expect("create live-view database directory");
         let seed_db = open_db(temp.path(), schema());
         seed_rows(&seed_db, table_rows);
         block_on(seed_db.close()).expect("close seeded live-view database");
@@ -78,9 +72,9 @@ impl LiveViewFixture {
     }
 
     /// Untimed: the one-shot read and a maintained hydration both return the
-    /// exact page and read no more than the label's indexed candidates.
+    /// exact page, and the plan seeks the label index instead of scanning
+    /// every tenant's releases.
     pub fn assert_selective_hydration(&self) {
-        self.db.reset_storage_read_metrics_for_test();
         let rows = block_on(self.db.all_for_identity(
             &self.prepared,
             global_read_opts(),
@@ -89,24 +83,30 @@ impl LiveViewFixture {
         .expect("run live-view query");
         let observed = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
         assert_eq!(observed, self.expected, "live-view result changed");
-        assert_selective_metrics(&self.db.take_storage_read_metrics_for_test(), "query");
+        let (sql, plan) = self
+            .db
+            .explain_query_plan(&self.prepared, Some(AuthorSubject::SYSTEM))
+            .expect("explain live-view query");
+        assert!(
+            plan.contains("USING INDEX") && !plan.contains(&format!("SCAN {TABLE}")),
+            "live-view hydration must seek the label index: {plan}\n{sql}"
+        );
 
         let measured = self.hydrate();
         assert_eq!(measured.row_count, self.expected.len());
         assert_eq!(measured.result_digest, digest_rows(&self.expected));
-        assert_selective_metrics(&measured.metrics, "maintained");
     }
 
-    pub fn active_groove_subscriptions(&self) -> usize {
-        self.db.active_groove_subscriptions_for_test()
+    pub fn active_subscriptions(&self) -> usize {
+        self.db.runtime_stats_for_test().active_subscriptions
     }
 
     /// Drain the queued `SubscriptionStream::drop` finalizers and prove a
-    /// repeated benchmark retains no Groove graph per sample. Outside timing.
+    /// repeated benchmark retains no subscription per sample. Outside timing.
     pub fn assert_subscription_baseline(&self, baseline: usize, phase: &str) {
         block_on(self.db.tick()).expect("drain queued live-view finalizers");
         assert_eq!(
-            self.active_groove_subscriptions(),
+            self.active_subscriptions(),
             baseline,
             "{phase} must retire every dropped live view"
         );
@@ -115,7 +115,6 @@ impl LiveViewFixture {
     /// The timed operation: open one maintained subscription and consume its
     /// initial reset. No assertion runs inside the sample.
     pub fn hydrate(&self) -> Hydration {
-        self.db.reset_storage_read_metrics_for_test();
         let mut subscription =
             block_on(self.db.subscribe(&self.prepared, local_read_opts())).expect("open live view");
         let SubscriptionEvent::Delta {
@@ -130,13 +129,11 @@ impl LiveViewFixture {
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<Vec<_>>();
-        let metrics = self.db.take_storage_read_metrics_for_test();
         // Only queues teardown; the caller ticks the owner outside timing.
         drop(subscription);
         Hydration {
             row_count: rows.len(),
             result_digest: digest_rows(&rows),
-            metrics,
         }
     }
 }
@@ -150,18 +147,6 @@ fn live_view_query() -> Query {
         .limit(VIEW_ROWS)
 }
 
-fn assert_selective_metrics(metrics: &StorageReadMetrics, phase: &str) {
-    assert!(
-        metrics.global_current_rows.reads <= LABEL_RELEASES,
-        "{phase} live-view hydration read {} current rows for {LABEL_RELEASES} indexed candidates",
-        metrics.global_current_rows.reads,
-    );
-    assert!(
-        (1..=LABEL_RELEASES).contains(&metrics.global_current_indexes.reads),
-        "{phase} live-view hydration must use the label index without reading more than the label's releases",
-    );
-}
-
 fn schema() -> JazzSchema {
     JazzSchema::new(
         &SchemaBuilder::new()
@@ -171,7 +156,8 @@ fn schema() -> JazzSchema {
                     .column("published", ColumnType::Boolean)
                     .column("released_at", ColumnType::Timestamp)
                     .column("title", ColumnType::Text)
-                    .index_only(["label"]),
+                    .index_only(["label"])
+                    .composite_index(["label", "published", "released_at"]),
             )
             .build(),
     )
@@ -179,22 +165,17 @@ fn schema() -> JazzSchema {
 }
 
 fn open_db(path: &Path, schema: JazzSchema) -> Db {
-    let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(path, &refs).expect("open live-view RocksDB");
-    block_on(Db::open_history_complete(
+    block_on(Db::open_at(
         DbConfig::new(
             schema,
-            storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x73; 16]),
                 author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x73)),
+        &path.join("catalogue.sqlite"),
+        FileOptions::default(),
     ))
     .expect("open live-view Jazz database")
 }
@@ -227,9 +208,7 @@ fn seed_rows(db: &Db, table_rows: usize) {
             ))
             .expect("stage live-view seed release");
         }
-        let tx_id = block_on(tx.commit()).expect("commit live-view seed batch");
-        db.finalize_local_mergeable_commit_for_test(tx_id)
-            .expect("settle live-view seed batch");
+        block_on(tx.commit()).expect("commit live-view seed batch");
     }
 }
 
