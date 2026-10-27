@@ -135,6 +135,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../transaction_commit_kind.rs"]
+mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
 #[path = "../union_queries.rs"]
