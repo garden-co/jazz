@@ -170,13 +170,10 @@ fn split_rows(
     split_rows(rest, parts)
 }
 
-/// One frame's [`SyncMessage`]: exactly one postcard value, so a frame
-/// with bytes after its message is malformed rather than truncated.
+/// One frame's [`SyncMessage`]: exactly one canonical postcard value.
+/// Alternate varint spellings and bytes after its message are malformed.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    match postcard::take_from_bytes(frame)? {
-        (message, []) => Ok(message),
-        _ => Err(postcard::Error::DeserializeBadEncoding),
-    }
+    jazz_types::postcard_exact::decode_postcard_exact(frame)
 }
 
 /// Joins a `Rows` message's frames (see [`encode_frames`]) back into the

@@ -29,6 +29,7 @@ pub use jazz_db::format;
 #[cfg(feature = "testing")]
 pub use jazz_db::full_materializations_for_test;
 pub use jazz_db::result_tree;
+pub use jazz_db::sync_codec;
 pub use jazz_model::model;
 pub use jazz_model::query;
 pub use jazz_model::row_input;
