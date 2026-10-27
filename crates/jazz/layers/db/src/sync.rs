@@ -936,6 +936,11 @@ pub(crate) struct Client {
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
+    /// The next permission preflight's id. Each client starts at a random
+    /// point, so an id held over from another instance (a reopened
+    /// database) or a late answer to one never names a request of this
+    /// one (INV-API-28).
+    next_advice: u64,
     /// Large-value nodes asked for and not yet answered.
     requested: BTreeSet<ChunkRequest>,
     /// Nodes to ask for on the next send.
@@ -3176,6 +3181,7 @@ impl Client {
                 detached: false,
             })),
             next_id: 1,
+            next_advice: fresh_advice_base(),
             remote: HashMap::new(),
             remote_ids: HashMap::new(),
             outbox: Vec::new(),
@@ -3998,8 +4004,8 @@ impl Db {
         let Some(client) = inner.client.as_mut() else {
             return 0;
         };
-        let id = client.next_id;
-        client.next_id += 1;
+        let id = client.next_advice;
+        client.next_advice += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
             let (author, session) = match session {
@@ -4043,11 +4049,17 @@ impl Db {
         .await
     }
 
-    /// Resolve an outstanding request as `Unknown`; its answer is ignored.
+    /// Resolve an outstanding request as `Unknown`: its waiter is removed,
+    /// a request not yet sent is never sent, and a late answer is ignored.
     pub fn cancel_permission_advice_request(&self, id: u64) {
         let mut inner = self.inner.borrow_mut();
-        if let Some(slot) = inner.client.as_mut().and_then(|c| c.advice.get_mut(&id)) {
-            slot.get_or_insert(PermissionAdvice::Unknown);
+        let Some(client) = inner.client.as_mut() else {
+            return;
+        };
+        if client.advice.remove(&id).is_some() {
+            client
+                .outbox
+                .retain(|m| !matches!(m, SyncMessage::Advise { id: asked, .. } if *asked == id));
         }
     }
 
@@ -6402,6 +6414,14 @@ fn commit_who(
         (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
         (None, _) => Ok(Who::Local),
     }
+}
+
+/// Where a client's permission advice ids start: random, below 2^51 so the
+/// ids stay exact as JavaScript numbers, and never 0 (the id of advice
+/// asked without a client).
+fn fresh_advice_base() -> u64 {
+    let (high, _) = uuid::Uuid::new_v4().as_u64_pair();
+    (high >> 13) | 1
 }
 
 /// Whether `identity` may read a row of stored table `table`.
