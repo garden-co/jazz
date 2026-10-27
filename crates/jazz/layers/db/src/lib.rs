@@ -45,6 +45,7 @@ pub mod names;
 pub mod options;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+pub(crate) mod text_merge;
 pub mod values;
 
 #[cfg(feature = "testing")]

@@ -58,6 +58,7 @@ pub use crate::options::{FirstLoad, RemoteLinkHint};
 #[path = "sync_conflicts.rs"]
 mod conflicts;
 pub use crate::wire::TransportError;
+pub(crate) use conflicts::Built;
 pub use conflicts::WriteConflict;
 
 /// Wall-clock Unix ms.
@@ -6839,7 +6840,7 @@ impl Db {
         // applied: a base on a rejected commit rejects the upload. A relay
         // renames the bases for its upstream; the authority resolves them.
         let by_row = self.inner().row_ops(&ops);
-        let (bases, built) = {
+        let (bases, mut built) = {
             let inner = self.inner();
             let resolved = if relay {
                 inner
@@ -6862,13 +6863,17 @@ impl Db {
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
             inner.defer_checks();
-            // The unit was made over the sender's image (SPEC 4, INV-HIST-8).
+            // The unit was made over the sender's image (SPEC 4, INV-HIST-8);
+            // text merges read what each row was built on.
             inner.merging = true;
+            inner.merge_bases = std::mem::take(&mut built);
+            inner.text_in.borrow_mut().clear();
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
                 .and_then(|()| inner.finish_checks(seq));
             inner.merging = false;
+            built = std::mem::take(&mut inner.merge_bases);
             if let Err(error) = applied {
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
@@ -6908,9 +6913,9 @@ impl Db {
         .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
         .and_then(|rows| {
             if !relay {
-                self.inner
-                    .borrow()
-                    .record_bases(&ops, &by_row, &built, seq, &rows)?;
+                let inner = self.inner.borrow();
+                inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
+                inner.record_text_in(seq, origin.0, &built, &rows)?;
             }
             Ok(rows)
         });
