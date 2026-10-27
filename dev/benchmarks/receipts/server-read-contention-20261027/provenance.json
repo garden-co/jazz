@@ -1,0 +1,188 @@
+{
+  "runtime_base": "5b2fc14d17a226c00a88c7824f04466d6eedf160",
+  "runtime_changes": "none; new diagnostic example only",
+  "recorded_at_utc": "2026-10-27T19:28:26.443896+00:00",
+  "machine": {
+    "cpu": "Apple M1 Max",
+    "logical_cpus": 10,
+    "architecture": "arm64",
+    "macos": "27.0.1"
+  },
+  "toolchain": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+  "profile": "release",
+  "allocator": "system",
+  "benchmark_source_sha256": "eddb72036650fde20b27f501b9f074930902187790cb2563fe3f50862a711996",
+  "binary_sha256": "16be9d884e6e3942b74931154a5a3e10a7c51256039b6cab977e64d8bcd4595a",
+  "commands": [
+    [
+      "target/release/examples/server_read_contention",
+      "--revision",
+      "5b2fc14d17a226c00a88c7824f04466d6eedf160",
+      "--readers",
+      "4"
+    ],
+    [
+      "target/release/examples/server_read_contention",
+      "--revision",
+      "5b2fc14d17a226c00a88c7824f04466d6eedf160",
+      "--readers",
+      "1"
+    ],
+    [
+      "target/release/examples/server_read_contention",
+      "--revision",
+      "5b2fc14d17a226c00a88c7824f04466d6eedf160",
+      "--readers",
+      "8"
+    ]
+  ],
+  "run_order": [
+    4,
+    1,
+    8
+  ],
+  "limitations": [
+    "Local developer-machine measurements, not hosted CodSpeed",
+    "Request timing includes transport and queueing; SQL execution is not isolated",
+    "Four ABBA phases per reader count; fixed-iteration closed-loop load"
+  ],
+  "summary": [
+    {
+      "readers": 1,
+      "mode": "idle",
+      "remote_read": {
+        "count": 80,
+        "p50_ms": 1.156458,
+        "p95_ms": 1.464625,
+        "p99_ms": 2.065542
+      },
+      "global_write": {
+        "count": 80,
+        "p50_ms": 1.214542,
+        "p95_ms": 1.5309169999999999,
+        "p99_ms": 2.161166
+      }
+    },
+    {
+      "readers": 1,
+      "mode": "contended",
+      "remote_read": {
+        "count": 80,
+        "p50_ms": 146.160709,
+        "p95_ms": 153.618542,
+        "p99_ms": 163.719167
+      },
+      "global_write": {
+        "count": 80,
+        "p50_ms": 146.00295799999998,
+        "p95_ms": 153.554625,
+        "p99_ms": 164.052208
+      },
+      "background_query": {
+        "count": 80,
+        "p50_ms": 146.34704100000002,
+        "p95_ms": 153.563625,
+        "p99_ms": 163.857166
+      },
+      "background_isolated": {
+        "count": 2,
+        "p50_ms": 147.447208,
+        "p95_ms": 147.70374999999999,
+        "p99_ms": 147.70374999999999
+      }
+    },
+    {
+      "readers": 4,
+      "mode": "idle",
+      "remote_read": {
+        "count": 320,
+        "p50_ms": 1.515375,
+        "p95_ms": 1.9681659999999999,
+        "p99_ms": 2.554542
+      },
+      "global_write": {
+        "count": 80,
+        "p50_ms": 1.554375,
+        "p95_ms": 2.1862079999999997,
+        "p99_ms": 2.350583
+      }
+    },
+    {
+      "readers": 4,
+      "mode": "contended",
+      "remote_read": {
+        "count": 320,
+        "p50_ms": 145.12725,
+        "p95_ms": 156.197333,
+        "p99_ms": 164.024541
+      },
+      "global_write": {
+        "count": 80,
+        "p50_ms": 145.127958,
+        "p95_ms": 156.17875,
+        "p99_ms": 164.179708
+      },
+      "background_query": {
+        "count": 80,
+        "p50_ms": 145.154041,
+        "p95_ms": 155.98125,
+        "p99_ms": 164.35637499999999
+      },
+      "background_isolated": {
+        "count": 2,
+        "p50_ms": 141.612333,
+        "p95_ms": 153.297917,
+        "p99_ms": 153.297917
+      }
+    },
+    {
+      "readers": 8,
+      "mode": "idle",
+      "remote_read": {
+        "count": 640,
+        "p50_ms": 1.8146250000000002,
+        "p95_ms": 2.382958,
+        "p99_ms": 2.7578329999999998
+      },
+      "global_write": {
+        "count": 80,
+        "p50_ms": 1.761708,
+        "p95_ms": 2.3661659999999998,
+        "p99_ms": 2.9985
+      }
+    },
+    {
+      "readers": 8,
+      "mode": "contended",
+      "remote_read": {
+        "count": 640,
+        "p50_ms": 144.94099999999997,
+        "p95_ms": 150.708625,
+        "p99_ms": 155.54958399999998
+      },
+      "global_write": {
+        "count": 80,
+        "p50_ms": 144.965584,
+        "p95_ms": 150.563959,
+        "p99_ms": 155.475125
+      },
+      "background_query": {
+        "count": 80,
+        "p50_ms": 144.929958,
+        "p95_ms": 150.83825000000002,
+        "p99_ms": 155.701333
+      },
+      "background_isolated": {
+        "count": 2,
+        "p50_ms": 149.270667,
+        "p95_ms": 149.517292,
+        "p99_ms": 149.517292
+      }
+    }
+  ],
+  "receipts": {
+    "readers-8.jsonl": "290c3cc7641a48facd92c67b68be775ab30ea8936fdf0840646a87252ab54f4a",
+    "readers-1.jsonl": "301ef76a86e9bddcf72084fcacabeb29efa72ed1eef5deb796bbdb645e34e11c",
+    "readers-4.jsonl": "035b37817ec17219bd07b741e89bf43d020607784995b8c569857699d733ff00"
+  }
+}
