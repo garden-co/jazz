@@ -331,3 +331,12 @@ mod sqlite_sync_v3;
 
 #[path = "../sqlite_upstream_read_wire.rs"]
 mod sqlite_upstream_read_wire;
+
+#[path = "../storage_owner_retirement.rs"]
+mod storage_owner_retirement;
+
+#[path = "../streaming_upload_ownership.rs"]
+mod streaming_upload_ownership;
+
+#[path = "../served_query_failures.rs"]
+mod served_query_failures;

@@ -286,6 +286,7 @@ impl Db {
             id,
         };
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let mut inner = self.inner();
             let client = inner.client.as_mut().expect("client");
             if client.connection != connection

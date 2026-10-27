@@ -5329,20 +5329,21 @@ impl Db {
 
     /// Strict transaction reads retain their read guard while waiting for a
     /// transport admitted by the normal host handshake.
-    pub(super) async fn wait_for_read_transport(&self) {
+    pub(super) async fn wait_for_read_transport(&self) -> Result<(), Error> {
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let inner = self.inner.borrow();
             if inner
                 .client
                 .as_ref()
                 .is_some_and(|client| client.transport.is_some() && may_wait(client.hint.get()))
             {
-                Poll::Ready(())
+                Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
             }
         })
-        .await;
+        .await
     }
 
     pub(super) async fn fetch_answer(
@@ -5387,6 +5388,7 @@ impl Db {
         accepted: bool,
         view: &ReadViewSourceSpec,
     ) -> Result<Option<FetchAnswer>, Error> {
+        self.ensure_storage_owner_active()?;
         let _deadline = self.read_deadline(deadline);
         let _attempt = self.read_attempt_deadline();
         let qualified = scope.is_some() || accepted;
@@ -5447,6 +5449,7 @@ impl Db {
         // updated in place on reconnect, avoiding a drop while Inner is borrowed.
         let mut request: Option<FetchRequest> = None;
         let answer = poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let mut inner = self.inner.borrow_mut();
             let available = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
@@ -5538,11 +5541,11 @@ impl Db {
     /// commits held behind streamed chunks. Capture only this opening's writes;
     /// later writes cannot extend its wait. Either terminal fate releases the
     /// barrier: rejected writes are absent from the authority's ensuing answer.
-    async fn wait_for_preceding_read_writes(&self, reader: AuthorSubject) {
+    async fn wait_for_preceding_read_writes(&self, reader: AuthorSubject) -> Result<(), Error> {
         let mut pending: Vec<UploadId> = {
             let inner = self.inner.borrow();
             let Some(client) = &inner.client else {
-                return;
+                return Ok(());
             };
             client
                 .pending
@@ -5564,23 +5567,24 @@ impl Db {
                 .collect()
         };
         if pending.is_empty() {
-            return;
+            return Ok(());
         }
         let _attempt = self.read_attempt_deadline();
         self.schedule_pending_tick();
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let inner = self.inner.borrow();
             let Some(client) = &inner.client else {
-                return Poll::Ready(());
+                return Poll::Ready(Ok(()));
             };
             pending.retain(|id| !client.fates.contains_key(id));
             if pending.is_empty() || !may_wait(client.hint.get()) {
-                Poll::Ready(())
+                Poll::Ready(Ok(()))
             } else {
                 Poll::Pending
             }
         })
-        .await;
+        .await
     }
 
     /// Freeze everything this database has committed, its own unsettled
@@ -5590,6 +5594,7 @@ impl Db {
     /// replica can read; writes still pending after that (offline) are
     /// named individually and stay readable here and at the authority.
     pub async fn capture_snapshot(&self) -> Result<SnapshotRef, Error> {
+        self.ensure_storage_owner_active()?;
         let node = self.inner.borrow().identity.node;
         if !self.is_client() {
             return Ok(SnapshotRef {
@@ -5605,6 +5610,7 @@ impl Db {
             client.pending.iter().map(|p| (p.node, p.tx)).collect()
         };
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             let settling = client.transport.is_some()
@@ -5616,10 +5622,10 @@ impl Db {
             if settling {
                 Poll::Pending
             } else {
-                Poll::Ready(())
+                Poll::Ready(Ok::<(), Error>(()))
             }
         })
-        .await;
+        .await?;
         let inner = self.inner.borrow();
         let client = inner.client.as_ref().expect("client");
         Ok(SnapshotRef {
@@ -5641,6 +5647,7 @@ impl Db {
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let inner = self.inner.borrow();
             inner.require_owner_subject(inner.identity.author)?;
             if let Some(error) = inner.write_rejection(tx)? {
@@ -5687,6 +5694,7 @@ impl Db {
     /// ones included) reaches `tier`, failing with the first the server
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         if tier == DurabilityTier::None || !self.is_client() {
             return Ok(());
         }
@@ -5770,6 +5778,10 @@ impl Db {
     /// link fails or the request was cancelled first.
     pub async fn permission_advice(&self, id: u64) -> PermissionAdvice {
         poll_fn(|_| {
+            if self.ensure_storage_owner_active().is_err() {
+                self.cancel_permission_advice_request(id);
+                return Poll::Ready(PermissionAdvice::Unknown);
+            }
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
                 return Poll::Ready(PermissionAdvice::Unknown);
@@ -7664,8 +7676,18 @@ impl Db {
                         Some((*id, error))
                     })
                     .collect::<Vec<_>>();
+                let mut refused = refused;
+                for (id, (_, group, ..)) in &inner.sessions[index].subs {
+                    if let Some(error) = group
+                        .upgrade()
+                        .and_then(|group| group.borrow().failure.clone())
+                    {
+                        // Do not expose private row data from evaluation errors.
+                        refused.push((*id, Error::new(error.code, "Subscription query failed")));
+                    }
+                }
                 for (id, error) in refused {
-                    inner.refuse_subscription(index, id, error);
+                    inner.refuse_subscription(index, id, error)?;
                 }
                 if recheck.is_empty()
                     && inner.sessions[index].idle()
@@ -7713,6 +7735,7 @@ impl Db {
                     })
                     .collect();
                 let mut images = Vec::new();
+                let mut refused_after_drain = Vec::new();
                 // Seqs of shipped history versions: their origins go first.
                 let mut history_seqs = BTreeSet::new();
                 for (id, queue, group, list) in subs {
@@ -8004,7 +8027,7 @@ impl Db {
                             }
                             Err(error) => {
                                 images.truncate(first);
-                                inner.refuse_subscription(index, id, error);
+                                refused_after_drain.push((id, error));
                                 continue;
                             }
                         }
@@ -8030,7 +8053,7 @@ impl Db {
                             }
                             Err(error) => {
                                 images.truncate(first);
-                                inner.refuse_subscription(index, id, error);
+                                refused_after_drain.push((id, error));
                                 continue;
                             }
                         }
@@ -8163,9 +8186,12 @@ impl Db {
                         rows: accepted_rows,
                     });
                 }
+                inner.sessions[index].watch = watch;
+                inner.sessions[index].held = held_rows;
+                for (id, error) in refused_after_drain {
+                    inner.refuse_subscription(index, id, error)?;
+                }
                 let session = &mut inner.sessions[index];
-                session.watch = watch;
-                session.held = held_rows;
                 let mut seen = HashSet::new();
                 images.retain(|image| {
                     seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
@@ -9604,71 +9630,7 @@ impl Db {
                 session.stale.extend(evict);
             }
             SyncMessage::Unsubscribe { id } => {
-                let mut inner = self.inner.borrow_mut();
-                inner.sessions[index].support.remove(&id);
-                inner.sessions[index].first_load.remove(&id);
-                inner.sessions[index].readable_policy.remove(&id);
-                inner.sessions[index].query_support.remove(&id);
-                inner.sessions[index].scoped_unions.remove(&id);
-                if let Some((query, binding, include_deleted, scope)) =
-                    inner.sessions[index].relayed.remove(&id)
-                {
-                    inner.release_remote(
-                        &query,
-                        &binding,
-                        include_deleted,
-                        &scope,
-                        RemoteReach::REMOTE,
-                    );
-                }
-                if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
-                    let dropped = inner.fan.dropped.clone();
-                    dropped.set(dropped.get() + 1);
-                    // Rows the result lost since the last tick were not
-                    // re-checked yet: the client may still hold them.
-                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
-                    if let Some(group) = group.upgrade() {
-                        let table = group.borrow().root().to_owned();
-                        for event in events {
-                            let SubscriptionEvent::Delta { removed, .. } = event else {
-                                continue;
-                            };
-                            for gone in removed {
-                                let id = gone.row_uuid.0.as_bytes().to_vec();
-                                for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
-                                    inner.sessions[index].touched.insert((
-                                        table.clone(),
-                                        gone.row_uuid,
-                                        image.key,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    // The replica keeps the rows it was shipped: held, a
-                    // policy dependency's commit still re-checks them, so a
-                    // retained copy is evicted once the client loses access.
-                    if policy.is_some()
-                        && let Some(group) = group.upgrade()
-                    {
-                        let group = group.borrow();
-                        let table = group.root().to_owned();
-                        let mut held = std::mem::take(&mut inner.sessions[index].held);
-                        for row in group.rows.iter().filter(|row| *row.table == *table) {
-                            let rid = row.id.0.as_bytes().to_vec();
-                            let seq = row.seq as i64;
-                            for image in
-                                inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?
-                            {
-                                held.entry(table.clone())
-                                    .or_default()
-                                    .entry((row.id, image.key))
-                                    .or_insert(true);
-                            }
-                        }
-                        inner.sessions[index].held = held;
-                    }
-                }
+                self.inner.borrow_mut().retire_subscription(index, id)?;
             }
             SyncMessage::Advise {
                 id,
@@ -10911,7 +10873,7 @@ impl Db {
                 .map(|(identity, _)| *identity)
                 .or(author)
                 .unwrap_or_else(|| self.inner().identity.author);
-            self.wait_for_preceding_read_writes(reader).await;
+            self.wait_for_preceding_read_writes(reader).await?;
         }
         let read = self.read_serialized_query(query, opts, open_tx, request_scope, author);
         let mut read = std::pin::pin!(read);
@@ -11083,6 +11045,7 @@ impl Db {
             }
             let mut stream = self.open_subscription(&prepared, author, opts)?;
             let rows = poll_fn(|_| {
+                self.ensure_storage_owner_active()?;
                 if let Some(error) = stream
                     .refused
                     .as_ref()
@@ -11326,6 +11289,7 @@ impl Db {
         let _deadline = self.read_deadline(deadline);
         let _attempt_deadline = deadline.and_then(|_| self.read_attempt_deadline());
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             if self.inner().client.as_ref().map(|client| client.connection) != connection {
                 return Poll::Ready(Err(Error::new(
                     ErrorCode::NotObserved,
@@ -11573,6 +11537,7 @@ impl Db {
         scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
         deadline: Instant,
     ) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         let _wake = self.read_deadline(Some(deadline));
         let _attempt = self.read_attempt_deadline();
         let (id, connection) = {
@@ -11604,6 +11569,7 @@ impl Db {
         };
         self.schedule_pending_tick();
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let mut inner = self.inner();
             let client = inner.client.as_mut().expect("client");
             if client.connection != connection {

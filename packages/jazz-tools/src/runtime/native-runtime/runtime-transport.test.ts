@@ -93,6 +93,68 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("lets a tab reach Local through its healthy worker after a remote server failure", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "offline" } });
+      const wait = runtime.waitForTransaction(await committedTxId(receipt), "local");
+      runtime.reportRemoteServerTransportError(new Error("cloud disconnected"));
+      persisted.resolve();
+      await expect(wait).resolves.toBeUndefined();
+      await expect(runtime.flushLocalSettlements()).resolves.toBeUndefined();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
+  });
+
+  it("allows new Local waits after a failed worker is replaced", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        connectUpstream: () => new FakeTransport([]),
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "replayed" } });
+      const txId = await committedTxId(receipt);
+      const wait = runtime.waitForTransaction(txId, "local");
+      const failure = new Error("worker storage failed");
+      runtime.reportLocalRelayError(failure);
+      await expect(wait).rejects.toBe(failure);
+      await expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(failure);
+      const replacement = await runtime.connectUpstreamPeer();
+      persisted.resolve();
+      await expect(runtime.waitForTransaction(txId, "local")).resolves.toBeUndefined();
+      replacement.close();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
+  });
+
   it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
     vi.useFakeTimers();
     let schedule: ((urgency: "immediate" | "deferred" | `after:${number}`) => void) | undefined;

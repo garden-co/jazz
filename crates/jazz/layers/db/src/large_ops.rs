@@ -139,6 +139,12 @@ impl Inner {
     /// Drop queues contain only this owner's uploads. SQL errors retain the
     /// receipt for the next maintenance pass; crash recovery uses lease expiry.
     pub(super) fn release_dropped_uploads(&self) -> Result<(), Error> {
+        // Removing an in-memory receipt must not outlive a SQL rollback.
+        // Callback transactions can tick while suspended; defer cleanup until
+        // its deletes can commit independently of that application unit.
+        if !self.conn.is_autocommit() {
+            return Ok(());
+        }
         let mut cleanup = self.upload_cleanup.borrow_mut();
         while let Some(id) = cleanup.last() {
             crate::large::end_upload(&self.conn, id)?;

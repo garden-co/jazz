@@ -395,6 +395,13 @@ impl SubscriptionStream {
     /// use this to notify an idle foreground only when there is work to drain.
     pub fn has_pending_event(&self) -> bool {
         if self
+            .group
+            .upgrade()
+            .is_some_and(|group| group.borrow().failure.is_some())
+        {
+            return true;
+        }
+        if self
             .refused
             .as_ref()
             .is_some_and(|refused| refused.borrow().is_some())
@@ -424,7 +431,12 @@ impl SubscriptionStream {
         let reason = self
             .refused
             .as_ref()
-            .and_then(|refused| refused.borrow().as_ref().map(Error::to_string));
+            .and_then(|refused| refused.borrow().as_ref().map(Error::to_string))
+            .or_else(|| {
+                self.group
+                    .upgrade()
+                    .and_then(|group| group.borrow().failure.as_ref().map(Error::to_string))
+            });
         if let Some(reason) = reason {
             self.refused = None;
             self.gate = None;
@@ -1458,6 +1470,7 @@ impl Db {
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         self.sync_tick()?;
         let deferred = self.inner().deferred_owner_durability;
         if !deferred && let Some(barrier) = self.prepare_owner_durability()? {
@@ -1530,7 +1543,20 @@ impl Db {
             }))
             .map_err(storage)?;
         inner.retired = true;
+        // Queued transaction reads may be waiting behind an unpolled future,
+        // so retiring the owner must wake their admission queue directly.
+        for batch in inner.batches.values() {
+            accepted::close_pending_reads(&batch.reads_state);
+        }
         Ok(())
+    }
+
+    pub(crate) fn ensure_storage_owner_active(&self) -> Result<(), Error> {
+        if self.inner.borrow().retired {
+            Err(Error::new(ErrorCode::Storage, "storage owner is retired"))
+        } else {
+            Ok(())
+        }
     }
 
     // ---- preparation ----------------------------------------------------
@@ -1906,6 +1932,16 @@ impl Db {
 
     pub fn active_groove_subscriptions_for_test(&self) -> usize {
         self.inner().fan.live_members().len()
+    }
+
+    /// Inject a one-shot prepared-membership result failure into the next
+    /// refresh for `table`.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fail_next_membership_refresh_for_test(&self, table: &str, error: Error) -> bool {
+        self.inner()
+            .fan
+            .fail_next_membership_refresh_for_test(table, error)
     }
 
     pub fn fanout_stats(&self) -> fanout::FanoutStats {
@@ -6504,7 +6540,7 @@ impl TxRef<'_> {
             self.db.remote_shape(&prepared.query)?;
             let fetch = async {
                 if tier == ReadTier::Remote {
-                    self.db.wait_for_read_transport().await;
+                    self.db.wait_for_read_transport().await?;
                 }
                 let through = self
                     .db

@@ -931,6 +931,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReplacementPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private localRelayError: Error | null = null;
+  private readonly localRelayErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -1182,13 +1184,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }): Promise<Transport> {
     if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer(authority);
     this.peerUpstreamAttached = true;
-    if (authority)
-      return this.connectNegotiatedUpstream({
-        protocolVersion: WIRE_PROTOCOL_VERSION,
-        features: authority.features,
-        authority,
-      });
-    return await this.db.connectUpstream();
+    const transport = authority
+      ? await this.connectNegotiatedUpstream({
+          protocolVersion: WIRE_PROTOCOL_VERSION,
+          features: authority.features,
+          authority,
+        })
+      : await this.db.connectUpstream();
+    this.localRelayError = null;
+    return transport;
   }
 
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
@@ -3300,6 +3304,16 @@ export class NativeRuntimeAdapter implements Runtime {
     this.handleServerTransportError(error);
   }
 
+  /** The durable worker itself failed, so a tab cannot establish Local either. */
+  reportLocalRelayError(error: Error): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalRelayError(error);
+    this.localRelayError ??= error;
+    for (const waiter of this.localRelayErrorWaiters.splice(0)) {
+      if (waiter.active) waiter.reject(this.localRelayError);
+    }
+    this.handleServerTransportError(error);
+  }
+
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
@@ -3342,6 +3356,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
+    this.throwServerTransportErrorForTier("local");
   }
 
   /** Observe worker durability work, including fire-and-forget mutations. */
@@ -4736,6 +4751,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string): void {
+    if (tier === "local" && this.nonDurableClient && this.localRelayError) {
+      throw this.localRelayError;
+    }
     if ((tier === "global" || tier === "remote") && this.serverTransportError) {
       throw this.serverTransportError;
     }
@@ -4744,10 +4762,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private waitForServerTransportError(
     tier: string,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "global" && tier !== "remote") return null;
-    if (this.serverTransportError) {
+    const local = tier === "local" && this.nonDurableClient;
+    if (!local && tier !== "global" && tier !== "remote") return null;
+    const error = local ? this.localRelayError : this.serverTransportError;
+    const waiters = local ? this.localRelayErrorWaiters : this.serverTransportErrorWaiters;
+    if (error) {
       return {
-        promise: Promise.reject(this.serverTransportError),
+        promise: Promise.reject(error),
         cancel: () => {},
       };
     }
@@ -4758,14 +4779,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const promise = new Promise<never>((_, reject) => {
       waiter.reject = reject;
     });
-    this.serverTransportErrorWaiters.push(waiter);
+    waiters.push(waiter);
     return {
       promise,
       cancel: () => {
         if (!waiter.active) return;
         waiter.active = false;
-        const index = this.serverTransportErrorWaiters.indexOf(waiter);
-        if (index >= 0) this.serverTransportErrorWaiters.splice(index, 1);
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
       },
     };
   }

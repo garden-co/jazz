@@ -32,6 +32,31 @@ function transport(overrides: Partial<Transport> = {}): Transport {
 }
 
 describe("BrowserWorkerTransportPump", () => {
+  it("reports a failed asynchronous outbound durability barrier through the peer error handler", async () => {
+    let schedule!: () => void;
+    let failed = false;
+    const failure = new Error("browser storage: injected quota failure");
+    const peer = transport({
+      setOutboundScheduler: (callback) => {
+        schedule = callback;
+      },
+      recvWireFrames: () => {
+        if (failed) throw failure;
+        return [];
+      },
+    });
+    const onError = vi.fn();
+    const pump = new BrowserWorkerTransportPump(runtime(peer), peer, vi.fn(), onError);
+    try {
+      await pump.flush();
+      failed = true;
+      schedule();
+      await vi.waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(failure));
+    } finally {
+      pump.close();
+    }
+  });
+
   it("expires a silent partial while semantic work is held and another peer progresses", async () => {
     vi.useFakeTimers();
     let release!: () => void;

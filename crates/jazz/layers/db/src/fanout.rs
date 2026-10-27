@@ -90,11 +90,21 @@ pub(super) struct Group {
     awaiting: bool,
     /// Whether the opening was published.
     opened: bool,
+    pub(super) failure: Option<Error>,
+    #[cfg(any(test, feature = "testing"))]
+    refresh_failure_for_test: Option<Error>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    fn reject(&mut self, error: Error) {
+        self.failure = Some(error.clone());
+        self.push(SubscriptionEvent::Rejected {
+            reason: error.to_string(),
+        });
+    }
+
     /// Remote query and permission support streams also need changed input
     /// witnesses when the visible row result is unchanged.
     pub(super) fn observe_support_inputs(&mut self, queue: &Queue) {
@@ -199,6 +209,22 @@ fn canon_value(value: &Value) -> Option<String> {
 }
 
 impl Fanout {
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn fail_next_membership_refresh_for_test(
+        &mut self,
+        table: &str,
+        error: Error,
+    ) -> bool {
+        for group in self.groups.values() {
+            let mut group = group.borrow_mut();
+            if group.root == table && !group.prepared.query.array_subqueries.is_empty() {
+                group.refresh_failure_for_test = Some(error);
+                return true;
+            }
+        }
+        false
+    }
+
     fn index(&mut self, gid: u64, watches: &[Watch]) {
         for watch in watches {
             match watch {
@@ -495,6 +521,8 @@ impl Inner {
         self.fan.index(gid, &watches);
         self.fan.by_key.insert(key.clone(), gid);
         let handle = Rc::new(RefCell::new(Group {
+            #[cfg(any(test, feature = "testing"))]
+            refresh_failure_for_test: None,
             key,
             prepared: prepared.clone(),
             root,
@@ -510,6 +538,7 @@ impl Inner {
             includes,
             awaiting,
             opened: !awaiting,
+            failure: None,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -1262,6 +1291,9 @@ impl Inner {
     }
 
     fn reset_group(&self, group: &mut Group) {
+        if group.failure.is_some() {
+            return;
+        }
         match self.group_rows(group) {
             Err(error) if crate::large::is_missing(&error) || sync::union_waiting(&error) => {
                 group.awaiting = true
@@ -1298,14 +1330,20 @@ impl Inner {
                 group.keys.clear();
                 self.read_keys(group);
             }
-            Err(error) => group.push(SubscriptionEvent::Rejected {
-                reason: error.to_string(),
-            }),
+            Err(error) => group.reject(error),
         }
     }
 
     /// Bring a group's result up to date; true when it re-ran the query.
     fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+        if group.failure.is_some() {
+            return false;
+        }
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(error) = group.refresh_failure_for_test.take() {
+            group.reject(error);
+            return true;
+        }
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
                 Some(Ok(Some(event))) => {
@@ -1316,9 +1354,7 @@ impl Inner {
                 // Missing chunks: the full run below decides to wait.
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
-                    group.push(SubscriptionEvent::Rejected {
-                        reason: error.to_string(),
-                    });
+                    group.reject(error);
                     return false;
                 }
                 None => {}
@@ -1331,10 +1367,7 @@ impl Inner {
                 return true;
             }
             Err(error) => {
-                let event = SubscriptionEvent::Rejected {
-                    reason: error.to_string(),
-                };
-                group.push(event);
+                group.reject(error);
                 return true;
             }
         };

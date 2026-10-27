@@ -451,6 +451,15 @@ impl TickScheduler for Host {
 }
 
 impl Host {
+    fn has_store(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.store.borrow().is_some()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        false
+    }
+
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (a no-op without one).
     async fn flush(&self, through: u64) -> Result<(), JsValue> {
@@ -1838,7 +1847,7 @@ impl WasmDb {
     pub fn connect_upstream(&self) -> Result<js_sys::Promise, JsValue> {
         let link = self.binding()?.connect_upstream();
         Ok(js_sys::Promise::resolve(&JsValue::from(
-            WasmTransport::new(link),
+            WasmTransport::new(link, None),
         )))
     }
 
@@ -1917,9 +1926,10 @@ impl WasmDb {
         claims: JsValue,
     ) -> Result<js_sys::Promise, JsValue> {
         let claims = binding_host::claims(identity, json_or_null(claims)?).map_err(host_error)?;
-        let link = self.binding()?.accept_subscriber(identity, claims);
+        let inner = self.open_inner()?;
+        let link = inner.binding.accept_subscriber(identity, claims);
         Ok(js_sys::Promise::resolve(&JsValue::from(
-            WasmTransport::new(link),
+            WasmTransport::new(link, Some(inner.host)),
         )))
     }
 
@@ -1940,6 +1950,9 @@ impl WasmDb {
             if owns_runtime {
                 let closed = inner.binding.close().await;
                 let retired = inner.binding.db.retire_storage_owner();
+                // A wait may have polled during close's final tick, before
+                // retirement became visible. Wake it after installing the fence.
+                inner.binding.hooks.progress.wake_all();
                 let flushed = inner.host.flush(inner.binding.db.seq_high_water()).await;
                 #[cfg(target_arch = "wasm32")]
                 inner.host.store.borrow_mut().take();
@@ -1959,11 +1972,74 @@ impl WasmDb {
 #[wasm_bindgen]
 pub struct WasmTransport {
     link: binding_host::Link,
+    // Only a durable worker's downstream publication needs this barrier.
+    // Upstream chunk requests must remain able to drive a pending core tick.
+    persistence: Option<Rc<Host>>,
+    outbound: Rc<RefCell<DurableOutbound>>,
+}
+
+#[derive(Default)]
+struct DurableOutbound {
+    ready: Vec<Vec<u8>>,
+    in_flight: usize,
+    failed: Option<JsValue>,
+    scheduler: Option<js_sys::Function>,
+    closed: bool,
 }
 
 impl WasmTransport {
-    fn new(link: binding_host::Link) -> Self {
-        Self { link }
+    fn new(link: binding_host::Link, persistence: Option<Rc<Host>>) -> Self {
+        Self {
+            link,
+            persistence: persistence.filter(|host| host.has_store()),
+            outbound: Rc::default(),
+        }
+    }
+
+    /// Keep each downstream batch in order until its writes have reached the
+    /// backing store. In particular, Stored/Fate must not acknowledge a tab's
+    /// Local wait while IndexedDB still owns an uncommitted transaction.
+    fn take_durable_outbound(&self) -> Result<Vec<Vec<u8>>, JsValue> {
+        let Some(host) = self.persistence.as_ref() else {
+            return Ok(self.link.take_outbound());
+        };
+        let mut outbound = self.outbound.borrow_mut();
+        if outbound.closed {
+            return Ok(Vec::new());
+        }
+        if let Some(error) = &outbound.failed {
+            return Err(error.clone());
+        }
+        let ready = std::mem::take(&mut outbound.ready);
+        if outbound.in_flight == 0 && self.link.outbound_len() != 0 {
+            let frames = self.link.take_outbound();
+            outbound.in_flight = frames.len();
+            let host = Rc::clone(host);
+            let state = Rc::clone(&self.outbound);
+            wasm_bindgen_futures::spawn_local(async move {
+                // A link has no database sequence. Flush the store without
+                // advancing the checkpoint used by direct database waits.
+                let result = host.flush(0).await;
+                let scheduler = {
+                    let mut outbound = state.borrow_mut();
+                    outbound.in_flight = 0;
+                    if outbound.closed {
+                        return;
+                    }
+                    match result {
+                        Ok(()) => outbound.ready.extend(frames),
+                        Err(error) => outbound.failed = Some(error),
+                    }
+                    outbound.scheduler.clone()
+                };
+                // The host must drain again on both success and failure. A
+                // failed flush terminates the peer transport, never write Fate.
+                if let Some(scheduler) = scheduler {
+                    let _ = scheduler.call0(&JsValue::NULL);
+                }
+            });
+        }
+        Ok(ready)
     }
 }
 
@@ -2039,16 +2115,17 @@ impl WasmTransport {
     }
 
     #[wasm_bindgen(js_name = recvWireFrames)]
-    pub fn recv_wire_frames(&self) -> js_sys::Array {
+    pub fn recv_wire_frames(&self) -> Result<js_sys::Array, JsValue> {
         let frames = js_sys::Array::new();
-        for frame in self.link.take_outbound() {
+        for frame in self.take_durable_outbound()? {
             frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
         }
-        frames
+        Ok(frames)
     }
 
     #[wasm_bindgen(js_name = setOutboundScheduler)]
     pub fn set_outbound_scheduler(&self, callback: js_sys::Function) {
+        self.outbound.borrow_mut().scheduler = Some(callback.clone());
         self.link.set_outbound_ready(Some(Box::new(move || {
             let _ = callback.call0(&JsValue::NULL);
         })));
@@ -2056,6 +2133,7 @@ impl WasmTransport {
 
     #[wasm_bindgen(js_name = clearOutboundScheduler)]
     pub fn clear_outbound_scheduler(&self) {
+        self.outbound.borrow_mut().scheduler = None;
         self.link.set_outbound_ready(None);
     }
 
@@ -2065,14 +2143,24 @@ impl WasmTransport {
     pub fn tick(&self) -> js_sys::Promise {
         let binding = self.link.binding().clone();
         let pending = self.link.outbound_counter();
+        let outbound = Rc::clone(&self.outbound);
         future_to_promise(async move {
             binding.tick().await.map_err(host_error)?;
-            Ok(JsValue::from_f64(pending() as f64))
+            let outbound = outbound.borrow();
+            Ok(JsValue::from_f64(
+                (pending() + outbound.ready.len() + outbound.in_flight) as f64,
+            ))
         })
     }
 
     #[wasm_bindgen(js_name = close)]
     pub fn close(&mut self) -> bool {
+        let mut outbound = self.outbound.borrow_mut();
+        outbound.closed = true;
+        outbound.ready.clear();
+        outbound.scheduler = None;
+        drop(outbound);
+        self.link.set_outbound_ready(None);
         self.link.close()
     }
 }

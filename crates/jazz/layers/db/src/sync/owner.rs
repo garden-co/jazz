@@ -1581,6 +1581,7 @@ impl Db {
             inner.client.as_ref().expect("foreground").connection
         };
         poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
             let inner = self.inner();
             if let Err(error) = inner.require_owner_subject(inner.identity.author) {
                 return Poll::Ready(Err(error));

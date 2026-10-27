@@ -132,7 +132,11 @@ import {
   decryptedIndexBytes,
 } from "../e2ee/cell-data.js";
 import { TypedTableQueryBuilder, type AnyTableMeta } from "../typed-app.js";
-import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import {
+  applySubscriptionDelta,
+  SubscriptionManager,
+  type SubscriptionDelta,
+} from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
 import {
@@ -389,8 +393,20 @@ export function observeAcceptedQueryDependencies(
   onChange: () => void,
   onError: (error: Error) => void,
   options: QueryOptions,
+  onRows?: (rows: { id: string }[]) => void,
 ): SubscriptionHandle {
-  return acceptedEvidenceSubscriptions.get(db)!(query, { onDelta: onChange, onError }, options);
+  const rows: { id: string }[] = [];
+  return acceptedEvidenceSubscriptions.get(db)!(
+    query,
+    {
+      onDelta: (delta) => {
+        if (onRows) onRows(applySubscriptionDelta(rows, delta));
+        onChange();
+      },
+      onError,
+    },
+    options,
+  );
 }
 
 /** @internal Retrieve the incremental source associated with a public Db. */

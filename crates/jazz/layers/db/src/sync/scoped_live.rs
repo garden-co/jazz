@@ -60,7 +60,7 @@ impl Db {
                         *opened = true;
                     }
                 }
-                Err(error) => self.inner().refuse_subscription(index, id, error),
+                Err(error) => self.inner().refuse_subscription(index, id, error)?,
             }
             touched.insert(index);
         }
