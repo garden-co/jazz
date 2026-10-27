@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, Journal, JsonSetEdit, LargeValueUpdate,
-    LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, block_on,
+    Db, DbConfig, DbIdentity, ErrorCode, FileOptions, InsertOptions, Journal, JsonSetEdit,
+    LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, contains, eq, lit};
@@ -256,6 +256,27 @@ fn contains_scans_chunked_values_across_boundaries() {
 }
 
 #[test]
+fn a_read_answering_too_many_large_values_is_refused_as_unsupported() {
+    let db = db();
+    let body = text(9, LARGE);
+    insert(&db, 1, &body, b"tiny");
+    insert(&db, 2, "nothing here", b"none");
+    let needle = |s: &str| {
+        Query::from("docs").filter(contains(col("body"), lit(Value::String(s.to_owned()))))
+    };
+    // Room for an empty answer (`[]`) but not for one chunked cell's key.
+    jazz::set_prep_answer_limit_for_test(Some(2));
+    assert!(ids(&db, needle("0".repeat(5).as_str())).is_empty());
+    let prepared = db.prepare_query(&needle(&body[100..120])).unwrap();
+    let refused = block_on(db.all(&prepared, ReadOpts::default()));
+    jazz::set_prep_answer_limit_for_test(None);
+    let error = refused.expect_err("over the answer limit");
+    assert_eq!(error.code, ErrorCode::Query);
+    assert!(error.message.contains("is not supported yet"), "{error:?}");
+    assert_eq!(ids(&db, needle(&body[100..120])), vec![row(1)]);
+}
+
+#[test]
 fn history_versions_keep_their_own_roots() {
     let db = db();
     insert(&db, 1, &text(9, LARGE), b"");
@@ -373,7 +394,9 @@ fn a_plain_sqlite_connection_runs_the_schema_queries_and_triggers() {
     for sql in &schema {
         let lower = sql.to_lowercase();
         assert!(
-            !lower.contains("collate") && !lower.contains("jz_"),
+            !lower.contains("collate")
+                && !lower.contains("jz_")
+                && !lower.contains("_jazz_lv_scratch"),
             "{sql}"
         );
     }

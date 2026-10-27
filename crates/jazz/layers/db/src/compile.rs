@@ -157,9 +157,10 @@ struct LargeColumn {
 }
 
 /// A question about chunked cells that their sort key cannot answer,
-/// answered in Rust before the statement runs. Each writes its answers to
-/// `_jazz_lv_scratch` under its slot, which the statement reads. The slot
-/// is a hash of the question, so the same query compiles to the same SQL.
+/// answered in Rust before the statement runs. Its answers are bound to
+/// the statement as one JSON parameter, the prep's `slot` (a parameter
+/// index), so a read never writes: the statement reads them with
+/// `json_each` / `json_extract`, keyed by each cell's descriptor.
 #[derive(Clone, Debug)]
 pub enum Prep {
     /// The chunked cells of `table.column` that pass `test`.
@@ -203,14 +204,6 @@ impl MatchTest {
 }
 
 impl Prep {
-    fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
-        let hash = blake3::hash(question.as_bytes());
-        // 52 bits: exact as a JS number (Durable Objects).
-        let slot =
-            i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) & ((1 << 52) - 1);
-        make(slot)
-    }
-
     pub fn slot(&self) -> i64 {
         match self {
             Prep::Match { slot, .. } | Prep::Rank { slot, .. } | Prep::Class { slot, .. } => *slot,
@@ -218,16 +211,21 @@ impl Prep {
     }
 }
 
-/// SQL: whether `cell` is among a prep's answers.
+/// SQL: whether `cell` (a chunked cell) is among a prep's answers.
 fn scratch_has(slot: i64, cell: &str) -> String {
     format!(
-        "EXISTS (SELECT 1 FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))"
+        "({} IN (SELECT value FROM json_each(?{slot})))",
+        crate::large::answer_key_sql(cell)
     )
 }
 
-/// SQL: a prep's answer value for `cell`.
+/// SQL: a prep's answer value for `cell` (a chunked cell), NULL when it
+/// has none.
 fn scratch_value(slot: i64, cell: &str) -> String {
-    format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))")
+    format!(
+        "json_extract(?{slot}, '$.\"' || {} || '\"')",
+        crate::large::answer_key_sql(cell)
+    )
 }
 
 /// SQL text plus its positional parameters.
@@ -250,6 +248,9 @@ pub struct Ctx<'a> {
     pub settled_only: bool,
     /// Questions the statement needs answered first.
     pub preps: Vec<Prep>,
+    /// Each prep's question, parallel to `preps`: one question is asked
+    /// (and bound) once.
+    questions: Vec<String>,
     /// The authority's node, whose own commits history reads name by their
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
@@ -338,6 +339,7 @@ impl<'a> Ctx<'a> {
             cut: None,
             settled_only: false,
             preps: Vec::new(),
+            questions: Vec::new(),
             history_origin: None,
             next_alias: 0,
         }
@@ -563,8 +565,9 @@ impl<'a> Ctx<'a> {
                         let columns = vec![(large.table.clone(), large.column.clone())];
                         let question = format!("class {columns:?}");
                         let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
+                        // A class id is a blob: it never equals an inline cell.
                         let by = format!(
-                            "(CASE WHEN COALESCE({}, 0) THEN {} ELSE {sql} END)",
+                            "(CASE WHEN COALESCE({}, 0) THEN unhex({}) ELSE {sql} END)",
                             crate::large::chunked_sql(&sql),
                             scratch_value(slot, &sql)
                         );
@@ -2972,13 +2975,17 @@ impl Ctx<'_> {
         }
     }
 
+    /// The parameter a prep's answers are bound to: one per question, a
+    /// placeholder until the statement runs.
     fn prep(&mut self, make: impl FnOnce(i64) -> Prep, question: String) -> i64 {
-        let prep = Prep::new(make, &question);
-        let slot = prep.slot();
-        if !self.preps.iter().any(|p| p.slot() == slot) {
-            self.preps.push(prep);
+        if let Some(at) = self.questions.iter().position(|q| *q == question) {
+            return self.preps[at].slot();
         }
-        slot
+        self.bind(Sql::Null);
+        let prep = make(self.params.len() as i64);
+        self.questions.push(question);
+        self.preps.push(prep);
+        self.preps.last().expect("pushed").slot()
     }
 
     /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against

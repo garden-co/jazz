@@ -20,8 +20,8 @@
 //! ranges read [`key_sql`], which is the cell itself when inline and the
 //! sort prefix when chunked; the rare questions the prefix cannot answer
 //! (values sharing it, `contains`, literals over the inline threshold) are
-//! answered in Rust before the statement runs and handed to it through
-//! `_jazz_lv_scratch`. Chunks live in `_jazz_lv_node` in the same
+//! answered in Rust before the statement runs and bound to it as one JSON
+//! parameter, so reads never write. Chunks live in `_jazz_lv_node` in the same
 //! database, so a row and the chunks it references commit in one
 //! transaction; per-root reference counts are kept by triggers on every
 //! table that has a large-capable column.
@@ -107,8 +107,7 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_upload_node (id BLOB NOT NULL, locator BLOB 
  PRIMARY KEY (id, locator)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_locator ON _jazz_lv_upload_node (locator);
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS _jazz_lv_scratch (slot INTEGER NOT NULL, cell BLOB NOT NULL, \
- v BLOB, PRIMARY KEY (slot, cell)) WITHOUT ROWID;
+DROP TABLE IF EXISTS _jazz_lv_scratch;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE ON _jazz_lv_root \
  WHEN NEW.durable = 0 BEGIN \
  INSERT OR IGNORE INTO _jazz_lv_reclaim (root) VALUES (NEW.root); END;
@@ -242,6 +241,53 @@ pub(crate) fn root_sql(cell: &str) -> String {
         "(CASE WHEN {} THEN substr(CAST({cell} AS BLOB), {ROOT_AT}, 32) END)",
         chunked_sql(cell)
     )
+}
+
+/// SQL: the key a prep answers a chunked cell under: its descriptor in
+/// hex (as [`answer_key`] spells it). The descriptor names the value, and
+/// it is short where the sort prefix before it is up to 4 KiB.
+pub(crate) fn answer_key_sql(cell: &str) -> String {
+    let blob = format!("CAST({cell} AS BLOB)");
+    format!(
+        "hex(substr({blob}, {PREFIX_AT} + \
+         CAST(CAST(substr({blob}, {PREFIX_LEN_AT}, 5) AS TEXT) AS INTEGER)))"
+    )
+}
+
+/// A chunked cell's prep key, as [`answer_key_sql`] reads it.
+fn answer_key(cell: &[u8]) -> Result<String, Error> {
+    use std::fmt::Write;
+    let descriptor = chunked_descriptor(cell)?;
+    let mut key = String::with_capacity(descriptor.len() * 2);
+    for byte in descriptor {
+        let _ = write!(key, "{byte:02X}");
+    }
+    Ok(key)
+}
+
+/// The most JSON one prep may bind: Durable Object SQLite refuses a value
+/// over 2 MiB. A key is about 150 bytes, so this holds about 6,000 answers.
+const ANSWER_BYTES: usize = 2_000_000;
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static ANSWER_BYTES_FOR_TEST: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Lower the per-prep answer limit on this thread, so tests reach it
+/// without storing thousands of chunked values (`None` restores it).
+#[cfg(any(test, feature = "testing"))]
+pub fn set_prep_answer_limit_for_test(bytes: Option<usize>) {
+    ANSWER_BYTES_FOR_TEST.with(|limit| limit.set(bytes));
+}
+
+fn answer_bytes() -> usize {
+    #[cfg(any(test, feature = "testing"))]
+    if let Some(bytes) = ANSWER_BYTES_FOR_TEST.with(std::cell::Cell::get) {
+        return bytes;
+    }
+    ANSWER_BYTES
 }
 
 /// SQL: the sort key of a large-capable cell, the expression its indexes,
@@ -811,28 +857,25 @@ fn order_runs(
     Ok(())
 }
 
-/// Answer one prep into `_jazz_lv_scratch`. Returns whether a rank prep
-/// found chunked values that share a sort key.
+/// Answer one prep: the JSON parameter the statement reads its answers
+/// from (an array of keys for a match, an object of key to rank or class
+/// id otherwise), and whether a rank prep found chunked values that share
+/// a sort key. Only reads: the answers never touch the store.
 pub(crate) fn answer(
     conn: &Connection,
     chunks: &Chunks,
     prep: &crate::compile::Prep,
-) -> Result<bool, Error> {
+) -> Result<(crate::values::Sql, bool), Error> {
     use crate::compile::{MatchTest, Prep};
     use crate::tools::CmpOp;
-    let mut insert = conn
-        .prepare_cached(
-            "INSERT OR REPLACE INTO _jazz_lv_scratch (slot, cell, v) VALUES (?1, ?2, ?3)",
-        )
-        .map_err(storage)?;
-    let slot = prep.slot();
-    match prep {
+    let (answers, ties) = match prep {
         Prep::Match {
             table,
             column,
             test,
             ..
         } => {
+            let mut keys = Vec::new();
             for cell in chunked_cells(conn, table, column)? {
                 let pass = match test {
                     MatchTest::Contains(needle) => chunks.contains(&cell, needle)?,
@@ -850,12 +893,10 @@ pub(crate) fn answer(
                     }
                 };
                 if pass {
-                    insert
-                        .execute(rusqlite::params![slot, cell, Option::<Vec<u8>>::None])
-                        .map_err(storage)?;
+                    keys.push(serde_json::Value::String(answer_key(&cell)?));
                 }
             }
-            Ok(false)
+            (serde_json::Value::Array(keys), false)
         }
         Prep::Rank { table, column, .. } => {
             let mut groups: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
@@ -866,6 +907,7 @@ pub(crate) fn answer(
                     .push(cell);
             }
             let mut ties = false;
+            let mut ranks = serde_json::Map::new();
             for (_, cells) in groups {
                 if cells.len() < 2 {
                     continue;
@@ -876,26 +918,44 @@ pub(crate) fn answer(
                 // Cells of one logical value share a rank.
                 for (rank, run) in runs.iter().enumerate() {
                     for cell in run {
-                        insert
-                            .execute(rusqlite::params![slot, cell, rank as i64])
-                            .map_err(storage)?;
+                        ranks.insert(answer_key(cell)?, serde_json::Value::from(rank));
                     }
                 }
             }
-            Ok(ties)
+            (serde_json::Value::Object(ranks), ties)
         }
         Prep::Class { columns, .. } => {
+            let mut classes = serde_json::Map::new();
             for (table, column) in columns {
                 for cell in chunked_cells(conn, table, column)? {
                     let class = blake3::hash(&chunks.materialize(&cell)?);
-                    insert
-                        .execute(rusqlite::params![slot, cell, class.as_bytes().to_vec()])
-                        .map_err(storage)?;
+                    classes.insert(
+                        answer_key(&cell)?,
+                        serde_json::Value::String(class.to_hex().to_string()),
+                    );
                 }
             }
-            Ok(false)
+            (serde_json::Value::Object(classes), false)
         }
+    };
+    let json = answers.to_string();
+    if json.len() > answer_bytes() {
+        let (table, column) = match prep {
+            Prep::Match { table, column, .. } | Prep::Rank { table, column, .. } => {
+                (table.as_str(), column.as_str())
+            }
+            Prep::Class { columns, .. } => columns.first().map_or(("", ""), |(table, column)| {
+                (table.as_str(), column.as_str())
+            }),
+        };
+        return Err(crate::values::unsupported(format!(
+            "a read that matches, orders or compares this many large values of \
+             `{table}.{column}` at once ({} bytes of answers, more than {})",
+            json.len(),
+            answer_bytes()
+        )));
     }
+    Ok((crate::values::Sql::Text(json.into_bytes()), ties))
 }
 
 /// Store a prepared value's new nodes and cache them. A replica (`replica`)

@@ -2291,42 +2291,42 @@ impl Inner {
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        self.with_preps(&compiled.preps, |ties| {
+        self.with_preps(&compiled.preps, &compiled.params, |ties, params| {
             let sql = match &compiled.ranked_sql {
                 Some(ranked) if ties => ranked,
                 _ => &compiled.sql,
             };
-            self.execute_sql(sql, compiled, table)
+            self.execute_sql(sql, params, compiled, table)
         })
     }
 
-    /// Answer `preps` into `_jazz_lv_scratch`, run `body` (told whether a
-    /// rank prep found chunked values sharing a sort key), then clear the
-    /// answers. Statements that need no prep run directly.
+    /// Answer `preps` into their parameters of `params`, then run `body`
+    /// with those parameters (told whether a rank prep found chunked
+    /// values sharing a sort key). Answering only reads.
     pub(crate) fn with_preps<T>(
         &self,
         preps: &[crate::compile::Prep],
-        body: impl FnOnce(bool) -> Result<T, Error>,
+        params: &[Sql],
+        body: impl FnOnce(bool, &[Sql]) -> Result<T, Error>,
     ) -> Result<T, Error> {
         if preps.is_empty() {
-            return body(false);
+            return body(false, params);
         }
-        // The answers are scratch rows: undone with the savepoint either way.
-        begin_savepoint(&self.conn, "jazz_scratch")?;
-        let result = (|| {
-            let mut ties = false;
-            for prep in preps {
-                ties |= crate::large::answer(&self.conn, &self.chunks, prep)?;
-            }
-            body(ties)
-        })();
-        end_savepoint(&self.conn, "jazz_scratch", false)?;
-        result
+        let mut answered = params.to_vec();
+        let mut ties = false;
+        for prep in preps {
+            let (answers, tie) = crate::large::answer(&self.conn, &self.chunks, prep)?;
+            ties |= tie;
+            let slot = usize::try_from(prep.slot() - 1).expect("a parameter index");
+            answered[slot] = answers;
+        }
+        body(ties, &answered)
     }
 
     fn execute_sql(
         &self,
         sql: &str,
+        params: &[Sql],
         compiled: &Compiled,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -2338,7 +2338,7 @@ impl Inner {
             .map(|(_, ty)| ty.clone())
             .collect();
         let mut rows = statement
-            .query(params_from_iter(compiled.params.iter()))
+            .query(params_from_iter(params.iter()))
             .map_err(storage)?;
         let mut out = Vec::new();
         // A replica missing chunks reads on past the first blocked cell, so
@@ -2721,7 +2721,7 @@ impl Inner {
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
         let (sql, params, preps) = self.policy_check(table, row, key, cut, policy)?;
-        let value: i64 = self.with_preps(&preps, |_| {
+        let value: i64 = self.with_preps(&preps, &params, |_, params| {
             self.conn
                 .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
                 .map_err(storage)
@@ -2817,7 +2817,7 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        let value: Option<i64> = self.with_preps(&preps, |_| {
+        let value: Option<i64> = self.with_preps(&preps, &params, |_, params| {
             self.conn
                 .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
                 .optional()
@@ -2864,7 +2864,9 @@ impl Inner {
         };
         let preps = std::mem::take(&mut ctx.preps);
         let base = ctx.params;
-        self.with_preps(&preps, |_| self.versions_in(table, &condition, &base, ids))
+        self.with_preps(&preps, &base, |_, base| {
+            self.versions_in(table, &condition, base, ids)
+        })
     }
 
     fn versions_in(
