@@ -288,12 +288,7 @@ fn apply_resume_event(
         let cells = task_schema
             .columns
             .iter()
-            .map(|column| {
-                (
-                    column.name().to_owned(),
-                    output.row.cell(task_schema, column.name()),
-                )
-            })
+            .map(|column| (column.name().to_owned(), output.row.cell(column.name())))
             .collect();
         let previous = rows.insert(output.row.row_uuid(), cells);
         assert_eq!(
@@ -307,7 +302,6 @@ fn apply_resume_event(
 fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usize) -> usize {
     let board = Fixture::memory(tasks, comments, activity_events);
     update_target_task(&board);
-    let task_schema = task_schema();
     let client = open_memory_node(schema(false), 0x75, false);
     let (_link, sent) = connect(&client, &board.db);
     let mut subscription = subscribe_tasks(&client);
@@ -320,8 +314,7 @@ fn fresh_task_snapshot_bytes(tasks: usize, comments: usize, activity_events: usi
                 updated_rows += added
                     .iter()
                     .filter(|row| {
-                        row.row.cell(&task_schema, "status")
-                            == Some(Value::String("resume-canary".to_owned()))
+                        row.row.cell("status") == Some(Value::String("resume-canary".to_owned()))
                     })
                     .count();
             }

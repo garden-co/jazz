@@ -15,8 +15,7 @@ duplicate domain/IDs, cited Rust/TypeScript tests, and covered-without-test
 mistakes. The JSONL itself is the complete invariant data source; it carries
 no migration shadow registry or historical receipt.
 It reports `now` + `untested` as visible documented debt without failing.
-Every record is in the `jazz` domain: the `groove` domain was retired with
-the Groove engine (see Reserved ids).
+Every record is in the `jazz` domain.
 
 `Status` is a closed planning vocabulary validated by the gate. `Coverage` is
 deliberately free-form human receipt text, not an enum: only `✓` has a machine
@@ -49,15 +48,16 @@ merge heads, merge versions or merge-head rows; the surviving user-visible
 guarantees are `INV-HIST-8`, `INV-HIST-10`, `INV-HIST-15` and `INV-EDGE-16`
 (ch. 4 §4.3).
 
-Retired with the Groove engine when Jazz moved onto SQLite: every
-`"domain":"groove"` record (the `INV-ARR`, `INV-INC`, `INV-LARGE`, `INV-MV`,
-`INV-OK`, `INV-REC`, `INV-SHAPE`, `INV-STORAGE` and `INV-TICK` families, and
-the groove-domain `INV-QUERY` ids up to `INV-QUERY-38`). Their IDs must not be
-reused. The guarantees that still hold on SQLite live in jazz records:
-`INV-QUERY-39` (recursive set semantics), `INV-QUERY-40` (one-shot reads),
-`INV-QUERY-41` (result-only deliveries), `INV-PERF-9` (incremental cost),
-`INV-CONTENT-1` (large values), `INV-LOWER-13` (ordering) and `INV-LENS-23`
-(storage format).
+These ids must not be reused either: `INV-ARR-*`, `INV-INC-*`,
+`INV-LARGE-*`, `INV-MV-*`, `INV-OK-*`, `INV-REC-*`, `INV-SHAPE-*`,
+`INV-STORAGE-*`, `INV-TICK-*`, and every `INV-QUERY` id below `INV-QUERY-39`
+that has no record. Their
+guarantees are covered by `INV-QUERY-39` (recursive set semantics; was
+`INV-REC-3`, `INV-REC-6`, `INV-REC-17`), `INV-QUERY-40` (one-shot reads; was
+`INV-OK-3`, `INV-TICK-19`), `INV-QUERY-41` (result-only deliveries; was
+`INV-TICK-3`, `INV-QUERY-28`), `INV-PERF-9` (incremental cost; was
+`INV-INC-1`, `INV-INC-2`), `INV-CONTENT-1` (large values), `INV-LOWER-13`
+(ordering) and `INV-LENS-23` (storage format).
 
 ## Open Questions
 

@@ -1,11 +1,9 @@
-//! WebAssembly bindings for Jazz on SQLite (`jazz-db`).
+//! WebAssembly bindings for the Jazz database (`jazz-db`).
 //!
 //! One bundle serves both browser roles: a worker that owns a durable SQLite
 //! file (on IndexedDB or OPFS, see [`browser`]) and main-thread in-memory
-//! databases that sync through it. The exported names and byte codecs are the
-//! ones the Groove engine's binding had, so the TypeScript runtime keeps its
-//! shape. Engine features `jazz-db` does not have yet fail with an explicit
-//! "not supported on SQLite yet" error instead of a stand-in.
+//! databases that sync through it. Calls for features Jazz does not support
+//! yet fail with an explicit "not supported yet" error.
 //!
 //! `jazz-db` runs every operation to completion synchronously. The only
 //! things that wait are reads and write fates that need the server; they
@@ -1215,10 +1213,9 @@ impl WasmDb {
                 "cached catalogue open cannot initialise a standalone authority",
             )));
         }
-        let db = block_on(binding_host::open_memory(
-            binding_host::db_config(schema, &config, identity),
-            &config,
-        ))
+        let db = block_on(binding_host::open_memory(binding_host::db_config(
+            schema, &config, identity,
+        )))
         .map_err(to_js_error)?;
         if let Some(capture) = cached_catalogue {
             // SAFETY: the host loads the opaque capture from its app-scoped

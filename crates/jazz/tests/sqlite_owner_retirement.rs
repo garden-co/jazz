@@ -50,7 +50,7 @@ fn retired_owner_revokes_cached_statements_and_retained_views() {
     );
     let transaction = OpenTransactionId::new();
     block_on(view.begin_serializable(transaction)).unwrap();
-    block_on(view.serializable_tx_ref(transaction).upsert(
+    block_on(view.tx_ref(transaction).upsert(
         "notes",
         RowUuid::from_bytes([2; 16]),
         cells("staged"),

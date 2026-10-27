@@ -48,6 +48,44 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
     Error::new(ErrorCode::Storage, error.to_string())
 }
 
+/// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
+pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
+    conn.execute_batch(&format!("SAVEPOINT {name}"))
+        .map_err(storage)
+}
+
+/// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
+/// rolls a whole transaction back by itself after some errors (a full disk,
+/// an I/O error); then the savepoint is gone and there is nothing to undo.
+pub(crate) fn end_savepoint(
+    conn: &rusqlite::Connection,
+    name: &str,
+    keep: bool,
+) -> Result<(), Error> {
+    let sql = if keep {
+        format!("RELEASE {name}")
+    } else {
+        format!("ROLLBACK TO {name}; RELEASE {name}")
+    };
+    match conn.execute_batch(&sql) {
+        Ok(()) => Ok(()),
+        Err(_) if !keep && conn.is_autocommit() => Ok(()),
+        Err(error) => Err(storage(error)),
+    }
+}
+
+/// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
+pub(crate) fn in_savepoint<T>(
+    conn: &rusqlite::Connection,
+    name: &str,
+    f: impl FnOnce() -> Result<T, Error>,
+) -> Result<T, Error> {
+    begin_savepoint(conn, name)?;
+    let result = f();
+    end_savepoint(conn, name, result.is_ok())?;
+    result
+}
+
 /// One SQLite value, as bound or read. Text holds raw bytes: large-capable
 /// columns store text that is not UTF-8 (tagged bytes and chunked large-value
 /// descriptors, see [`crate::large`]), which SQLite stores and compares
@@ -621,7 +659,7 @@ impl Schema {
                     stored: column.name.clone(),
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
-                    json: format!("{:?}", column.large_value_kind) == "Json",
+                    json: column.large_value_kind == crate::schema::LargeValueSemanticKind::Json,
                     merge: table
                         .merge_strategies
                         .get(&column.name)
@@ -1205,7 +1243,7 @@ impl CurrentRow {
     }
 
     /// A projected cell by column name.
-    pub fn cell(&self, _table: &crate::schema::TableSchema, column: &str) -> Option<Value> {
+    pub fn cell(&self, column: &str) -> Option<Value> {
         self.cells
             .iter()
             .find(|(name, _)| name == column)

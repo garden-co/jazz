@@ -115,7 +115,7 @@ fn poll<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
 }
 async fn read(db: &Db, tier: ReadTier, checks: &Cell<usize>) -> Result<usize, Error> {
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &postcard::to_allocvec(&Query::from("notes")).unwrap(),
             ReadOpts::for_read_tier(tier),
             None,

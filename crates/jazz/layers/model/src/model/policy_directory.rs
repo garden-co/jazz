@@ -1,4 +1,4 @@
-//! Durable Groove encoding of policy claims in the policy-binding directory.
+//! Durable record encoding of policy claims in the policy-binding directory.
 //! Re-exported from `crate::protocol`.
 
 use std::collections::BTreeMap;
@@ -11,7 +11,7 @@ use jazz_types::records::{
 /// The durable, typed payload used by the policy-binding directory.
 ///
 /// This deliberately flattens a recursively shaped claims map into ordinary
-/// Groove records instead of inventing another opaque byte codec.  Each root
+/// records instead of inventing another opaque byte codec.  Each root
 /// node carries its claim name; containers name their children only by their
 /// position.  The representation supports the policy-claim value vocabulary
 /// admitted at public boundaries (scalars, nullable values, arrays, and
@@ -28,7 +28,7 @@ pub fn policy_binding_directory_claims_value(
     Ok(Value::Array(nodes))
 }
 
-/// Decode and validate the normal Groove representation of policy claims.
+/// Decode and validate the normal record representation of policy claims.
 pub fn policy_binding_directory_claims_from_value(
     value: Value,
 ) -> Result<BTreeMap<String, Value>, String> {

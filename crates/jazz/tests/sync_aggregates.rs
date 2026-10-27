@@ -1,7 +1,7 @@
 //! Synced aggregates: a remote aggregate read subscribes to its input rows
 //! (the rows the reader may read that match its filters), and the client
 //! aggregates them as it would local rows. AVG stays finite for large
-//! finite inputs. Not ported from Jazz.
+//! finite inputs.
 
 use crate::common;
 

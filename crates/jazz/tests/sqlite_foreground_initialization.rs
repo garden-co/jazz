@@ -83,7 +83,7 @@ fn stage(db: &Db, n: u8) -> OpenTransactionId {
     block_on(db.begin_serializable(id)).unwrap();
     db.prepare_initialization_insert(id, "notes", RowUuid::from_bytes([n; 16]))
         .unwrap();
-    block_on(db.serializable_tx_ref(id).insert(
+    block_on(db.tx_ref(id).insert(
         "notes",
         BTreeMap::from([("text".into(), Value::String("founder".into()))]),
         jazz::db::InsertOptions {
@@ -186,7 +186,7 @@ fn foreground_initialization_waits_for_storage_and_recovers_original_fate() {
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
     let read = drive(
         &[&fresh_tab, &storage],
-        fresh_tab.all_serialized_query(
+        fresh_tab.all_serialized_query_as(
             &query,
             ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
             None,

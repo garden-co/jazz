@@ -4,7 +4,7 @@
 //! chunks its range covers, and an append or splice adds one entry to the
 //! value's bounded edit tail instead of rewriting it; when the tail is full
 //! the value is consolidated, rechunking only until content boundaries
-//! resynchronize (Groove SPEC ch. 9 §9.3). Every edit is published as one
+//! resynchronize (see `jazz_types::large_values`). Every edit is published as one
 //! ordinary row update, so policies, history and sync see a new version.
 
 use super::*;
@@ -1220,7 +1220,7 @@ fn closed() -> Error {
 
 /// Splices in a page's coordinates, lowered to byte coordinates of the
 /// current value. Each later splice is relative to the value the earlier
-/// ones produced, as in main's `apply_inline_splices`.
+/// ones produced.
 fn lower_splices(
     inner: &Inner,
     column: &crate::values::Column,

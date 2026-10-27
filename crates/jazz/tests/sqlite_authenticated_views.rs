@@ -165,7 +165,7 @@ fn accepted_views_follow_authority_revocation() {
         server.accept_subscriber(down, alice());
         let read = drive(
             &[&replica, &server],
-            replica.all_serialized_query(
+            replica.all_serialized_query_as(
                 &postcard::to_allocvec(&Query::from("notes")).unwrap(),
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,

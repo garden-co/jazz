@@ -245,7 +245,7 @@ fn drive<T>(nodes: &[&Db], future: impl Future<Output = Result<T, Error>>) -> Re
 async fn read(db: &Db, q: &Query, code: &str) -> Result<Vec<CurrentRow>, Error> {
     let bytes = postcard::to_allocvec(q).unwrap();
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,

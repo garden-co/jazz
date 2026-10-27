@@ -1,21 +1,19 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Declared composite current indexes, exercised through the public schema
-//! builder and the `Db` read/write API over durable RocksDB storage.
+//! builder and the `Db` read/write API, in memory and over durable
+//! file-backed storage.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, UpdateOptions};
+use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, UpdateOptions};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{CurrentWriteSchema, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuilder};
-#[cfg(any())] // jazz-sqlite: not ported, RocksDB storage
-use jazz_storage_rocksdb::RocksDbStorage;
 
 use crate::common;
 
@@ -51,24 +49,27 @@ fn public_schema() -> Schema {
         .build()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
-fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .unwrap();
-    block_on(Db::open(DbConfig::new(
-        schema.clone(),
-        DbIdentity {
-            node: NodeUuid::from_bytes([0xc1; 16]),
-            author: AuthorSubject::SYSTEM,
-        },
-    )))
+/// The store file inside a test's scratch directory.
+fn store_path(directory: &std::path::Path) -> std::path::PathBuf {
+    directory.join("jazz.sqlite")
+}
+
+/// A durable file-backed store in `directory`, opened with `schema`.
+fn open_file_db(directory: &std::path::Path, schema: &JazzSchema) -> Db {
+    block_on(Db::open_at(
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xc1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ),
+        &store_path(directory),
+        FileOptions::default(),
+    ))
     .unwrap()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
 fn insert_task(db: &Db, id: RowUuid, owner: &str, rank: i32, title: &str) {
     block_on(db.insert(
         "tasks",
@@ -85,10 +86,9 @@ fn insert_task(db: &Db, id: RowUuid, owner: &str, rank: i32, title: &str) {
     .unwrap();
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
 /// Titles of `owner`'s top two tasks by descending rank: the equality-prefix,
 /// ordered-page shape a `(owner, rank)` composite index is declared for.
-fn top_two_titles(db: &Db, schema: &JazzSchema, owner: &str) -> Vec<String> {
+fn top_two_titles(db: &Db, owner: &str) -> Vec<String> {
     let query = db
         .prepare_query(
             &Query::from("tasks")
@@ -97,22 +97,20 @@ fn top_two_titles(db: &Db, schema: &JazzSchema, owner: &str) -> Vec<String> {
                 .limit(2),
         )
         .unwrap();
-    let table = &schema.tables()[0];
     block_on(db.all(&query, ReadOpts::default()))
         .unwrap()
         .into_iter()
-        .map(|row| match row.cell(table, "title") {
+        .map(|row| match row.cell("title") {
             Some(Value::String(title)) => title,
             other => panic!("expected a title, got {other:?}"),
         })
         .collect()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
 /// A table that declares a `(owner, rank)` composite index answers alice's
 /// "top two by rank" page correctly, keeps answering it after rows move
 /// between owners and ranks, and still does after a restart that recovers the
-/// composite-index schema from its durable (v2) catalogue payload.
+/// composite-index schema and its index from the store file.
 ///
 /// ```text
 /// alice ──insert 3 tasks, bob 1──► db ──top2(alice)──► [ship, plan]
@@ -124,13 +122,13 @@ fn composite_index_schema_serves_ordered_pages_across_updates_and_reopen() {
     let schema = JazzSchema::new(&public_schema()).expect("composite schema compiles");
     let directory = tempfile::tempdir().unwrap();
     {
-        let db = open_rocks_db(directory.path(), &schema);
+        let db = open_file_db(directory.path(), &schema);
         insert_task(&db, row(1), "alice", 3, "ship");
         insert_task(&db, row(2), "alice", 1, "draft");
         insert_task(&db, row(3), "alice", 2, "plan");
         insert_task(&db, row(4), "bob", 5, "review");
-        assert_eq!(top_two_titles(&db, &schema, "alice"), ["ship", "plan"]);
-        assert_eq!(top_two_titles(&db, &schema, "bob"), ["review"]);
+        assert_eq!(top_two_titles(&db, "alice"), ["ship", "plan"]);
+        assert_eq!(top_two_titles(&db, "bob"), ["review"]);
 
         // Both indexed columns change: the row must leave bob's prefix and
         // enter alice's at its new position; `ship` must move down in place.
@@ -151,16 +149,13 @@ fn composite_index_schema_serves_ordered_pages_across_updates_and_reopen() {
             UpdateOptions::default(),
         ))
         .unwrap();
-        assert_eq!(top_two_titles(&db, &schema, "alice"), ["review", "plan"]);
-        assert!(top_two_titles(&db, &schema, "bob").is_empty());
+        assert_eq!(top_two_titles(&db, "alice"), ["review", "plan"]);
+        assert!(top_two_titles(&db, "bob").is_empty());
     }
 
-    let reopened = open_rocks_db(directory.path(), &schema);
-    assert_eq!(
-        top_two_titles(&reopened, &schema, "alice"),
-        ["review", "plan"]
-    );
-    assert!(top_two_titles(&reopened, &schema, "bob").is_empty());
+    let reopened = open_file_db(directory.path(), &schema);
+    assert_eq!(top_two_titles(&reopened, "alice"), ["review", "plan"]);
+    assert!(top_two_titles(&reopened, "bob").is_empty());
 }
 
 /// Composite indexes are part of schema identity, but only as a set: the
@@ -228,120 +223,106 @@ fn composite_index_declarations_are_canonical_and_validated() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
-/// Keys of every composite-index entry in the durable `indices` family, with
-/// the `(table, index)` its numeric index id is registered to, in key order.
-///
-/// Groove keys each entry by a LEB128 index id and records the id in its
-/// `\0groove-index-id\0` registry (table and index names, then a `u32` BE id).
-fn composite_index_entries(storage: &LayoutStorage) -> Vec<(String, String, Vec<u8>)> {
-    const REGISTRY: &[u8] = b"\0groove-index-id\0";
-    let entries = block_on(storage.prefix("indices".into(), Vec::new())).unwrap();
-    let mut names = BTreeMap::new();
-    for (key, value) in &entries {
-        let Some(rest) = key.strip_prefix(REGISTRY) else {
-            continue;
-        };
-        let table_len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
-        let table = String::from_utf8(rest[2..2 + table_len].to_vec()).unwrap();
-        let index = String::from_utf8(rest[2 + table_len..].to_vec()).unwrap();
-        let id = u32::from_be_bytes(value[..4].try_into().unwrap());
-        names.insert(id, (table, index));
-    }
-    entries
-        .into_iter()
-        .filter(|(key, _)| key.first() != Some(&0))
-        .filter_map(|(key, _)| {
-            let (mut id, mut shift, mut len) = (0_u32, 0, 0);
-            for byte in &key {
-                id |= u32::from(byte & 0x7f) << shift;
-                shift += 7;
-                len += 1;
-                if byte & 0x80 == 0 {
-                    break;
-                }
-            }
-            let (table, index) = names.get(&id).expect("entry id is registered").clone();
-            index
-                .starts_with("by_physical_composite_")
-                .then(|| (table, index, key[len..].to_vec()))
-        })
-        .collect()
+/// Name and definition of every index SQLite holds for `tasks` in the
+/// store file, in name order.
+fn stored_task_indexes(directory: &std::path::Path) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open(store_path(directory)).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT name, sql FROM sqlite_master \
+             WHERE type = 'index' AND tbl_name = 'tasks' AND sql IS NOT NULL ORDER BY name",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
-/// Durable-encoding receipt for the physical composite index. This is
-/// deliberately below the public API: the index namespace
-/// (`by_physical_composite_v1_<column ids>`) and its entry key layout
-/// (branch key, then each indexed column in declared order, then the row
-/// key) are restart-authoritative bytes that no query result exposes, so a
-/// silent respelling would orphan every existing entry. Alice's one local
-/// row pins the exact key on the ahead-current tier; the global-current table
-/// declares the same index name and columns from the same helper.
+/// Durable-encoding receipt for the composite index. Its name is its stored
+/// key list, so reopening a store under any schema version that declares
+/// the same index re-creates nothing; a silent respelling of the name or of
+/// its key columns would build a second copy of every entry beside the
+/// first. The index keys the declared columns in declared order (a text
+/// column by its key expression) and ends in the row id.
 #[test]
-fn physical_composite_index_entry_keys_are_pinned() {
+fn composite_index_definition_in_the_store_file_is_pinned() {
     let schema = JazzSchema::new(&public_schema()).expect("composite schema compiles");
     let directory = tempfile::tempdir().unwrap();
     {
-        let db = open_rocks_db(directory.path(), &schema);
+        let db = open_file_db(directory.path(), &schema);
         insert_task(&db, row(0x0a), "alice", 7, "ship");
     }
-    let storage = RocksDbStorage::open(
-        directory.path(),
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v3())).unwrap();
-    let keys = composite_index_entries(&storage)
+    let composite = stored_task_indexes(directory.path())
         .into_iter()
-        .map(|(table, index, key)| (table, index, hex::encode(key)))
+        .filter(|(name, _)| name.contains(','))
         .collect::<Vec<_>>();
-    // After the index id: the index columns written once, single-escaped:
-    // branch key bytes `01 00000000`, nullable text "alice", nullable
-    // order-preserving i32 7; then `ff` and the primary-key columns the index
-    // lacks, here only row uuid 0x0a.. (the branch key is already indexed).
-    // The ahead overlay holds one row per row, so its primary key has no
-    // transaction coordinate. The value is empty.
     assert_eq!(
-        keys,
+        composite,
         [(
-            "jazz_physical_1_ahead_current".to_owned(),
-            "by_physical_composite_v1_1_2".to_owned(),
-            "070100ff00ff00ff00ff0000090661".to_owned()
-                + "6c6963650000090e80000007ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+            "tasks__ix(owner,rank)".to_owned(),
+            concat!(
+                "CREATE INDEX \"tasks__ix(owner,rank)\" ON \"tasks\"(",
+                // A text cell may be chunked; the key is its inline text.
+                "(CASE WHEN (substr(CAST(\"owner\" AS BLOB), 1, 1) = X'FF') ",
+                "THEN CAST(substr(CAST(\"owner\" AS BLOB), 39, ",
+                "CAST(CAST(substr(CAST(\"owner\" AS BLOB), 34, 5) AS TEXT) AS INTEGER)) AS TEXT) ",
+                "ELSE \"owner\" END), \"rank\", id)"
+            )
+            .to_owned()
         )]
+    );
+    let before = stored_task_indexes(directory.path());
+    {
+        let db = open_file_db(directory.path(), &schema);
+        assert_eq!(top_two_titles(&db, "alice"), ["ship"]);
+    }
+    assert_eq!(
+        stored_task_indexes(directory.path()),
+        before,
+        "reopening creates no index twice"
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
-/// Row ids of every composite-index entry, in storage key order.
-///
-/// Deliberately below the public API: no query path reads a composite index
-/// yet (the planner still chooses single-column probes), so a missing or
-/// stale index is invisible in query results. The entries' key order is the
-/// order the index would serve `(owner, rank)` pages in, and each key ends in
-/// the row's primary key, whose 16-byte row uuid is `[n; 16]` in these tests.
-fn composite_index_row_order(path: &std::path::Path, schema: &JazzSchema) -> Vec<u8> {
-    let storage = RocksDbStorage::open(
-        path,
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v3())).unwrap();
-    composite_index_entries(&storage)
-        .into_iter()
-        .map(|(_, _, key)| {
-            (1..=u8::MAX)
-                .find(|byte| key.windows(16).any(|window| window == [*byte; 16]))
-                .expect("composite index key names a test row uuid")
-        })
+/// Leading bytes of the row ids of `tasks` in `(owner, rank)` order, read
+/// from the store file by a scan SQLite must serve from the composite index
+/// (`INDEXED BY` fails the statement when the index cannot serve it). The
+/// test row uuids are `[n; 16]`.
+fn composite_index_row_order(directory: &std::path::Path) -> Vec<u8> {
+    let conn = rusqlite::Connection::open(store_path(directory)).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT id FROM tasks INDEXED BY \"tasks__ix(owner,rank)\" \
+             WHERE owner IS NOT NULL ORDER BY owner, rank, id",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|id| id.unwrap()[0])
         .collect()
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
+/// Asserts that `owner`'s page is served from the composite index, not by
+/// scanning and sorting the table.
+fn assert_page_uses_composite_index(db: &Db, owner: &str) {
+    let page = db
+        .prepare_query(
+            &Query::from("tasks")
+                .filter(eq(col("owner"), lit(Value::String(owner.to_owned()))))
+                .order_by("rank", OrderDirection::Desc)
+                .limit(2),
+        )
+        .unwrap();
+    let (_, plan) = db.explain_query_plan(&page, None).unwrap();
+    assert!(plan.contains("tasks__ix(owner,rank)"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
+}
+
 /// Publish `composite` as the identity-lens descendant of `plain` and make it
-/// the write schema: the ordinary catalogue migration path for any schema
-/// change to an existing store.
+/// the write schema: the catalogue migration path for a schema change to a
+/// live store.
 fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSchema) {
     let target = SchemaVersion::new(composite.clone());
     let lens = MigrationLens::new(
@@ -355,14 +336,9 @@ fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSch
     )
     .unwrap();
     let publication = db
-        .author_schema_lineage_publication(
-            target.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(target.clone(), lens)
         .unwrap();
-    block_on(db.publish_schema_with_lens(1, publication)).unwrap();
+    block_on(db.publish_schema_with_lens(publication)).unwrap();
     block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: target.id,
@@ -370,25 +346,23 @@ fn publish_composite_descendant(db: &Db, plain: &JazzSchema, composite: &JazzSch
     .unwrap();
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
-/// Adding a composite index to an existing app is a schema change, not a
-/// no-op. The composite schema is a new schema version, so reopening a plain
-/// store with it directly waits for catalogue admission like any other schema
-/// change; once published through the ordinary identity-lens migration, the
-/// index is backfilled for rows written before it existed and maintained for
-/// rows written after, across a reopen, in `(owner, rank)` order.
+/// Adding a composite index to an existing app is a schema change: the
+/// composite schema is a new schema version. A store written under the
+/// plain schema takes the index whether the composite schema arrives by
+/// reopening the file with it or by publishing it to the live store through
+/// an identity lens. Either way the index is backfilled with the rows written
+/// before it existed and maintained for rows written after, across a
+/// reopen, in `(owner, rank)` order.
 ///
 /// ```text
 /// open(plain) ──insert r1 alice/2, r2 bob/1──► close
-/// open(plain + composite) ──write──► rejected: awaiting catalogue admission
-/// open(plain) ──publish composite via identity lens──► insert r3 alice/1 ──► close
+/// open(plain + composite) ──insert r3 alice/1──► close
 /// open(plain + composite) ──insert r4 bob/0──► close
 ///     index order = [r3 alice/1, r1 alice/2, r4 bob/0, r2 bob/1]
-/// ```
 ///
-/// Before composite indexes were part of the schema version id, both schemas
-/// shared one id, the direct reopen silently kept the stored plain schema, and
-/// the index held no entries at all.
+/// open(plain) ──insert r1, r2──► publish composite via identity lens
+///     ──insert r3──► close ──► open(plain + composite) ──insert r4──► same order
+/// ```
 #[test]
 fn adding_composite_index_to_existing_store_maintains_and_backfills_it() {
     let plain = JazzSchema::new(&SchemaBuilder::new().table(tasks_table()).build())
@@ -400,47 +374,49 @@ fn adding_composite_index_to_existing_store_maintains_and_backfills_it() {
         "declaring a composite index is a new schema version"
     );
 
-    let directory = tempfile::tempdir().unwrap();
+    // The composite schema reaches the file by reopening it.
+    let reopened = tempfile::tempdir().unwrap();
     {
-        let db = open_rocks_db(directory.path(), &plain);
+        let db = open_file_db(reopened.path(), &plain);
         insert_task(&db, row(1), "alice", 2, "plan");
         insert_task(&db, row(2), "bob", 1, "review");
     }
+    assert!(
+        stored_task_indexes(reopened.path())
+            .iter()
+            .all(|(name, _)| !name.contains(',')),
+        "the plain schema declares no composite index"
+    );
     {
-        let db = open_rocks_db(directory.path(), &composite);
-        let error = block_on(db.insert(
-            "tasks",
-            BTreeMap::from([
-                ("owner".to_owned(), Value::String("carol".to_owned())),
-                ("rank".to_owned(), Value::I32(1)),
-                ("title".to_owned(), Value::String("unadmitted".to_owned())),
-            ]),
-            InsertOptions::default(),
-        ))
-        .err()
-        .expect("an unpublished composite schema is not silently the plain one");
-        assert!(
-            error
-                .to_string()
-                .contains("awaiting published catalogue admission"),
-            "{error}"
-        );
+        let db = open_file_db(reopened.path(), &composite);
+        insert_task(&db, row(3), "alice", 1, "draft");
+        assert_page_uses_composite_index(&db, "alice");
+        assert_eq!(top_two_titles(&db, "alice"), ["plan", "draft"]);
     }
     {
-        let db = open_rocks_db(directory.path(), &plain);
+        let db = open_file_db(reopened.path(), &composite);
+        insert_task(&db, row(4), "bob", 0, "triage");
+        assert_eq!(top_two_titles(&db, "bob"), ["review", "triage"]);
+    }
+    assert_eq!(composite_index_row_order(reopened.path()), [3, 1, 4, 2]);
+
+    // The composite schema reaches the live store as a published descendant.
+    let published = tempfile::tempdir().unwrap();
+    {
+        let db = open_file_db(published.path(), &plain);
+        insert_task(&db, row(1), "alice", 2, "plan");
+        insert_task(&db, row(2), "bob", 1, "review");
         publish_composite_descendant(&db, &plain, &composite);
         insert_task(&db, row(3), "alice", 1, "draft");
-        assert_eq!(top_two_titles(&db, &composite, "alice"), ["plan", "draft"]);
+        assert_page_uses_composite_index(&db, "alice");
+        assert_eq!(top_two_titles(&db, "alice"), ["plan", "draft"]);
     }
     {
-        let db = open_rocks_db(directory.path(), &composite);
+        let db = open_file_db(published.path(), &composite);
         insert_task(&db, row(4), "bob", 0, "triage");
-        assert_eq!(top_two_titles(&db, &composite, "bob"), ["review", "triage"]);
+        assert_eq!(top_two_titles(&db, "bob"), ["review", "triage"]);
     }
-    assert_eq!(
-        composite_index_row_order(directory.path(), &composite),
-        [3, 1, 4, 2]
-    );
+    assert_eq!(composite_index_row_order(published.path()), [3, 1, 4, 2]);
 }
 
 /// Durable-encoding receipt for schema version ids. The id is a UUIDv5 over
@@ -559,72 +535,37 @@ fn composite_index_logical_names_cannot_collide_with_single_column_indexes() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, reopens durable RocksDB storage / pins Groove index keys
-/// Global-current counterpart of [`physical_composite_index_entry_keys_are_pinned`].
-///
-/// A history-complete authority can seed an already-settled row (the
-/// server bootstrap/import path), so alice's row reaches
-/// `jazz_physical_1_global_current` without a client/server topology. A
-/// client write settled through a server lands in the same physical table and
-/// index; that path is not exercised here.
-/// Its composite index uses the same name and key columns as the
-/// ahead-current one: `by_physical_composite_v1_1_2`, keyed by branch key,
-/// `_app_1` (owner), `_app_2` (rank), then the global row's primary key.
+/// A settled row a history-complete authority seeds (the server
+/// bootstrap/import path) lands in the same table, and is served by the
+/// same composite index, as a local write: alice's seeded row and her local
+/// row share one `(owner, rank)` page.
 #[test]
-fn physical_global_current_composite_index_entry_keys_are_pinned() {
+fn settled_rows_are_served_by_the_composite_index() {
     let schema = JazzSchema::new(&public_schema()).expect("composite schema compiles");
-    let directory = tempfile::tempdir().unwrap();
-    {
-        let storage = RocksDbStorage::open(
-            directory.path(),
-            &families.iter().map(String::as_str).collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let db = block_on(Db::open_history_complete(DbConfig::new(
-            schema.clone(),
-            DbIdentity {
-                node: NodeUuid::from_bytes([0xc1; 16]),
-                author: AuthorSubject::SYSTEM,
-            },
-        )))
-        .unwrap();
-        db.seed_settled_mergeable_for_bootstrap(
-            "tasks",
-            row(0x0a),
-            AuthorSubject::SYSTEM,
-            BTreeMap::from([
-                ("owner".to_owned(), Value::String("alice".to_owned())),
-                ("rank".to_owned(), Value::I32(7)),
-                ("title".to_owned(), Value::String("ship".to_owned())),
-            ]),
-        )
-        .unwrap();
-        block_on(db.close()).unwrap();
-    }
-    let storage = RocksDbStorage::open(
-        directory.path(),
-        &families.iter().map(String::as_str).collect::<Vec<_>>(),
+    let db = block_on(Db::open_history_complete(DbConfig::new(
+        schema.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xc1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    db.seed_settled_mergeable_for_bootstrap(
+        "tasks",
+        row(0x0a),
+        AuthorSubject::SYSTEM,
+        BTreeMap::from([
+            ("owner".to_owned(), Value::String("alice".to_owned())),
+            ("rank".to_owned(), Value::I32(7)),
+            ("title".to_owned(), Value::String("ship".to_owned())),
+        ]),
     )
     .unwrap();
-    let storage = block_on(LayoutStorage::new(storage, StorageLayout::jazz_class_v3())).unwrap();
-    let keys = composite_index_entries(&storage)
-        .into_iter()
-        .filter(|(table, _, _)| table == "jazz_physical_1_global_current")
-        .map(|(table, index, key)| (table, index, hex::encode(key)))
-        .collect::<Vec<_>>();
-    // After the index id: branch key bytes, nullable text "alice", nullable
-    // order-preserving i32 7, written once and single-escaped; then `ff` and
-    // row uuid 0x0a.., the only primary-key column the index lacks (unlike
-    // ahead-current, no transaction coordinate either way).
-    assert_eq!(
-        keys,
-        [(
-            "jazz_physical_1_global_current".to_owned(),
-            "by_physical_composite_v1_1_2".to_owned(),
-            "070100ff00ff00ff00ff0000090661".to_owned()
-                + "6c6963650000090e80000007ff0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
-        )]
-    );
+    insert_task(&db, row(0x0b), "alice", 3, "plan");
+    insert_task(&db, row(0x0c), "bob", 9, "review");
+    assert_page_uses_composite_index(&db, "alice");
+    assert_eq!(top_two_titles(&db, "alice"), ["ship", "plan"]);
+    assert_eq!(top_two_titles(&db, "bob"), ["review"]);
 }
 
 /// A composite index may end in a provenance timestamp: a chat's newest

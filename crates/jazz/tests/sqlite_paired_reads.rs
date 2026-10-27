@@ -123,7 +123,7 @@ fn texts(read: &BindingSettledRead) -> Vec<String> {
 }
 fn fetch(db: &Db, dbs: &[&Db], query: Query) {
     let bytes = postcard::to_allocvec(&query).unwrap();
-    let read = db.all_serialized_query(
+    let read = db.all_serialized_query_as(
         &bytes,
         options(false, true),
         None,
@@ -291,11 +291,7 @@ fn initialization_absence_pins_subsequent_transaction_reads() {
         .unwrap();
     block_on(server.update("notes", note.row_uuid(), cells("after"), Default::default())).unwrap();
     let query = alice.prepare_query(&Query::from("notes")).unwrap();
-    let read = drive(
-        &[&alice, &server],
-        alice.serializable_tx_ref(tx).all_prepared(&query),
-    )
-    .unwrap();
+    let read = drive(&[&alice, &server], alice.tx_ref(tx).all_prepared(&query)).unwrap();
     assert_eq!(read[0].cell_at(0), Some(Value::String("before".into())));
     let accepted = block_on(paired(&alice, tx, "notes", true, true, false)).unwrap();
     assert_eq!(texts(&accepted), ["before"]);
@@ -322,11 +318,7 @@ fn known_begin_coordinate_pins_the_first_ordinary_read() {
     let tx = begin(&alice);
     block_on(server.update("notes", note.row_uuid(), cells("after"), Default::default())).unwrap();
     let query = alice.prepare_query(&Query::from("notes")).unwrap();
-    let read = drive(
-        &[&alice, &server],
-        alice.serializable_tx_ref(tx).all_prepared(&query),
-    )
-    .unwrap();
+    let read = drive(&[&alice, &server], alice.tx_ref(tx).all_prepared(&query)).unwrap();
     assert_eq!(read[0].cell_at(0), Some(Value::String("before".into())));
     let accepted = drive(
         &[&alice, &server],
@@ -430,11 +422,7 @@ fn authority_begin_refuses_mixed_cuts_and_local_only_coverage() {
     connect(&alice, &server);
     let tx = begin(&alice);
     let query = alice.prepare_query(&Query::from("notes")).unwrap();
-    drive(
-        &[&alice, &server],
-        alice.serializable_tx_ref(tx).all_prepared(&query),
-    )
-    .unwrap();
+    drive(&[&alice, &server], alice.tx_ref(tx).all_prepared(&query)).unwrap();
     let error = drive(
         &[&alice, &server],
         alice
@@ -600,7 +588,7 @@ fn unfinished_cancelled_and_failed_reads_block_commit() {
         let row = insert(&db, "notes", "accepted");
         let tx = begin(&db);
         if action == "provisional" {
-            block_on(db.serializable_tx_ref(tx).update(
+            block_on(db.tx_ref(tx).update(
                 "notes",
                 row.row_uuid(),
                 cells("staged"),
@@ -899,7 +887,7 @@ fn trusted_delegation_freezes_claims_for_reads_and_commit() {
     let ordinary = backend.prepare_query(&Query::from("notes")).unwrap();
     let rows = drive(
         &[&backend, &server],
-        backend.serializable_tx_ref(tx).all_prepared(&ordinary),
+        backend.tx_ref(tx).all_prepared(&ordinary),
     )
     .unwrap();
     assert_eq!(rows.len(), 1);
@@ -1438,7 +1426,7 @@ fn ordinary_reads_preserve_admitted_staging_for_inline_and_chunked_text() {
         let alice = open(1, false);
         connect(&alice, &server);
         let tx = begin(&alice);
-        let transaction = alice.serializable_tx_ref(tx);
+        let transaction = alice.tx_ref(tx);
         let value = |label: &str| {
             if large {
                 format!("{}-{label}", "chunked-é😀".repeat(10_000))
@@ -1509,7 +1497,7 @@ fn ordinary_queued_read_keeps_its_prefix_after_predecessor_cancellation() {
     let alice = open(1, false);
     connect(&alice, &server);
     let tx = begin(&alice);
-    let transaction = alice.serializable_tx_ref(tx);
+    let transaction = alice.tx_ref(tx);
     let first = block_on(transaction.insert("notes", cells("first"), Default::default()))
         .unwrap()
         .row_uuid();

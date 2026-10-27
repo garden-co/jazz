@@ -1,4 +1,4 @@
-//! Public unions on SQLite (`app.union([...])`, `.union({ a, b })`): a
+//! Public unions (`app.union([...])`, `.union({ a, b })`): a
 //! relation query whose body is a `UNION ALL` of arms, ordered and windowed
 //! as a whole. Each arm reads the output table under its own read policy
 //! (an arm never widens access), a row matched by several arms is one

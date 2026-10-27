@@ -320,7 +320,7 @@ fn owner_serializable_reads_keep_pending_origin_order() {
     block_on(owner.begin_serializable(id)).unwrap();
     let query = owner.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(owner.serializable_tx_ref(id).all_prepared(&query))
+        block_on(owner.tx_ref(id).all_prepared(&query))
             .unwrap()
             .len(),
         1

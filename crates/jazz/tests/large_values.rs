@@ -1,7 +1,7 @@
-//! Chunked large values on SQLite: a `string`, `json` or `bytes` value above
+//! Chunked large values: a `string`, `json` or `bytes` value above
 //! the inline threshold is stored as a descriptor over a content-defined
 //! chunk tree, and still reads, filters, orders and indexes as its logical
-//! value (Groove SPEC ch. 9, `INV-LARGE-1`).
+//! value (`INV-CONTENT-1`).
 
 use crate::common;
 
@@ -746,16 +746,13 @@ fn partial_updates_inside_a_transaction_build_on_its_earlier_writes() {
     // Abandoned: nothing lands.
     let batch = OpenTransactionId::new();
     block_on(db.begin_mergeable(batch)).unwrap();
-    block_on(
-        db.mergeable_tx_ref(batch)
-            .update_with_large_value_mutations(
-                "docs",
-                row(1),
-                BTreeMap::new(),
-                vec![appended(0)],
-                Default::default(),
-            ),
-    )
+    block_on(db.tx_ref(batch).update_with_large_value_mutations(
+        "docs",
+        row(1),
+        BTreeMap::new(),
+        vec![appended(0)],
+        Default::default(),
+    ))
     .unwrap();
     db.abandon_transaction_handle(batch).unwrap();
     assert_eq!(body(&db, 1), original);
@@ -764,7 +761,7 @@ fn partial_updates_inside_a_transaction_build_on_its_earlier_writes() {
     // tail fills and consolidates inside the transaction.
     let batch = OpenTransactionId::new();
     block_on(db.begin_mergeable(batch)).unwrap();
-    let tx = db.mergeable_tx_ref(batch);
+    let tx = db.tx_ref(batch);
     for n in 0..64 {
         block_on(tx.update_with_large_value_mutations(
             "docs",
@@ -803,22 +800,19 @@ fn partial_updates_inside_a_transaction_build_on_its_earlier_writes() {
     let batch = OpenTransactionId::new();
     block_on(db.begin_mergeable(batch)).unwrap();
     for title in ["second", "final"] {
-        block_on(
-            db.mergeable_tx_ref(batch)
-                .update_with_large_value_mutations(
-                    "notes",
-                    row(9),
-                    BTreeMap::new(),
-                    vec![LargeValueUpdate::JsonSet {
-                        column: "doc".into(),
-                        edits: vec![JsonSetEdit {
-                            at: "/title".into(),
-                            value: serde_json::json!(title),
-                        }],
-                    }],
-                    Default::default(),
-                ),
-        )
+        block_on(db.tx_ref(batch).update_with_large_value_mutations(
+            "notes",
+            row(9),
+            BTreeMap::new(),
+            vec![LargeValueUpdate::JsonSet {
+                column: "doc".into(),
+                edits: vec![JsonSetEdit {
+                    at: "/title".into(),
+                    value: serde_json::json!(title),
+                }],
+            }],
+            Default::default(),
+        ))
         .unwrap();
     }
     block_on(db.commit_mergeable_handle(batch)).unwrap();

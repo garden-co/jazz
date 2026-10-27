@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::common;
@@ -541,8 +540,8 @@ fn local_bindings_of_one_shape_share_one_prepared_source() {
     assert_eq!(four.active_subscriptions, two.active_subscriptions + 2);
     assert_eq!(four.active_shape_params, two.active_shape_params + 2);
     assert_eq!(
-        four.arrangement_count, two.arrangement_count,
-        "later bindings of one Local-tier shape must reuse its prepared source"
+        four.active_prepared_shapes, two.active_prepared_shapes,
+        "later bindings of one Local-tier shape must reuse its prepared shape"
     );
     drop((first, second, rest));
     block_on(db.close()).expect("close sharing fixture");
@@ -604,7 +603,7 @@ fn local_request_scope_reuses_prepared_source_after_literal_subscriber_retires()
         before_c.active_shape_params + 1
     );
     assert_eq!(
-        after_c.arrangement_count, before_c.arrangement_count,
+        after_c.active_prepared_shapes, before_c.active_prepared_shapes,
         "C must reuse B's prepared source after A's literal token retires"
     );
 

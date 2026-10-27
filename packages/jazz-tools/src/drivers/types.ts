@@ -199,7 +199,7 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * - `persistent`: local persistence enabled (IndexedDB in browser, Fjall in backend)
+ * - `persistent`: local persistence enabled (SQLite on IndexedDB in the browser, a SQLite file in the backend)
  * - `memory`: non-persistent in-memory runtime only
  */
 export type StorageDriver =

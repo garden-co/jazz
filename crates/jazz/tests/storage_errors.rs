@@ -4,7 +4,7 @@
 //! savepoint gone still forgets its changes, and a new upstream session
 //! whose held rows cannot be read reports it and declares them on the next
 //! send. The errors are injected by hiding one of the store's own tables
-//! through a second connection. Not ported from Jazz.
+//! through a second connection.
 
 use crate::common;
 
@@ -291,9 +291,9 @@ fn held_rows_that_cannot_be_read_fail_the_send_and_are_declared_on_the_next() {
     })));
     server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
 
-    hide(&path, "_jazz_revoked");
+    hide(&path, "items");
     let failed = block_on(client.tick());
-    restore(&path, "_jazz_revoked");
+    restore(&path, "items");
     assert!(failed.is_err(), "the send reports the storage error");
     assert!(
         sent.borrow().is_empty(),

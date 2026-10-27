@@ -2009,10 +2009,7 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       tx.hasStagedMutations = true;
-      return {
-        kind: "staged",
-        openTransactionId: txIdFromContext(writeContext)!,
-      };
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
       requireNativeWrite(
@@ -2074,10 +2071,7 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs ?? undefined,
       );
       tx.hasStagedMutations = true;
-      return {
-        kind: "staged",
-        openTransactionId: txIdFromContext(writeContext)!,
-      };
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     // Outside a transaction the binding writes as the adapter's own identity.
     // Do not silently substitute it for a session or attributed write.
@@ -2129,10 +2123,7 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       tx.hasStagedMutations = true;
-      return {
-        kind: "staged",
-        openTransactionId: txIdFromContext(writeContext)!,
-      };
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
       requireNativeWrite(
@@ -2169,10 +2160,7 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       tx.hasStagedMutations = true;
-      return {
-        kind: "staged",
-        openTransactionId: txIdFromContext(writeContext)!,
-      };
+      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
       requireNativeWrite(
@@ -2593,10 +2581,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const write = this.db.commitTransaction(openTransactionId, pending.kind);
     this.pendingTxs.delete(openTransactionId);
-    this.completedTxs.set(openTransactionId, {
-      kind: pending.kind,
-      state: "committed",
-    });
+    this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
@@ -2698,10 +2683,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } finally {
       this.pendingTxs.delete(openTransactionId);
     }
-    this.completedTxs.set(openTransactionId, {
-      kind: pending.kind,
-      state: "rolled_back",
-    });
+    this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "rolled_back" });
     return Promise.resolve(true);
   }
 
@@ -3085,14 +3067,8 @@ export class NativeRuntimeAdapter implements Runtime {
         });
         attempt.admission = admission;
         const outcome = await Promise.race([
-          admission.then((transport) => ({
-            type: "admitted" as const,
-            transport,
-          })),
-          attempt.terminal.then((error) => ({
-            type: "terminal" as const,
-            error,
-          })),
+          admission.then((transport) => ({ type: "admitted" as const, transport })),
+          attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
         ]);
         if (outcome.type === "terminal") {
           throw outcome.error;
@@ -3848,10 +3824,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
-  private table(table: string): {
-    columns: ColumnDescriptor[];
-    policies?: TablePolicies;
-  } {
+  private table(table: string): { columns: ColumnDescriptor[]; policies?: TablePolicies } {
     const definition = this.schema[table];
     if (!definition) throw new Error(`unknown table ${table}`);
     return definition;
@@ -5153,9 +5126,7 @@ function readOptions(
 function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   if (optionsJson == null) return false;
   try {
-    const options = JSON.parse(optionsJson) as {
-      first_load_remote_wait_ms?: unknown;
-    };
+    const options = JSON.parse(optionsJson) as { first_load_remote_wait_ms?: unknown };
     return (
       typeof options.first_load_remote_wait_ms === "number" && options.first_load_remote_wait_ms > 0
     );
@@ -5539,9 +5510,7 @@ function decodeRuntimeTerminalOperations(
     return {
       root_key: terminalKey(operation.root_key),
       path,
-      edit: {
-        Move: { key: terminalKey(edit.Move.key), index: edit.Move.index },
-      },
+      edit: { Move: { key: terminalKey(edit.Move.key), index: edit.Move.index } },
     };
   });
 }
@@ -5556,7 +5525,7 @@ function terminalBytes(bytes: NativeTerminalBytes): Uint8Array {
   return bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes);
 }
 
-/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+/** Decode the leading UUID key field from the ordered record-key carrier. */
 function terminalPayloadRowId(encoded: NativeTerminalBytes): string {
   const bytes = terminalBytes(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {
@@ -5826,7 +5795,7 @@ function contextualError(context: string, error: unknown): Error {
 function rejectionCode(message: string): string {
   if (message.includes("AuthorizationDenied")) return "permission_denied";
   if (message.includes("SerializationConflict")) return "serialization_conflict";
-  // The SQLite engine's stable prefix for a policy denial.
+  // The engine's stable prefix for a policy denial.
   if (/^(?:WriteRejected:\s*)?authorization_denied(?::|$)/.test(message))
     return "permission_denied";
   if (message.includes("CausalityViolation")) return "causality_violation";
@@ -5893,9 +5862,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   }
   const table = parsed.table;
   if (parsed.relation_ir != null) {
-    const lossless = parseRelationQueryJsonLossless(queryJson) as {
-      relation_ir?: unknown;
-    };
+    const lossless = parseRelationQueryJsonLossless(queryJson) as { relation_ir?: unknown };
     if (!lossless.relation_ir || typeof lossless.relation_ir !== "object") {
       throw new Error("Relation query is missing relation_ir");
     }
@@ -5942,10 +5909,7 @@ function coerceQueryPredicate(
     };
   }
   if (filter.op === "Not") {
-    return {
-      op: "Not",
-      predicate: coerceQueryPredicate(table, filter.predicate, schema),
-    };
+    return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
   }
   if (isHistoryTable(table) && "column" in filter) {
     if (filter.column === "$transactionId") {
@@ -5975,25 +5939,15 @@ function coerceQueryPredicate(
               boundary < 0n ? op === "Gt" || op === "Gte" : op === "Lt" || op === "Lte";
             return { op: matches ? "All" : "Any", predicates: [] };
           }
-          return {
-            column: filter.column,
-            op,
-            value: { type: "U64", value: boundary },
-          };
+          return { column: filter.column, op, value: { type: "U64", value: boundary } };
         };
         switch (filter.op) {
           case "Eq":
-            return {
-              op: "All",
-              predicates: [bound("Gte", lower), bound("Lte", upper)],
-            };
+            return { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] };
           case "Ne":
             return {
               op: "Not",
-              predicate: {
-                op: "All",
-                predicates: [bound("Gte", lower), bound("Lte", upper)],
-              },
+              predicate: { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] },
             };
           case "Gt":
             return bound("Gt", upper);
@@ -6087,10 +6041,7 @@ function coerceEnumPayloadPredicate(
     };
   }
   if (predicate.op === "Not") {
-    return {
-      ...predicate,
-      predicate: coerceEnumPayloadPredicate(predicate.predicate, fields),
-    };
+    return { ...predicate, predicate: coerceEnumPayloadPredicate(predicate.predicate, fields) };
   }
   if (predicate.op === "EnumMatch") {
     throw new Error("payload enum matches cannot be nested");
@@ -6171,10 +6122,7 @@ function readRootOrderBy(value: unknown): QueryOrder[] {
       if (entry[1] !== "asc" && entry[1] !== "desc") {
         throw unsupportedQueryEncodingError("order_by");
       }
-      return {
-        column: entry[0],
-        direction: entry[1] === "asc" ? "Asc" : "Desc",
-      };
+      return { column: entry[0], direction: entry[1] === "asc" ? "Asc" : "Desc" };
     }
     if (!entry || typeof entry !== "object") {
       throw unsupportedQueryEncodingError("order_by");
@@ -6281,10 +6229,7 @@ function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | nul
   ] as const) {
     const entry = record[key];
     if (entry && typeof entry === "object") {
-      const { column, value: literal } = entry as {
-        column?: unknown;
-        value?: unknown;
-      };
+      const { column, value: literal } = entry as { column?: unknown; value?: unknown };
       return typeof column === "string"
         ? [{ column, op, value: valueToQueryLiteral(literal) }]
         : null;
@@ -6302,10 +6247,7 @@ function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | nul
   }
   const contains = record.Contains;
   if (contains && typeof contains === "object") {
-    const { column, value: literal } = contains as {
-      column?: unknown;
-      value?: unknown;
-    };
+    const { column, value: literal } = contains as { column?: unknown; value?: unknown };
     return typeof column === "string"
       ? [{ column, op: "Contains", value: valueToQueryLiteral(literal) }]
       : null;
@@ -6323,10 +6265,7 @@ function readArraySubqueryOrder(value: unknown): QueryOrder[] {
     if (entry[1] !== "Ascending" && entry[1] !== "Descending") {
       throw unsupportedQueryEncodingError("array_subqueries.order_by");
     }
-    return {
-      column: entry[0],
-      direction: entry[1] === "Ascending" ? "Asc" : "Desc",
-    };
+    return { column: entry[0], direction: entry[1] === "Ascending" ? "Asc" : "Desc" };
   });
 }
 
@@ -6354,10 +6293,7 @@ function coerceQueryLiteral(
         resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
           ?.column_type);
   if (columnType?.type === "Bytea" && value.type === "Array") {
-    return {
-      type: "Bytea",
-      value: Uint8Array.from(value.value.map(readByteLiteral)),
-    };
+    return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
   }
   if (value.type === "Array") {
     const elementType =
@@ -6384,10 +6320,7 @@ function coerceLiteralForColumnType(
 ): QueryLiteral {
   if (value.type === "Nullable") {
     return allowNullable && value.value
-      ? {
-          type: "Nullable",
-          value: coerceLiteralForColumnType(value.value, columnType, false),
-        }
+      ? { type: "Nullable", value: coerceLiteralForColumnType(value.value, columnType, false) }
       : value;
   }
   if (columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)) {
@@ -6400,10 +6333,7 @@ function coerceLiteralForColumnType(
     return { type: "Double", value: value.value };
   }
   if (columnType?.type === "BigInt" && value.type === "Integer") {
-    return {
-      type: "BigInt",
-      value: exactSignedI64(value.value, "BigInt value"),
-    };
+    return { type: "BigInt", value: exactSignedI64(value.value, "BigInt value") };
   }
   if (columnType?.type === "Timestamp" && value.type === "Integer") {
     return { type: "Timestamp", value: value.value };
@@ -6415,10 +6345,7 @@ function coerceLiteralForColumnType(
     }
   }
   if (columnType?.type === "Bytea" && value.type === "Array") {
-    return {
-      type: "Bytea",
-      value: Uint8Array.from(value.value.map(readByteLiteral)),
-    };
+    return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
   }
   if (columnType?.type === "Array" && value.type === "Array") {
     return {
@@ -6449,11 +6376,7 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
       predicates.push(canonical);
       continue;
     }
-    const record = condition as {
-      column?: unknown;
-      op?: unknown;
-      value?: unknown;
-    };
+    const record = condition as { column?: unknown; op?: unknown; value?: unknown };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
     const column = stripColumnQualifier(record.column);
     switch (record.op) {
@@ -6461,58 +6384,30 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
         if (record.value === null) {
           predicates.push({ column, op: "IsNull" });
         } else {
-          predicates.push({
-            column,
-            op: "Eq",
-            value: valueToQueryLiteral(record.value),
-          });
+          predicates.push({ column, op: "Eq", value: valueToQueryLiteral(record.value) });
         }
         break;
       case "ne":
         if (record.value === null) {
           predicates.push({ column, op: "IsNotNull" });
         } else {
-          predicates.push({
-            column,
-            op: "Ne",
-            value: valueToQueryLiteral(record.value),
-          });
+          predicates.push({ column, op: "Ne", value: valueToQueryLiteral(record.value) });
         }
         break;
       case "gt":
-        predicates.push({
-          column,
-          op: "Gt",
-          value: valueToQueryLiteral(record.value),
-        });
+        predicates.push({ column, op: "Gt", value: valueToQueryLiteral(record.value) });
         break;
       case "gte":
-        predicates.push({
-          column,
-          op: "Gte",
-          value: valueToQueryLiteral(record.value),
-        });
+        predicates.push({ column, op: "Gte", value: valueToQueryLiteral(record.value) });
         break;
       case "lt":
-        predicates.push({
-          column,
-          op: "Lt",
-          value: valueToQueryLiteral(record.value),
-        });
+        predicates.push({ column, op: "Lt", value: valueToQueryLiteral(record.value) });
         break;
       case "lte":
-        predicates.push({
-          column,
-          op: "Lte",
-          value: valueToQueryLiteral(record.value),
-        });
+        predicates.push({ column, op: "Lte", value: valueToQueryLiteral(record.value) });
         break;
       case "contains":
-        predicates.push({
-          column,
-          op: "Contains",
-          value: valueToQueryLiteral(record.value),
-        });
+        predicates.push({ column, op: "Contains", value: valueToQueryLiteral(record.value) });
         break;
       case "isNull":
         if (typeof record.value !== "boolean") return null;
@@ -6554,11 +6449,7 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
   }
   const enumMatch = record.EnumMatch;
   if (enumMatch && typeof enumMatch === "object") {
-    const match = enumMatch as {
-      column?: unknown;
-      case?: unknown;
-      payload?: unknown;
-    };
+    const match = enumMatch as { column?: unknown; case?: unknown; payload?: unknown };
     const column = readColumnRef(match.column);
     const payload = predicateToFilterTree(match.payload);
     return column && typeof match.case === "string" && payload
@@ -6683,10 +6574,7 @@ function readLiteral(value: unknown): QueryLiteral | null {
       CANONICAL_SIGNED_I64_DECIMAL.test(record.value)
     ) {
       try {
-        return {
-          type: "BigInt",
-          value: exactSignedI64(BigInt(record.value), "BigInt value"),
-        };
+        return { type: "BigInt", value: exactSignedI64(BigInt(record.value), "BigInt value") };
       } catch {
         return null;
       }
@@ -6811,11 +6699,7 @@ function encodeCells(
 ): Uint8Array {
   const descriptor = [...columns]
     .sort((left, right) => left.name.localeCompare(right.name))
-    .map((column) => ({
-      name: column.name,
-      valueType: storageColumnValueType(column),
-      column,
-    }));
+    .map((column) => ({ name: column.name, valueType: storageColumnValueType(column), column }));
   const values = descriptor.map(({ column }) =>
     encodeCellValue(column, valueFor(column), requireMissingDefaults),
   );
@@ -7391,10 +7275,7 @@ function normalizeSubscriptionRejectionReason(
     return { type: "ServerFailure", code: record.code };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
-    return {
-      type: "InvalidAuthoritySourceClosure",
-      transition: record.transition,
-    };
+    return { type: "InvalidAuthoritySourceClosure", transition: record.transition };
   }
   throw new Error("unknown subscription rejection reason");
 }
@@ -7481,10 +7362,7 @@ function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
     };
   }
   if (type.type === "Row" && value.type === "Row") {
-    return {
-      type: "Row",
-      value: runtimeSubscriptionNestedRow(value.value, type.columns),
-    };
+    return { type: "Row", value: runtimeSubscriptionNestedRow(value.value, type.columns) };
   }
   if (type.type === "EnumPayload" && value.type === "Enum") {
     const payload = type.cases.find((entry) => entry.name === value.value.case)?.fields;

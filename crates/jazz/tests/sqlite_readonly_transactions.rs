@@ -87,7 +87,7 @@ fn insert(db: &Db, owner: &str) -> jazz::db::WriteHandle {
 }
 fn read(db: &Db, tx: OpenTransactionId, dbs: &[&Db]) -> usize {
     let query = db.prepare_query(&Query::from("notes")).unwrap();
-    drive(dbs, db.serializable_tx_ref(tx).all_prepared(&query))
+    drive(dbs, db.tx_ref(tx).all_prepared(&query))
         .unwrap()
         .len()
 }
@@ -459,11 +459,7 @@ fn allocator_write_failure_rolls_back_rows_and_receipts() {
             "batch" => {
                 let tx = OpenTransactionId::new();
                 block_on(db.begin_mergeable(tx)).unwrap();
-                block_on(
-                    db.mergeable_tx_ref(tx)
-                        .insert("notes", cells(), Default::default()),
-                )
-                .unwrap();
+                block_on(db.tx_ref(tx).insert("notes", cells(), Default::default())).unwrap();
                 block_on(db.commit_mergeable_handle(tx)).unwrap_err()
             }
             _ => block_on(db.transaction(async |tx| {

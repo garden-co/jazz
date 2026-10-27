@@ -18,10 +18,9 @@ members = [
   "crates/jazz-otel",
   "crates/jazz-sim",
   "crates/jazz-napi",
-  # The old Axum todo server examples expect a Send + Sync JazzClient in shared
-  # router state. Core Db ownership is currently local-thread by design;
-  # keep these examples as integration targets, but out of workspace-wide green
-  # gates until they are rebuilt around the new server boundary.
+  # The Axum todo server examples need a Send + Sync JazzClient in shared
+  # router state, and Db is thread-local by design, so they stay outside the
+  # workspace.
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
   "examples/stage-plan/benchmarks",
@@ -78,8 +77,8 @@ debug = true
 inherits = "release"
 debug = "line-tables-only"
 
-# Dependencies, including bundled C/C++ such as RocksDB (cc-rs turns any
-# debug level into full `-g`), keep only their symbol names.
+# Dependencies, including bundled C such as SQLite (cc-rs turns any debug
+# level into full `-g`), keep only their symbol names.
 [profile.release-server.package."*"]
 debug = false
 

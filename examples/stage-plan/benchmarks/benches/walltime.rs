@@ -58,7 +58,7 @@ fn stage_plan_reopen_1500(bencher: divan::Bencher) {
         .bench_local_refs(|f| f.0.reopen());
 }
 
-// --- The show board (RocksDB): reads a board UI makes ---
+// --- The show board (file-backed): reads a board UI makes ---
 
 /// Open one show's board: filter and order its tasks, bounded.
 #[divan::bench(sample_count = 10)]

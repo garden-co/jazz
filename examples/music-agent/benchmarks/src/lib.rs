@@ -10,7 +10,7 @@ const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -29,7 +29,6 @@ pub struct Fixture {
     attachment: RowUuid,
     attachment_bytes: usize,
     transcript: PreparedQuery,
-    turns: TableSchema,
 }
 
 impl Default for Fixture {
@@ -132,7 +131,6 @@ impl Fixture {
             attachment,
             attachment_bytes,
             transcript,
-            turns: table(&schema, "turns"),
         }
     }
 
@@ -196,7 +194,7 @@ impl Fixture {
             .read(&self.transcript)
             .expect("read transcript")
             .into_iter()
-            .map(|row| match row.cell(&self.turns, "body") {
+            .map(|row| match row.cell("body") {
                 Some(Value::String(body)) => body,
                 other => panic!("unexpected transcript body: {other:?}"),
             })
@@ -208,12 +206,11 @@ impl Fixture {
         let query = reopened
             .prepare_query(&transcript_query())
             .expect("prepare restarted transcript");
-        let table = table(&schema(), "turns");
         reopened
             .read(&query)
             .expect("read restarted transcript")
             .into_iter()
-            .map(|row| match row.cell(&table, "body") {
+            .map(|row| match row.cell("body") {
                 Some(Value::String(body)) => body,
                 other => panic!("unexpected restarted body: {other:?}"),
             })
@@ -268,15 +265,6 @@ fn open(schema: JazzSchema, dir: &tempfile::TempDir) -> BenchDb {
         Default::default(),
     ))
     .expect("open MusicAgent database")
-}
-
-fn table(schema: &JazzSchema, name: &str) -> TableSchema {
-    schema
-        .tables()
-        .iter()
-        .find(|table| table.name == name)
-        .unwrap_or_else(|| panic!("MusicAgent schema has {name}"))
-        .clone()
 }
 
 fn insert(db: &BenchDb, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {

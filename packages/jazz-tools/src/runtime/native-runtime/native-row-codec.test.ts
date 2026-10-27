@@ -331,7 +331,7 @@ describe("native row codec", () => {
     expect(reader.u64()).toBe(42);
   });
 
-  it("round-trips every Groove ValueType fixture, including depth-three nesting", () => {
+  it("round-trips every ValueType fixture, including depth-three nesting", () => {
     const fixture = nativeRowCodecFixture();
     const testCase = fixture.cases.find(
       (candidate) => candidate.name === "all_value_types_depth_three",

@@ -39,12 +39,8 @@ pub fn rss_kib() -> u64 {
         * 4
 }
 
-mod engine {
-    use jazz::db;
-    use jazz::db::SyncMessage as SyncMsg;
-    use jazz::db::TransportError;
-    include!("fanout_wire_scenario.rs");
-}
+#[path = "fanout_wire_scenario.rs"]
+mod scenario;
 
 fn main() {
     let env = |k: &str, d: usize| {
@@ -61,7 +57,7 @@ fn main() {
         messages_per_room: env("MESSAGES_PER_ROOM", 20),
         ops: env("OPS", 30),
     };
-    let report = engine::run(&cfg);
+    let report = scenario::run(&cfg);
     println!(
         "wire: clients={} subs={} initial sync {:?}; RSS: {} KiB for client Dbs, +{} KiB after sync ({} B/sub)",
         report.clients,

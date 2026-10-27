@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Ordering by a column that the query's `select` projects away (#3495).
 //!
 //! SQL semantics: an order key orders the result whether or not it is
@@ -91,20 +90,14 @@ fn by_rank(direction: OrderDirection) -> Query {
 /// Titles in result order. Also checks that the unselected order key is not
 /// returned.
 fn titles(rows: impl IntoIterator<Item = CurrentRow>) -> Vec<String> {
-    let schema = schema();
-    let table = schema
-        .tables()
-        .iter()
-        .find(|table| table.name.as_str() == "tasks")
-        .expect("tasks table");
     rows.into_iter()
         .map(|row| {
             assert_eq!(
-                row.cell(table, "rank"),
+                row.cell("rank"),
                 None,
                 "an unselected order key must not be returned"
             );
-            match row.cell(table, "title") {
+            match row.cell("title") {
                 Some(Value::String(title)) => title,
                 other => panic!("expected a title, got {other:?}"),
             }

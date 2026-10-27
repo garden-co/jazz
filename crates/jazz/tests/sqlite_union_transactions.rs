@@ -153,7 +153,7 @@ fn begin(db: &Db) -> OpenTransactionId {
     tx
 }
 fn read(db: &Db, tx: OpenTransactionId, query: &Query) -> Vec<CurrentRow> {
-    let result = block_on(db.all_serialized_query(
+    let result = block_on(db.all_serialized_query_as(
         &postcard::to_allocvec(query).unwrap(),
         ReadOpts::for_read_tier(ReadTier::LocalOnly),
         Some(tx),
@@ -179,7 +179,7 @@ fn switch_arm(db: &Db) {
     .unwrap();
 }
 fn stage_check(db: &Db, tx: OpenTransactionId) {
-    block_on(db.serializable_tx_ref(tx).insert(
+    block_on(db.tx_ref(tx).insert(
         "checks",
         BTreeMap::from([("value".into(), Value::I32(1))]),
         Default::default(),
@@ -536,7 +536,7 @@ fn union_windows_read_staged_prefixes_and_pin_the_snapshot() {
             },
         });
         let tx = begin(&db);
-        block_on(db.serializable_tx_ref(tx).update(
+        block_on(db.tx_ref(tx).update(
             "counters",
             counter(),
             BTreeMap::from([("value".into(), Value::I32(5))]),

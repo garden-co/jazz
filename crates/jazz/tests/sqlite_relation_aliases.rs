@@ -199,7 +199,7 @@ fn fetch(db: &Db, nodes: &[&Db], query: &Query) -> Vec<CurrentRow> {
     let bytes = postcard::to_allocvec(query).unwrap();
     let SerializedReadResult::Rows(rows) = drive(
         nodes,
-        db.all_serialized_query(
+        db.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -397,7 +397,7 @@ fn cold_alias_snapshot_is_pinned_and_conflicts_at_commit() {
         block_on(client.subscribe(&empty, ReadOpts::for_read_tier(ReadTier::Remote))).unwrap();
     turns(&nodes);
     let tx = begin(&client);
-    drive(&nodes, client.serializable_tx_ref(tx).all_prepared(&empty)).unwrap();
+    drive(&nodes, client.tx_ref(tx).all_prepared(&empty)).unwrap();
     block_on(server.update(
         "docs",
         id(1),
@@ -408,7 +408,7 @@ fn cold_alias_snapshot_is_pinned_and_conflicts_at_commit() {
     let q = client
         .prepare_query(&query(true, &[("title", "label")], false))
         .unwrap();
-    let rows = drive(&nodes, client.serializable_tx_ref(tx).all_prepared(&q)).unwrap();
+    let rows = drive(&nodes, client.tx_ref(tx).all_prepared(&q)).unwrap();
     assert_eq!(
         cells(&rows[0]),
         vec![("label".into(), Some(Value::String("z".into())))]
@@ -495,7 +495,7 @@ fn offline_alias_evidence_validates_sources_and_witnesses() {
         client.set_remote_link_hint(RemoteLinkHint::Failed);
         let tx = begin(&client);
         let bytes = postcard::to_allocvec(&q).unwrap();
-        let rows = block_on(client.all_serialized_query(
+        let rows = block_on(client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::LocalOnly),
             Some(tx),
@@ -513,7 +513,7 @@ fn offline_alias_evidence_validates_sources_and_witnesses() {
             cells(&rows[0]),
             vec![("label".into(), Some(Value::String("z".into())))]
         );
-        block_on(client.serializable_tx_ref(tx).insert(
+        block_on(client.tx_ref(tx).insert(
             "docs",
             BTreeMap::from([
                 ("title".into(), Value::String("companion".into())),
@@ -664,7 +664,7 @@ fn tampered_alias_evidence_and_envelopes_are_rejected() {
         client.set_remote_link_hint(RemoteLinkHint::Failed);
         let tx = begin(&client);
         let bytes = postcard::to_allocvec(&q).unwrap();
-        block_on(client.all_serialized_query(
+        block_on(client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::LocalOnly),
             Some(tx),
@@ -675,7 +675,7 @@ fn tampered_alias_evidence_and_envelopes_are_rejected() {
             |_| {},
         ))
         .unwrap();
-        block_on(client.serializable_tx_ref(tx).update(
+        block_on(client.tx_ref(tx).update(
             "docs",
             id(1),
             BTreeMap::from([("title".into(), Value::String("forged write".into()))]),
@@ -720,7 +720,7 @@ fn alias_evidence_uses_existing_versioned_bytes() {
     let q = query(false, &[("title", "label")], false);
     let tx = begin(&client);
     let bytes = postcard::to_allocvec(&q).unwrap();
-    block_on(client.all_serialized_query(
+    block_on(client.all_serialized_query_as(
         &bytes,
         ReadOpts::for_read_tier(ReadTier::LocalOnly),
         Some(tx),
@@ -806,7 +806,7 @@ fn pending_alias_evidence_survives_reopen() {
             client.set_remote_link_hint(RemoteLinkHint::Failed);
             let tx = begin(&client);
             let bytes = postcard::to_allocvec(&q).unwrap();
-            let result = block_on(client.all_serialized_query(
+            let result = block_on(client.all_serialized_query_as(
                 &bytes,
                 ReadOpts::for_read_tier(ReadTier::LocalOnly),
                 Some(tx),

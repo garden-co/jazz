@@ -661,7 +661,7 @@ fn private_owner_retains_old_names_under_renamed_authority_policies() {
     let bytes = postcard::to_allocvec(&Query::from("notes")).unwrap();
     let rows = drive(
         &[&owner, &server],
-        owner.all_serialized_query(
+        owner.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -721,7 +721,7 @@ fn private_owner_retains_old_names_under_renamed_authority_policies() {
     connect(&tab, &owner, user("alice"), None);
     let rows = drive(
         &[&tab, &owner, &server],
-        tab.all_serialized_query(
+        tab.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::LocalFirst),
             None,

@@ -1,17 +1,13 @@
 //! A team's first edit of a release plan under a many-branch sign-off policy:
 //! the authority compiles the update policy and evaluates it for the edit.
 //!
-//! Moved from `crates/jazz/benches/authorization_support_branches.rs`
-//! (`update_support_branches`), reframed in BigLabel terms: the base table is
-//! a release plan, each policy factor is a sign-off desk, and each desk grants
+//! In BigLabel terms: the base table is a release plan, each policy factor is a sign-off desk, and each desk grants
 //! the edit to either its leads or its deputies. The update policy is an AND of
 //! `desks` ORs, each OR choosing between two correlated `exists` grants, so it
-//! normalizes to `2^desks` branches of `desks` joins each. Schema, policy,
-//! node identities are unchanged; the grant tables stay empty, as before, so
-//! the measurement is policy compilation plus an evaluation over empty
-//! grants, which denies the edit. (Groove compiled the policy into
-//! authorization-support views to hydrate; SQLite evaluates it as one
-//! statement of correlated `EXISTS` branches.)
+//! normalizes to `2^desks` branches of `desks` joins each. The grant tables
+//! stay empty, so the measurement is policy compilation plus an evaluation over empty grants,
+//! which denies the edit. The policy runs as one statement of correlated
+//! `EXISTS` branches.
 //!
 //! Each sample opens a fresh database, so no compiled statement is reused
 //! between samples. Compare the 16- and 64-branch rungs: linear scaling

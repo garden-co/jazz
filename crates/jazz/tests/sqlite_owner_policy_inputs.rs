@@ -258,7 +258,7 @@ fn changed_permission_evidence_refreshes_an_unchanged_result() {
     );
     let tx = jazz::tools::OpenTransactionId::new();
     block_on(authority.begin_serializable(tx)).unwrap();
-    let replacement = block_on(authority.serializable_tx_ref(tx).insert(
+    let replacement = block_on(authority.tx_ref(tx).insert(
         "members",
         std::collections::BTreeMap::from([
             ("scope".into(), Value::Uuid(scope.0)),
@@ -270,7 +270,7 @@ fn changed_permission_evidence_refreshes_an_unchanged_result() {
     .row_uuid();
     block_on(
         authority
-            .serializable_tx_ref(tx)
+            .tx_ref(tx)
             .delete("members", membership, Default::default()),
     )
     .unwrap();

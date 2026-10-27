@@ -199,7 +199,7 @@ fn fetch(client: &Db, nodes: &[&Db], query: &Query) -> Vec<CurrentRow> {
     let bytes = postcard::to_allocvec(query).unwrap();
     let SerializedReadResult::Rows(rows) = drive(
         nodes,
-        client.all_serialized_query(
+        client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -384,7 +384,7 @@ fn unbounded_inner_union_prefixes_refuse_instead_of_returning_empty_pages() {
         let bytes = postcard::to_allocvec(&q).unwrap();
         let error = drive(
             &[&client, &server],
-            client.all_serialized_query(
+            client.all_serialized_query_as(
                 &bytes,
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,
@@ -598,7 +598,7 @@ fn malformed_or_downgraded_union_receipts_are_rejected() {
         let bytes = postcard::to_allocvec(&query(both())).unwrap();
         let error = drive(
             &[&client, &server],
-            client.all_serialized_query(
+            client.all_serialized_query_as(
                 &bytes,
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,
@@ -1003,7 +1003,7 @@ fn local_first_wait_materializes_exact_union_window() {
     };
     let result = drive(
         &[&client, &server],
-        client.all_serialized_query(&bytes, opts, None, None, None, false, || false, |_| {}),
+        client.all_serialized_query_as(&bytes, opts, None, None, None, false, || false, |_| {}),
     )
     .unwrap();
     let SerializedReadResult::Rows(rows) = result else {
@@ -1047,7 +1047,7 @@ fn empty_union_still_validates_indexed_witness_shape() {
     .unwrap();
     let error = drive(
         &[&client, &server],
-        client.all_serialized_query(
+        client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -1228,7 +1228,7 @@ fn cancelled_union_foreground_read_releases_attachment() {
     let control = delayed_connect(&client, &server, "settled");
     let q = query(window(both(), 0, 2));
     let bytes = postcard::to_allocvec(&q).unwrap();
-    let mut read = Box::pin(client.all_serialized_query(
+    let mut read = Box::pin(client.all_serialized_query_as(
         &bytes,
         ReadOpts::for_read_tier(ReadTier::Remote),
         None,

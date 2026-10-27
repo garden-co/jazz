@@ -132,7 +132,7 @@ fn drive<T>(nodes: &[&Db], future: impl Future<Output = T>) -> T {
 async fn read(db: &Db, table: &str, token: &str) -> Result<usize, Error> {
     let query = postcard::to_allocvec(&Query::from(table)).unwrap();
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &query,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -224,7 +224,7 @@ fn scoped_permissions_exclude_stale_deleted_and_retargeted_grants() {
         let query = postcard::to_allocvec(&Query::from("grants")).unwrap();
         let cached = drive(
             &nodes,
-            backend.all_serialized_query(
+            backend.all_serialized_query_as(
                 &query,
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,
@@ -472,7 +472,7 @@ fn delayed_scoped_receipt_uses_its_exact_historical_dependency() {
     let query = postcard::to_allocvec(&Query::from("grants")).unwrap();
     let cached = drive(
         &nodes,
-        backend.all_serialized_query(
+        backend.all_serialized_query_as(
             &query,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -496,7 +496,7 @@ fn delayed_scoped_receipt_uses_its_exact_historical_dependency() {
 async fn scoped_ordered_ids(db: &Db, query: Query) -> Result<Vec<RowUuid>, Error> {
     let query = postcard::to_allocvec(&query).unwrap();
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &query,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -627,7 +627,7 @@ fn scoped_text_ordering_does_not_hydrate_unrelated_cached_values() {
         let query = postcard::to_allocvec(&Query::from("docs")).unwrap();
         let cached = drive(
             &[&server, &backend],
-            backend.all_serialized_query(
+            backend.all_serialized_query_as(
                 &query,
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,
@@ -1057,7 +1057,7 @@ fn accepted_scoped_reads_distinguish_unrelated_and_dependency_writes() {
         let tx = jazz::tools::OpenTransactionId::new();
         block_on(view.begin_serializable_for_identity(tx, alice())).unwrap();
         if table == "markers" {
-            block_on(view.serializable_tx_ref(tx).insert(
+            block_on(view.tx_ref(tx).insert(
                 "markers",
                 BTreeMap::from([("body".into(), Value::String("unrelated".into()))]),
                 Default::default(),
@@ -1069,7 +1069,7 @@ fn accepted_scoped_reads_distinguish_unrelated_and_dependency_writes() {
             } else {
                 (id(20), "token")
             };
-            block_on(view.serializable_tx_ref(tx).update(
+            block_on(view.tx_ref(tx).update(
                 table,
                 row,
                 BTreeMap::from([(column.into(), Value::String("changed".into()))]),

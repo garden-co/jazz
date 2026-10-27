@@ -147,7 +147,7 @@ impl Fixture {
             block_on(self.alice.begin_mergeable(id)).unwrap();
         }
         for (row_id, value) in values {
-            block_on(self.alice.mergeable_tx_ref(id).upsert(
+            block_on(self.alice.tx_ref(id).upsert(
                 "nodes",
                 row(*row_id),
                 value.clone(),
@@ -274,7 +274,7 @@ fn local_serializable_session_uses_the_same_unit_proof() {
         (2, cells(2, true, true, "room")),
     ] {
         block_on(
-            bob.serializable_tx_ref(id)
+            bob.tx_ref(id)
                 .upsert("nodes", row(n), value, Default::default()),
         )
         .unwrap();
@@ -459,7 +459,7 @@ fn provisional_staging_does_not_grant_reads_through_unproven_creates() {
     .unwrap();
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(1),
         cells(1, false, true, "room"),
@@ -468,7 +468,7 @@ fn provisional_staging_does_not_grant_reads_through_unproven_creates() {
     .unwrap();
     let query = bob.prepare_query(&Query::from("secrets")).unwrap();
     assert!(
-        block_on(bob.serializable_tx_ref(id).all_prepared(&query))
+        block_on(bob.tx_ref(id).all_prepared(&query))
             .unwrap()
             .is_empty()
     );
@@ -547,14 +547,14 @@ fn update_with_check_revalidates_final_dependencies() {
     .unwrap();
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "notes",
         row(1),
         BTreeMap::from([("scope".into(), Value::String("old".into()))]),
         Default::default(),
     ))
     .unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(10),
         cells(10, true, true, "new"),
@@ -609,7 +609,7 @@ fn unselected_insert_marker_cannot_unlock_mutual_updates() {
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
     for (row_id, parent) in [(1, 2), (2, 1)] {
-        block_on(bob.serializable_tx_ref(id).upsert(
+        block_on(bob.tx_ref(id).upsert(
             "nodes",
             row(row_id),
             cells(parent, true, true, "new"),
@@ -736,7 +736,7 @@ fn proof_preparation_does_not_touch_unrelated_chunked_values() {
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
     for (row_id, parent, seed) in [(1, 2, false), (2, 2, true)] {
-        block_on(bob.serializable_tx_ref(id).upsert(
+        block_on(bob.tx_ref(id).upsert(
             "nodes",
             row(row_id),
             cells(parent, seed, true, "room"),
@@ -808,15 +808,13 @@ fn baseline_and_final_proofs_may_have_different_seed_orders() {
     for (row_id, parent, seed) in [(1, 2, false), (2, 1, true)] {
         let mut values = cells(parent, seed, true, "room");
         values.insert("grant".into(), Value::Uuid(row(10).0));
-        block_on(bob.serializable_tx_ref(id).upsert(
-            "nodes",
-            row(row_id),
-            values,
-            Default::default(),
-        ))
+        block_on(
+            bob.tx_ref(id)
+                .upsert("nodes", row(row_id), values, Default::default()),
+        )
         .unwrap();
     }
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "grants",
         row(10),
         BTreeMap::from([("phase".into(), Value::Bool(true))]),
@@ -866,7 +864,7 @@ fn provisional_large_value_reads_fail_explicitly() {
     let bob = open(common::compile_schema(&public), 2, true);
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(1),
         cells(1, false, true, "room"),
@@ -874,7 +872,7 @@ fn provisional_large_value_reads_fail_explicitly() {
     ))
     .unwrap();
     let query = bob.prepare_query(&Query::from("nodes")).unwrap();
-    let error = block_on(bob.serializable_tx_ref(id).all_prepared(&query)).unwrap_err();
+    let error = block_on(bob.tx_ref(id).all_prepared(&query)).unwrap_err();
     assert!(
         error
             .message
@@ -1138,7 +1136,7 @@ fn staged_inherited_grants_do_not_unlock_existing_secrets() {
     .unwrap();
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(10),
         cells(10, true, true, "room"),
@@ -1147,7 +1145,7 @@ fn staged_inherited_grants_do_not_unlock_existing_secrets() {
     .unwrap();
     let query = bob.prepare_query(&Query::from("secrets")).unwrap();
     assert!(
-        block_on(bob.serializable_tx_ref(id).all_prepared(&query))
+        block_on(bob.tx_ref(id).all_prepared(&query))
             .unwrap()
             .is_empty()
     );
@@ -1289,12 +1287,10 @@ fn named_commit(db: &Db, values: &[(&str, u128, BTreeMap<String, Value>)]) -> u6
     let id = OpenTransactionId::new();
     block_on(db.begin_serializable(id)).unwrap();
     for (table, row_id, value) in values {
-        block_on(db.serializable_tx_ref(id).upsert(
-            table,
-            row(*row_id),
-            value.clone(),
-            Default::default(),
-        ))
+        block_on(
+            db.tx_ref(id)
+                .upsert(table, row(*row_id), value.clone(), Default::default()),
+        )
         .unwrap();
     }
     block_on(db.commit_serializable_handle(id)).unwrap().0
@@ -1362,7 +1358,7 @@ fn accepted_forward_and_reverse_grants_authorize_only_their_session() {
     f.settle(next).unwrap();
     let id = OpenTransactionId::new();
     block_on(f.bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
-    block_on(f.bob.serializable_tx_ref(id).upsert(
+    block_on(f.bob.tx_ref(id).upsert(
         "grants",
         row(5),
         grant_cells(1, "room", "rotate"),
@@ -1631,7 +1627,7 @@ fn sealed_and_origin_mapped_units_keep_candidate_authorization() {
         f.alice
             .prepare_initialization_insert(id, "nodes", row(row_id))
             .unwrap();
-        block_on(f.alice.serializable_tx_ref(id).upsert(
+        block_on(f.alice.tx_ref(id).upsert(
             "nodes",
             row(row_id),
             cells(parent, seed, true, "room"),
@@ -1703,12 +1699,10 @@ fn candidate_checks_keep_the_accepted_catalogue_identity_provider() {
                 "scopeId".into(),
                 Value::Uuid(if matching { scope } else { fake }),
             );
-            block_on(bob.serializable_tx_ref(id).upsert(
-                "nodes",
-                row(row_id),
-                values,
-                Default::default(),
-            ))
+            block_on(
+                bob.tx_ref(id)
+                    .upsert("nodes", row(row_id), values, Default::default()),
+            )
             .unwrap();
         }
         assert_eq!(
@@ -1891,7 +1885,7 @@ fn ordinary_exists_distinguishes_deleted_new_and_accepted_evidence() {
         }
         let tx = OpenTransactionId::new();
         block_on(f.alice.begin_mergeable(tx)).unwrap();
-        let staged = f.alice.mergeable_tx_ref(tx);
+        let staged = f.alice.tx_ref(tx);
         if !accepted {
             block_on(staged.upsert(
                 "nodes",

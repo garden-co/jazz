@@ -463,7 +463,7 @@ impl RelayDb {
         mut options: jazz::db::InsertOptions,
     ) -> Result<RowUuid, Error> {
         let row = *options.row_id.get_or_insert_with(|| self.next_row_id());
-        let staged = block_on(self.serializable_tx_ref(id).insert(&table, cells, options));
+        let staged = block_on(self.tx_ref(id).insert(&table, cells, options));
         self.binding.staged(id, staged).map_err(core_error)?;
         Ok(row)
     }
@@ -487,7 +487,7 @@ impl RelayDb {
         options: jazz::db::UpdateOptions,
     ) -> Result<(), Error> {
         let staged = block_on(
-            self.serializable_tx_ref(id)
+            self.tx_ref(id)
                 .update(&table, row, cells, options),
         );
         self.binding.staged(id, staged).map_err(core_error)
@@ -512,7 +512,7 @@ impl RelayDb {
         options: jazz::db::UpsertOptions,
     ) -> Result<(), Error> {
         let staged = block_on(
-            self.serializable_tx_ref(id)
+            self.tx_ref(id)
                 .upsert(&table, row, cells, options),
         );
         self.binding.staged(id, staged).map_err(core_error)
@@ -534,7 +534,7 @@ impl RelayDb {
         row: RowUuid,
         options: jazz::db::DeleteOptions,
     ) -> Result<(), Error> {
-        let staged = block_on(self.serializable_tx_ref(id).delete(&table, row, options));
+        let staged = block_on(self.tx_ref(id).delete(&table, row, options));
         self.binding.staged(id, staged).map_err(core_error)
     }
     pub(super) fn apply_restore(
@@ -557,7 +557,7 @@ impl RelayDb {
         options: jazz::db::RestoreOptions,
     ) -> Result<(), Error> {
         let staged = block_on(
-            self.serializable_tx_ref(id)
+            self.tx_ref(id)
                 .restore(&table, row, cells, options),
         );
         self.binding.staged(id, staged).map_err(core_error)

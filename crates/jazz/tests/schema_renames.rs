@@ -3,6 +3,12 @@
 //! writes it under its own name, so old and new versions share the same rows,
 //! history and indexes, a reopened file finds them again, and a client on the
 //! old schema syncs with a server on the new one. No data is copied.
+//!
+//! The lens ops that do write values (INV-LENS-13, INV-LENS-17): a copy is a
+//! stored column of its own, filled from its source at activation and in
+//! rows older versions insert; a dropped column gets the lens's backwards
+//! default in rows newer versions insert; the identity transform changes no
+//! value.
 
 use crate::common;
 
@@ -674,5 +680,246 @@ fn a_frozen_base_from_before_a_table_rename_still_copies_the_frozen_row() {
     assert_eq!(
         titles(ReadOpts::default().branch_view(main, None)),
         texts(&["later"])
+    );
+}
+
+/// `todos(title, rank)` plus `search_title`, a copy of `title`.
+fn with_copy() -> JazzSchema {
+    schema(vec![
+        todos("todos", "title").column("search_title", ColumnType::Text),
+    ])
+}
+
+fn copy_title() -> MigrationLens {
+    lens(
+        &v1(),
+        &with_copy(),
+        "todos",
+        "todos",
+        vec![LensOp::CopyColumn {
+            from: "title".into(),
+            to: "search_title".into(),
+        }],
+    )
+}
+
+/// `column` of every row version `table`'s history holds, sorted.
+fn history(path: &Path, table: &str, column: &str) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut values: Vec<String> = conn
+        .prepare(&format!("SELECT \"{column}\" FROM \"{table}__h\""))
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    values.sort();
+    values
+}
+
+#[test]
+fn a_copied_column_is_filled_from_its_source_in_current_rows_and_history() {
+    let path = scratch("copy-fill");
+    let db = open_at(v1(), &path);
+    insert(&db, "todos", 1, "title", "a");
+    update(&db, "todos", 1, "title", "a2");
+    insert(&db, "todos", 2, "title", "b");
+    block_on(db.activate_schema_with_lenses(with_copy(), &[copy_title()])).unwrap();
+
+    assert_eq!(read(&db, "todos", "search_title"), texts(&["a2", "b"]));
+    assert_eq!(read(&db, "todos", "title"), texts(&["a2", "b"]));
+    assert_eq!(
+        history(&path, "todos", "search_title"),
+        vec!["a".to_owned()],
+        "superseded versions hold the copy too"
+    );
+}
+
+#[test]
+fn a_row_an_older_version_inserts_gets_the_copy_of_its_source() {
+    let path = scratch("copy-mirror");
+    let db = open_at(v1(), &path);
+    insert(&db, "todos", 1, "title", "a");
+    // A handle opened before the copy existed keeps it in step too.
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    block_on(db.activate_schema_with_lenses(with_copy(), &[copy_title()])).unwrap();
+
+    insert(&old, "todos", 2, "title", "b");
+    assert_eq!(read(&db, "todos", "search_title"), texts(&["a", "b"]));
+
+    // The copy is a column of its own (SPEC 4 §4.6): a write of the source,
+    // by either version, leaves it, and the new version writes it alone.
+    update(&old, "todos", 1, "title", "a2");
+    update(&db, "todos", 2, "title", "b2");
+    assert_eq!(read(&db, "todos", "search_title"), texts(&["a", "b"]));
+    update(&db, "todos", 1, "search_title", "mine");
+    assert_eq!(read(&db, "todos", "title"), texts(&["a2", "b2"]));
+    assert_eq!(read(&db, "todos", "search_title"), texts(&["mine", "b"]));
+
+    // A reopened store keeps the rule.
+    drop((old, db));
+    let db = open_at(with_copy(), &path);
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    insert(&old, "todos", 3, "title", "c");
+    assert_eq!(
+        read(&db, "todos", "search_title"),
+        texts(&["mine", "b", "c"])
+    );
+}
+
+#[test]
+fn a_row_a_client_on_the_old_schema_inserts_gets_the_copy() {
+    let server = server(v1(), vec![(with_copy(), copy_title())]);
+    let old = block_on(Db::open(config(v1(), 1, user(1)))).unwrap();
+    let new = block_on(Db::open(config(with_copy(), 2, user(2)))).unwrap();
+    let (old_client, old_server) = pipe();
+    let (new_client, new_server) = pipe();
+    let _old_link = block_on(old.connect_upstream(old_client));
+    let _new_link = block_on(new.connect_upstream(new_client));
+    server.accept_subscriber(old_server, user(1));
+    server.accept_subscriber(new_server, user(2));
+    let new_query = new.prepare_query(&Query::from("todos")).unwrap();
+    let _new_stream = block_on(new.subscribe(&new_query, ReadOpts::default())).unwrap();
+
+    insert(&old, "todos", 1, "title", "from old");
+    pump(&server, &[&old, &new]);
+    assert_eq!(read(&server, "todos", "search_title"), texts(&["from old"]));
+    assert_eq!(
+        read_query(&new, Query::from("todos"), "search_title", local()),
+        texts(&["from old"])
+    );
+}
+
+#[test]
+fn a_copy_must_name_a_new_column_of_the_source_type() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let missing = lens(
+        &v1(),
+        &with_copy(),
+        "todos",
+        "todos",
+        vec![LensOp::CopyColumn {
+            from: "nope".into(),
+            to: "search_title".into(),
+        }],
+    );
+    let error = block_on(db.activate_schema_with_lenses(with_copy(), &[missing])).unwrap_err();
+    assert!(error.to_string().contains("no `nope`"), "{error}");
+
+    let typed = schema(vec![
+        todos("todos", "title").column("search_title", ColumnType::Integer),
+    ]);
+    let retyped = lens(
+        &v1(),
+        &typed,
+        "todos",
+        "todos",
+        vec![LensOp::CopyColumn {
+            from: "title".into(),
+            to: "search_title".into(),
+        }],
+    );
+    let error = block_on(db.activate_schema_with_lenses(typed, &[retyped])).unwrap_err();
+    assert!(error.to_string().contains("another type"), "{error}");
+}
+
+#[test]
+fn the_identity_transform_is_accepted_and_changes_no_value() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    insert(&db, "todos", 1, "title", "a");
+    let identity = lens(
+        &v1(),
+        &v2(),
+        "todos",
+        "todos",
+        vec![
+            LensOp::RenameColumn {
+                from: "title".into(),
+                to: "name".into(),
+            },
+            LensOp::TransformColumn {
+                column: "name".into(),
+                transform: "jazz.identity".into(),
+            },
+        ],
+    );
+    block_on(db.activate_schema_with_lenses(v2(), &[identity])).unwrap();
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    assert_eq!(read(&db, "todos", "name"), texts(&["a"]));
+    update(&old, "todos", 1, "title", "b");
+    assert_eq!(read(&db, "todos", "name"), texts(&["b"]));
+}
+
+#[test]
+fn an_unregistered_transform_is_rejected() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    let upper = lens(
+        &v1(),
+        &v2(),
+        "todos",
+        "todos",
+        vec![
+            LensOp::RenameColumn {
+                from: "title".into(),
+                to: "name".into(),
+            },
+            LensOp::TransformColumn {
+                column: "name".into(),
+                transform: "app.uppercase".into(),
+            },
+        ],
+    );
+    let error = block_on(db.activate_schema_with_lenses(v2(), &[upper])).unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema);
+    assert!(
+        error.to_string().contains("unregistered transform"),
+        "{error}"
+    );
+}
+
+/// v1 without `rank`.
+fn without_rank() -> JazzSchema {
+    schema(vec![
+        TableSchemaBuilder::new("todos")
+            .column("title", ColumnType::Text)
+            .index_only(["title"])
+            .policies(allow_all_policies()),
+    ])
+}
+
+#[test]
+fn a_row_a_newer_version_inserts_gives_a_dropped_column_its_backwards_default() {
+    let db = block_on(Db::open(config(v1(), 1, AuthorSubject::SYSTEM))).unwrap();
+    block_on(db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), text("old")),
+            ("rank".to_owned(), Value::I64(3)),
+        ]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let drop_rank = lens(
+        &v1(),
+        &without_rank(),
+        "todos",
+        "todos",
+        vec![LensOp::DropColumn {
+            column: "rank".into(),
+            backwards_default: Value::I64(7),
+        }],
+    );
+    block_on(db.activate_schema_with_lenses(without_rank(), &[drop_rank])).unwrap();
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+
+    insert(&db, "todos", 2, "title", "new");
+    update(&db, "todos", 1, "title", "old2");
+    assert_eq!(
+        read(&old, "todos", "rank"),
+        vec![Value::I64(3), Value::I64(7)],
+        "an update keeps the stored value; an insert takes the backwards default"
     );
 }

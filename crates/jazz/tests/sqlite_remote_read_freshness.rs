@@ -85,7 +85,7 @@ fn warm(db: &Db, dbs: &[&Db]) -> SubscriptionStream {
     panic!("subscription did not warm")
 }
 async fn read(tab: &Db, query: &[u8]) -> Result<SerializedReadResult, jazz::db::Error> {
-    tab.all_serialized_query(
+    tab.all_serialized_query_as(
         query,
         ReadOpts::for_read_tier(ReadTier::Remote),
         None,

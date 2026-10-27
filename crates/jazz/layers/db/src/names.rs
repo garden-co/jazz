@@ -17,7 +17,7 @@ use crate::options::{Error, ErrorCode};
 use crate::protocol::{LensOp, MigrationLens};
 use crate::records::Value;
 use crate::schema::JazzSchema;
-use crate::values::{Schema, StoredNames, storage, unsupported};
+use crate::values::{Schema, Sql, StoredNames, storage, unsupported};
 
 /// One row per (version, table, column); `col` is '' for the table itself.
 /// `n` orders versions by admission.
@@ -25,11 +25,46 @@ pub(crate) const DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_names (version BL
      tbl TEXT NOT NULL, col TEXT NOT NULL, n INTEGER NOT NULL, stored_tbl TEXT NOT NULL, \
      stored_col TEXT NOT NULL, PRIMARY KEY (version, tbl, col)) WITHOUT ROWID;";
 
+/// Stored columns that lenses fill in rows inserted by versions that do not
+/// name them, one row per (stored table, stored column, lens target version):
+/// `src` names the column a copy follows, else `dflt` is a dropped
+/// column's backwards default. Created with the first such lens, so stores
+/// without one keep their file as it was.
+const LENS_CELLS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_lens_cells (tbl TEXT NOT NULL, \
+     col TEXT NOT NULL, since BLOB NOT NULL, src TEXT, dflt, PRIMARY KEY (tbl, col, since)) \
+     WITHOUT ROWID;";
+
+/// A stored column a lens into version `since` fills in rows inserted by
+/// versions that do not name it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LensCell {
+    /// Stored table and column.
+    pub(crate) table: String,
+    pub(crate) column: String,
+    pub(crate) since: SchemaVersionId,
+    pub(crate) rule: LensCellRule,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LensCellRule {
+    /// A copy of stored column `.0`: a row a version admitted before
+    /// `since` inserts gives the copy the source's value.
+    Copy(String),
+    /// A dropped column: a row inserted by `since` or a later version gives
+    /// it this backwards default.
+    Dropped(Sql),
+}
+
 /// What a migration lens asks of the stored tables. SQLite applies a lens by
 /// growing the stored tables (added columns read their default without being
 /// rewritten; dropped ones stay stored) and by naming: a renamed table or
-/// column keeps its stored name. Copies, transforms and rejected source
-/// deltas are not supported yet.
+/// column keeps its stored name. A copy is a stored column of its own
+/// (SPEC 4 §4.6), filled from its source once when the lens is activated;
+/// afterwards a row an older version inserts gives it the source's value,
+/// and a write of the source leaves it as it is. A row a newer version
+/// inserts gives a dropped column the lens's backwards default (see
+/// [`LensCell`]). The identity transform changes no value.
+/// Other transforms and rejected source deltas are not supported yet.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LensEffects {
     /// Defaults for added columns, by (target table, column).
@@ -38,6 +73,8 @@ pub struct LensEffects {
     pub tables: BTreeMap<String, String>,
     /// Renamed columns: (target table, target name) -> source name.
     pub columns: BTreeMap<(String, String), String>,
+    /// Copied columns: (target table, copy) -> source column.
+    pub copies: BTreeMap<(String, String), String>,
 }
 
 impl LensEffects {
@@ -58,6 +95,27 @@ impl LensEffects {
                             .insert((target.clone(), column.clone()), default.clone());
                     }
                     LensOp::DropColumn { .. } => {}
+                    LensOp::CopyColumn { from, to } => {
+                        effects
+                            .copies
+                            .insert((target.clone(), to.clone()), from.clone());
+                    }
+                    LensOp::TransformColumn { transform, .. } => {
+                        match crate::schema::registered_column_transform(transform) {
+                            None => {
+                                return Err(Error::new(
+                                    ErrorCode::Schema,
+                                    format!(
+                                        "lens for `{target}` uses unregistered transform `{transform}`"
+                                    ),
+                                ));
+                            }
+                            // The identity transform's values are the source's.
+                            Some(_)
+                                if matches!(transform.as_str(), "identity" | "jazz.identity") => {}
+                            Some(_) => return Err(unsupported(format!("transform `{transform}`"))),
+                        }
+                    }
                     LensOp::RenameColumn { from, to } => {
                         effects
                             .columns
@@ -72,7 +130,7 @@ impl LensEffects {
                         }
                         effects.tables.insert(to.clone(), from.clone());
                     }
-                    other => return Err(unsupported(format!("lens op {other:?} on SQLite"))),
+                    other => return Err(unsupported(format!("lens op {other:?}"))),
                 }
             }
         }
@@ -84,6 +142,7 @@ impl LensEffects {
 #[derive(Default)]
 pub(crate) struct Names {
     versions: HashMap<SchemaVersionId, (i64, StoredNames)>,
+    lens_cells: Vec<LensCell>,
 }
 
 fn schema_error(message: impl Into<String>) -> Error {
@@ -128,7 +187,121 @@ impl Names {
                 columns.insert(column, stored_column);
             }
         }
+        drop(statement);
+        let has_cells: bool = conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_lens_cells'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if has_cells {
+            let mut statement = conn
+                .prepare("SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells")
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, Sql>(4)?,
+                    ))
+                })
+                .map_err(storage)?;
+            for row in rows {
+                let (table, column, since, src, default) = row.map_err(storage)?;
+                let since = SchemaVersionId::from_bytes(since.try_into().map_err(|_| {
+                    Error::new(ErrorCode::Storage, "bad schema version in _jazz_lens_cells")
+                })?);
+                let rule = match src {
+                    Some(source) => LensCellRule::Copy(source),
+                    None => LensCellRule::Dropped(default),
+                };
+                names.lens_cells.push(LensCell {
+                    table,
+                    column,
+                    since,
+                    rule,
+                });
+            }
+        }
         Ok(names)
+    }
+
+    /// Record lens cells (once each), in memory and in the file.
+    pub(crate) fn record_lens_cells(
+        &mut self,
+        conn: &Connection,
+        cells: Vec<LensCell>,
+    ) -> Result<(), Error> {
+        if cells.is_empty() {
+            return Ok(());
+        }
+        conn.execute_batch(LENS_CELLS_DDL).map_err(storage)?;
+        let mut insert = conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO _jazz_lens_cells (tbl, col, since, src, dflt) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .map_err(storage)?;
+        for cell in cells {
+            if self.lens_cells.contains(&cell) {
+                continue;
+            }
+            let (source, default) = match &cell.rule {
+                LensCellRule::Copy(source) => (Some(source.as_str()), Sql::Null),
+                LensCellRule::Dropped(default) => (None, default.clone()),
+            };
+            insert
+                .execute(rusqlite::params![
+                    cell.table,
+                    cell.column,
+                    cell.since.as_bytes().to_vec(),
+                    source,
+                    default
+                ])
+                .map_err(storage)?;
+            self.lens_cells.push(cell);
+        }
+        Ok(())
+    }
+
+    /// The lens cells a row admitted `version` inserts into `table` fills:
+    /// (column, stored copy) for copies later versions' lenses made of its
+    /// columns, and (stored column, backwards default) for columns earlier
+    /// lenses dropped. Looked up per write, so a handle opened before a
+    /// lens was activated fills them too.
+    pub(crate) fn lens_cells(
+        &self,
+        version: &SchemaVersionId,
+        table: &crate::values::Table,
+    ) -> (Vec<(String, String)>, Vec<(String, Sql)>) {
+        let (mut copies, mut dropped) = (Vec::new(), Vec::new());
+        let Some((n, _)) = self.versions.get(version) else {
+            return (copies, dropped);
+        };
+        for cell in &self.lens_cells {
+            let Some((since, _)) = self.versions.get(&cell.since) else {
+                continue;
+            };
+            if table.stored != cell.table || table.columns.iter().any(|c| c.stored == cell.column) {
+                continue;
+            }
+            match &cell.rule {
+                LensCellRule::Copy(source) if n < since => {
+                    if let Some(source) = table.columns.iter().find(|c| c.stored == *source) {
+                        copies.push((source.name.clone(), cell.column.clone()));
+                    }
+                }
+                LensCellRule::Dropped(default) if n >= since => {
+                    dropped.push((cell.column.clone(), default.clone()));
+                }
+                _ => {}
+            }
+        }
+        (copies, dropped)
     }
 
     /// The most recently admitted version's names.
@@ -252,9 +425,7 @@ impl Names {
                     .get(&(name.clone(), column.name.clone()))
                     .unwrap_or(&column.name);
                 if from != &column.name && table.branch_by.contains(&column.name) {
-                    return Err(unsupported(format!(
-                        "renaming branch column {name}.{from} on SQLite"
-                    )));
+                    return Err(unsupported(format!("renaming branch column {name}.{from}")));
                 }
                 match source_columns.and_then(|columns| columns.get(from)) {
                     Some(stored_column) => {
@@ -344,37 +515,51 @@ mod tests {
     }
 
     /// SQLite applies a lens by naming and growing the stored tables. A
-    /// rename only names the stored column; a copy, a transform or a
-    /// rejected source delta would need rows rewritten, and is refused.
+    /// rename only names the stored column, a copy is a column of its own
+    /// and the identity transform changes nothing; an unregistered
+    /// transform is rejected, and a rejected source delta is not supported.
     #[test]
-    fn lenses_rename_and_grow_stored_tables_and_refuse_what_would_rewrite_rows() {
-        let renamed = LensEffects::of(&lens(vec![LensOp::RenameColumn {
-            from: "title".to_owned(),
-            to: "name".to_owned(),
-        }]))
-        .unwrap();
-        assert_eq!(
-            renamed
-                .columns
-                .get(&("todos".to_owned(), "name".to_owned())),
-            Some(&"title".to_owned())
-        );
-
-        for op in [
-            LensOp::CopyColumn {
+    fn lenses_rename_copy_and_grow_stored_tables_and_refuse_what_they_cannot_apply() {
+        let effects = LensEffects::of(&lens(vec![
+            LensOp::RenameColumn {
                 from: "title".to_owned(),
-                to: "copy".to_owned(),
+                to: "name".to_owned(),
+            },
+            LensOp::CopyColumn {
+                from: "name".to_owned(),
+                to: "search_name".to_owned(),
             },
             LensOp::TransformColumn {
-                column: "title".to_owned(),
+                column: "name".to_owned(),
                 transform: "jazz.identity".to_owned(),
             },
-            LensOp::RejectSourceDelta {
-                reason: "frozen".to_owned(),
-            },
-        ] {
-            let error = LensEffects::of(&lens(vec![op])).unwrap_err();
-            assert!(error.to_string().contains("not supported yet"), "{error}");
-        }
+        ]))
+        .unwrap();
+        let key = |column: &str| ("todos".to_owned(), column.to_owned());
+        assert_eq!(effects.columns.get(&key("name")), Some(&"title".to_owned()));
+        assert_eq!(
+            effects.copies.get(&key("search_name")),
+            Some(&"name".to_owned())
+        );
+
+        let unregistered = LensEffects::of(&lens(vec![LensOp::TransformColumn {
+            column: "title".to_owned(),
+            transform: "app.uppercase".to_owned(),
+        }]))
+        .unwrap_err();
+        assert_eq!(unregistered.code, ErrorCode::Schema);
+        assert!(
+            unregistered.to_string().contains("unregistered transform"),
+            "{unregistered}"
+        );
+
+        let rejected = LensEffects::of(&lens(vec![LensOp::RejectSourceDelta {
+            reason: "frozen".to_owned(),
+        }]))
+        .unwrap_err();
+        assert!(
+            rejected.to_string().contains("not supported yet"),
+            "{rejected}"
+        );
     }
 }

@@ -267,7 +267,7 @@ fn persisted_descriptor_kind_payloads_preserve_types_and_reject_incomplete_trees
 #[test]
 fn settled_record_descriptor_codec_is_exact_and_rejects_alternate_bytes() {
     // A descriptor can cross a durable engine boundary (for example, inside a
-    // Jazz settled result payload). Its encoding must therefore be Groove's
+    // Jazz settled result payload). Its encoding must therefore be the
     // normal record/value algebra, not the incidental serde layout of these
     // Rust types. Cover every recursive descriptor family here; concrete
     // persistent-key fixtures live with Jazz's result-member codec.

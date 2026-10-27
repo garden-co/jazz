@@ -95,7 +95,7 @@ pub type HostResult<T> = Result<T, HostError>;
 pub fn not_supported(what: &str) -> HostError {
     HostError::Engine(Error::new(
         ErrorCode::Query,
-        format!("{what} is not supported on SQLite yet"),
+        format!("{what} is not supported yet"),
     ))
 }
 
@@ -403,11 +403,11 @@ pub struct OpenConfig {
     pub identity: OpenIdentity,
     /// Seed for deterministic row ids (tests).
     pub row_id_seed: Option<u64>,
-    /// A Groove replica knob: keep full history. Every SQLite store keeps
-    /// full history, so this opens normally (not as an authority).
+    /// Whether the replica keeps full history. Every store keeps full
+    /// history, so either value opens the same store (not an authority).
     pub history_complete: bool,
-    /// A Groove persistence knob: SQLite commits each applied batch, so it
-    /// is accepted and has nothing to configure.
+    /// The public `initialSyncFlushEvery` option. Each applied batch commits
+    /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
 }
 
@@ -555,14 +555,13 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
 
 /// Open an in-memory database. `history_complete` needs nothing: every
 /// SQLite store keeps full history.
-pub async fn open_memory(db_config: DbConfig, _config: &OpenConfig) -> Result<Db, Error> {
+pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
     Db::open(db_config).await
 }
 
 /// Open a durable store in the SQLite file at `path` (see [`open_memory`]).
 pub async fn open_file(
     db_config: DbConfig,
-    _config: &OpenConfig,
     path: &std::path::Path,
     options: crate::db::FileOptions,
 ) -> Result<Db, Error> {
@@ -1370,7 +1369,7 @@ impl Binding {
         let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
         let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
-        let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
+        let staged = block_on(self.db.tx_ref(id).insert(table, cells, options));
         self.staged(id, staged)?;
         Ok(row)
     }
@@ -1389,11 +1388,7 @@ impl Binding {
         let patch = decode_cells(patch)?;
         let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .update(table, row, patch, options),
-        );
+        let staged = block_on(self.db.tx_ref(id).update(table, row, patch, options));
         self.staged(id, staged)
     }
 
@@ -1411,11 +1406,7 @@ impl Binding {
         options.identity = self.staged_identity(id, options.identity)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .upsert(table, row, cells, options),
-        );
+        let staged = block_on(self.db.tx_ref(id).upsert(table, row, cells, options));
         self.staged(id, staged)
     }
 
@@ -1431,7 +1422,7 @@ impl Binding {
         let row = row_uuid(row)?;
         let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
-        let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
+        let staged = block_on(self.db.tx_ref(id).delete(table, row, options));
         self.staged(id, staged)
     }
 
@@ -1458,7 +1449,7 @@ impl Binding {
         };
         let staged = block_on(
             self.db
-                .mergeable_tx_ref(id)
+                .tx_ref(id)
                 .update_with_large_value_mutations(table, row, patch, mutations, options),
         );
         self.staged(id, staged)
@@ -1478,11 +1469,7 @@ impl Binding {
         let cells = cells.map(decode_cells).transpose()?;
         let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .restore(table, row, cells, options),
-        );
+        let staged = block_on(self.db.tx_ref(id).restore(table, row, cells, options));
         self.staged(id, staged)
     }
 
@@ -1547,7 +1534,7 @@ impl Binding {
         };
         let hooks = Rc::clone(&self.hooks);
         Ok(Box::pin(self.parked(async move {
-            let mut read = std::pin::pin!(db.all_serialized_query(
+            let mut read = std::pin::pin!(db.all_serialized_query_as(
                 &query,
                 opts,
                 open_tx,
@@ -1555,7 +1542,7 @@ impl Binding {
                 author,
                 require_coverage,
                 expired,
-                |_| {},
+                |_| {}
             ));
             // A row whose large values are missing records their chunks for
             // the next send; ask for the tick that sends it, or the read

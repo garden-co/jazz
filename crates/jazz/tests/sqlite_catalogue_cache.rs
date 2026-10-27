@@ -589,7 +589,7 @@ fn transactions_reject_unpublished_cached_schema_reads_and_writes() {
         } else {
             block_on(alice.begin_mergeable(id)).unwrap();
         }
-        let tx = alice.mergeable_tx_ref(id);
+        let tx = alice.tx_ref(id);
         assert_eq!(
             block_on(tx.all_prepared(&prepared)).unwrap_err().code,
             ErrorCode::Schema

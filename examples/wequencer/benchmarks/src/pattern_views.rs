@@ -48,7 +48,6 @@ pub struct RuntimeReceipt {
     pub active_subscriptions: usize,
     pub active_prepared_shapes: usize,
     pub active_shape_params: usize,
-    pub arrangement_count: usize,
 }
 
 impl PatternViewsFixture {
@@ -106,7 +105,6 @@ fn runtime_receipt(db: &Db) -> RuntimeReceipt {
         active_subscriptions: stats.active_subscriptions,
         active_prepared_shapes: stats.active_prepared_shapes,
         active_shape_params: stats.active_shape_params,
-        arrangement_count: stats.arrangement_count,
     }
 }
 

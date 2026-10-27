@@ -877,7 +877,7 @@ mod proof_graph {
             let fixture = Fixture::new(schema(policy(parent(true, false))), author("alice")).await;
             let open = crate::db::OpenTransactionId::new();
             fixture.alice.begin_mergeable(open).await.unwrap();
-            let tx = fixture.alice.mergeable_tx_ref(open);
+            let tx = fixture.alice.tx_ref(open);
             let rows = [
                 (1, cells(2, false, true, "room")),
                 (2, cells(2, true, true, "room")),

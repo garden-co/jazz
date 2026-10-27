@@ -161,7 +161,7 @@ fn try_fetch_at_tier(
     tier: ReadTier,
 ) -> Result<Vec<CurrentRow>, jazz::db::Error> {
     let bytes = postcard::to_allocvec(&Query::from("notes")).unwrap();
-    let read = client.all_serialized_query(
+    let read = client.all_serialized_query_as(
         &bytes,
         opts(tier, deleted),
         None,

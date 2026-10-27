@@ -563,19 +563,9 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        let schema = self.effective_schema(prepared.schema.as_ref().unwrap_or(&self.owner));
-        self.require_catalogue_schema(&schema)?;
-        let compiled = Ctx::new(&schema, policy.as_ref(), &claims, &prepared.binding)
-            .with_owner_previews(
-                self.owner_previews(identity)
-                    && history_source_table(&prepared.query.table).is_none(),
-            )
-            .with_catalogue(self)
-            .with_view(read.view.clone())
-            .with_cut(read.cut.clone())
-            .with_settled_only(read.settled_only)
-            .with_history_origin(self.history_origin())
-            .with_members_only(read.members_only)
+        let schema = self.read_schema(prepared, read)?;
+        let compiled = self
+            .read_ctx(&schema, prepared, identity, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
@@ -1482,10 +1472,7 @@ impl Group {
 /// aggregates, windows), outside branch views and cuts (a settled-only
 /// read is one), whose compiled SQL
 /// reads its root table exactly once (a read policy that looks at other
-/// rows of the same table would let one row's change move another). A
-/// synced read (`members_only`) qualifies: whether the server lists a row
-/// is a fact about that row alone, and listing or unlisting it reports the
-/// row as changed.
+/// rows of the same table would let one row's change move another).
 fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) -> bool {
     !crate::db::relation::is_union(query)
         && !is_history_table(&query.table)

@@ -1675,7 +1675,7 @@ fn foreground_transaction_preparation_reads_its_offline_owner() {
         let tx = OpenTransactionId::new();
         block_on(tab.begin_mergeable(tx)).unwrap();
         let query = tab.prepare_query(&Query::from("notes")).unwrap();
-        let handle = tab.mergeable_tx_ref(tx);
+        let handle = tab.tx_ref(tx);
         let mut read = pin!(handle.all_prepared(&query));
         let mut result = None;
         for _ in 0..100 {

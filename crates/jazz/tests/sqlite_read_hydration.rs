@@ -125,7 +125,7 @@ fn poll<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 async fn read(db: &Db, options: ReadOpts, scoped: bool) -> Result<SerializedReadResult, Error> {
-    db.all_serialized_query(
+    db.all_serialized_query_as(
         &postcard::to_allocvec(&Query::from("docs")).unwrap(),
         options,
         None,

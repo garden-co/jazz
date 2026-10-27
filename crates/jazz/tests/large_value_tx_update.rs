@@ -90,7 +90,6 @@ fn seed(db: &Db) -> RowUuid {
 
 /// Committed row cells as a public query reader sees them.
 fn committed(db: &Db, row: RowUuid) -> BTreeMap<&'static str, Value> {
-    let table = schema().tables()[0].clone();
     let query = db.prepare_query(&db.table("docs")).expect("prepare");
     let rows = db.read(&query).expect("read");
     let row = rows
@@ -99,7 +98,7 @@ fn committed(db: &Db, row: RowUuid) -> BTreeMap<&'static str, Value> {
         .expect("row is visible");
     ["title", "rank", "body", "blob", "note"]
         .into_iter()
-        .map(|column| (column, row.cell(&table, column).expect("column present")))
+        .map(|column| (column, row.cell(column).expect("column present")))
         .collect()
 }
 
@@ -108,7 +107,7 @@ fn rank_patch(rank: i32) -> BTreeMap<String, Value> {
 }
 
 /// A physically plausible descriptor forged by the caller through public
-/// Groove types. It was never staged or read by the engine.
+/// types. It was never staged or read by the engine.
 fn forged_descriptor() -> Value {
     Value::Large(Box::new(LargeValueRef {
         kind: LargeValueKind::String,
@@ -143,7 +142,6 @@ fn assert_large_values_intact(cells: &BTreeMap<&'static str, Value>) {
 fn transaction_update_of_small_column_keeps_large_values() {
     let db = open_db();
     let row = seed(&db);
-    let table = schema().tables()[0].clone();
     let query = db.prepare_query(&db.table("docs")).expect("prepare");
     let point = db
         .prepare_query(&db.table("docs").filter(jazz::query::eq(
@@ -168,17 +166,11 @@ fn transaction_update_of_small_column_keeps_large_values() {
     // Read-your-writes inside the transaction, through a point query and a
     // listing.
     let point = point.expect("row visible in its own transaction");
-    assert_eq!(point.cell(&table, "rank"), Some(Value::I32(0)));
-    assert_eq!(
-        point.cell(&table, "body"),
-        Some(Value::String(big_text('b')))
-    );
+    assert_eq!(point.cell("rank"), Some(Value::I32(0)));
+    assert_eq!(point.cell("body"), Some(Value::String(big_text('b'))));
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].cell(&table, "rank"), Some(Value::I32(0)));
-    assert_eq!(
-        rows[0].cell(&table, "blob"),
-        Some(Value::Bytes(big_bytes(0xab)))
-    );
+    assert_eq!(rows[0].cell("rank"), Some(Value::I32(0)));
+    assert_eq!(rows[0].cell("blob"), Some(Value::Bytes(big_bytes(0xab))));
 
     let after = committed(&db, row);
     assert_eq!(after["rank"], Value::I32(0));
@@ -276,7 +268,7 @@ fn serializable_transaction_update_keeps_large_values() {
 }
 
 /// Contract: carrying engine-read descriptors forward does not sanction a
-/// caller-authored one. mallory forges a descriptor through public Groove
+/// caller-authored one. mallory forges a descriptor through public
 /// types and patches it into the large column; both the transactional and
 /// the standalone update reject it and the stored row is unchanged.
 #[test]
@@ -320,7 +312,7 @@ fn transaction_restore_brings_back_large_values() {
     let batch = OpenTransactionId::new();
     block_on(db.begin_mergeable(batch)).expect("begin");
     block_on(
-        db.mergeable_tx_ref(batch)
+        db.tx_ref(batch)
             .restore("docs", row, None, Default::default()),
     )
     .expect("stage restore");

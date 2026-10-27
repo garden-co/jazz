@@ -16,7 +16,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on}
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -30,8 +30,6 @@ type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,
-    messages_table: TableSchema,
-    memberships_table: TableSchema,
     timeline: PreparedQuery,
     unread_rooms: PreparedQuery,
     author_history: PreparedQuery,
@@ -43,7 +41,7 @@ impl Fixture {
         assert!(message_count >= HOT_ROOM_MESSAGES + MESSAGES_PER_ROOM);
         assert!(message_count.is_multiple_of(MESSAGES_PER_ROOM));
         let room_count = message_count / MESSAGES_PER_ROOM;
-        let (db, messages_table, memberships_table) = open_db();
+        let db = open_db();
 
         for author in 0..AUTHORS {
             insert(
@@ -133,8 +131,6 @@ impl Fixture {
 
         Self {
             db,
-            messages_table,
-            memberships_table,
             timeline,
             unread_rooms,
             author_history,
@@ -154,15 +150,15 @@ impl Fixture {
     }
 
     pub fn timeline_sent_at(&self) -> Vec<u64> {
-        self.ordered_values(&self.timeline, &self.messages_table, "sent_at")
+        self.ordered_values(&self.timeline, "sent_at")
     }
 
     pub fn unread_room_activity(&self) -> Vec<u64> {
-        self.ordered_values(&self.unread_rooms, &self.memberships_table, "last_activity")
+        self.ordered_values(&self.unread_rooms, "last_activity")
     }
 
     pub fn author_history_sent_at(&self) -> Vec<u64> {
-        self.ordered_values(&self.author_history, &self.messages_table, "sent_at")
+        self.ordered_values(&self.author_history, "sent_at")
     }
 
     fn read_count(&self, query: &PreparedQuery) -> usize {
@@ -172,12 +168,12 @@ impl Fixture {
             .len()
     }
 
-    fn ordered_values(&self, query: &PreparedQuery, table: &TableSchema, column: &str) -> Vec<u64> {
+    fn ordered_values(&self, query: &PreparedQuery, column: &str) -> Vec<u64> {
         self.db
             .read(query)
             .expect("BandChat benchmark read succeeds")
             .into_iter()
-            .map(|row| match row.cell(table, column) {
+            .map(|row| match row.cell(column) {
                 Some(Value::U64(value)) => value,
                 other => panic!("unexpected {column} value: {other:?}"),
             })
@@ -221,27 +217,15 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source).expect("BandChat benchmark schema compiles")
 }
 
-fn open_db() -> (BenchDb, TableSchema, TableSchema) {
-    let schema = schema();
-    let table = |name: &str| {
-        schema
-            .tables()
-            .iter()
-            .find(|table| table.name == name)
-            .unwrap_or_else(|| panic!("BandChat schema has {name}"))
-            .clone()
-    };
-    let messages_table = table("messages");
-    let memberships_table = table("memberships");
-    let db = block_on(Db::open(DbConfig::new(
-        schema,
+fn open_db() -> BenchDb {
+    block_on(Db::open(DbConfig::new(
+        schema(),
         DbIdentity {
             node: NodeUuid::from_bytes([0xbc; 16]),
             author: AuthorSubject::SYSTEM,
         },
     )))
-    .expect("open BandChat benchmark database");
-    (db, messages_table, memberships_table)
+    .expect("open BandChat benchmark database")
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {

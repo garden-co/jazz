@@ -100,7 +100,7 @@ fn begin_read(db: &Db, expected: i32) -> OpenTransactionId {
     let tx = OpenTransactionId::new();
     block_on(db.begin_serializable(tx)).unwrap();
     let query = db.prepare_query(&query()).unwrap();
-    let rows = block_on(db.serializable_tx_ref(tx).all_prepared(&query)).unwrap();
+    let rows = block_on(db.tx_ref(tx).all_prepared(&query)).unwrap();
     assert_eq!(rows[0].cell_at(0), Some(Value::I32(expected)));
     tx
 }

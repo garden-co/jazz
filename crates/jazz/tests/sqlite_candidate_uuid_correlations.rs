@@ -108,7 +108,7 @@ fn attempt(
     } else {
         block_on(db.begin_mergeable_for_identity(id, identity)).unwrap();
     }
-    block_on(db.mergeable_tx_ref(id).insert(
+    block_on(db.tx_ref(id).insert(
         "spaces",
         BTreeMap::from([
             ("identifier".into(), Value::Uuid(row(scope).0)),
@@ -122,7 +122,7 @@ fn attempt(
     .unwrap();
     if create {
         // The source follows the dependent row: admission must prove it first.
-        block_on(db.mergeable_tx_ref(id).insert(
+        block_on(db.tx_ref(id).insert(
             "sources",
             source(),
             InsertOptions {
@@ -133,11 +133,7 @@ fn attempt(
         .unwrap();
     }
     if remove {
-        block_on(
-            db.mergeable_tx_ref(id)
-                .delete("sources", row(10), Default::default()),
-        )
-        .unwrap();
+        block_on(db.tx_ref(id).delete("sources", row(10), Default::default())).unwrap();
     }
     if serializable {
         block_on(db.commit_serializable_handle(id)).map(|_| ())

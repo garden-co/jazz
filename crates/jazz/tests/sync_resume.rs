@@ -2,7 +2,7 @@
 //! seq W resubscribes "Q since W". The server ships only result rows
 //! changed after W (plus the result's row ids); the client drops cached
 //! rows that left and fetches result rows it lacks, which covers rows that
-//! became readable without changing. Not ported from Jazz.
+//! became readable without changing.
 
 use crate::common;
 

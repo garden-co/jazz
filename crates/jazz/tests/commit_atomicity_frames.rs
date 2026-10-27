@@ -125,7 +125,7 @@ fn a_commit_split_across_frames_is_applied_whole() {
         let values = BTreeMap::from([("body".to_owned(), Value::String(body.clone()))]);
         block_on(
             server
-                .mergeable_tx_ref(tx)
+                .tx_ref(tx)
                 .insert("notes", values, Default::default()),
         )
         .unwrap();

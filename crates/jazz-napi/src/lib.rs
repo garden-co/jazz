@@ -1,4 +1,4 @@
-//! jazz-napi — Native Node.js bindings for Jazz on SQLite (`jazz-db`).
+//! jazz-napi — Native Node.js bindings for the Jazz database (`jazz-db`).
 //!
 //! Provides Node.js bindings for the Jazz database, server helpers, and
 //! local-first identity utilities.
@@ -9,8 +9,7 @@
 //!   TypeScript client packages share with the WASM binding. Both delegate to
 //!   [`jazz::binding_host`]; this crate only adapts it to Node: options
 //!   objects, pollable pending reads, write promises and the tick callback.
-//!   Engine features `jazz-db` does not have yet fail with an explicit "not
-//!   supported on SQLite yet" error instead of a stand-in.
+//!   Unsupported features fail with an explicit "not supported yet" error.
 //! - `JazzServer` exposes the Rust server process used by integration tests
 //!   and Node deployments.
 //! - Local-first JWT helpers stay here as package-level native utilities.
@@ -1211,7 +1210,7 @@ impl NapiDb {
         let db_config = binding_host::db_config(schema, &config, identity);
         let (db, lock) = match data_path {
             None => (
-                block_on(binding_host::open_memory(db_config, &config))
+                block_on(binding_host::open_memory(db_config))
                     .map_err(|error| napi_core_error(&error))?,
                 None,
             ),
@@ -1219,7 +1218,6 @@ impl NapiDb {
                 let NativeStorage::File { path, lock } = native_storage::persistent_storage(root)?;
                 let db = block_on(binding_host::open_file(
                     db_config,
-                    &config,
                     &path,
                     FileOptions {
                         synchronous_full: true,

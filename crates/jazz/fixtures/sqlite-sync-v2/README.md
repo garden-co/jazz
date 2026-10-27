@@ -16,6 +16,8 @@ result, echo hints and Local/Global flag. A Local receipt cannot retire a
 private foreground's original upload or establish accepted history. Ordinary
 foregrounds may clear their local send queue after a Local receipt while the
 write remains pending; their durable worker still owns the authority upload.
+Tag 46 is upstream's `Stored` notice: a worker has queued a foreground's
+write for upload. It does not establish authority acceptance.
 UNION coverage describes the hydrated
 prefix; readers validate its scope/evidence before applying the requested
 outer page. Serializable validation retains the original full query.
@@ -26,7 +28,7 @@ the version fence, the colliding tags, per-operation timestamps and original
 writer receipts. Historical v1 fixtures remain unchanged in their original
 files. Changes to this contract require another version and new fixtures.
 
-The shared `../sqlite_sync_wire_v2.json` corpus covers all 46 message tags,
+The shared `../sqlite_sync_wire_v2.json` corpus covers all 47 message tags,
 21 extended forms and malformed frames. Upstream tags 0–19 keep their pinned
 body bytes and gain the v2 prefix; the E2EE cases use the independent fixtures
 in this directory. Rust and the WASM/NAPI artifact tests use the same corpus.

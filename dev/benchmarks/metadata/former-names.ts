@@ -179,8 +179,7 @@ export const formerBenchmarks: ReadonlyMap<string, FormerBenchmark> = new Map([
   ["big_label_ingest_batch_amortization[10]", dropped("big_label_ingest_batch_amortization[100]")],
   ["ingest_walltime_10k", dropped("ingest_walltime_100k")],
 
-  // Groove's IVM engine sweep: the engine was replaced by SQLite, so these
-  // are no longer measured.
+  // The IVM engine sweep: retired, with no counterpart.
   ...sized(["prepared_warm", "prepared_cold", "pull", "snapshot"], [500], dropped()),
   ...sized(["pull", "snapshot"], [5000], dropped()),
   ...sized(

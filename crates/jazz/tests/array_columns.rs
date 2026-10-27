@@ -1,4 +1,4 @@
-//! Array columns on SQLite: stored as JSON text, read back by their
+//! Array columns: stored as JSON text, read back by their
 //! declared element type, compared whole and searched by element.
 use std::collections::BTreeMap;
 

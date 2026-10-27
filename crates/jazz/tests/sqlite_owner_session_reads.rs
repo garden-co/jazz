@@ -124,7 +124,7 @@ fn account_provenance_policy_survives_private_owner_sync() {
     drive(&[&tab, &owner, &server], tab.wait_for_storage_owner()).unwrap();
     let tx = jazz::tools::OpenTransactionId::new();
     block_on(tab.begin_serializable(tx)).unwrap();
-    block_on(tab.serializable_tx_ref(tx).insert(
+    block_on(tab.tx_ref(tx).insert(
         "identities",
         BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
         InsertOptions {
@@ -155,7 +155,7 @@ fn account_provenance_policy_survives_private_owner_sync() {
     let bytes = postcard::to_allocvec(&Query::from("identities")).unwrap();
     let read = drive(
         &[&tab, &owner, &server],
-        tab.all_serialized_query(
+        tab.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -225,7 +225,7 @@ fn policy_revision_revokes_cached_reads_and_survives_restart() {
     let bytes = postcard::to_allocvec(&Query::from("identities")).unwrap();
     let read = drive(
         &[&owner, &server],
-        owner.all_serialized_query(
+        owner.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,

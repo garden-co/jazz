@@ -364,7 +364,7 @@ fn remote_projected_join(mode: u8) {
     let bytes = postcard::to_allocvec(&query).unwrap();
     let result = drive(
         &nodes,
-        client.all_serialized_query(
+        client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -428,7 +428,7 @@ fn projected_join_snapshot_keeps_its_pinned_cells() {
     turns(&nodes);
     let tx = jazz::tools::OpenTransactionId::new();
     block_on(client.begin_serializable(tx)).unwrap();
-    drive(&nodes, client.serializable_tx_ref(tx).all_prepared(&empty)).unwrap();
+    drive(&nodes, client.tx_ref(tx).all_prepared(&empty)).unwrap();
     block_on(server.update(
         "docs",
         id(1),
@@ -438,11 +438,7 @@ fn projected_join_snapshot_keeps_its_pinned_cells() {
     .unwrap();
     let query = relation_query_to_query(&relation(true, &["id", "title"])).unwrap();
     let prepared = client.prepare_query(&query).unwrap();
-    let rows = drive(
-        &nodes,
-        client.serializable_tx_ref(tx).all_prepared(&prepared),
-    )
-    .unwrap();
+    let rows = drive(&nodes, client.tx_ref(tx).all_prepared(&prepared)).unwrap();
     assert_eq!(shown(&rows), vec![(id(1), "doc 1".into())]);
     client.abandon_transaction_handle(tx).unwrap();
 }

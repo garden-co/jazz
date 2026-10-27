@@ -338,7 +338,7 @@ fn staged_union_phantom_is_rejected_without_publication() {
         }
         let nodes = [&client, &relay, &server];
         let tx = begin(&client, true);
-        block_on(client.serializable_tx_ref(tx).insert(
+        block_on(client.tx_ref(tx).insert(
             "docs",
             BTreeMap::from([
                 ("title".into(), Value::String("aa".into())),
@@ -373,7 +373,7 @@ fn accepted_union_commit_rechecks_the_original_full_query() {
     let nodes = [&client, &server];
     let tx = begin(&client, true);
     expect_page(&drive(&nodes, paired(&client, tx, &query(true, "title"), true, 0)).unwrap());
-    block_on(client.serializable_tx_ref(tx).insert(
+    block_on(client.tx_ref(tx).insert(
         "checks",
         BTreeMap::from([("title".into(), Value::String("must not publish".into()))]),
         Default::default(),
@@ -851,7 +851,7 @@ fn trusted_union_overlay_outside_page_waits_for_commit() {
         }
         let nodes = [&client, &relay, &server];
         let tx = begin(&client, true);
-        block_on(client.serializable_tx_ref(tx).insert(
+        block_on(client.tx_ref(tx).insert(
             "docs",
             BTreeMap::from([
                 ("title".into(), Value::String("zzzz".into())),

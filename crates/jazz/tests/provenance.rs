@@ -1,6 +1,6 @@
 //! Row provenance (`$createdAt`, `$updatedAt`, `$createdBy`, `$updatedBy`):
 //! engine-maintained per row version, readable, orderable and filterable by
-//! name, kept by history, and never writable by the app. Not ported from Jazz.
+//! name, kept by history, and never writable by the app.
 
 use crate::common;
 
@@ -185,13 +185,13 @@ fn history_keeps_each_versions_provenance() {
     block_on(db.begin_serializable(open)).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(5));
     block_on(db.update("notes", row(1), body("b"), Default::default())).unwrap();
-    let at_snapshot = block_on(db.serializable_tx_ref(open).all_prepared(&select)).unwrap();
+    let at_snapshot = block_on(db.tx_ref(open).all_prepared(&select)).unwrap();
     assert_eq!(
         u64_cell(&at_snapshot[0], "$updatedAt"),
         first,
         "the as-of read sees the old version's stamp"
     );
-    db.abandon_serializable_handle(open).unwrap();
+    db.abandon_transaction_handle(open).unwrap();
 }
 
 fn subject_cell(row: &jazz::db::CurrentRow, name: &str) -> String {
@@ -351,7 +351,7 @@ fn rollback_does_not_reuse_another_authors_cached_identity() {
     let tx = OpenTransactionId::new();
     block_on(db.begin_serializable(tx)).unwrap();
     block_on(
-        db.serializable_tx_ref(tx)
+        db.tx_ref(tx)
             .insert("notes", body("draft"), Default::default()),
     )
     .unwrap();
@@ -489,4 +489,62 @@ fn a_subscription_filtered_by_its_author_sees_new_rows() {
         }
     }
     assert_eq!(seen, [row(1)]);
+}
+
+/// A transaction opened for an identity attributes every write to it, and a
+/// write inside a transaction cannot choose another identity.
+#[test]
+fn a_transaction_for_an_identity_attributes_its_writes_and_fixes_their_identity() {
+    let db = db();
+    block_on(db.transaction_for_identity(user(1), async |tx| {
+        tx.insert(
+            "notes",
+            body("a"),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        )
+        .await
+    }))
+    .unwrap();
+    let staged = block_on(db.mergeable_tx_for_identity(user(2))).unwrap();
+    block_on(staged.insert(
+        "notes",
+        body("b"),
+        InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(staged.commit()).unwrap();
+
+    let select = db
+        .prepare_query(&Query::from("notes").select(["$createdBy.identity.subject"]))
+        .unwrap();
+    let rows = block_on(db.all(&select, ReadOpts::default())).unwrap();
+    let subject_of = |n: u8| {
+        let row = rows.iter().find(|r| r.row_uuid() == row(n)).unwrap();
+        subject_cell(row, "$createdBy.identity.subject")
+    };
+    assert_eq!(subject_of(1), user(1).principal_parts().1);
+    assert_eq!(subject_of(2), user(2).principal_parts().1);
+
+    let error = block_on(db.transaction_for_identity(user(1), async |tx| {
+        tx.insert("notes", body("c"), as_user(2, row(3))).await
+    }))
+    .unwrap_err();
+    assert!(
+        error
+            .message
+            .contains("selected when the transaction is opened"),
+        "{error:?}"
+    );
+    assert_eq!(
+        block_on(db.all(&select, ReadOpts::default()))
+            .unwrap()
+            .len(),
+        2
+    );
 }

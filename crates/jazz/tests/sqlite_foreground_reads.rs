@@ -107,7 +107,7 @@ fn one_shot<'a>(
     query: &'a [u8],
     opts: ReadOpts,
 ) -> impl Future<Output = Result<SerializedReadResult, jazz::db::Error>> + 'a {
-    db.all_serialized_query(query, opts, None, None, None, false, || false, |_| {})
+    db.all_serialized_query_as(query, opts, None, None, None, false, || false, |_| {})
 }
 fn poll<T>(future: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
     future.poll(&mut Context::from_waker(Waker::noop()))
@@ -452,7 +452,7 @@ fn foreground_cache_hydration_preserves_the_owners_session_policy() {
         (vec!["alice".into()], DurabilityTier::Local)
     );
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
-    let error = block_on(tab.all_serialized_query(
+    let error = block_on(tab.all_serialized_query_as(
         &query,
         ReadOpts::default(),
         None,
@@ -645,7 +645,7 @@ fn foreground_writes_fail_without_publishing_or_claiming_durability() {
     let batch = jazz::tools::OpenTransactionId::new();
     block_on(tab.begin_mergeable(batch)).unwrap();
     let error = block_on(
-        tab.mergeable_tx_ref(batch)
+        tab.tx_ref(batch)
             .insert("notes", cells(), Default::default()),
     )
     .unwrap_err();

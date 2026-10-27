@@ -225,7 +225,7 @@ fn remote(server: &Db, client: &Db, query: &Query) -> Vec<RowUuid> {
     let result = drive(
         server,
         client,
-        client.all_serialized_query(
+        client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -375,7 +375,7 @@ fn recursive_empty_unindexed_shape_is_refused_before_settlement() {
     let error = drive(
         &server,
         &client,
-        client.all_serialized_query(
+        client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -405,12 +405,7 @@ fn recursive_authority_snapshot_hydrates_the_original_graph() {
     let tx = jazz::tools::OpenTransactionId::new();
     block_on(client.begin_serializable(tx)).unwrap();
     let empty = client.prepare_query(&Query::from("docs").limit(0)).unwrap();
-    drive(
-        &server,
-        &client,
-        client.serializable_tx_ref(tx).all_prepared(&empty),
-    )
-    .unwrap();
+    drive(&server, &client, client.tx_ref(tx).all_prepared(&empty)).unwrap();
     block_on(server.update(
         "edges",
         id(32),
@@ -420,12 +415,7 @@ fn recursive_authority_snapshot_hydrates_the_original_graph() {
     .unwrap();
     let query = query("sub");
     let prepared = client.prepare_query(&query).unwrap();
-    let result = drive(
-        &server,
-        &client,
-        client.serializable_tx_ref(tx).all_prepared(&prepared),
-    )
-    .unwrap();
+    let result = drive(&server, &client, client.tx_ref(tx).all_prepared(&prepared)).unwrap();
     assert_eq!(
         result.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![id(1)]

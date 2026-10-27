@@ -172,7 +172,7 @@ fn fixture(node: u8, unpublished: bool) -> (Db, Db, Rc<Cell<usize>>) {
 }
 async fn read(replica: &Db, options: ReadOpts) -> Result<SerializedReadResult, Error> {
     replica
-        .all_serialized_query(
+        .all_serialized_query_as(
             &postcard::to_allocvec(&Query::from("projects")).unwrap(),
             options,
             None,

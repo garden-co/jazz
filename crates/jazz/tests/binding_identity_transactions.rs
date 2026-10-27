@@ -662,7 +662,7 @@ fn replica_session_read_sets_validate_as_the_bound_session() {
         )
         .unwrap();
     let query = backend.db.prepare_query(&Query::from("files")).unwrap();
-    let transaction = backend.db.serializable_tx_ref(tx);
+    let transaction = backend.db.tx_ref(tx);
     let visible = drive(&up, &down, transaction.all_prepared(&query)).unwrap();
     assert_eq!(visible.len(), 1);
     assert_eq!(subject(&visible[0], "owner"), "alice");
@@ -731,7 +731,7 @@ fn session_transaction_relations_keep_the_bound_reader() {
                     .array_subquery(ArraySubquery::new("children", "files", "parent", "id")),
             )
             .unwrap();
-        let transaction = db.db.serializable_tx_ref(tx);
+        let transaction = db.db.tx_ref(tx);
         let future = transaction.all_prepared(&query);
         let visible = match &links {
             Some((up, down)) => drive(up, down, future),
@@ -2111,7 +2111,7 @@ fn typed_native_transaction_admission_retains_backend_and_session_checks() {
             WriteIdentity::Session(author("alice")),
         )
         .unwrap();
-    let staged = block_on(backend.db.mergeable_tx_ref(id).insert(
+    let staged = block_on(backend.db.tx_ref(id).insert(
         "files",
         BTreeMap::from([("owner".into(), Value::String("alice".into()))]),
         Default::default(),
@@ -2146,7 +2146,7 @@ fn typed_native_stage_refusal_rejects_the_entire_batch() {
     alice
         .staged(
             id,
-            block_on(alice.db.mergeable_tx_ref(id).insert(
+            block_on(alice.db.tx_ref(id).insert(
                 "files",
                 BTreeMap::from([("owner".into(), Value::String("alice".into()))]),
                 Default::default(),
@@ -2154,7 +2154,7 @@ fn typed_native_stage_refusal_rejects_the_entire_batch() {
         )
         .unwrap();
     let missing = RowUuid::from_bytes([0xef; 16]);
-    let staged = block_on(alice.db.mergeable_tx_ref(id).upsert(
+    let staged = block_on(alice.db.tx_ref(id).upsert(
         "files",
         missing,
         BTreeMap::new(),
@@ -2242,7 +2242,7 @@ fn typed_native_read_cannot_replace_the_transaction_session() {
         .unwrap();
     let query = postcard::to_allocvec(&Query::from("files")).unwrap();
     let read = |who| {
-        block_on(backend.db.all_serialized_query(
+        block_on(backend.db.all_serialized_query_as(
             &query,
             ReadOpts::for_read_tier(ReadTier::LocalOnly),
             Some(id),

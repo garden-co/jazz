@@ -445,7 +445,7 @@ fn serializable_read_validation_stays_at_the_authority() {
     block_on(client.begin_serializable(id)).unwrap();
     let query = client.prepare_query(&Query::from("notes")).unwrap();
     assert!(
-        drive(&dbs, client.serializable_tx_ref(id).all_prepared(&query))
+        drive(&dbs, client.tx_ref(id).all_prepared(&query))
             .unwrap()
             .is_empty()
     );
@@ -470,7 +470,7 @@ fn serializable_read_validation_stays_at_the_authority() {
     let id = jazz::tools::OpenTransactionId([2; 16]);
     block_on(client.begin_serializable_for_identity(id, alice())).unwrap();
     assert_eq!(
-        drive(&dbs, client.serializable_tx_ref(id).all_prepared(&query))
+        drive(&dbs, client.tx_ref(id).all_prepared(&query))
             .unwrap()
             .len(),
         1
@@ -740,7 +740,7 @@ fn own_pending_dependencies_keep_original_order_through_relay() {
     block_on(client.begin_serializable(id)).unwrap();
     let query = client.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(client.serializable_tx_ref(id).all_prepared(&query))
+        block_on(client.tx_ref(id).all_prepared(&query))
             .unwrap()
             .len(),
         1
@@ -990,5 +990,43 @@ fn private_upload_scope_is_checked_before_replay_without_poisoning_the_original(
                 "the valid upload applies only once"
             );
         }
+    }
+}
+
+/// Alice can move her original writer between a direct connection and Bob's
+/// trusted relay without changing its identity or losing authority settlement.
+/// Alice -> authority; Alice -> trusted relay -> authority (and the reverse).
+#[test]
+fn a_writer_keeps_its_identity_when_switching_between_direct_and_trusted_relay() {
+    for direct_first in [true, false] {
+        let server = authority();
+        let relay = open(50, AuthorSubject::SYSTEM, None);
+        let client = open(1, alice(), None);
+        connect(&relay, &server, AuthorSubject::SYSTEM);
+        if direct_first {
+            connect(&client, &server, alice());
+        } else {
+            connect(&client, &relay, alice());
+        }
+        let first = insert(&client, "before", true);
+        let dbs = [&client, &relay, &server, &relay, &client];
+        drive(
+            &dbs,
+            client.wait_for_transaction(first, DurabilityTier::Global),
+        )
+        .unwrap();
+        if direct_first {
+            connect(&client, &relay, alice());
+        } else {
+            connect(&client, &server, alice());
+        }
+        let next = insert(&client, "after", true);
+        drive(
+            &dbs,
+            client.wait_for_transaction(next, DurabilityTier::Global),
+        )
+        .unwrap_or_else(|error| panic!("direct_first={direct_first}: {error}"));
+        assert_eq!(texts(&server), ["after", "before"]);
+        assert_eq!(client.write_state(next).unwrap().fate, Fate::Accepted);
     }
 }

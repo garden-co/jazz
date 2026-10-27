@@ -224,7 +224,7 @@ fn a_new_row_is_not_evidence_for_itself() {
     let graft = commit(&bob_db, &server, |batch| {
         block_on(
             bob_db
-                .mergeable_tx_ref(batch)
+                .tx_ref(batch)
                 .insert("members", member(bob), Default::default()),
         )
         .unwrap();
@@ -232,18 +232,18 @@ fn a_new_row_is_not_evidence_for_itself() {
     assert!(graft.is_err(), "a row never vouches for itself");
     // Nor do two new rows vouch for each other: neither is grounded.
     let pair = commit(&bob_db, &server, |batch| {
-        let tx = bob_db.mergeable_tx_ref(batch);
+        let tx = bob_db.tx_ref(batch);
         block_on(tx.insert("members", member(bob), Default::default())).unwrap();
         block_on(tx.insert("members", member(bob), Default::default())).unwrap();
     });
     assert!(pair.is_err(), "two new rows never vouch for each other");
     // An owner adds him.
     commit(&alice_db, &server, |batch| {
-        block_on(alice_db.mergeable_tx_ref(batch).insert(
-            "members",
-            member(bob),
-            Default::default(),
-        ))
+        block_on(
+            alice_db
+                .tx_ref(batch)
+                .insert("members", member(bob), Default::default()),
+        )
         .unwrap();
     })
     .expect("an owner adds a member");
@@ -262,7 +262,7 @@ fn a_unit_s_earlier_inserts_are_evidence_and_its_deletes_are_not() {
     // A band and its first task in one unit.
     let first = RowUuid::from_bytes([0x21; 16]);
     commit(&alice_db, &server, |batch| {
-        let tx = alice_db.mergeable_tx_ref(batch);
+        let tx = alice_db.tx_ref(batch);
         block_on(tx.insert("bands", band(alice), options(first))).unwrap();
         block_on(tx.insert("tasks", task(first), Default::default())).unwrap();
     })
@@ -271,7 +271,7 @@ fn a_unit_s_earlier_inserts_are_evidence_and_its_deletes_are_not() {
     // Grounding does not depend on the order the unit names its writes.
     let later = RowUuid::from_bytes([0x23; 16]);
     commit(&alice_db, &server, |batch| {
-        let tx = alice_db.mergeable_tx_ref(batch);
+        let tx = alice_db.tx_ref(batch);
         block_on(tx.insert("tasks", task(later), Default::default())).unwrap();
         block_on(tx.insert("bands", band(alice), options(later))).unwrap();
     })
@@ -282,7 +282,7 @@ fn a_unit_s_earlier_inserts_are_evidence_and_its_deletes_are_not() {
     for (n, delete_first) in [(0x22, true), (0x24, false)] {
         let gone = RowUuid::from_bytes([n; 16]);
         let fleeting = commit(&alice_db, &server, |batch| {
-            let tx = alice_db.mergeable_tx_ref(batch);
+            let tx = alice_db.tx_ref(batch);
             block_on(tx.insert("bands", band(alice), options(gone))).unwrap();
             if delete_first {
                 block_on(tx.delete("bands", gone, Default::default())).unwrap();
@@ -297,7 +297,7 @@ fn a_unit_s_earlier_inserts_are_evidence_and_its_deletes_are_not() {
 
     // A committed band the unit deletes still reads as committed.
     commit(&alice_db, &server, |batch| {
-        let tx = alice_db.mergeable_tx_ref(batch);
+        let tx = alice_db.tx_ref(batch);
         block_on(tx.delete("bands", first, Default::default())).unwrap();
         block_on(tx.insert("tasks", task(first), Default::default())).unwrap();
     })

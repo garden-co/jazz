@@ -16,8 +16,7 @@
 //!   a Groove SQLite-adapter file). Each is refused with
 //!   `UnsupportedStorageCodecs` without being changed.
 //!
-//! `dev/gates/storage-compat.sh` runs these by exact name. Not ported from
-//! Jazz.
+//! `dev/gates/storage-compat.sh` runs these by exact name.
 
 use crate::common;
 
@@ -822,7 +821,7 @@ fn another_storage_format_is_refused_without_changing_the_file() {
     for (name, sql) in [
         ("newer", "UPDATE _jazz_format SET version = version + 1"),
         ("older", "UPDATE _jazz_format SET version = 0"),
-        // Tables but no stamp: not a file Jazz's SQLite engine wrote.
+        // Tables but no stamp: not a file Jazz wrote.
         ("unstamped", "DROP TABLE _jazz_format"),
     ] {
         let path = edited_server_corpus(name, sql);

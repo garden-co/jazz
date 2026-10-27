@@ -98,7 +98,7 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       {
         const payload = new Uint8Array(4);
         new DataView(payload.buffer).setInt32(0, value.value, true);
-        return envelope(4, payload); // Groove I32
+        return envelope(4, payload); // Value::I32
       }
     case "BigInt": {
       if (typeof value.value === "number" && !Number.isSafeInteger(value.value)) {
@@ -110,19 +110,19 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       }
       const payload = new Uint8Array(8);
       new DataView(payload.buffer).setBigInt64(0, integer, true);
-      return envelope(5, payload); // Groove I64
+      return envelope(5, payload); // Value::I64
     }
     case "Uuid": {
       const bytes = parseUuidBytes(value.value);
       if (!bytes) throw new Error(`invalid branch UUID ${value.value}`);
-      return envelope(7, bytes); // Groove UUID
+      return envelope(7, bytes); // Value::Uuid
     }
     case "Text": {
       const text = new TextEncoder().encode(value.value);
       const payload = new Uint8Array(1 + text.length);
-      payload[0] = 0; // Groove stored-scalar Primitive case
+      payload[0] = 0; // stored-scalar Primitive case
       payload.set(text, 1);
-      return envelope(6, payload); // Groove String
+      return envelope(6, payload); // Value::String
     }
     default:
       throw new Error(

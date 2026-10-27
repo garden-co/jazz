@@ -697,7 +697,7 @@ fn cold_relay_paired_read_hydrates_the_catalogue_policy_dependency() {
         client.table_identity("documents").unwrap().unwrap().0,
         scope
     );
-    client.abandon_serializable_handle(tx).unwrap();
+    client.abandon_transaction_handle(tx).unwrap();
 }
 
 /// Alice restores Bob's authenticated capture offline. E17 policy intrinsics

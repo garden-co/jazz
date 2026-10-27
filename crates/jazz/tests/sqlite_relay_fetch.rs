@@ -126,7 +126,7 @@ fn query() -> Query {
 async fn read(db: &Db, query: Query) -> Result<Vec<String>, Error> {
     let bytes = postcard::to_allocvec(&query).unwrap();
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,

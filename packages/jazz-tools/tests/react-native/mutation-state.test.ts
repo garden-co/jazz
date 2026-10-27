@@ -33,9 +33,7 @@ it("refuses write state snapshots explicitly and retires closed writes", async (
           title: { type: "Text", value: "local state" },
         }),
       );
-      expect(() => write.writeState()).toThrow(
-        "write state snapshots is not supported on SQLite yet",
-      );
+      expect(() => write.writeState()).toThrow("write state snapshots is not supported yet");
       await write.wait("local");
       expect(write.close()).toBe(true);
       expect(write.close()).toBe(false);

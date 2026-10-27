@@ -1,4 +1,3 @@
-// Ported from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
@@ -16,8 +15,6 @@ use jazz::tools::{
     CmpOp, ColumnType, Operation, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies,
     TableSchemaBuilder,
 };
-#[cfg(any())]
-use jazz_storage_rocksdb::RocksDbStorage;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -66,7 +63,7 @@ fn captured_branch_snapshot(db: &Db) -> SnapshotRef {
 /// changes the draft. No authority or server acceptance is required.
 #[test]
 fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let base = selector(0xe1);
     let head = selector(0xe2);
     let row = db
@@ -106,17 +103,12 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
     let live =
         ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::current(base.clone())));
     let query = db.prepare_query(&db.table("todos")).unwrap();
-    let table = schema
-        .tables
-        .iter()
-        .find(|table| table.name == "todos")
-        .unwrap();
     assert_eq!(
-        db.all(&query, frozen.clone()).unwrap()[0].cell(table, "title"),
+        db.all(&query, frozen.clone()).unwrap()[0].cell("title"),
         Some(Value::String("Original".into()))
     );
     assert_eq!(
-        db.all(&query, live).unwrap()[0].cell(table, "title"),
+        db.all(&query, live).unwrap()[0].cell("title"),
         Some(Value::String("Changed".into()))
     );
     db.update(
@@ -133,13 +125,13 @@ fn captured_snapshot_fences_later_writes_and_preserves_draft_overrides() {
     )
     .unwrap();
     assert_eq!(
-        db.all(&query, frozen).unwrap()[0].cell(table, "title"),
+        db.all(&query, frozen).unwrap()[0].cell("title"),
         Some(Value::String("Draft".into()))
     );
     assert_eq!(
         db.all(&query, ReadOpts::default().branch_view(base, None))
             .unwrap()[0]
-            .cell(table, "title"),
+            .cell("title"),
         Some(Value::String("Changed".into()))
     );
 }
@@ -153,7 +145,7 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
     let base = selector(0xe3);
     let head = selector(0xe4);
     let persisted = {
-        let db = open_rocks_db(dir.path(), &schema);
+        let db = open_file_db(dir.path(), &schema);
         let row = db
             .insert(
                 "todos",
@@ -185,17 +177,12 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
     let opts =
         ReadOpts::default().branch_view(head, Some(BranchViewBase::snapshot(base, snapshot)));
     {
-        let db = open_rocks_db(dir.path(), &schema);
+        let db = open_file_db(dir.path(), &schema);
         let query = db.prepare_query(&db.table("todos")).unwrap();
-        let table = schema
-            .tables
-            .iter()
-            .find(|table| table.name == "todos")
-            .unwrap();
         let frozen = db.all(&query, opts.clone()).unwrap();
         assert_eq!(frozen.len(), 1);
         assert_eq!(
-            frozen[0].cell(table, "title"),
+            frozen[0].cell("title"),
             Some(Value::String("Original".into()))
         );
         assert_eq!(
@@ -204,7 +191,7 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
                 ReadOpts::default().branch_view(selector(0xe3), None)
             )
             .unwrap()[0]
-                .cell(table, "title"),
+                .cell("title"),
             Some(Value::String("Changed".into()))
         );
     }
@@ -220,7 +207,6 @@ fn captured_snapshot_reopens_and_missing_history_is_explicit() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, tests Jazz's SnapshotRef codec, not the engine
 /// The application codec is a public compatibility contract: u64 extrema and
 /// transaction dots survive both the string format and the established binary
 /// serde layout. The fixture is authored independently of serde.
@@ -229,7 +215,7 @@ fn snapshot_reference_codec_matches_pinned_bytes_and_preserves_wire_layout() {
     #[derive(serde::Serialize)]
     struct OldLayout<'a> {
         owner: NodeUuid,
-        global_base: GlobalTime,
+        global_base: jazz::time::GlobalTime,
         local_base: jazz::time::TxTime,
         dots: &'a [jazz::tx::TxId],
     }
@@ -261,7 +247,6 @@ fn snapshot_reference_codec_matches_pinned_bytes_and_preserves_wire_layout() {
     }
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, tests Jazz's SnapshotRef codec, not the engine
 /// Alice restores a reference containing unsorted duplicate transaction dots.
 /// Rust re-encoding canonicalises the string without changing its frontier.
 #[test]
@@ -341,21 +326,6 @@ fn open_db() -> (Db, JazzSchema) {
     (db, schema)
 }
 
-fn open_history_complete_db() -> (Db, JazzSchema) {
-    let schema = compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("todos")
-                    .column("branch_id", ColumnType::Uuid)
-                    .column("title", ColumnType::Text)
-                    .branch_by("branch_id"),
-            )
-            .build(),
-    );
-    let db = open_history_complete_db_with_schema(schema.clone());
-    (db, schema)
-}
-
 fn open_history_complete_db_with_schema(schema: JazzSchema) -> Db {
     block_on(Db::open_history_complete(
         DbConfig::new(
@@ -370,7 +340,7 @@ fn open_history_complete_db_with_schema(schema: JazzSchema) -> Db {
     .unwrap()
 }
 
-fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
+fn open_file_db(path: &std::path::Path, schema: &JazzSchema) -> Db {
     block_on(Db::open_at(
         DbConfig::new(
             schema.clone(),
@@ -443,7 +413,7 @@ fn indexed_branch_view_masks_base_before_applying_the_predicate() {
 
 #[test]
 fn branch_view_upsert_merges_head_copies_inherited_and_inserts_absent_rows() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let base = selector(0xb1);
     let head = selector(0xb2);
     let head_row = RowUuid::from_bytes([0xb3; 16]);
@@ -491,10 +461,9 @@ fn branch_view_upsert_merges_head_copies_inherited_and_inserts_absent_rows() {
         ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base.clone()))),
     ))
     .unwrap();
-    let table = &schema.tables[0];
     let titles = rows
         .iter()
-        .map(|row| (row.row_uuid(), row.cell(table, "title").unwrap()))
+        .map(|row| (row.row_uuid(), row.cell("title").unwrap()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         titles,
@@ -509,7 +478,7 @@ fn branch_view_upsert_merges_head_copies_inherited_and_inserts_absent_rows() {
     assert_eq!(base_rows.len(), 1);
     assert_eq!(base_rows[0].row_uuid(), inherited_row);
     assert_eq!(
-        base_rows[0].cell(table, "title"),
+        base_rows[0].cell("title"),
         Some(Value::String("base before".to_owned())),
         "copy-on-write must leave inherited base content unchanged"
     );
@@ -517,7 +486,7 @@ fn branch_view_upsert_merges_head_copies_inherited_and_inserts_absent_rows() {
 
 #[test]
 fn mergeable_transaction_branch_view_upsert_handles_all_three_row_states() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let base = selector(0xb6);
     let head = selector(0xb7);
     let head_row = RowUuid::from_bytes([0xb8; 16]);
@@ -568,10 +537,9 @@ fn mergeable_transaction_branch_view_upsert_handles_all_three_row_states() {
         ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base))),
     ))
     .unwrap();
-    let table = &schema.tables[0];
     let titles = rows
         .iter()
-        .map(|row| (row.row_uuid(), row.cell(table, "title").unwrap()))
+        .map(|row| (row.row_uuid(), row.cell("title").unwrap()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         titles,
@@ -592,7 +560,7 @@ fn mergeable_transaction_branch_view_upsert_handles_all_three_row_states() {
 /// alice ──delete head row──► tx overlay ──upsert row──► visible replacement
 #[test]
 fn branch_upsert_after_staged_delete_replaces_the_pending_tombstone() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let head = selector(0xbb);
     let row = RowUuid::from_bytes([0xbc; 16]);
     db.insert(
@@ -637,7 +605,7 @@ fn branch_upsert_after_staged_delete_replaces_the_pending_tombstone() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row);
     assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
+        rows[0].cell("title"),
         Some(Value::String("after".to_owned()))
     );
 }
@@ -649,7 +617,7 @@ fn branch_upsert_after_staged_delete_replaces_the_pending_tombstone() {
 /// alice ──insert/upsert rows──► tx overlay ──upsert same rows──► merged content
 #[test]
 fn session_transaction_can_upsert_its_staged_branch_rows_again() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let alice = AuthorSubject::for_test_bytes([0xbd; 16]);
     let head = selector(0xbe);
     let inserted_row = RowUuid::from_bytes([0xbf; 16]);
@@ -708,12 +676,7 @@ fn session_transaction_can_upsert_its_staged_branch_rows_again() {
     let rows = block_on(db.all(&query, ReadOpts::default().branch_view(head, None))).unwrap();
     let titles = rows
         .iter()
-        .map(|row| {
-            (
-                row.row_uuid(),
-                row.cell(&schema.tables[0], "title").unwrap(),
-            )
-        })
+        .map(|row| (row.row_uuid(), row.cell("title").unwrap()))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
         titles,
@@ -726,7 +689,7 @@ fn session_transaction_can_upsert_its_staged_branch_rows_again() {
 
 #[test]
 fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let base = selector(0x97);
     let head = selector(0x98);
     let replaced = RowUuid::from_bytes([0x99; 16]);
@@ -784,7 +747,7 @@ fn branch_view_reduction_precedes_aggregation_and_ordered_windows() {
     let rows = block_on(db.all(&window, opts)).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
+        rows[0].cell("title"),
         Some(Value::String("charlie".to_owned()))
     );
 }
@@ -904,12 +867,11 @@ fn branch_view_join_projects_branch_column_subsets_and_shared_tables() {
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, asserts Groove aggregate binding-field descriptors
 /// Alice's branch view counts its reduced rows; Bob's grouped window observes
 /// explicit aggregate roles, deterministic group identity, and empty counts.
 #[test]
 fn review_branch_aggregate_empty_grouped_window_and_roles() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let base = selector(0xd1);
     let head = selector(0xd2);
     let opts =
@@ -971,12 +933,13 @@ fn review_branch_aggregate_empty_grouped_window_and_roles() {
     );
     assert_eq!(rows[0].cell_at(1), Some(Value::U64(2)));
     assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
+        rows[0].cell("title"),
         Some(Value::String("charlie".to_owned()))
     );
     assert_eq!(
-        rows[0].binding_field_names(),
-        vec![None, None, Some("count")]
+        rows[0].cells().map(|(name, _)| name).collect::<Vec<_>>(),
+        vec!["title", "count"],
+        "the group key, then the count under its aggregate role"
     );
     let again = block_on(db.all(&window, opts.clone())).unwrap();
     assert_eq!(again[0].row_uuid(), rows[0].row_uuid());
@@ -1433,14 +1396,9 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
     let branches = db.prepare_query(&db.table("branches")).unwrap();
     let branch_rows = block_on(db.all(&branches, opts.clone())).unwrap();
     assert_eq!(branch_rows.len(), 2);
-    let branch_table = schema
-        .tables
-        .iter()
-        .find(|table| table.name == "branches")
-        .unwrap();
     assert!(branch_rows.iter().all(|row| {
-        row.cell(branch_table, "owner") == Some(Value::String(before.principal_parts().1))
-            && row.cell(branch_table, "branch_id") == Some(Value::Uuid(head_branch.0))
+        row.cell("owner") == Some(Value::String(before.principal_parts().1))
+            && row.cell("branch_id") == Some(Value::Uuid(head_branch.0))
     }));
     let system_rows = block_on(db.all(&query, opts.clone())).unwrap();
     assert_eq!(system_rows.len(), 1);
@@ -1548,7 +1506,7 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
 
 #[test]
 fn one_mergeable_transaction_can_atomically_write_multiple_branches() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let row = RowUuid::from_bytes([0x70; 16]);
     let left = selector(0x72);
     let right = selector(0x73);
@@ -1582,26 +1540,21 @@ fn one_mergeable_transaction_can_atomically_write_multiple_branches() {
     };
     let left_rows = rows_in(left);
     let right_rows = rows_in(right);
-    let table = schema
-        .tables
-        .iter()
-        .find(|table| table.name == "todos")
-        .unwrap();
     assert_eq!(left_rows.len(), 1);
     assert_eq!(right_rows.len(), 1);
     assert_eq!(
-        left_rows[0].cell(table, "title"),
+        left_rows[0].cell("title"),
         Some(Value::String("left".to_owned()))
     );
     assert_eq!(
-        right_rows[0].cell(table, "title"),
+        right_rows[0].cell("title"),
         Some(Value::String("right".to_owned()))
     );
 }
 
 #[test]
 fn branch_move_is_explicit_source_delete_and_destination_restore() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let source = selector(0x94);
     let target = selector(0x95);
     let row = RowUuid::from_bytes([0x96; 16]);
@@ -1631,12 +1584,11 @@ fn branch_move_is_explicit_source_delete_and_destination_restore() {
         block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
     assert_eq!(destination.len(), 1);
     assert_eq!(
-        destination[0].cell(&schema.tables[0], "title"),
+        destination[0].cell("title"),
         Some(Value::String("move me".to_owned()))
     );
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, RocksDB reopen (adapter is in-memory)
 #[test]
 fn cross_branch_transaction_and_independent_winners_survive_reopen() {
     let (_template, schema) = open_db();
@@ -1645,7 +1597,7 @@ fn cross_branch_transaction_and_independent_winners_survive_reopen() {
     let left = selector(0xa6);
     let right = selector(0xa7);
     {
-        let db = open_rocks_db(directory.path(), &schema);
+        let db = open_file_db(directory.path(), &schema);
         let tx = db.mergeable_tx().unwrap();
         tx.insert(
             "todos",
@@ -1682,7 +1634,7 @@ fn cross_branch_transaction_and_independent_winners_survive_reopen() {
         .unwrap();
     }
 
-    let db = open_rocks_db(directory.path(), &schema);
+    let db = open_file_db(directory.path(), &schema);
     let query = db.prepare_query(&db.table("todos")).unwrap();
     assert!(
         block_on(db.all(&query, ReadOpts::default().branch_view(left, None)))
@@ -1693,7 +1645,7 @@ fn cross_branch_transaction_and_independent_winners_survive_reopen() {
     let rows = block_on(db.all(&query, ReadOpts::default().branch_view(right, None))).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
+        rows[0].cell("title"),
         Some(Value::String("right".to_owned()))
     );
 }
@@ -1818,8 +1770,7 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
 
 #[test]
 fn seeded_branch_view_subscription_matches_one_shot_reduction() {
-    let (db, schema) = open_db();
-    let table = &schema.tables[0];
+    let (db, _) = open_db();
     let base = selector(0xaf);
     let head = selector(0xb0);
     let rows = (0_u8..12)
@@ -1860,7 +1811,7 @@ fn seeded_branch_view_subscription_matches_one_shot_reduction() {
             maintained.remove(&removed.row_uuid);
         }
         for row in added.into_iter().chain(updated) {
-            let Value::String(title) = row.cell(table, "title").unwrap() else {
+            let Value::String(title) = row.cell("title").unwrap() else {
                 panic!("title must remain a string");
             };
             maintained.insert(row.row_uuid(), title);
@@ -1951,7 +1902,7 @@ fn seeded_branch_view_subscription_matches_one_shot_reduction() {
             .unwrap()
             .into_iter()
             .map(|row| {
-                let Value::String(title) = row.cell(table, "title").unwrap() else {
+                let Value::String(title) = row.cell("title").unwrap() else {
                     panic!("title must remain a string");
                 };
                 (row.row_uuid(), title)
@@ -1963,7 +1914,7 @@ fn seeded_branch_view_subscription_matches_one_shot_reduction() {
 
 #[test]
 fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let row = RowUuid::from_bytes([0x64; 16]);
     let base = selector(0x65);
     let head = selector(0x66);
@@ -1991,17 +1942,12 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     };
     let rows = block_on(db.all(&prepared, opts.clone())).unwrap();
     assert_eq!(rows.len(), 1);
-    let table = schema
-        .tables
-        .iter()
-        .find(|table| table.name == "todos")
-        .unwrap();
     assert_eq!(
-        rows[0].cell(table, "title"),
+        rows[0].cell("title"),
         Some(Value::String("base".to_owned()))
     );
     assert_eq!(
-        rows[0].cell(table, "branch_id"),
+        rows[0].cell("branch_id"),
         Some(Value::Uuid(uuid::Uuid::from_bytes([0x66; 16])))
     );
     let mut subscription = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
@@ -2069,7 +2015,7 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     .unwrap();
     let rows = block_on(db.all(&prepared, opts.clone())).unwrap();
     assert_eq!(
-        rows[0].cell(table, "title"),
+        rows[0].cell("title"),
         Some(Value::String("edited".to_owned()))
     );
 
@@ -2077,10 +2023,7 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
         "todos",
         row,
         jazz::db::DeleteOptions {
-            target: jazz::db::WriteTarget::BranchView {
-                head: head,
-                base: None,
-            },
+            target: jazz::db::WriteTarget::BranchView { head, base: None },
             ..Default::default()
         },
     )
@@ -2088,7 +2031,6 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
     assert!(block_on(db.all(&prepared, opts)).unwrap().is_empty());
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, RocksDB reopen (adapter is in-memory)
 #[test]
 fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct() {
     let (_template, schema) = open_db();
@@ -2102,7 +2044,7 @@ fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct
         ReadOpts::default().branch_view(head.clone(), Some(BranchViewBase::Current(base.clone())));
 
     {
-        let db = open_rocks_db(directory.path(), &schema);
+        let db = open_file_db(directory.path(), &schema);
         for row in [copied, inherited] {
             db.insert(
                 "todos",
@@ -2129,23 +2071,15 @@ fn indexed_branch_view_copy_on_write_and_reopen_keep_branch_coordinates_distinct
         )
         .unwrap();
 
-        assert_branch_view_copy_on_write_receipt(
-            &db,
-            &schema,
-            &base,
-            copied,
-            inherited,
-            &branch_view,
-        );
+        assert_branch_view_copy_on_write_receipt(&db, &base, copied, inherited, &branch_view);
     }
 
-    let db = open_rocks_db(directory.path(), &schema);
-    assert_branch_view_copy_on_write_receipt(&db, &schema, &base, copied, inherited, &branch_view);
+    let db = open_file_db(directory.path(), &schema);
+    assert_branch_view_copy_on_write_receipt(&db, &base, copied, inherited, &branch_view);
 }
 
 fn assert_branch_view_copy_on_write_receipt(
     db: &Db,
-    schema: &JazzSchema,
     base: &BranchSelector,
     copied: RowUuid,
     inherited: RowUuid,
@@ -2170,18 +2104,17 @@ fn assert_branch_view_copy_on_write_receipt(
     let all = db.prepare_query(&db.table("todos")).unwrap();
     let rows = block_on(db.all(&all, branch_view.clone())).unwrap();
     assert_eq!(rows.len(), 2);
-    let table = &schema.tables[0];
     let by_row = rows
         .iter()
         .map(|row| (row.row_uuid(), row))
         .collect::<BTreeMap<_, _>>();
     assert_eq!(
-        by_row[&copied].cell(table, "title"),
+        by_row[&copied].cell("title"),
         Some(Value::String("draft".to_owned()))
     );
     for row in by_row.values() {
         assert_eq!(
-            row.cell(table, "branch_id"),
+            row.cell("branch_id"),
             Some(Value::Uuid(uuid::Uuid::from_bytes([0xd2; 16]))),
             "ordinary branch cells project the requested head, including inherited content"
         );
@@ -2204,7 +2137,7 @@ fn assert_branch_view_copy_on_write_receipt(
 
 #[test]
 fn inherited_delete_is_a_head_register_and_can_be_restored() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let row = RowUuid::from_bytes([0x67; 16]);
     let base = selector(0x68);
     let head = selector(0x69);
@@ -2286,16 +2219,15 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
         "unexpected inherited-restore delta: {restored:?}"
     );
     let rows = block_on(db.all(&prepared, opts)).unwrap();
-    let table = &schema.tables[0];
     assert_eq!(
-        rows[0].cell(table, "title"),
+        rows[0].cell("title"),
         Some(Value::String("restored".to_owned()))
     );
 }
 
 #[test]
 fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let row = RowUuid::from_bytes([0x74; 16]);
     let base = selector(0x75);
     let head = selector(0x76);
@@ -2362,7 +2294,7 @@ fn frozen_base_subscription_keeps_the_base_fixed_and_the_head_live() {
     ));
     let rows = block_on(db.all(&prepared, opts)).unwrap();
     assert_eq!(
-        rows[0].cell(&schema.tables[0], "title"),
+        rows[0].cell("title"),
         Some(Value::String("live head".to_owned()))
     );
 
@@ -2461,49 +2393,42 @@ fn branch_history_checks_inherited_policy_evidence_in_the_branch() {
     let note = RowUuid::from_bytes([0x85; 16]);
     let draft =
         BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0x86; 16])))]);
-    let writes = [
-        db.insert(
-            "projects",
-            BTreeMap::from([("owner".to_owned(), Value::String(bob.principal_parts().1))]),
-            jazz::db::InsertOptions {
-                row_id: Some(project),
-                target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
-                ..Default::default()
+    db.insert(
+        "projects",
+        BTreeMap::from([("owner".to_owned(), Value::String(bob.principal_parts().1))]),
+        jazz::db::InsertOptions {
+            row_id: Some(project),
+            target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.insert(
+        "notes",
+        BTreeMap::from([
+            ("project".to_owned(), Value::Uuid(project.0)),
+            ("title".to_owned(), Value::String("first".to_owned())),
+        ]),
+        jazz::db::InsertOptions {
+            row_id: Some(note),
+            target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.update(
+        "notes",
+        note,
+        BTreeMap::from([("title".into(), Value::String("second".into()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: None,
             },
-        )
-        .unwrap(),
-        db.insert(
-            "notes",
-            BTreeMap::from([
-                ("project".to_owned(), Value::Uuid(project.0)),
-                ("title".to_owned(), Value::String("first".to_owned())),
-            ]),
-            jazz::db::InsertOptions {
-                row_id: Some(note),
-                target: jazz::db::ExactWriteTarget::Branch(draft.clone()),
-                ..Default::default()
-            },
-        )
-        .unwrap(),
-        db.update(
-            "notes",
-            note,
-            BTreeMap::from([("title".into(), Value::String("second".into()))]),
-            jazz::db::UpdateOptions {
-                target: jazz::db::WriteTarget::BranchView {
-                    head: draft.clone(),
-                    base: None,
-                },
-                ..Default::default()
-            },
-        )
-        .unwrap(),
-    ];
-    // Accept the writes as this node's own authority, so remote reads see them.
-    for write in writes {
-        db.finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-            .unwrap();
-    }
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let opts = ReadOpts {
         tier: jazz::db::ReadTier::Remote,
@@ -2571,7 +2496,7 @@ type BranchEdit<'a> = Box<dyn Fn(&Db) + 'a>;
 /// ```
 #[test]
 fn indexed_branch_view_subscription_follows_late_changes_on_both_branches() {
-    let (db, schema) = open_db();
+    let (db, _) = open_db();
     let main = selector(0x81);
     let draft = selector(0x82);
     let [a, b, c, d, x, e] =
@@ -2647,12 +2572,11 @@ fn indexed_branch_view_subscription_follows_late_changes_on_both_branches() {
         .prepare_query(&Query::from("todos").filter(eq(col("title"), lit("needle"))))
         .unwrap();
     let all = db.prepare_query(&db.table("todos")).unwrap();
-    let table = &schema.tables[0];
     let expected = |db: &Db| {
         let mut rows = block_on(db.all(&all, opts.clone()))
             .unwrap()
             .into_iter()
-            .filter(|row| row.cell(table, "title") == Some(Value::String("needle".to_owned())))
+            .filter(|row| row.cell("title") == Some(Value::String("needle".to_owned())))
             .map(|row| row.row_uuid())
             .collect::<Vec<_>>();
         rows.sort();
@@ -2777,35 +2701,104 @@ fn indexed_branch_view_subscription_follows_late_changes_on_both_branches() {
     });
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, needs schema views (register_schema_view), see lens notes
+/// Branched todos whose `status` enum declares `variants`.
+fn todos_with_status(variants: &[&str]) -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .column(
+                        "status",
+                        ColumnType::ScalarEnum {
+                            name: "Status".to_owned(),
+                            variants: variants
+                                .iter()
+                                .map(|variant| (*variant).to_owned())
+                                .collect(),
+                        },
+                    )
+                    .branch_by("branch_id"),
+            )
+            .build(),
+    )
+}
+
+/// The identity lens from `todos_with_status(["open"])` to
+/// `todos_with_status(["open", "closed"])`: a newer version that adds an
+/// enum variant older readers cannot decode.
+fn status_widening_lens(
+    v1: &JazzSchema,
+    v2: &jazz::protocol::SchemaVersion,
+) -> jazz::protocol::MigrationLens {
+    jazz::protocol::MigrationLens::new(
+        v1.version_id(),
+        v2.id,
+        vec![jazz::protocol::TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![jazz::protocol::LensOp::TransformColumn {
+                column: "status".to_owned(),
+                transform: "jazz.identity".to_owned(),
+            }],
+        }],
+    )
+    .unwrap()
+}
+
+/// Adding a variant to a stored enum column is not supported yet: its
+/// `TransformColumn` lens is refused (and without one, so is changing the
+/// stored column's type) with an explicit error, and the store keeps
+/// writing the version it had.
+#[test]
+fn widening_a_stored_enum_column_is_not_supported_yet() {
+    let v1 = todos_with_status(&["open"]);
+    let db = open_history_complete_db_with_schema(v1.clone());
+    let v2 = todos_with_status(&["open", "closed"]);
+    let target = jazz::protocol::SchemaVersion::new(v2);
+    let publication = db
+        .author_schema_lineage_publication(target.clone(), status_widening_lens(&v1, &target))
+        .unwrap();
+    block_on(db.publish_schema_with_lens(publication)).unwrap();
+    let error = block_on(db.activate_catalogue_schema_for_test(
+        jazz::protocol::CurrentWriteSchema {
+            revision: 1,
+            schema: target.id,
+        },
+    ))
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("is not supported yet"),
+        "{error}"
+    );
+    let error = block_on(db.activate_schema(target.schema.clone())).unwrap_err();
+    assert!(
+        error.to_string().contains("is not supported yet"),
+        "{error}"
+    );
+    db.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("still v1".to_owned())),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ]),
+        jazz::db::InsertOptions {
+            target: jazz::db::ExactWriteTarget::Branch(selector(0x50)),
+            ..Default::default()
+        },
+    )
+    .expect("the store keeps writing its current version");
+}
+
 /// An older reader omits a head row it cannot decode, but that head row still
 /// masks the base row underneath: the reader never sees the base body.
 ///
 /// base/open ──v2 head/closed──► v1 reader of head-over-base sees neither
 #[test]
+#[ignore = "#4273: widening a stored enum column via a TransformColumn lens is not supported yet"]
 fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
-    let schema = |variants: &[&str]| {
-        compile_schema(
-            &SchemaBuilder::new()
-                .table(
-                    TableSchemaBuilder::new("todos")
-                        .column("branch_id", ColumnType::Uuid)
-                        .column("title", ColumnType::Text)
-                        .column(
-                            "status",
-                            ColumnType::ScalarEnum {
-                                name: "Status".to_owned(),
-                                variants: variants
-                                    .iter()
-                                    .map(|variant| (*variant).to_owned())
-                                    .collect(),
-                            },
-                        )
-                        .branch_by("branch_id"),
-                )
-                .build(),
-        )
-    };
+    let schema = todos_with_status;
     let v1 = schema(&["open"]);
     let db = open_history_complete_db_with_schema(v1.clone());
     let old = block_on(db.register_schema_view(v1.clone())).unwrap();
@@ -2833,28 +2826,10 @@ fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
     }
     let v2 = schema(&["open", "closed"]);
     let target = jazz::protocol::SchemaVersion::new(v2.clone());
-    let lens = jazz::protocol::MigrationLens::new(
-        v1.version_id(),
-        target.id,
-        vec![jazz::protocol::TableLens {
-            source_table: "todos".to_owned(),
-            target_table: "todos".to_owned(),
-            ops: vec![jazz::protocol::LensOp::TransformColumn {
-                column: "status".to_owned(),
-                transform: "jazz.identity".to_owned(),
-            }],
-        }],
-    )
-    .unwrap();
     let publication = db
-        .author_schema_lineage_publication(
-            target.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(target.clone(), status_widening_lens(&v1, &target))
         .unwrap();
-    block_on(db.publish_schema_with_lens(1, publication)).unwrap();
+    block_on(db.publish_schema_with_lens(publication)).unwrap();
     block_on(
         db.activate_catalogue_schema_for_test(jazz::protocol::CurrentWriteSchema {
             revision: 1,
@@ -2879,11 +2854,6 @@ fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
         },
     )
     .unwrap();
-    let table = v1
-        .tables()
-        .iter()
-        .find(|table| table.name == "todos")
-        .unwrap();
     let whole = old.prepare_query(&old.table("todos")).unwrap();
     let composed = ReadOpts {
         tier: jazz::db::ReadTier::LocalOnly,
@@ -2893,7 +2863,7 @@ fn branch_view_head_row_an_older_reader_omits_still_masks_the_base() {
         block_on(old.all(&whole, composed))
             .unwrap()
             .into_iter()
-            .map(|row| (row.row_uuid(), row.cell(table, "title")))
+            .map(|row| (row.row_uuid(), row.cell("title")))
             .collect::<BTreeMap<_, _>>(),
         BTreeMap::from([(inherited, Some(Value::String("base inherited".to_owned())))]),
         "the omitted head row masks the base body"
@@ -2922,7 +2892,6 @@ fn branch_view_reads_keep_enum_branch_columns() {
             )
             .build(),
     );
-    let table = &schema.tables()[0];
     let db = open_history_complete_db_with_schema(schema.clone());
     let base = BranchSelector::new([("branch", Value::EnumTag(0))]);
     let head = BranchSelector::new([("branch", Value::EnumTag(1))]);
@@ -2948,7 +2917,7 @@ fn branch_view_reads_keep_enum_branch_columns() {
         block_on(db.all(&query, opts))
             .unwrap()
             .into_iter()
-            .map(|row| (row.row_uuid(), row.cell(table, "branch")))
+            .map(|row| (row.row_uuid(), row.cell("branch")))
             .collect::<BTreeMap<_, _>>()
     };
     let exact = ReadOpts {
@@ -3063,12 +3032,6 @@ fn a_tab_over_its_worker_edits_a_draft_frozen_at_its_capture() {
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(tab.connect_upstream(client_side));
     worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
-    let pump = || {
-        for _ in 0..8 {
-            block_on(tab.tick()).unwrap();
-            block_on(worker.tick()).unwrap();
-        }
-    };
     let main = selector(0xe1);
     let draft = selector(0xe2);
     let title = |t: &str| BTreeMap::from([("title".into(), Value::String(t.into()))]);
@@ -3115,10 +3078,7 @@ fn a_tab_over_its_worker_edits_a_draft_frozen_at_its_capture() {
         }
     };
     let titles = |rows: Vec<jazz::db::CurrentRow>| {
-        let table = schema.tables.iter().find(|t| t.name == "todos").unwrap();
-        rows.iter()
-            .map(|row| row.cell(table, "title"))
-            .collect::<Vec<_>>()
+        rows.iter().map(|row| row.cell("title")).collect::<Vec<_>>()
     };
     assert_eq!(
         titles(read(
@@ -3241,10 +3201,7 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
         }
     };
     let titles = |rows: Vec<jazz::db::CurrentRow>| {
-        let table = schema.tables.iter().find(|t| t.name == "todos").unwrap();
-        rows.iter()
-            .map(|row| row.cell(table, "title"))
-            .collect::<Vec<_>>()
+        rows.iter().map(|row| row.cell("title")).collect::<Vec<_>>()
     };
     assert_eq!(
         titles(read(
@@ -3279,7 +3236,7 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
     // As the bindings read: the store is empty, so the read asks the worker.
     let table = postcard::to_allocvec(&tab.table("todos")).unwrap();
     let read_of = |query: &[u8], opts: ReadOpts| {
-        let mut all = pin!(tab.all_serialized_query(
+        let mut all = pin!(tab.all_serialized_query_as(
             query,
             opts,
             None,
@@ -3338,5 +3295,283 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
             Some(Value::String("Draft".into())),
             Some(Value::String("Inherited original".into()))
         ]
+    );
+}
+
+/// A head row deleted through a branch view (masking its inherited base
+/// row) is restored on the exact head, leaving the base untouched.
+#[test]
+fn a_head_deletion_through_a_branch_view_restores_on_the_exact_head() {
+    let (db, _) = open_db();
+    let base = selector(0xc1);
+    let head = selector(0xc2);
+    let row = RowUuid::from_bytes([0xc3; 16]);
+    let title = |text: &str| BTreeMap::from([("title".to_owned(), Value::String(text.to_owned()))]);
+    db.insert(
+        "todos",
+        title("inherited"),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let view = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: Some(BranchViewBase::Current(base.clone())),
+    };
+    db.upsert(
+        "todos",
+        row,
+        title("draft upsert"),
+        jazz::db::UpsertOptions {
+            target: view.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            target: view,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.restore(
+        "todos",
+        row,
+        Some(title("restored draft")),
+        jazz::db::RestoreOptions {
+            target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let read = |selector: BranchSelector| {
+        block_on(db.all(&query, ReadOpts::default().branch_view(selector, None)))
+            .unwrap()
+            .iter()
+            .map(|row| row.cell("title").unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(read(head), [Value::String("restored draft".to_owned())]);
+    assert_eq!(read(base), [Value::String("inherited".to_owned())]);
+}
+
+/// The same head deletion and restore on a client connected to a server,
+/// however the writes interleave with sync: the server's answers leave the
+/// head tombstone on the replica, so the exact-head restore finds it.
+#[test]
+fn a_synced_head_deletion_through_a_branch_view_restores_on_the_exact_head() {
+    for schedule in 0..27u32 {
+        synced_head_deletion_restores(schedule);
+    }
+}
+
+fn synced_head_deletion_restores(schedule: u32) {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8, author: AuthorSubject| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let author = AuthorSubject::for_test_bytes([0x63; 16]);
+    let client = open(0x02, author);
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    let (client_side, server_side) = jazz::db::duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, author);
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    // Step `n` of the schedule: 0 no sync, 1 one exchange, 2 a full pump.
+    let sync = |step: u32| match schedule / 3u32.pow(step) % 3 {
+        0 => {}
+        1 => {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(client.tick()).unwrap();
+        }
+        _ => {
+            for _ in 0..5 {
+                block_on(client.tick()).unwrap();
+                block_on(server.tick()).unwrap();
+            }
+            block_on(client.tick()).unwrap();
+        }
+    };
+
+    let base = selector(0xd1);
+    let head = selector(0xd2);
+    let row = RowUuid::from_bytes([0xd3; 16]);
+    let title = |text: &str| BTreeMap::from([("title".to_owned(), Value::String(text.to_owned()))]);
+    let view = jazz::db::WriteTarget::BranchView {
+        head: head.clone(),
+        base: Some(BranchViewBase::Current(base.clone())),
+    };
+    client
+        .insert(
+            "todos",
+            title("inherited"),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    sync(0);
+    client
+        .upsert(
+            "todos",
+            row,
+            title("draft upsert"),
+            jazz::db::UpsertOptions {
+                target: view.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    sync(1);
+    client
+        .delete(
+            "todos",
+            row,
+            jazz::db::DeleteOptions {
+                target: view,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    sync(2);
+    client
+        .restore(
+            "todos",
+            row,
+            Some(title("restored draft")),
+            jazz::db::RestoreOptions {
+                target: jazz::db::ExactWriteTarget::Branch(head.clone()),
+                ..Default::default()
+            },
+        )
+        .expect(&format!("schedule {schedule}"));
+}
+
+/// A Remote read through one branch view judges only that branch's cached
+/// rows: rows on other branches, which its answer does not list, stay.
+#[test]
+fn a_remote_branch_read_keeps_the_rows_of_other_branches() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8, author: AuthorSubject| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let author = AuthorSubject::for_test_bytes([0x63; 16]);
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    // A tab over its storage owner, as in a browser.
+    let worker = open(0x02, author);
+    let (worker_side, server_side) = jazz::db::duplex();
+    let _upstream = block_on(worker.connect_upstream(worker_side));
+    server.accept_subscriber(server_side, author);
+    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let client = open(0x03, author);
+    client.set_non_durable_client();
+    let (tab_side, owner_side) = jazz::db::duplex();
+    let _owner = block_on(client.connect_upstream(tab_side));
+    worker.accept_subscriber(owner_side, author);
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let tick = || {
+        block_on(client.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(client.tick()).unwrap();
+    };
+    let pump = || {
+        for _ in 0..5 {
+            tick();
+        }
+    };
+
+    let (main, draft) = (selector(0xe1), selector(0xe2));
+    for (byte, branch) in [(0xe3, &main), (0xe4, &draft)] {
+        client
+            .insert(
+                "todos",
+                BTreeMap::from([("title".to_owned(), Value::String(format!("{byte:x}")))]),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([byte; 16])),
+                    target: jazz::db::ExactWriteTarget::Branch(branch.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    pump();
+
+    // The host read path, as a binding reads.
+    let query = postcard::to_allocvec(&client.table("todos")).unwrap();
+    let read = |branch: &BranchSelector, tier: jazz::db::ReadTier| {
+        let mut opts = ReadOpts::default().branch_view(branch.clone(), None);
+        opts.tier = tier;
+        let mut read = pin!(client.all_serialized_query(&query, opts, None, None, None));
+        let mut context = Context::from_waker(Waker::noop());
+        for _ in 0..50 {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+                return match result.unwrap() {
+                    jazz::db::SerializedReadResult::Rows(rows) => rows.len(),
+                    other => panic!("{other:?}"),
+                };
+            }
+            tick();
+        }
+        panic!("the read did not complete");
+    };
+    assert_eq!(read(&draft, jazz::db::ReadTier::Remote), 1);
+    assert_eq!(
+        read(&main, jazz::db::ReadTier::LocalOnly),
+        1,
+        "the main row stays cached"
+    );
+    assert_eq!(read(&main, jazz::db::ReadTier::Remote), 1);
+    assert_eq!(
+        read(&draft, jazz::db::ReadTier::LocalOnly),
+        1,
+        "the draft row stays cached"
     );
 }

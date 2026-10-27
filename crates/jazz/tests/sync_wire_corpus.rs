@@ -50,7 +50,6 @@ const VARIANTS: [&str; 20] = [
     "Chunks",
     "Rows",
     "Evict",
-    "Unlist",
     "Settled",
     "Answer",
     "Refused",
@@ -60,6 +59,7 @@ const VARIANTS: [&str; 20] = [
     "Schema",
     "Origins",
     "SchemaAdmission",
+    "Stored",
 ];
 
 const V2_VARIANTS: [&str; 47] = [
@@ -423,15 +423,15 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(alice.begin_serializable(open_tx)).unwrap();
     let _ = drive(
         &[&alice, &server, &alice],
-        alice.serializable_tx_ref(open_tx).all_prepared(&notes),
+        alice.tx_ref(open_tx).all_prepared(&notes),
     );
     block_on(server.update("notes", shared, note(1, large(4)), UpdateOptions::default())).unwrap();
     pump(&[&alice, &server, &alice]);
     let _ = drive(
         &[&alice, &server, &alice],
-        alice.serializable_tx_ref(open_tx).all_prepared(&notes),
+        alice.tx_ref(open_tx).all_prepared(&notes),
     );
-    alice.abandon_serializable_handle(open_tx).unwrap();
+    alice.abandon_transaction_handle(open_tx).unwrap();
 
     // Origins: a history subscription ships superseded versions, and the
     // commits behind them first.
@@ -453,7 +453,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     let _ = drive(&[&alice, &server, &alice], alice.permission_advice(id));
 
-    // Unlist: the server gives the shared note away while alice holds it.
+    // The server gives the shared note away while alice holds it: evicted.
     block_on(server.update(
         "notes",
         shared,
@@ -478,6 +478,15 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let bob = open(0x52, user(2), true);
     connect(&bob, &server, user(2), &recorded);
     pump(&[&bob, &server, &bob]);
+
+    // Stored: a worker relays its tab's write upstream.
+    let worker = open(0x53, user(1), false);
+    connect(&worker, &server, user(1), &recorded);
+    let tab = open(0x54, user(1), false);
+    tab.set_non_durable_client();
+    connect(&tab, &worker, user(1), &recorded);
+    block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default())).unwrap();
+    pump(&[&tab, &worker, &server, &worker, &tab]);
 
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
@@ -562,8 +571,8 @@ fn produce_sqlite_sync_wire_corpus_v1() {
     commit.truncate(commit.len() / 2);
     let subscribe = unhex(&messages[0].frame_hex);
     let unsubscribe = unhex(&messages[1].frame_hex);
-    // The last Groove-era wire version, from the corpus this one replaced.
-    let groove: serde_json::Value = serde_json::from_str(
+    // Wire v5 hellos are refused; the frame comes from the v6 corpus.
+    let v6_corpus: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("fixtures/wire_frame_artifact_corpus_v6.json"),
@@ -571,7 +580,7 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         .unwrap(),
     )
     .unwrap();
-    let v5_hello = groove["rejections"]
+    let v5_hello = v6_corpus["rejections"]
         .as_array()
         .unwrap()
         .iter()

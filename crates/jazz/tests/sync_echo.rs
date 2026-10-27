@@ -2,7 +2,7 @@
 //! version of a row is exactly what the writer's commit produced there (its
 //! digest in the commit's `expect`), the Fate names the row `held` and the
 //! writer installs its own image at `through`, with the authority's stamps.
-//! Anything else ships the image as before. Not ported from Jazz.
+//! Anything else ships the image as before.
 
 use crate::common;
 
@@ -400,7 +400,7 @@ fn explicit_timestamps_reach_the_authority_per_write() {
     let batch = jazz::tools::OpenTransactionId::new();
     block_on(client.begin_mergeable(batch)).unwrap();
     for (n, at) in [(1u8, 1_704_067_200_001u64), (2, 1_704_067_200_002)] {
-        block_on(client.mergeable_tx_ref(batch).insert(
+        block_on(client.tx_ref(batch).insert(
             "docs",
             cells(&[("title", "Doc"), ("body", "")]),
             InsertOptions {

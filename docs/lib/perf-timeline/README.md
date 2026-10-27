@@ -102,8 +102,7 @@ placement only, never CodSpeed metadata or Git commit dates.
 The alpha.54 harness lives permanently on `bench/alpha54-codspeed-backfill`;
 it must not be merged into main. It retains every released engine crate tree,
 released dependency versions and profiles, and imports the five later CodSpeed
-workloads with harness-only API adaptations. The standalone native Groove
-`record_validation` receipt is outside the CodSpeed workload inventory.
+workloads with harness-only API adaptations.
 
 One release may have several registry entries, one per harness commit; each
 entry allowlists only its own run/result IDs, and all entries for a release must

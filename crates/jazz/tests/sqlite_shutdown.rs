@@ -70,7 +70,7 @@ fn shutdown_fences_retained_handles_while_receipts_and_cleanup_drain() {
     let tx = OpenTransactionId::new();
     block_on(db.begin_serializable(tx)).unwrap();
     block_on(
-        db.serializable_tx_ref(tx)
+        db.tx_ref(tx)
             .insert("notes", cells("uncommitted"), Default::default()),
     )
     .unwrap();
@@ -134,7 +134,7 @@ fn shutdown_fences_retained_handles_while_receipts_and_cleanup_drain() {
     )));
     closed(block_on(db.begin_mergeable(OpenTransactionId::new())));
     closed(block_on(db.begin_serializable(OpenTransactionId::new())));
-    closed(block_on(db.serializable_tx_ref(tx).insert(
+    closed(block_on(db.tx_ref(tx).insert(
         "notes",
         cells("late staged"),
         Default::default(),
@@ -212,7 +212,7 @@ fn shutdown_refuses_initialization_publication_but_allows_cancellation() {
         let tx = OpenTransactionId::new();
         block_on(db.begin_serializable(tx)).unwrap();
         block_on(
-            db.serializable_tx_ref(tx)
+            db.tx_ref(tx)
                 .insert("notes", cells(title), Default::default()),
         )
         .unwrap();

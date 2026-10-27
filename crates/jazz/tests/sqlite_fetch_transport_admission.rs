@@ -72,7 +72,7 @@ async fn read(db: &Db, tier: ReadTier) -> Result<usize, jazz::db::Error> {
     let mut opts = ReadOpts::for_read_tier(tier);
     opts.first_load = FirstLoad::WaitForRemote { timeout_ms: 30_000 };
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &postcard::to_allocvec(&Query::from("notes")).unwrap(),
             opts,
             None,

@@ -97,9 +97,9 @@ read, and subscribe — is shown here using the `todos` example:
 
 ```rust
 use std::collections::BTreeMap;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource};
-use jazz::groove::{records::Value, storage::MemoryStorage};
+use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, ReadOpts, SeededRowIdSource};
 use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -112,45 +112,43 @@ let source = SchemaBuilder::new()
     )
     .build();
 let schema = JazzSchema::new(&source)?;
-let storage = MemoryStorage::new(
-    &schema.column_families().iter().map(String::as_str).collect::<Vec<_>>(),
-);
 
 // A `Db` is always a client. A local-first single-process app is just a client
 // with no upstream: its writes stay at the `Local` tier (durable on disk) and it
 // never needs `Global`. To sync later it connects an upstream and drives tick()
 // (§13.5); its backlog uploads and settles — no API change, no role.
-let db = jazz::block_on(Db::open(DbConfig {
-    schema, storage,
-    identity: DbIdentity {
+let config = DbConfig::new(
+    schema,
+    DbIdentity {
         node: NodeUuid::from_bytes([0x11; 16]),
         author: AuthorSubject::for_test_bytes([0xa1; 16]),
     },
-    id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
-}))?;
+)
+.with_id_source(SeededRowIdSource::new(0x1111));
+let db = jazz::block_on(Db::open_at(config, "todos.sqlite".as_ref(), FileOptions::default()))?;
 
-let cells: RowCells = BTreeMap::from([
-    ("title".into(), Value::String("buy milk".into())),
-    ("done".into(),  Value::Bool(false)),
+let cells = BTreeMap::from([
+    ("title".to_owned(), Value::String("buy milk".into())),
+    ("done".to_owned(), Value::Bool(false)),
 ]);
 
 // write — returns a handle; a client write settles at `Local` (an upstream would
 // later carry it to `Global`). With no upstream, wait(`Global`) never completes.
-let h = db.insert("todos", cells)?;
+let h = jazz::block_on(db.insert("todos", cells, Default::default()))?;
 let id = h.row_uuid();
 jazz::block_on(h.wait(DurabilityTier::Local))?;
 
 // read — query is immutable/chainable, validated against the schema (ch. 6)
-let q = db.table("todos").select(["title", "done"]);
+let q = db.prepare_query(&db.table("todos").select(["title", "done"]))?;
 let rows = jazz::block_on(db.all(&q, ReadOpts::default()))?;   // LocalFirst by default
 
-// watch — conflated handle: current() + changed()
+// watch — a stream of the current result and its changes
 let watch = jazz::block_on(db.subscribe(&q, ReadOpts::default()))?;
 
 // update merges over current cells; omitted columns keep their value
-let patch: RowCells = BTreeMap::from([("done".into(), Value::Bool(true))]);
-jazz::block_on(db.update("todos", id, patch)?.wait(DurabilityTier::Local))?;
-jazz::block_on(db.delete("todos", id)?.wait(DurabilityTier::Local))?;
+let patch = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+jazz::block_on(jazz::block_on(db.update("todos", id, patch, Default::default()))?.wait(DurabilityTier::Local))?;
+jazz::block_on(jazz::block_on(db.delete("todos", id, Default::default()))?.wait(DurabilityTier::Local))?;
 ```
 
 The application surface is exactly the set used above: `open`, the mutation
@@ -161,9 +159,11 @@ when an upstream is attached.
 
 ### 13.2 Opening a `Db`
 
-Opening a database binds a schema, storage backend, identity, and row-id source
-into one client facade. `Db::open(DbConfig<S>)` is async and takes a
-`JazzSchema`, storage, a `DbIdentity { node, author }`, and an optional
+Opening a database binds a schema, storage, identity, and row-id source into
+one client facade. `Db::open(DbConfig)` opens an in-memory database and
+`Db::open_at(DbConfig, path, FileOptions)` a SQLite file; both are async.
+`DbConfig::new(schema, identity)` takes a `JazzSchema` and a
+`DbIdentity { node, author }`, and `with_id_source` sets an optional
 `RowIdSource`. It opens an ordinary non-history-complete client node; the facade
 does not choose a topology role (`INV-API-2`, ch. 9). Row ids come either from
 `ProductionRowIdSource` (uuidv7) or from `SeededRowIdSource` (deterministic, for
@@ -248,7 +248,7 @@ not grow a second query engine by rerunning `query_rows` and diffing full result
 as its normal live-subscription mechanism. Subscription delivery is a thin event
 bridge over the core subscription surface: it carries opened, reset, and delta
 events, rather than facade-side diffs of full result sets (`INV-API-7`, and
-`groove/SPEC/INVARIANTS.md::INV-INC-1` for the mechanism law it serves).
+`INV-PERF-9` for the cost law it serves).
 
 #### Binding read choices
 
@@ -453,7 +453,7 @@ close, concurrent drain, and shutdown overlap MUST remain deterministic and
 idempotent.
 
 Finalization commands identify the owned subscription state, not a snapshot of
-a Groove ID, so a catalogue/runtime refresh cannot replace a handle between
+an engine ID, so a catalogue/runtime refresh cannot replace a handle between
 enqueue and drain. Enqueue synchronously marks that state closed; refresh MUST
 NOT rehydrate it while retirement is waiting for the node mutex.
 
@@ -777,16 +777,16 @@ High-level structs such as `JazzSchema`, `DbConfig`, `DbIdentity`, `ReadOpts`,
 host-native object mapping or postcard bytes. They are core types, not shadow
 ABI payloads. Row-shaped input and output is the stable hot path where custom
 encoding matters most. Reads, subscription streams, encoded-write variants, and
-transaction encoded-stage variants use the shared groove `Record` encoding
+transaction encoded-stage variants use the shared `jazz::records` `Record` encoding
 family at this boundary: postcard envelopes carry table/operation metadata, a
 `RecordDescriptor`, and raw encoded row/cell bytes.
 
-Read-side row arrays should use the shared groove `Record` encoding end-to-end
+Read-side row arrays should use the shared `jazz::records` `Record` encoding end-to-end
 across sync protocol records and binding returns: postcard envelopes carry a
 table name, a `RecordDescriptor`, and raw encoded row bytes. Bindings are
 expected to learn this row decoder once and may build descriptor/table-specialized
 accessors instead of receiving re-encoded maps for the hottest cross-boundary
-data path. This is the same lower-level groove descriptor/raw encoding family
+data path. This is the same lower-level descriptor/raw encoding family
 used by sync records, but read results are projected current-row records rather
 than sync `VersionRecord` payloads with parents/deletion/schema-version fields.
 

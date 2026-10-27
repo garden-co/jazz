@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Local first with a server-wait timeout (`FirstLoad::WaitForRemote`):
 //! the opening, empty or not, waits a bounded time for the server's answer
 //! while the remote could answer, and never waits when it cannot.
@@ -190,16 +189,7 @@ fn one_shot(
     max_turns: usize,
 ) -> Vec<RowUuid> {
     let bytes = postcard::to_allocvec(query).expect("encode query");
-    let read = client.all_serialized_query(
-        &bytes,
-        opts,
-        None,
-        None,
-        None,
-        false,
-        || false,
-        |attachment| client.detach_query(attachment),
-    );
+    let read = client.all_serialized_query(&bytes, opts, None, None, None);
     let mut read = pin!(read);
     let mut context = Context::from_waker(Waker::noop());
     for _ in 0..max_turns {
@@ -256,16 +246,7 @@ fn seed(server: &Db, index: usize, label: &str) {
 /// deadline can pass while the server stays silent.
 fn slow_one_shot(client: &Db, query: &Query, opts: ReadOpts) -> Vec<RowUuid> {
     let bytes = postcard::to_allocvec(query).expect("encode query");
-    let read = client.all_serialized_query(
-        &bytes,
-        opts,
-        None,
-        None,
-        None,
-        false,
-        || false,
-        |attachment| client.detach_query(attachment),
-    );
+    let read = client.all_serialized_query(&bytes, opts, None, None, None);
     let mut read = pin!(read);
     let mut context = Context::from_waker(Waker::noop());
     for _ in 0..MAX_TURNS {
@@ -426,16 +407,8 @@ fn a_remote_read_fails_once_its_coverage_budget_is_spent_unanswered() {
     };
     let bytes = postcard::to_allocvec(&items()).expect("encode query");
     let turns = std::cell::Cell::new(0);
-    let read = alice.all_serialized_query(
-        &bytes,
-        remote.clone(),
-        None,
-        None,
-        None,
-        true,
-        || turns.get() >= 5,
-        |attachment| alice.detach_query(attachment),
-    );
+    let expired = || turns.get() >= 5;
+    let read = alice.all_serialized_query(&bytes, remote.clone(), None, None, Some(&expired));
     let mut read = pin!(read);
     let mut context = Context::from_waker(Waker::noop());
     let error = loop {
@@ -454,16 +427,8 @@ fn a_remote_read_fails_once_its_coverage_budget_is_spent_unanswered() {
     );
 
     // With the server answering, the same budget is not reached.
-    let read = alice.all_serialized_query(
-        &bytes,
-        remote,
-        None,
-        None,
-        None,
-        true,
-        || false,
-        |attachment| alice.detach_query(attachment),
-    );
+    let expired = || false;
+    let read = alice.all_serialized_query(&bytes, remote, None, None, Some(&expired));
     let mut read = pin!(read);
     let mut rows = loop {
         if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
@@ -510,6 +475,7 @@ fn a_remote_read_on_an_unadmitted_schema_version_fails_with_the_reason() {
     .expect("open client");
     connect(&client, &server);
     let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let expired = || false;
     let read = client.all_serialized_query(
         &bytes,
         ReadOpts {
@@ -518,10 +484,7 @@ fn a_remote_read_on_an_unadmitted_schema_version_fails_with_the_reason() {
         },
         None,
         None,
-        None,
-        true,
-        || false,
-        |attachment| client.detach_query(attachment),
+        Some(&expired),
     );
     let mut read = pin!(read);
     let mut context = Context::from_waker(Waker::noop());

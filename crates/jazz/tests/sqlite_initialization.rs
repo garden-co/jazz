@@ -61,7 +61,7 @@ fn stage(db: &Db, n: u8) -> OpenTransactionId {
     block_on(db.begin_serializable(id)).unwrap();
     db.prepare_initialization_insert(id, "notes", row(n))
         .unwrap();
-    block_on(db.serializable_tx_ref(id).insert(
+    block_on(db.tx_ref(id).insert(
         "notes",
         cells("founder"),
         jazz::db::InsertOptions {
@@ -123,7 +123,7 @@ fn seal_is_private_frozen_and_publishes_the_exact_identity() {
     );
     assert!(
         block_on(
-            db.serializable_tx_ref(id)
+            db.tx_ref(id)
                 .insert("notes", cells("late"), Default::default())
         )
         .is_err()
@@ -161,7 +161,7 @@ fn interleaved_writes_and_snapshots_use_publication_order() {
     block_on(db.begin_serializable(before)).unwrap();
     let query = db.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(db.serializable_tx_ref(before).all_prepared(&query))
+        block_on(db.tx_ref(before).all_prepared(&query))
             .unwrap()
             .len(),
         1
@@ -169,7 +169,7 @@ fn interleaved_writes_and_snapshots_use_publication_order() {
     let published = db.publish_initialization_transaction(seal).unwrap();
     assert_eq!(rows(&db).len(), 2);
     assert_eq!(
-        block_on(db.serializable_tx_ref(before).all_prepared(&query))
+        block_on(db.tx_ref(before).all_prepared(&query))
             .unwrap()
             .len(),
         1
@@ -246,17 +246,16 @@ fn reserved_upload_and_dependent_transaction_reach_authority() {
     block_on(alice.begin_serializable(id)).unwrap();
     let query = alice.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(alice.serializable_tx_ref(id).all_prepared(&query))
+        block_on(alice.tx_ref(id).all_prepared(&query))
             .unwrap()
             .len(),
         1
     );
-    block_on(alice.serializable_tx_ref(id).update(
-        "notes",
-        row(1),
-        cells("dependent"),
-        Default::default(),
-    ))
+    block_on(
+        alice
+            .tx_ref(id)
+            .update("notes", row(1), cells("dependent"), Default::default()),
+    )
     .unwrap();
     let second = block_on(alice.commit_serializable_handle(id)).unwrap();
     connect(&alice, &bob, "alice");
@@ -490,17 +489,14 @@ fn new_lease_transaction_depends_on_original_initialization() {
     block_on(alice.begin_serializable(id)).unwrap();
     let q = alice.prepare_query(&Query::from("notes")).unwrap();
     assert_eq!(
-        block_on(alice.serializable_tx_ref(id).all_prepared(&q))
-            .unwrap()
-            .len(),
+        block_on(alice.tx_ref(id).all_prepared(&q)).unwrap().len(),
         1
     );
-    block_on(alice.serializable_tx_ref(id).update(
-        "notes",
-        row(1),
-        cells("after restart"),
-        Default::default(),
-    ))
+    block_on(
+        alice
+            .tx_ref(id)
+            .update("notes", row(1), cells("after restart"), Default::default()),
+    )
     .unwrap();
     let receipt = block_on(alice.commit_serializable_handle(id)).unwrap();
     let bob = open(3, "bob", None, true);
@@ -844,12 +840,11 @@ fn origin_dependencies_still_validate_shape_and_authenticated_scope() {
         alice.publish_initialization_transaction(seal).unwrap();
         let id = OpenTransactionId::new();
         block_on(alice.begin_serializable(id)).unwrap();
-        block_on(alice.serializable_tx_ref(id).update(
-            "notes",
-            row(1),
-            cells("follow-up"),
-            Default::default(),
-        ))
+        block_on(
+            alice
+                .tx_ref(id)
+                .update("notes", row(1), cells("follow-up"), Default::default()),
+        )
         .unwrap();
         let receipt = block_on(alice.commit_serializable_handle(id)).unwrap();
         let (up, down) = duplex();

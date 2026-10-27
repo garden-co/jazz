@@ -1,7 +1,7 @@
 //! Chunked large values in SQLite cells.
 //!
-//! `string`, `json` and `bytes` columns keep Groove's large-value format
-//! (`jazz_types::large_values`): a value above the inline threshold is a
+//! `string`, `json` and `bytes` columns use the large-value format of
+//! `jazz_types::large_values`: a value above the inline threshold is a
 //! descriptor over an immutable, content-defined chunk tree. Every such
 //! column stores both arms as SQLite TEXT, so one collation sees them all:
 //!
@@ -1068,31 +1068,22 @@ pub(crate) fn stage_upload(
     replica: bool,
 ) -> Result<(), Error> {
     let cache = (!conn.is_autocommit() || chunks.in_memory()).then_some(chunks);
-    conn.execute_batch("SAVEPOINT jazz_lv_upload")
-        .map_err(storage)?;
-    let result = staged.iter().try_for_each(|chunk| {
-        store_chunk(conn, cache, chunk)?;
-        if replica {
-            mark_unpushed(conn, &chunk.node_ref.locator)?;
-        }
-        conn.prepare_cached(
-            "INSERT OR IGNORE INTO _jazz_lv_upload_node (id, locator) VALUES (?1, ?2)",
-        )
-        .and_then(|mut statement| {
-            statement.execute([id.as_slice(), chunk.node_ref.locator.as_bytes().as_slice()])
+    crate::values::in_savepoint(conn, "jazz_lv_upload", || {
+        staged.iter().try_for_each(|chunk| {
+            store_chunk(conn, cache, chunk)?;
+            if replica {
+                mark_unpushed(conn, &chunk.node_ref.locator)?;
+            }
+            conn.prepare_cached(
+                "INSERT OR IGNORE INTO _jazz_lv_upload_node (id, locator) VALUES (?1, ?2)",
+            )
+            .and_then(|mut statement| {
+                statement.execute([id.as_slice(), chunk.node_ref.locator.as_bytes().as_slice()])
+            })
+            .map_err(storage)?;
+            Ok(())
         })
-        .map_err(storage)?;
-        Ok(())
-    });
-    match result {
-        Ok(()) => conn
-            .execute_batch("RELEASE jazz_lv_upload")
-            .map_err(storage),
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK TO jazz_lv_upload; RELEASE jazz_lv_upload");
-            Err(error)
-        }
-    }
+    })
 }
 
 /// Record the finished value's tail-free base, so binding it trusts it.

@@ -82,9 +82,9 @@ pub struct FanoutReceipt {
 }
 
 /// A fresh Core -> in-memory foreground topology. Core owns authorization.
-/// (A device-local persistence relay between them is not supported on SQLite
-/// yet.) Two teams have equally sized tables; Alice can read only team zero. The
-/// overview intentionally has no tenant predicate, so policy is load-bearing.
+/// (There is no device-local persistence relay between them.) Two teams have
+/// equally sized tables; Alice can read only team zero. The overview
+/// intentionally has no tenant predicate, so policy is load-bearing.
 pub struct FanoutFixture {
     core: Db,
     foreground: Db,
@@ -131,9 +131,7 @@ impl FanoutFixture {
                 .unwrap();
             }
         }
-        let commit = block_on(tx.commit()).unwrap();
-        core.finalize_local_mergeable_commit_for_test(commit)
-            .unwrap();
+        block_on(tx.commit()).unwrap();
         let foreground = open(&schema, 0x67, reader(0), false);
         connect(&core, &foreground, reader(0));
         Self {
@@ -267,10 +265,11 @@ impl FanoutFixture {
             Default::default(),
         ))
         .unwrap();
-        self.core
-            .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-            .unwrap();
-        block_on(write.wait(DurabilityTier::Global)).unwrap();
+        block_on(
+            self.core
+                .wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
         self.pump_until("edit", |fixture| {
             fixture.results.iter().enumerate().all(|(index, rows)| {
                 index > 1
@@ -298,13 +297,14 @@ impl FanoutFixture {
             Default::default(),
         ))
         .unwrap();
-        self.core
-            .finalize_local_mergeable_commit_for_test(revoke.mergeable_tx_id())
-            .unwrap();
-        block_on(revoke.wait(DurabilityTier::Global)).unwrap();
+        block_on(
+            self.core
+                .wait_for_transaction(revoke.mergeable_tx_id(), DurabilityTier::Global),
+        )
+        .unwrap();
         // The authority evicts rows a client may no longer read, so both
-        // tiers lose the revoked team's rows. (SPEC 16 §16.1.1 still says
-        // local-first may keep withdrawn rows; the SQLite engine does not.)
+        // tiers lose the revoked team's rows: local-first does not keep
+        // withdrawn rows.
         self.pump_until("revoke", |fixture| {
             fixture.results.iter().all(BTreeMap::is_empty)
         });

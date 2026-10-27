@@ -70,7 +70,14 @@ export const INDEXEDDB_STORAGE_EPOCH = 1;
 export const INDEXEDDB_PAGE_CHECKSUM = "xxh3-64-le";
 export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
 
-/** The upstream metadata layout declares the exact SQLite file codec it owns. */
+/**
+ * The closed Jazz storage profile carried by a browser durable root: the
+ * worker's SQLite file (on the IndexedDB VFS) is in Jazz SQLite storage
+ * format 2, which the engine also stamps inside the file
+ * (`jazz::format::STORAGE_FORMAT`). A root written by an older storage format
+ * declares other codec families and fails manifest admission with an
+ * `UnsupportedStorageCodecsError` before anything in it is read or changed.
+ */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = ["jazz.sqlite-storage.v2"] as const;
 
 /**

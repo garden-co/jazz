@@ -226,7 +226,7 @@ fn remote(nodes: &[&Db], client: &Db, query: &Query) -> Result<Vec<RowUuid>, Err
     let bytes = postcard::to_allocvec(query).unwrap();
     let result = drive(
         nodes,
-        client.all_serialized_query(
+        client.all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -401,7 +401,7 @@ fn inherited_snapshot_uses_the_parent_at_the_pinned_cut() {
     let empty = client
         .prepare_query(&Query::from("children").limit(0))
         .unwrap();
-    drive(&nodes, client.serializable_tx_ref(tx).all_prepared(&empty)).unwrap();
+    drive(&nodes, client.tx_ref(tx).all_prepared(&empty)).unwrap();
     block_on(server.update(
         "parents",
         id(1),
@@ -411,11 +411,7 @@ fn inherited_snapshot_uses_the_parent_at_the_pinned_cut() {
     .unwrap();
     let query = Query::from("children").inherits("parent");
     let prepared = client.prepare_query(&query).unwrap();
-    let rows = drive(
-        &nodes,
-        client.serializable_tx_ref(tx).all_prepared(&prepared),
-    )
-    .unwrap();
+    let rows = drive(&nodes, client.tx_ref(tx).all_prepared(&prepared)).unwrap();
     assert_eq!(
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![id(10)]

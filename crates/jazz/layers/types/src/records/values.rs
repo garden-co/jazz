@@ -1500,26 +1500,6 @@ impl ValueType {
         }
     }
 
-    /// Whether an engine-only physical type occurs anywhere in this type.
-    pub(crate) fn contains_internal_storage_type(&self) -> bool {
-        match self {
-            Self::Internal(_) => true,
-            Self::Tuple(members) => members.iter().any(Self::contains_internal_storage_type),
-            Self::Array(inner) | Self::Nullable(inner) => inner.contains_internal_storage_type(),
-            Self::Record(descriptor) => descriptor
-                .fields()
-                .iter()
-                .any(|field| field.value_type.contains_internal_storage_type()),
-            Self::Enum(schema) => schema.cases.iter().any(|case| {
-                case.payload
-                    .fields()
-                    .iter()
-                    .any(|field| field.value_type.contains_internal_storage_type())
-            }),
-            _ => false,
-        }
-    }
-
     /// Whether an interned marker occurs anywhere in this type.
     pub fn contains_interned(&self) -> bool {
         match self {
@@ -2397,6 +2377,14 @@ fn decode_array(bytes: &[u8], element_type: &ValueType) -> Result<Value, Error> 
     }
 
     Ok(Value::Array(values))
+}
+
+impl Value {
+    /// Whether this value is one of `value_type`'s (its shape, enum cases,
+    /// record descriptors and ranges), as an encoder would accept it.
+    pub fn check_type(&self, value_type: &ValueType) -> Result<(), Error> {
+        ensure_value_type(self, value_type)
+    }
 }
 
 pub(crate) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result<(), Error> {

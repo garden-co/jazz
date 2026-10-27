@@ -7,9 +7,7 @@ edition = "2024"
 default = []
 otel = ["dep:jazz-otel", "dep:opentelemetry"]
 embedded-server = ["jazz/runtime"]
-sqlite = []
-sync-autopsy = []
-test = ["embedded-server", "sync-autopsy", "jazz/testing"]
+test = ["embedded-server", "jazz/testing"]
 
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["runtime"] }

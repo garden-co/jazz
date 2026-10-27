@@ -201,7 +201,7 @@ fn graph(db: &Db, tx: Option<OpenTransactionId>) {
             ..Default::default()
         };
         if let Some(tx) = tx {
-            block_on(db.mergeable_tx_ref(tx).insert("members", cells, opts)).unwrap();
+            block_on(db.tx_ref(tx).insert("members", cells, opts)).unwrap();
         } else {
             block_on(db.insert("members", cells, opts)).unwrap();
         }
@@ -215,7 +215,7 @@ fn graph(db: &Db, tx: Option<OpenTransactionId>) {
         ..Default::default()
     };
     if let Some(tx) = tx {
-        block_on(db.mergeable_tx_ref(tx).insert("access", cells, opts)).unwrap();
+        block_on(db.tx_ref(tx).insert("access", cells, opts)).unwrap();
     } else {
         block_on(db.insert("access", cells, opts)).unwrap();
     }
@@ -226,7 +226,7 @@ fn begin(db: &Db, who: u8) -> OpenTransactionId {
     tx
 }
 fn resource(db: &Db, tx: OpenTransactionId, n: u128) {
-    block_on(db.mergeable_tx_ref(tx).insert(
+    block_on(db.tx_ref(tx).insert(
         "resources",
         BTreeMap::from([("label".into(), Value::String("protected".into()))]),
         InsertOptions {
@@ -295,11 +295,7 @@ fn deleting_an_accepted_hop_revokes_the_final_proof() {
         graph(&db, None);
         let tx = begin(&db, 1);
         resource(&db, tx, 100);
-        block_on(
-            db.mergeable_tx_ref(tx)
-                .delete(table, id(n), Default::default()),
-        )
-        .unwrap();
+        block_on(db.tx_ref(tx).delete(table, id(n), Default::default())).unwrap();
         denied(finish(&db, tx));
         assert_eq!(count(&db, "resources"), 0);
         assert_eq!(count(&db, table), if table == "members" { 3 } else { 1 });
@@ -328,7 +324,7 @@ fn accepted_historical_hops_survive_unrelated_same_unit_updates() {
     let tx = begin(&db, 1);
     resource(&db, tx, 100);
     for n in [1, 2, 3] {
-        block_on(db.mergeable_tx_ref(tx).update(
+        block_on(db.tx_ref(tx).update(
             "members",
             id(n),
             BTreeMap::from([("label".into(), Value::String("still a member".into()))]),
@@ -356,7 +352,7 @@ fn retargeting_an_accepted_edge_cannot_manufacture_a_baseline_grant() {
     .unwrap();
     let tx = begin(&db, 1);
     resource(&db, tx, 100);
-    block_on(db.mergeable_tx_ref(tx).update(
+    block_on(db.tx_ref(tx).update(
         "members",
         id(2),
         BTreeMap::from([("child".into(), Value::Uuid(id(10).0))]),
@@ -440,14 +436,14 @@ fn joined_relation_sources_use_bound_keys_instead_of_sibling_subqueries() {
         .unwrap();
         let tx = begin(&db, who);
         resource(&db, tx, 100);
-        block_on(db.mergeable_tx_ref(tx).update(
+        block_on(db.tx_ref(tx).update(
             "members",
             id(1),
             BTreeMap::from([("label".into(), Value::String("updated".into()))]),
             Default::default(),
         ))
         .unwrap();
-        block_on(db.mergeable_tx_ref(tx).update(
+        block_on(db.tx_ref(tx).update(
             "access",
             id(4),
             BTreeMap::from([("resource".into(), Value::Uuid(id(100).0))]),
@@ -569,7 +565,7 @@ fn remote_reads_do_not_reuse_a_cached_group_grant_after_revocation() {
         }
         let query = postcard::to_allocvec(&Query::from("resources")).unwrap();
         let read = || {
-            replica.all_serialized_query(
+            replica.all_serialized_query_as(
                 &query,
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,
@@ -674,7 +670,7 @@ fn remote_reads_exclude_own_cached_writes_after_a_group_grant_is_removed() {
                 .await
             } else {
                 let result = replica
-                    .all_serialized_query(
+                    .all_serialized_query_as(
                         &query,
                         ReadOpts::for_read_tier(ReadTier::Remote),
                         None,
@@ -777,7 +773,7 @@ fn label_graph(db: &Db, label: &str) {
     }
 }
 fn chunked_resource(db: &Db, tx: OpenTransactionId, label: &str) {
-    block_on(db.mergeable_tx_ref(tx).insert(
+    block_on(db.tx_ref(tx).insert(
         "resources",
         BTreeMap::from([("label".into(), Value::String(label.into()))]),
         InsertOptions {
@@ -799,7 +795,7 @@ fn recursive_candidate_relations_prepare_chunked_seed_and_step_values() {
         let other = format!("{}denied", "x".repeat(70 * 1024));
         label_graph(&db, if matches { &label } else { &other });
         let tx = begin(&db, who);
-        block_on(db.mergeable_tx_ref(tx).update(
+        block_on(db.tx_ref(tx).update(
             "members",
             id(2),
             BTreeMap::from([("recipient".into(), Value::Uuid(id(99).0))]),
@@ -825,7 +821,7 @@ fn recursive_chunked_permission_checks_revalidate_post_state() {
     label_graph(&db, &label);
     let tx = begin(&db, 1);
     chunked_resource(&db, tx, &label);
-    block_on(db.mergeable_tx_ref(tx).update(
+    block_on(db.tx_ref(tx).update(
         "members",
         id(2),
         BTreeMap::from([(
@@ -984,7 +980,7 @@ fn scoped_backend_reads_recheck_recursive_authority_evidence() {
         let nodes = [&server, &relay, &backend];
         let query = postcard::to_allocvec(&Query::from("resources")).unwrap();
         let read = |who| {
-            backend.all_serialized_query(
+            backend.all_serialized_query_as(
                 &query,
                 ReadOpts::for_read_tier(ReadTier::Remote),
                 None,

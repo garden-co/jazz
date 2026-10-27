@@ -189,7 +189,7 @@ fn paired(
 async fn fetch(db: &Db, query: Query) {
     let bytes = postcard::to_allocvec(&query).unwrap();
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &bytes,
             ReadOpts::for_read_tier(ReadTier::Remote),
             None,
@@ -257,7 +257,7 @@ fn unchanged_staged_grant_preserves_accepted_read() {
         let before = server_rows(&server, "grants");
         let view = view(&backend);
         let tx = begin(&view);
-        block_on(view.serializable_tx_ref(tx).update(
+        block_on(view.tx_ref(tx).update(
             "grants",
             id(20),
             BTreeMap::from([("token".into(), Value::String("alice".into()))]),
@@ -302,7 +302,7 @@ fn staged_other_root_can_commit_after_filtered_accepted_read() {
         drive(&nodes, fetch(&backend, Query::from("docs")));
         let view = view(&backend);
         let tx = begin(&view);
-        block_on(view.serializable_tx_ref(tx).update(
+        block_on(view.tx_ref(tx).update(
             "docs",
             id(11),
             fields("changed elsewhere"),
@@ -338,7 +338,7 @@ fn staged_grant_cannot_expose_an_uncached_root() {
         drive(&nodes, fetch(&backend, Query::from("docs")));
         let view = view(&backend);
         let tx = begin(&view);
-        block_on(view.serializable_tx_ref(tx).insert(
+        block_on(view.tx_ref(tx).insert(
             "grants",
             grant(11),
             InsertOptions {
@@ -408,7 +408,7 @@ fn staged_chunked_other_root_preserves_accepted_result() {
         drive(&nodes, fetch(&backend, Query::from("docs")));
         let view = view(&backend);
         let tx = begin(&view);
-        block_on(view.serializable_tx_ref(tx).update(
+        block_on(view.tx_ref(tx).update(
             "docs",
             id(11),
             fields(&"x".repeat(70 * 1024)),
@@ -453,7 +453,7 @@ fn staged_grants_obey_the_original_ordered_window() {
             drive(&nodes, fetch(&backend, Query::from("docs")));
             let view = view(&backend);
             let tx = begin(&view);
-            block_on(view.serializable_tx_ref(tx).insert(
+            block_on(view.tx_ref(tx).insert(
                 "grants",
                 grant(11),
                 InsertOptions {
@@ -501,7 +501,7 @@ fn stale_overlay_write_target_is_a_transaction_conflict() {
             ids(&drive(&nodes, paired(&view, tx, Query::from("docs"))).unwrap()),
             [id(10)]
         );
-        block_on(view.serializable_tx_ref(tx).update(
+        block_on(view.tx_ref(tx).update(
             "grants",
             id(20),
             BTreeMap::from([("token".into(), Value::String("alice".into()))]),
@@ -556,7 +556,7 @@ fn ordinary_answer_cannot_validate_an_accepted_overlay() {
     drive(&nodes, fetch(&backend, Query::from("grants")));
     let view = view(&backend);
     let tx = begin(&view);
-    block_on(view.serializable_tx_ref(tx).update(
+    block_on(view.tx_ref(tx).update(
         "grants",
         id(20),
         BTreeMap::from([("token".into(), Value::String("alice".into()))]),
@@ -662,7 +662,7 @@ fn pending_overlay_checks_cannot_outlive_their_staged_prefix_or_read() {
         drive(&nodes, fetch(&backend, Query::from("grants")));
         let view = view(&backend);
         let tx = begin(&view);
-        block_on(view.serializable_tx_ref(tx).update(
+        block_on(view.tx_ref(tx).update(
             "grants",
             id(20),
             BTreeMap::from([("token".into(), Value::String("alice".into()))]),
@@ -685,7 +685,7 @@ fn pending_overlay_checks_cannot_outlive_their_staged_prefix_or_read() {
             }
             assert!(held.borrow().is_some());
             if !cancel {
-                block_on(view.serializable_tx_ref(tx).insert(
+                block_on(view.tx_ref(tx).insert(
                     "grants",
                     grant(11),
                     InsertOptions {

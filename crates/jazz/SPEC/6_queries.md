@@ -1069,12 +1069,11 @@ surface. The test plan below records additional intended coverage.
   whose input rows are inserted in non-key order. These cases should assert the
   lexicographic group-key order and explicit `orderBy` override/tie behavior.
 - Add a facade-level canary next to
-  `crates/jazz/tests/incremental_delivery_canary.rs` for a large unordered
+  `crates/jazz/tests/include_live.rs` for a large unordered
   relation/include result. It should subscribe through the public `Db` API,
   insert one child whose id belongs in the middle of the child relation, assert
   the complete touched-parent replacement's order, and pin the bounded
-  allocation/byte expectation for the collector exception to
-  `groove/SPEC/INVARIANTS.md::INV-INC-1`.
+  allocation/byte expectation for the collector exception to `INV-PERF-9`.
 - Keep Rust tests aligned with
   `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
   through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,

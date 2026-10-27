@@ -89,7 +89,7 @@ async fn read(
     expired: &Cell<bool>,
 ) -> Result<Vec<String>, Error> {
     let result = db
-        .all_serialized_query(
+        .all_serialized_query_as(
             &postcard::to_allocvec(&Query::from("notes")).unwrap(),
             ReadOpts::for_read_tier(tier),
             tx,
@@ -126,7 +126,7 @@ async fn read(
 fn offline_remote_read_retains_prefix_and_pinned_snapshot() {
     let (alice, bob) = fixture();
     let tx = begin(&alice);
-    let transaction = alice.serializable_tx_ref(tx);
+    let transaction = alice.tx_ref(tx);
     block_on(transaction.insert("notes", cells("first"), Default::default())).unwrap();
     let expired = Cell::new(false);
     let mut pending = pin!(read(&alice, Some(tx), ReadTier::Remote, &expired));
@@ -161,7 +161,7 @@ fn offline_remote_read_retains_prefix_and_pinned_snapshot() {
 fn cancellation_releases_the_next_offline_read() {
     let (alice, bob) = fixture();
     let tx = begin(&alice);
-    let transaction = alice.serializable_tx_ref(tx);
+    let transaction = alice.tx_ref(tx);
     let expired = Cell::new(false);
     let mut first = Box::pin(read(&alice, Some(tx), ReadTier::Remote, &expired));
     assert!(poll(first.as_mut()).is_pending());
@@ -218,7 +218,7 @@ fn local_only_transaction_read_never_waits_for_authority() {
     let tx = begin(&alice);
     block_on(
         alice
-            .serializable_tx_ref(tx)
+            .tx_ref(tx)
             .insert("notes", cells("staged"), Default::default()),
     )
     .unwrap();

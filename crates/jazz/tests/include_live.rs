@@ -1,6 +1,6 @@
 //! A live result with an include sees its include targets change, and a
 //! big unbounded view re-checks only the rows that reference the changed
-//! target. Not ported from Jazz.
+//! target.
 
 use crate::common;
 
