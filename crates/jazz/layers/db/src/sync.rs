@@ -1519,6 +1519,33 @@ fn array_elements(cell: &Sql) -> Option<Vec<Sql>> {
     )
 }
 
+/// A one-shot remote read running on the reader pool (a prototype).
+pub(crate) struct PoolRead {
+    session: usize,
+    generation: u64,
+    id: u64,
+    query: Query,
+    at: Option<u64>,
+    policy: Option<AuthorSubject>,
+    /// The served seq when it was dispatched: its snapshot is no older.
+    through: u64,
+    rows: std::sync::mpsc::Receiver<Result<Vec<CurrentRow>, Error>>,
+}
+
+/// How long a remote read may run on the writer before it moves to the
+/// reader pool (`JAZZ_WRITER_SLICE_US`, a prototype knob).
+pub(crate) fn writer_slice() -> std::time::Duration {
+    static SLICE: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *SLICE.get_or_init(|| {
+        std::time::Duration::from_micros(
+            std::env::var("JAZZ_WRITER_SLICE_US")
+                .ok()
+                .and_then(|us| us.parse().ok())
+                .unwrap_or(2_000),
+        )
+    })
+}
+
 /// Handle for an accepted subscriber. Session slots are reused, so the
 /// handle also names which acceptance it is: a stale one names nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2994,6 +3021,107 @@ impl Inner {
     /// relay tells them the authority's seq it knows (its own local seqs
     /// number nothing the authority can check), so a session's snapshot
     /// is one the authority validates against as it is.
+    /// Ship a one-shot read's `rows` (read at or after `through`) to
+    /// session `index`: their images, supporting rows and origins, then
+    /// the answer. Watches and held rows follow them.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_fetch(
+        &mut self,
+        index: usize,
+        id: u64,
+        query: &Query,
+        at: Option<u64>,
+        policy: Option<AuthorSubject>,
+        named: Vec<(u64, [u8; 16], u64)>,
+        through: u64,
+        rows: Vec<CurrentRow>,
+    ) -> Result<(), Error> {
+        let history = history_source_table(&query.table);
+        let table = self
+            .schema
+            .stored_table(history.unwrap_or(&query.table))?
+            .to_owned();
+        let mut images = Vec::new();
+        // Seqs of shipped history versions, for their origins.
+        let mut seqs = BTreeSet::new();
+        // A flat join ships each occurrence's joined rows.
+        let joined_tables = query
+            .flat_join
+            .iter()
+            .flat_map(|flat| &flat.sources)
+            .map(|source| {
+                let table = &source.table;
+                self.schema
+                    .stored_table(history_source_table(table).unwrap_or(table))
+                    .map(str::to_owned)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        for row in &rows {
+            for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
+                images.extend(self.joined_images(table, joined, &mut seqs)?);
+            }
+        }
+        if history.is_some() {
+            let versions = rows.iter().map(|row| (row.id, row.seq));
+            self.history_versions(&table, versions, &mut images, &mut seqs)?;
+        } else {
+            for row in &rows {
+                let rid = row.id.0.as_bytes().to_vec();
+                let seq = row.seq as i64;
+                let mut found = self.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
+                if found.is_empty() {
+                    found = self.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                }
+                images.extend(found);
+            }
+        }
+        let support = self.support_of(query)?;
+        let mut extra = Vec::new();
+        let mut watch = std::mem::take(&mut self.sessions[index].watch);
+        let mut held = std::mem::take(&mut self.sessions[index].held);
+        // The replica keeps current rows it fetched: like supporting
+        // rows, a policy dependency's commit re-checks them.
+        if policy.is_some() && at.is_none() && history.is_none() {
+            for image in images.iter().filter(|image| image.table == table) {
+                held.entry(table.clone())
+                    .or_default()
+                    .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
+            }
+        }
+        for image in &images {
+            self.follow_support(&support, image, policy, &mut extra, &mut watch, &mut held)?;
+        }
+        images.extend(extra);
+        for image in &images {
+            watch.insert(wk((
+                image.table.clone(),
+                "id".to_owned(),
+                watch_key(&Sql::Blob(image.id.to_vec())),
+            )));
+        }
+        let mut origins = self.origins(&seqs)?;
+        origins.extend(named);
+        let through = at.unwrap_or(through);
+        let session = &mut self.sessions[index];
+        session.watch = watch;
+        session.held = held;
+        if !origins.is_empty() {
+            session
+                .outbox
+                .push(SyncMessage::Origins { commits: origins });
+        }
+        if !images.is_empty() {
+            session.outbox.push(SyncMessage::Rows { images });
+        }
+        session.outbox.push(SyncMessage::Answer {
+            id,
+            through,
+            rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
+        });
+
+        Ok(())
+    }
+
     fn served_through(&self) -> u64 {
         match &self.client {
             Some(client) if self.relays_upstream() => client.known,
@@ -5182,6 +5310,66 @@ impl Db {
         tables
     }
 
+    /// Answer the pool reads whose rows came back, as their sessions.
+    fn finish_pool_reads(&self) {
+        let done: Vec<(PoolRead, Result<Vec<CurrentRow>, Error>)> = {
+            let mut inner = self.inner.borrow_mut();
+            let mut done = Vec::new();
+            for read in std::mem::take(&mut inner.pool_reads) {
+                match read.rows.try_recv() {
+                    Ok(rows) => done.push((read, rows)),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => inner.pool_reads.push(read),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => done.push((
+                        read,
+                        Err(Error::new(ErrorCode::Storage, "the reader pool closed")),
+                    )),
+                }
+            }
+            done
+        };
+        for (read, rows) in done {
+            let (identity, claims) = {
+                let inner = self.inner.borrow();
+                let Some(session) = inner.sessions.get(read.session) else {
+                    continue;
+                };
+                if !session.open || session.generation != read.generation {
+                    continue;
+                }
+                (session.identity, session.claims.clone())
+            };
+            let vouched = claims
+                .filter(|_| identity != AuthorSubject::SYSTEM)
+                .map(|claims| (identity, claims));
+            let index = read.session;
+            let finished = self.with_claims(vouched, || {
+                let db = self.session_db(index);
+                let mut inner = db.inner();
+                rows.and_then(|rows| {
+                    inner.finish_fetch(
+                        index,
+                        read.id,
+                        &read.query,
+                        read.at,
+                        read.policy,
+                        Vec::new(),
+                        read.through,
+                        rows,
+                    )
+                })
+            });
+            if let Err(error) = finished {
+                self.inner.borrow_mut().sessions[index]
+                    .outbox
+                    .push(SyncMessage::Refused {
+                        id: read.id,
+                        code: error.code,
+                        message: error.message,
+                    });
+            }
+        }
+    }
+
     /// Server half of a tick: take every session's messages (commits apply
     /// in arrival order), let fan-out run, then send each session the
     /// images its subscriptions and commits touched, as of now.
@@ -5191,6 +5379,8 @@ impl Db {
             return Ok(());
         }
         crate::large::expire_receipts(&self.inner.borrow().conn, now_ms())?;
+        self.finish_pool_reads();
+        self.inner.borrow_mut().finish_pool_groups();
         for index in 0..sessions {
             // What one session sent that the server cannot serve (or a
             // storage failure serving it) ends that session alone: the
@@ -6158,10 +6348,7 @@ impl Db {
                 let mut inner = db.inner();
                 // A history read ships versions of its source table.
                 let history = history_source_table(&query.table);
-                let table = inner
-                    .schema
-                    .stored_table(history.unwrap_or(&query.table))?
-                    .to_owned();
+                inner.schema.stored_table(history.unwrap_or(&query.table))?;
                 // A strict Remote read leaves out this replica's pending
                 // versions, and the cached rows its upstream no longer lists
                 // for it: only the authority confirms them. One with a wait
@@ -6200,88 +6387,53 @@ impl Db {
                     settled_only: strict,
                     view: viewed.view,
                 };
-                let rows = inner.run(&prepared, policy, &read)?;
-                let mut images = Vec::new();
-                // Seqs of shipped history versions, for their origins.
-                let mut seqs = BTreeSet::new();
-                // A flat join ships each occurrence's joined rows.
-                let joined_tables = query
-                    .flat_join
-                    .iter()
-                    .flat_map(|flat| &flat.sources)
-                    .map(|source| {
-                        let table = &source.table;
-                        inner
-                            .schema
-                            .stored_table(history_source_table(table).unwrap_or(table))
-                            .map(str::to_owned)
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?;
-                for row in &rows {
-                    for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                        images.extend(inner.joined_images(table, joined, &mut seqs)?);
-                    }
-                }
-                if history.is_some() {
-                    let versions = rows.iter().map(|row| (row.id, row.seq));
-                    inner.history_versions(&table, versions, &mut images, &mut seqs)?;
-                } else {
-                    for row in &rows {
-                        let rid = row.id.0.as_bytes().to_vec();
-                        let seq = row.seq as i64;
-                        let mut found =
-                            inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
-                        if found.is_empty() {
-                            found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                // A prototype: a read that outruns the writer's slice (or
+                // whose statement did before) runs on a reader beside it,
+                // and is finished on a later tick. Its snapshot begins after
+                // this session's earlier commits applied (#4289).
+                if inner.pool.is_some()
+                    && history.is_none()
+                    && named.is_empty()
+                    && !strict
+                    && prepared.query.array_subqueries.is_empty()
+                {
+                    let compiled = inner.compile(&prepared, policy, &read)?;
+                    if compiled.joined == 0 {
+                        let (pool, budget) = inner.pool.clone().expect("a reader pool");
+                        let through = inner.served_through();
+                        let rows = if inner.heavy.contains(&compiled.sql) {
+                            None
+                        } else {
+                            budget.within(writer_slice(), || {
+                                inner.execute(&compiled, &prepared.query.table)
+                            })?
+                        };
+                        match rows {
+                            Some(rows) => inner.finish_fetch(
+                                index, id, &query, at, policy, named, through, rows,
+                            )?,
+                            None => {
+                                inner.heavy.insert(compiled.sql.clone());
+                                let rows = pool.run(compiled, prepared.query.table.clone())?;
+                                let generation = inner.sessions[index].generation;
+                                inner.pool_reads.push(PoolRead {
+                                    session: index,
+                                    generation,
+                                    id,
+                                    query,
+                                    at,
+                                    policy,
+                                    through,
+                                    rows,
+                                });
+                            }
                         }
-                        images.extend(found);
+                        return Ok(());
                     }
                 }
-                let support = inner.support_of(&query)?;
-                let mut extra = Vec::new();
-                let mut watch = std::mem::take(&mut inner.sessions[index].watch);
-                let mut held = std::mem::take(&mut inner.sessions[index].held);
-                // The replica keeps current rows it fetched: like supporting
-                // rows, a policy dependency's commit re-checks them.
-                if policy.is_some() && at.is_none() && history.is_none() {
-                    for image in images.iter().filter(|image| image.table == table) {
-                        held.entry(table.clone())
-                            .or_default()
-                            .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
-                    }
-                }
-                for image in &images {
-                    inner.follow_support(
-                        &support, image, policy, &mut extra, &mut watch, &mut held,
-                    )?;
-                }
-                images.extend(extra);
-                for image in &images {
-                    watch.insert(wk((
-                        image.table.clone(),
-                        "id".to_owned(),
-                        watch_key(&Sql::Blob(image.id.to_vec())),
-                    )));
-                }
-                let mut origins = inner.origins(&seqs)?;
-                origins.extend(named);
-                let through = at.unwrap_or(inner.served_through());
-                let session = &mut inner.sessions[index];
-                session.watch = watch;
-                session.held = held;
-                if !origins.is_empty() {
-                    session
-                        .outbox
-                        .push(SyncMessage::Origins { commits: origins });
-                }
-                if !images.is_empty() {
-                    session.outbox.push(SyncMessage::Rows { images });
-                }
-                session.outbox.push(SyncMessage::Answer {
-                    id,
-                    through,
-                    rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
-                });
+                let rows = inner.run(&prepared, policy, &read)?;
+                let through = inner.served_through();
+                inner.finish_fetch(index, id, &query, at, policy, named, through, rows)?;
             }
             SyncMessage::Commit {
                 node,

@@ -41,6 +41,7 @@ pub(crate) mod large;
 pub(crate) mod merge;
 pub mod names;
 pub mod options;
+pub(crate) mod reader_pool;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
 pub mod values;
