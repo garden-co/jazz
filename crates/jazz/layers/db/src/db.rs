@@ -49,10 +49,10 @@ use crate::values::{
     in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, RelationSnapshot,
-    RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireError, WireKind, WireOp, WireTarget, WireTransport, WireTransportAdapter,
-    decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, NON_DURABLE_BASE,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, Upstream, WireError, WireKind, WireOp, WireTarget, WireTransport,
+    WireTransportAdapter, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -418,6 +418,10 @@ struct Inner {
     authors: RefCell<AuthorCodes>,
     ids: Box<dyn RowIdSource>,
     seq: u64,
+    /// `seq` jumped to a replica's local base (`to`) from `from` without
+    /// handing either out: until a commit takes a seq, `from` is the high
+    /// water (see [`Db::seq_high_water`]).
+    base_jump: Option<(u64, u64)>,
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
@@ -1108,6 +1112,7 @@ impl Db {
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
+                base_jump: None,
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
@@ -1131,7 +1136,7 @@ impl Db {
             inner.seq = seq;
             inner.load_client()?;
             if inner.client.is_some() {
-                inner.seq = inner.seq.max(LOCAL_BASE);
+                inner.raise_to_local_base();
             }
         }
         Ok(db)
@@ -1143,13 +1148,22 @@ impl Db {
     /// [`Db::seed_seq_floor`], so no transaction id is reused: the
     /// authority deduplicates uploads by id and would drop the new write.
     pub fn seq_high_water(&self) -> u64 {
-        self.inner.borrow().seq
+        let inner = self.inner.borrow();
+        match inner.base_jump {
+            Some((from, to)) if inner.seq == to => from,
+            _ => inner.seq,
+        }
     }
 
     /// Never hand out a commit seq at or below `floor`.
     pub fn seed_seq_floor(&self, floor: u64) {
         let mut inner = self.inner.borrow_mut();
         inner.seq = inner.seq.max(floor);
+        if let Some((from, to)) = &mut inner.base_jump
+            && floor <= *to
+        {
+            *from = (*from).max(floor);
+        }
     }
 
     /// Every SQLite store holds complete history; this one is also the
@@ -2806,6 +2820,56 @@ impl Inner {
             plan.push(row.map_err(storage)?);
         }
         Ok(plan.join(" | "))
+    }
+
+    /// [`Inner::holds`] for `row` as of `cut`: the row under check and
+    /// the policy's other rows are each read as of `cut`.
+    fn holds_as_of(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Cut,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<bool, Error> {
+        let binding = BTreeMap::new();
+        let claims = Session::default();
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let condition = policy(&mut ctx)?;
+        let source = ctx.source(table)?;
+        let preps = std::mem::take(&mut ctx.preps);
+        let mut params = ctx.params;
+        params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+        params.push(Sql::Blob(key.to_vec()));
+        let sql = format!(
+            "SELECT COALESCE({condition}, 0) FROM {source} AS a WHERE a.id = ?{} AND a._b = ?{}",
+            params.len() - 1,
+            params.len()
+        );
+        let value: Option<i64> = self.with_preps(&preps, |_| {
+            self.conn
+                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .optional()
+                .map_err(storage)
+        })?;
+        Ok(value.is_some_and(|value| value != 0))
+    }
+
+    /// Whether `author` may `operation` the version of `row` at `seq`, with
+    /// the policy's other rows as they stood then too.
+    pub(crate) fn check_version(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
+        let session = self.session(author);
+        self.holds_as_of(table, row, key, Cut::at(seq), |ctx| {
+            ctx.operation_policy(table, operation, "a", &session)
+        })
     }
 
     /// The current version of each of `ids`' rows in `table`: (id, branch
@@ -4973,13 +5037,19 @@ impl Db {
             // A row a later local commit wrote (one not unsettled at begin)
             // changed since the snapshot: the authority gets that commit
             // first, so it would refuse this one too.
+            // An own commit unsettled at begin counts wherever it landed.
+            let landed = self.inner().own_landings(own)?;
             {
                 let inner = self.inner();
                 for (schema, op) in &batch.ops {
                     if let Some(row) = op.row()
                         && inner
                             .newest_seq(schema.stored_table(op.table())?, row)?
-                            .is_some_and(|seq| seq >= LOCAL_BASE && !own.contains(&seq))
+                            .is_some_and(|seq| {
+                                seq >= LOCAL_BASE
+                                    && !own.contains(&seq)
+                                    && !landed.values().any(|&at| at == seq)
+                            })
                     {
                         return Err(conflict(
                             "row visible parent changed since transaction write was staged",
@@ -5005,8 +5075,9 @@ impl Db {
             // and the authority, which gets this replica's earlier writes
             // first, would refuse the commit too; so it is a conflict now.
             // A row read at an own unsettled commit's local version that now
-            // holds a server version may only have settled: the authority
-            // decides that one.
+            // holds a server version (or the version a relay with no server
+            // settled it at) may only have settled: the authority decides
+            // that one.
             {
                 let inner = self.inner();
                 for read in reads {
@@ -5019,7 +5090,9 @@ impl Db {
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
                                 || (now.1 != then.1
-                                    && !(own.contains(&then.1) && now.1 < LOCAL_BASE))
+                                    && !(own.contains(&then.1)
+                                        && (now.1 < LOCAL_BASE
+                                            || landed.get(&then.1) == Some(&now.1))))
                         });
                     if changed {
                         return Err(conflict(

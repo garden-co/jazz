@@ -450,7 +450,7 @@ impl<'a> Ctx<'a> {
     /// table is its effective rows: head rows (tombstones included, so they
     /// mask), then base rows the head does not override. Filters, policies,
     /// ordering and windows all apply after this masking.
-    fn source(&mut self, table: &Table) -> Result<String, Error> {
+    pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
         let mut columns = "rid, id, _b, _seq, _del".to_owned();
