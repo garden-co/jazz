@@ -21,6 +21,8 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use common::{allow_all_policies, compile_schema};
 
 const LARGE: usize = 300 * 1024;
+/// The ingress window a test holding uploads back waits out.
+const WINDOW_MS: u64 = 2_000;
 
 fn open(node: u8, author: AuthorSubject) -> Db {
     let docs = TableSchemaBuilder::new("docs")
@@ -427,29 +429,23 @@ fn a_backends_streamed_upload_for_a_session_reaches_the_server() {
     }
 }
 
-/// A client uploading past the server's ingress limit can still read: its
-/// held-back pushes and commit wait for a later window, but a subscription it
-/// opens after them is served now.
+/// A read a client sends after a write the server's ingress limit holds back
+/// waits for that write: it is answered once the next window lets the upload
+/// through, and includes it.
 ///
 /// ```text
 /// alice ──push 1, commit 1──► server (within the window)
 /// alice ──push 2, commit 2──► held until the next window
-/// alice ──subscribe(titled)──► served, settles with the server's row
+/// alice ──subscribe(docs)───► held behind commit 2, then settles with both
 /// ```
 #[test]
-fn reads_overtake_uploads_held_by_the_ingress_limit() {
+fn reads_wait_for_commits_held_by_the_ingress_limit() {
     let server = open(0, AuthorSubject::SYSTEM);
     server.set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
         incoming_bytes_per_window: LARGE as u64,
-        window_ms: 60_000,
+        window_ms: WINDOW_MS,
         max_age_ms: 10 * 60 * 1_000,
     });
-    insert(
-        &server,
-        "titled",
-        9,
-        vec![("title", Value::String("on the server".into()))],
-    );
     let alice = open(1, user(1));
     let _log = connect(&server, &alice, user(1));
     pump(&server, &[&alice]);
@@ -472,27 +468,50 @@ fn reads_overtake_uploads_held_by_the_ingress_limit() {
         "the second upload waits for the next ingress window"
     );
 
-    let titled = alice.prepare_query(&Query::from("titled")).unwrap();
+    let docs = alice.prepare_query(&Query::from("docs")).unwrap();
     let mut stream = block_on(alice.subscribe(
-        &titled,
+        &docs,
         ReadOpts {
             tier: ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
     .unwrap();
-    pump(&server, &[&alice]);
-    let opening = std::iter::from_fn(|| stream.try_next_event())
-        .find_map(|event| match event {
-            jazz::db::SubscriptionEvent::Delta {
-                settled: true,
+    // The rows the read shows so far, and whether the server answered it.
+    let mut shown = std::collections::BTreeSet::new();
+    let mut drain = |stream: &mut SubscriptionStream| {
+        let mut answered = false;
+        while let Some(event) = stream.try_next_event() {
+            if let jazz::db::SubscriptionEvent::Delta {
                 added,
+                removed,
+                settled,
                 ..
-            } => Some(added),
-            _ => None,
-        })
-        .expect("the read is served while the upload is held");
-    assert_eq!(opening.len(), 1);
-    assert_eq!(opening[0].row.row_uuid(), row(9));
+            } = event
+            {
+                for gone in removed {
+                    shown.remove(&gone.row_uuid);
+                }
+                shown.extend(added.iter().map(|row| row.row.row_uuid()));
+                answered |= settled;
+            }
+        }
+        answered
+    };
+    pump(&server, &[&alice]);
+    assert!(!drain(&mut stream), "the read waits behind the held commit");
     assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
+
+    std::thread::sleep(std::time::Duration::from_millis(WINDOW_MS + 50));
+    pump(&server, &[&alice]);
+    assert!(local_cell(&server, "docs", 2, "body").unwrap().is_some());
+    assert!(
+        drain(&mut stream),
+        "the read is answered once the upload lands"
+    );
+    assert_eq!(
+        shown.into_iter().collect::<Vec<_>>(),
+        [row(1), row(2)],
+        "the read includes the writer's own upload"
+    );
 }

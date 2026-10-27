@@ -4858,12 +4858,14 @@ impl Db {
         for message in relayed.into_iter().rev() {
             inbound.push_front(message);
         }
-        // Writes held back by the ingress limit, in order. Reads and
-        // other messages that change no rows overtake them, so a client
-        // uploading a large value can still read.
+        // Writes held back by the ingress limit, and everything the session
+        // sent after them, in order. A read is never answered ahead of a
+        // commit sent before it: it would miss the writer's own write. (A
+        // client sends a value's chunks right before its commit, so a read
+        // that came after held chunks also came after their commit.)
         let mut held: VecDeque<SyncMessage> = VecDeque::new();
         while let Some(message) = inbound.pop_front() {
-            if !held.is_empty() && !overtakes_writes(&message) {
+            if !held.is_empty() {
                 held.push_back(message);
                 continue;
             }
@@ -6427,18 +6429,6 @@ fn owned_table<'a>(schema: &'a Schema, stored: &str) -> Result<&'a Table, Error>
     schema
         .by_stored(stored)
         .ok_or_else(|| query_error(format!("unknown table {stored}")))
-}
-
-/// Whether a client message may be served ahead of the writes the ingress
-/// limit holds back: it reads or declares interest, and writes no rows.
-fn overtakes_writes(message: &SyncMessage) -> bool {
-    matches!(
-        message,
-        SyncMessage::Subscribe { .. }
-            | SyncMessage::Unsubscribe { .. }
-            | SyncMessage::Fetch { .. }
-            | SyncMessage::Advise { .. }
-    )
 }
 
 // ---- names on the wire ------------------------------------------------------
