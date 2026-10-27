@@ -638,3 +638,88 @@ fn an_account_claim_compares_with_nullable_and_required_uuids_in_either_order() 
         );
     }
 }
+
+// ---- serializable reads under an owner policy -------------------------------
+
+fn owned_notes() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("owner", ColumnType::Text)
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(me("owner"))
+                            .with_insert(me("owner"))
+                            .with_update(Some(me("owner")), me("owner"))
+                            .with_delete(me("owner")),
+                    ),
+            )
+            .build(),
+    )
+}
+
+/// #3891: a serializable transaction that reads a whole owner-scoped table
+/// and writes is accepted while another session without claims is
+/// subscribed to the same table.
+#[test]
+fn a_whole_table_serializable_read_under_an_owner_policy_is_not_a_false_conflict() {
+    let server = authority(owned_notes());
+    seed(
+        &server,
+        "notes",
+        row(1, 1),
+        vec![
+            ("owner", subject(alice())),
+            ("title", Value::String("mine".into())),
+        ],
+    );
+    seed(
+        &server,
+        "notes",
+        row(1, 2),
+        vec![
+            ("owner", subject(bob())),
+            ("title", Value::String("bob's".into())),
+        ],
+    );
+    let bob_db = replica(owned_notes(), &server, 0xb0, bob());
+    let prepared = bob_db.prepare_query(&Query::from("notes")).unwrap();
+    let _bob_stream = block_on(bob_db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let alice_db = replica(owned_notes(), &server, 0xa1, alice());
+    pump(&[&bob_db, &alice_db, &server, &bob_db, &alice_db]);
+
+    let open = jazz::tools::OpenTransactionId::new();
+    block_on(alice_db.begin_serializable(open)).unwrap();
+    let all = alice_db.prepare_query(&Query::from("notes")).unwrap();
+    let read = drive(
+        &[&alice_db, &server, &bob_db, &alice_db],
+        alice_db.tx_ref(open).all_prepared(&all),
+    )
+    .unwrap();
+    assert_eq!(ids(&read), [row(1, 1)]);
+    drive(
+        &[&alice_db, &server, &alice_db],
+        alice_db.tx_ref(open).insert(
+            "notes",
+            cells(vec![
+                ("owner", subject(alice())),
+                ("title", Value::String("second".into())),
+            ]),
+            Default::default(),
+        ),
+    )
+    .unwrap();
+    let receipt = drive(
+        &[&alice_db, &server, &alice_db],
+        alice_db.commit_serializable_handle(open),
+    )
+    .unwrap();
+    let settled = drive(
+        &[&alice_db, &server, &bob_db, &alice_db],
+        alice_db.wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+    );
+    assert!(settled.is_ok(), "{settled:?}");
+    assert_eq!(all_ids(&server, "notes").len(), 3);
+}
