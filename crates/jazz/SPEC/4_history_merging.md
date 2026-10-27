@@ -30,7 +30,7 @@ Invariant digest:
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
 - `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's presence over origin under an index, read whole or by origin's candidates' row ids, whichever reads fewer rows; the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
-- `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in the conflict walk, never encoded in stored or sent bytes: a write's base names its pending predecessor by its full (node, tx), and the writer's replica rebases its remaining pending commits over each settled image it receives.
+- `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in the conflict walk, never encoded in stored or sent bytes: a write's base names its pending predecessor by its full (node, tx) (on the wire its node may be left out only when it is the commit's writer, and the authority stores the full id), and the writer's replica rebases its remaining pending commits over each settled image it receives.
 - `INV-REF-5`: A node MUST store its local ref only as the sparse delta over origin: committing, rebasing and settling a pending write MUST NOT store a copy of the origin image it overrides, and a read MUST mask origin by the delta itself.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
@@ -458,14 +458,17 @@ A maybe conflicting write whose intervening foreign writes all touched other
 columns has an empty conflict analysis.
 
 On SQLite a commit carries, beside its operations, the base of each row it
-writes over an image its writer held (`WireBase`: the settled seq and the
-pending predecessor's `(node, tx)`; an insert or a write over no held image
-carries none). A relay forwards its sessions' bases and names the session as
+writes over an image its writer held (`WireBase`: the row, by the index of
+the commit's first op that writes it and its branch key; the settled seq;
+and the pending predecessor's `(tx, node)`, the node left out when it is the
+commit's writer; an insert or a write over no held image carries none). A relay forwards its sessions' bases and names the session as
 the commit's origin, so each session stays its own writer; a base naming a
 relay's unsettled version is moved down to the settled version under it.
 The authority keeps, beside each row version an accepted upload wrote, its
-writer, its base and its authored stored columns (`_jazz_writes`, created
-with the first accepted upload). Its own writes are not kept there: they are
+writer, its base with the predecessor's full id, and its authored stored
+columns as a bitmask over per-table column codes (`_jazz_writes`, with the
+codes interned in `_jazz_columns`; both created with the first accepted
+upload). Its own writes are not kept there: they are
 made over the current image, so they are never maybe conflicting, and in
 another write's analysis they author every column. The flag and the walk are
 derived on demand (`Db::write_conflicts`, behind the `testing` feature); no
@@ -671,7 +674,8 @@ branch view's deletion registers cost the branches' rows outside the prefix.
 as `[local, peer, origin]`. Merging all peers into one delta keeps the stack
 short, as a relay's overlay already does. The model leaves room for it,
 because no stored or sent byte encodes "a pending predecessor is the
-writer's own node" (`INV-REF-4`): `base.pending` is a full `TxId`, and
+writer's own node" (`INV-REF-4`): `base.pending` names any `TxId` (only the
+commit's own writer may go unnamed), and
 pending history is keyed by writer. Peers would need:
 
 - per-transaction signatures, so Core can accept a write forwarded by a node

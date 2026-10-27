@@ -4,7 +4,8 @@
 //! the settled image the writer held and its own newest unsettled write to
 //! the row). The authority keeps, beside each row version an upload wrote,
 //! that base, the writer's (node, tx) and the columns the write authored
-//! (`_jazz_writes`). From those and the row's accepted history it derives on
+//! (`_jazz_writes`, as a bitmask over per-table column codes that
+//! `_jazz_columns` interns). From those and the row's accepted history it derives on
 //! demand whether the write overrode values its writer never saw, and which
 //! intervening writes it overlapped. Nothing derived is stored.
 //!
@@ -47,8 +48,9 @@ struct Version {
     writer: ([u8; 16], u64),
     base_seq: Option<u64>,
     base_pending: Option<([u8; 16], u64)>,
-    /// Stored column names; `None` authors every column, `_del` included.
-    authored: Option<BTreeSet<String>>,
+    /// Bitmask over the table's column codes; `None` authors every
+    /// column, `_del` included.
+    authored: Option<Vec<u8>>,
 }
 
 impl Version {
@@ -57,22 +59,26 @@ impl Version {
     }
 }
 
-/// What the authority keeps of each row version an accepted upload wrote.
+/// What the authority keeps of each row version an accepted upload wrote,
+/// and the per-table codes its authored-column bitmasks use (assigned in
+/// order of first use, never reused).
 const WRITES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_writes (t TEXT NOT NULL, \
      id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, node BLOB NOT NULL, \
      tx INTEGER NOT NULL, base_seq INTEGER, pending_node BLOB, pending_tx INTEGER, \
      authored BLOB, \
-     PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;";
+     PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID; \
+     CREATE TABLE IF NOT EXISTS _jazz_columns (t TEXT NOT NULL, name TEXT NOT NULL, \
+     code INTEGER NOT NULL, PRIMARY KEY (t, name)) WITHOUT ROWID;";
 
 /// The authored-column name a deletion or restore writes.
 const DELETION: &str = "_del";
 
-/// Whether two writes' authored columns overlap; `None` authors every
-/// column, `_del` included.
-fn authored_overlap(left: Option<&BTreeSet<String>>, right: Option<&BTreeSet<String>>) -> bool {
+/// Whether two writes' authored-column bitmasks overlap; `None` authors
+/// every column, `_del` included.
+fn authored_overlap(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     match (left, right) {
-        (Some(left), Some(right)) => !left.is_disjoint(right),
-        (Some(columns), None) | (None, Some(columns)) => !columns.is_empty(),
+        (Some(left), Some(right)) => left.iter().zip(right).any(|(l, r)| l & r != 0),
+        (Some(columns), None) | (None, Some(columns)) => columns.iter().any(|&b| b != 0),
         (None, None) => true,
     }
 }
@@ -87,33 +93,53 @@ fn in_writers_chain(pending: ([u8; 16], u64), record: ([u8; 16], u64)) -> bool {
 }
 
 impl Inner {
-    /// The name `ops` give stored table `table` for row `row`: a commit
-    /// names its tables as the schema it was staged under does.
-    pub(super) fn op_table_name(
-        &self,
-        ops: &[StagedOp],
-        table: &str,
-        row: RowUuid,
-    ) -> Option<String> {
+    /// The index of the first of `ops` that writes stored table `table`'s
+    /// row `row`: how a base names its row.
+    pub(super) fn op_writing(&self, ops: &[StagedOp], table: &str, row: RowUuid) -> Option<u32> {
         ops.iter()
-            .find(|op| {
+            .position(|op| {
                 op.row() == Some(row)
                     && self
                         .schema
                         .stored_table(op.table())
                         .is_ok_and(|stored| stored == table)
             })
-            .map(|op| op.table().to_owned())
+            .map(|index| index as u32)
     }
 
-    /// The stored columns `ops` author on stored table `table`'s row `row`;
-    /// `None` when one of them writes a full image (an insert or a move).
+    /// The code `_jazz_columns` gives stored column `name` of `table`,
+    /// assigned on first use.
+    fn column_code(&self, table: &str, name: &str) -> Result<u32, Error> {
+        let known = self
+            .conn
+            .cached_row(
+                "SELECT code FROM _jazz_columns WHERE t = ?1 AND name = ?2",
+                rusqlite::params![table, name],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if let Some(code) = known {
+            return Ok(code as u32);
+        }
+        self.exec(
+            "INSERT INTO _jazz_columns (t, name, code) \
+             SELECT ?1, ?2, count(*) FROM _jazz_columns WHERE t = ?1",
+            rusqlite::params![table, name],
+        )
+        .map_err(storage)?;
+        self.column_code(table, name)
+    }
+
+    /// The stored columns `ops` author on stored table `table`'s row `row`,
+    /// as a bitmask over their codes; `None` when one of them writes a full
+    /// image (an insert or a move).
     fn authored(
         &self,
         ops: &[StagedOp],
         table: &str,
         row: RowUuid,
-    ) -> Result<Option<BTreeSet<String>>, Error> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         let mut authored = BTreeSet::new();
         for op in ops {
             if op.row() != Some(row) {
@@ -145,7 +171,15 @@ impl Inner {
                 }
             }
         }
-        Ok(Some(authored))
+        let mut mask = Vec::new();
+        for name in &authored {
+            let code = self.column_code(table, name)? as usize;
+            if mask.len() <= code / 8 {
+                mask.resize(code / 8 + 1, 0);
+            }
+            mask[code / 8] |= 1 << (code % 8);
+        }
+        Ok(Some(mask))
     }
 
     /// Keep, beside each row version an accepted upload wrote at `seq`, its
@@ -162,17 +196,15 @@ impl Inner {
             self.conn.execute_batch(WRITES_DDL).map_err(storage)?;
         }
         for (table, row, key) in rows {
-            let base = bases.iter().find(|base| {
-                base.id == *row.0.as_bytes()
-                    && base.key == *key
-                    && self
-                        .schema
-                        .stored_table(&base.table)
-                        .is_ok_and(|stored| stored == table)
-            });
-            let authored = self
-                .authored(ops, table, *row)?
-                .map(|columns| encode(&columns.into_iter().collect::<Vec<_>>()));
+            let op = self.op_writing(ops, table, *row);
+            let base = bases
+                .iter()
+                .find(|base| Some(base.op) == op && base.key == *key);
+            let authored = self.authored(ops, table, *row)?;
+            // An unnamed pending node is the writer's.
+            let pending = base
+                .and_then(|base| base.pending)
+                .map(|(tx, node)| (node.unwrap_or(writer.0), tx));
             self.exec(
                 "INSERT OR REPLACE INTO _jazz_writes \
                  (t, id, k, seq, node, tx, base_seq, pending_node, pending_tx, authored) \
@@ -185,9 +217,8 @@ impl Inner {
                     writer.0.to_vec(),
                     writer.1 as i64,
                     base.and_then(|base| base.seq).map(|seq| seq as i64),
-                    base.and_then(|base| base.pending)
-                        .map(|(node, _)| node.to_vec()),
-                    base.and_then(|base| base.pending).map(|(_, tx)| tx as i64),
+                    pending.map(|(node, _)| node.to_vec()),
+                    pending.map(|(_, tx)| tx as i64),
                     authored,
                 ],
             )
@@ -206,20 +237,33 @@ impl Inner {
     /// accepted seq (another writer's write accepted in between was not in
     /// it). Its pending predecessor already names the session's own
     /// commit, and the upload names the session as its origin.
-    pub(super) fn relayed_bases(&self, bases: Vec<WireBase>) -> Result<Vec<WireBase>, Error> {
+    pub(super) fn relayed_bases(
+        &self,
+        ops: &[StagedOp],
+        bases: Vec<WireBase>,
+    ) -> Result<Vec<WireBase>, Error> {
         let me = *self.identity.node.as_bytes();
         let mut out = Vec::with_capacity(bases.len());
         for mut base in bases {
             if let Some(seen) = base.seq
                 && seen >= LOCAL_BASE
             {
-                let table = self.schema.stored_table(&base.table)?.to_owned();
+                let (Some(op), Some(row)) = (
+                    ops.get(base.op as usize),
+                    ops.get(base.op as usize).and_then(StagedOp::row),
+                ) else {
+                    return Err(Error::new(
+                        ErrorCode::Protocol,
+                        "a base names an op that writes no row",
+                    ));
+                };
+                let table = self.schema.stored_table(op.table())?.to_owned();
                 // Where the relay's version landed upstream, once it has.
                 let below = match self.settled(me, seen)? {
                     Some(Some(accepted)) => accepted.min(LOCAL_BASE),
                     _ => LOCAL_BASE,
                 };
-                base.seq = self.newest_version_below(&table, &base.id, &base.key, below)?;
+                base.seq = self.newest_version_below(&table, row.0.as_bytes(), &base.key, below)?;
             }
             out.push(base);
         }
@@ -330,11 +374,6 @@ impl Inner {
                             authored: None,
                         });
                     };
-                    let authored = authored
-                        .map(|bytes| postcard::from_bytes::<Vec<String>>(&bytes))
-                        .transpose()
-                        .map_err(|_| corrupt())?
-                        .map(|columns| columns.into_iter().collect());
                     Ok(Version {
                         seq,
                         writer: (
@@ -416,7 +455,7 @@ impl Inner {
                 .iter()
                 .filter(|v| {
                     !own_chain(v.writer)
-                        && authored_overlap(version.authored.as_ref(), v.authored.as_ref())
+                        && authored_overlap(version.authored.as_deref(), v.authored.as_deref())
                 })
                 .map(|v| (v.seq, v.writer))
                 .collect();

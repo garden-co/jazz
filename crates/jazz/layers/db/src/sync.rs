@@ -416,18 +416,19 @@ fn echo_digest(image: &Image) -> [u8; 16] {
 /// What the writer of a row version had seen of the row (SPEC 4 §4.6,
 /// "Base of a write"): `seq`, the settled image it held (an upstream seq,
 /// or a relay's unsettled one it was shipped); `pending`, its own newest
-/// unsettled commit to the row, whose writes its image included, as
-/// (node, tx). Both none is an empty base, which is never sent. Nothing
-/// here says the predecessor is the writer's own: only the conflict walk
-/// assumes it (INV-REF-4).
+/// unsettled commit to the row, whose writes its image included, as (tx,
+/// node), the node omitted when it is the commit's writer (its origin, or
+/// else its sender). Both none is an empty base, which is never sent.
+/// Nothing here says the predecessor is the writer's own: only the conflict
+/// walk assumes it (INV-REF-4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBase {
-    /// The row's table as the writer's schema names it.
-    pub table: String,
-    pub id: [u8; 16],
+    /// The commit's first op that writes the row.
+    pub op: u32,
+    /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
     pub seq: Option<u64>,
-    pub pending: Option<([u8; 16], u64)>,
+    pub pending: Option<(u64, Option<[u8; 16]>)>,
 }
 
 /// A row of a commit's `expect` the server did not ship (see
@@ -695,8 +696,8 @@ pub enum SyncMessage {
         /// reads it (INV-HIST-21).
         bases: Vec<WireBase>,
         /// The session commit a relay uploads this one for, as (node, tx),
-        /// when it is not the sender's own: the writer whose chain its
-        /// bases' `pending` names.
+        /// when it is not the sender's own: the writer its bases' unnamed
+        /// `pending` nodes stand for.
         origin: Option<([u8; 16], u64)>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
@@ -3527,7 +3528,6 @@ impl Db {
                 }
             }
         }
-        let node = inner.client.as_ref().expect("client").node;
         for (table, row, key) in &rows {
             let row_key = (table.clone(), *row, key.clone());
             let client = inner.client.as_ref().expect("client");
@@ -3540,14 +3540,15 @@ impl Db {
                     seq
                 }
             };
-            let pending = newest_pending.get(&row_key).map(|tx| (node, *tx));
+            // This replica is the commit's writer: its pending node goes
+            // unnamed.
+            let pending = newest_pending.get(&row_key).map(|tx| (*tx, None));
             if relayed.is_none()
                 && (settled.is_some() || pending.is_some())
-                && let Some(named) = inner.op_table_name(&ops, table, *row)
+                && let Some(op) = inner.op_writing(&ops, table, *row)
             {
                 bases.push(WireBase {
-                    table: named,
-                    id: *row.0.as_bytes(),
+                    op,
                     key: key.clone(),
                     seq: settled,
                     pending,
@@ -6412,7 +6413,7 @@ impl Db {
         // The authority keeps what the conflict derivation needs of each
         // version it wrote (INV-HIST-21); a relay passes it on instead.
         let finished = if relay {
-            let relayed = self.inner.borrow().relayed_bases(bases.clone());
+            let relayed = self.inner.borrow().relayed_bases(&ops, bases.clone());
             relayed.and_then(|bases| {
                 self.record_upload(
                     ops.clone(),
