@@ -130,8 +130,17 @@ const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// such as expiring staged large-value chunks.
 const IDLE_TICK: Duration = Duration::from_secs(1);
 
-/// Inbound messages one session may have applied per engine tick.
+/// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
+
+/// About how long one tick may take. Each tick serves as many sessions as
+/// the recent per-session cost fits in it (at least one); the round
+/// continues in the next tick, after the host work queued meanwhile
+/// (logins, catalogue writes) ran. A session's queued messages (up to its
+/// budget) are still taken in one tick: clients rely on a read sent just
+/// before their writes being answered after them. Smaller ticks cost no
+/// throughput: each message commits on its own either way.
+const TICK_SLICE: Duration = Duration::from_millis(4);
 
 /// The runtime catalogue's host table, and its one key.
 const RUNTIME_CATALOGUE: HostTable = HostTable::new("runtime_catalogue");
@@ -141,9 +150,12 @@ type Job = Box<dyn FnOnce(&mut Owner) + Send>;
 /// Work on the store's host tables, before or after the runtime opened.
 pub(crate) type HostJob = Box<dyn FnOnce(&dyn HostTables) + Send>;
 
-/// What the store thread is asked to do.
+/// What the store thread is asked to do. Host work has its own queue, which
+/// the thread drains before every runtime job and tick: a login or
+/// catalogue write waits for at most the one job or tick slice in progress.
 enum Work {
-    Host(HostJob),
+    /// Host work is queued.
+    Host,
     Owner(Job),
     Start(Start),
     Close,
@@ -167,6 +179,7 @@ pub struct AppStore {
 
 struct StoreThread {
     work: Mutex<Option<std_mpsc::Sender<Work>>>,
+    host: std_mpsc::Sender<HostJob>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     tick_queued: Arc<AtomicBool>,
 }
@@ -176,6 +189,7 @@ impl AppStore {
     pub fn open(storage: &StorageConfig) -> Result<Self, String> {
         let storage = storage.clone();
         let (work, receiver) = std_mpsc::channel::<Work>();
+        let (host, host_jobs) = std_mpsc::channel::<HostJob>();
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
         let owner_ticks = Arc::clone(&tick_queued);
@@ -192,7 +206,7 @@ impl AppStore {
                         return;
                     }
                 };
-                serve(file, &storage, receiver, &owner_ticks);
+                serve(file, &storage, receiver, host_jobs, &owner_ticks);
             })
             .map_err(|error| format!("failed to spawn server store thread: {error}"))?;
         opened_rx
@@ -201,6 +215,7 @@ impl AppStore {
         Ok(Self {
             inner: Arc::new(StoreThread {
                 work: Mutex::new(Some(work)),
+                host,
                 join: Mutex::new(Some(join)),
                 tick_queued,
             }),
@@ -214,7 +229,13 @@ impl AppStore {
 
     /// Key-value access to one host table.
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
-        Ok(HostKv::new(table, HostSender(self.sender()?)))
+        Ok(HostKv::new(
+            table,
+            HostSender {
+                host: self.inner.host.clone(),
+                wake: self.sender()?,
+            },
+        ))
     }
 
     fn sender(&self) -> Result<std_mpsc::Sender<Work>, String> {
@@ -296,13 +317,16 @@ impl AppStore {
 }
 
 /// Sends host-table work to a store's thread; it keeps the thread running.
-pub(crate) struct HostSender(std_mpsc::Sender<Work>);
+pub(crate) struct HostSender {
+    host: std_mpsc::Sender<HostJob>,
+    wake: std_mpsc::Sender<Work>,
+}
 
 impl HostSender {
     pub(crate) fn send(&self, job: HostJob) -> Result<(), String> {
-        self.0
-            .send(Work::Host(job))
-            .map_err(|_| "server store is closed".to_owned())
+        let closed = "server store is closed";
+        self.host.send(job).map_err(|_| closed.to_owned())?;
+        self.wake.send(Work::Host).map_err(|_| closed.to_owned())
     }
 }
 
@@ -374,15 +398,20 @@ fn serve(
     file: StoreFile,
     storage: &StorageConfig,
     work: std_mpsc::Receiver<Work>,
+    host: std_mpsc::Receiver<HostJob>,
     tick_queued: &AtomicBool,
 ) {
     let mut file: Result<StoreFile, Unavailable> = Ok(file);
     while let Ok(next) = work.recv() {
         match next {
-            Work::Host(job) => match &file {
-                Ok(file) => job(file),
-                Err(unavailable) => job(unavailable),
-            },
+            Work::Host => {
+                while let Ok(job) = host.try_recv() {
+                    match &file {
+                        Ok(file) => job(file),
+                        Err(unavailable) => job(unavailable),
+                    }
+                }
+            }
             // No runtime handle exists before the runtime starts.
             Work::Owner(_) => {}
             Work::Start(start) => {
@@ -403,7 +432,7 @@ fn serve(
                 match opened {
                     Ok(owner) => {
                         let _ = start.reply.send(Ok(()));
-                        owner.run(work, tick_queued);
+                        owner.run(work, host, tick_queued);
                         return;
                     }
                     Err(error) => {
@@ -877,6 +906,8 @@ fn deployment_steps(snapshot: &CatalogueSnapshot) -> Result<Vec<Step>, String> {
 struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
+    /// The tick in progress's time slice, shared with every session's queues.
+    slice: Rc<TickSlice>,
     catalogue: Catalogue,
     /// No permissions head is published yet: session reads wait in
     /// `OwnerSession::held` and session commits are rejected.
@@ -895,12 +926,62 @@ struct OwnerSession {
     egress: Arc<AtomicUsize>,
 }
 
-#[derive(Default)]
 struct SessionQueues {
     inbound: RefCell<VecDeque<SyncMessage>>,
     outbound: RefCell<VecDeque<SyncMessage>>,
-    /// Inbound messages the engine may still take this tick.
+    /// Inbound messages the engine may still take this round.
     budget: std::cell::Cell<usize>,
+    /// The tick in progress took a message from this session.
+    served: std::cell::Cell<bool>,
+    slice: Rc<TickSlice>,
+}
+
+/// How many sessions the tick in progress takes inbound messages from,
+/// sized to [`TICK_SLICE`].
+struct TickSlice {
+    /// Sessions this tick may serve: at least one, so every tick makes
+    /// progress.
+    cap: std::cell::Cell<usize>,
+    taken: std::cell::Cell<usize>,
+    /// Recent cost of a tick per session it served (a moving average).
+    per_session: std::cell::Cell<Option<Duration>>,
+}
+
+impl Default for TickSlice {
+    fn default() -> Self {
+        Self {
+            cap: std::cell::Cell::new(usize::MAX),
+            taken: std::cell::Cell::new(0),
+            per_session: std::cell::Cell::new(None),
+        }
+    }
+}
+
+impl TickSlice {
+    fn take(&self) -> bool {
+        let open = self.taken.get() < self.cap.get();
+        if open {
+            self.taken.set(self.taken.get() + 1);
+        }
+        open
+    }
+
+    /// Learn from a tick that took `elapsed`, and size the next one.
+    fn ticked(&self, elapsed: Duration) {
+        let taken = self.taken.replace(0);
+        if taken == 0 {
+            return;
+        }
+        let sample = elapsed / taken as u32;
+        let average = match self.per_session.get() {
+            Some(average) => (average * 3 + sample) / 4,
+            None => sample,
+        };
+        self.per_session.set(Some(average));
+        let fits = TICK_SLICE.as_nanos() / average.as_nanos().max(1);
+        self.cap
+            .set(usize::try_from(fits).unwrap_or(usize::MAX).max(1));
+    }
 }
 
 /// The engine's side of one session.
@@ -914,8 +995,14 @@ impl Transport for SessionTransport {
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         let budget = self.0.budget.get();
-        if budget == 0 {
+        if budget == 0 || self.0.inbound.borrow().is_empty() {
             return None;
+        }
+        if !self.0.served.get() {
+            if !self.0.slice.take() {
+                return None;
+            }
+            self.0.served.set(true);
         }
         let message = self.0.inbound.borrow_mut().pop_front()?;
         self.0.budget.set(budget - 1);
@@ -1129,6 +1216,7 @@ impl Owner {
         let mut owner = Self {
             db,
             sessions: HashMap::new(),
+            slice: Rc::default(),
             catalogue: Catalogue::new(&schema),
             awaiting_permissions,
         };
@@ -1140,8 +1228,13 @@ impl Owner {
         Ok(owner)
     }
 
-    fn run(mut self, work: std_mpsc::Receiver<Work>, tick_queued: &AtomicBool) {
-        loop {
+    fn run(
+        mut self,
+        work: std_mpsc::Receiver<Work>,
+        host: std_mpsc::Receiver<HostJob>,
+        tick_queued: &AtomicBool,
+    ) {
+        'serve: loop {
             // Inbound work left over from a budgeted tick runs next, after
             // any jobs that arrived meanwhile.
             let wait = if self.inbound_pending() {
@@ -1149,24 +1242,25 @@ impl Owner {
             } else {
                 IDLE_TICK
             };
-            match work.recv_timeout(wait) {
-                Ok(next) => {
-                    if !self.handle(next) {
-                        break;
-                    }
-                    let mut open = true;
-                    while let Ok(next) = work.try_recv() {
-                        if !self.handle(next) {
-                            open = false;
-                            break;
-                        }
-                    }
-                    if !open {
-                        break;
-                    }
-                }
-                Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            let mut next = match work.recv_timeout(wait) {
+                Ok(next) => Some(next),
+                Err(std_mpsc::RecvTimeoutError::Timeout) => None,
                 Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            // Host work alone does not tick the runtime: a login must not
+            // change when sessions' messages are taken.
+            let mut runtime_work = next.is_none();
+            while let Some(item) = next.take() {
+                self.drain_host(&host);
+                runtime_work |= !matches!(item, Work::Host);
+                if !self.handle(item) {
+                    break 'serve;
+                }
+                next = work.try_recv().ok();
+            }
+            self.drain_host(&host);
+            if !runtime_work {
+                continue;
             }
             tick_queued.store(false, Ordering::Release);
             self.tick();
@@ -1176,11 +1270,19 @@ impl Owner {
         }
     }
 
+    /// Host work queued so far, ahead of any runtime work.
+    fn drain_host(&self, host: &std_mpsc::Receiver<HostJob>) {
+        while let Ok(job) = host.try_recv() {
+            job(&self.db);
+        }
+    }
+
     /// Do `work`; false once the store is to close.
     fn handle(&mut self, work: Work) -> bool {
         match work {
             Work::Owner(job) => job(self),
-            Work::Host(job) => job(&self.db),
+            // Drained before every item.
+            Work::Host => {}
             Work::Start(start) => {
                 let _ = start
                     .reply
@@ -1203,7 +1305,13 @@ impl Owner {
             self.db.set_identity_claims(identity, claims.clone());
             claims
         });
-        let queues = Rc::new(SessionQueues::default());
+        let queues = Rc::new(SessionQueues {
+            inbound: RefCell::default(),
+            outbound: RefCell::default(),
+            budget: std::cell::Cell::new(INBOUND_MESSAGES_PER_TICK),
+            served: std::cell::Cell::new(false),
+            slice: Rc::clone(&self.slice),
+        });
         let subscriber = self.db.accept_subscriber_with_claims(
             Box::new(SessionTransport(Rc::clone(&queues))),
             identity,
@@ -1297,10 +1405,23 @@ impl Owner {
     /// large batch gets its first answers out early and other sessions are
     /// served between its parts.
     fn tick(&mut self) {
+        // A round ends when no session with inbound left has budget left
+        // (a time slice can end a tick mid-round); then every session gets a
+        // new budget. Until then, sessions a cut-short tick did not reach
+        // are served first.
+        let round_over = self.sessions.values().all(|session| {
+            session.queues.budget.get() == 0 || session.queues.inbound.borrow().is_empty()
+        });
         for session in self.sessions.values() {
-            session.queues.budget.set(INBOUND_MESSAGES_PER_TICK);
+            if round_over {
+                session.queues.budget.set(INBOUND_MESSAGES_PER_TICK);
+            }
+            session.queues.served.set(false);
         }
-        if let Err(error) = block_on(self.db.tick()) {
+        let started = std::time::Instant::now();
+        let ticked = block_on(self.db.tick());
+        self.slice.ticked(started.elapsed());
+        if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
         }
         for (subscriber, error) in self.db.take_closed_subscribers() {
@@ -1433,5 +1554,95 @@ impl Owner {
         }
         self.catalogue.snapshot = snapshot;
         self.catalogue.persist(&self.db)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+
+    fn schema() -> JazzSchema {
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap()
+    }
+
+    const PROBE: HostTable = HostTable::new("probe");
+
+    /// A login or catalogue write arriving during a long runtime job (or
+    /// tick) runs as soon as it ends, ahead of runtime work queued before
+    /// it, and finishes.
+    #[test]
+    fn host_work_runs_ahead_of_queued_runtime_work() {
+        let store = AppStore::memory().unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false, false)
+            .unwrap();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (entered, long_job_running) = std_mpsc::channel();
+        let (release, released) = std_mpsc::channel::<()>();
+        runtime
+            .send(Box::new(move |_| {
+                entered.send(()).unwrap();
+                released.recv().unwrap();
+            }))
+            .unwrap();
+        long_job_running.recv().unwrap();
+        for _ in 0..3 {
+            let order = Arc::clone(&order);
+            runtime
+                .send(Box::new(move |_| order.lock().unwrap().push("runtime")))
+                .unwrap();
+        }
+        let host = store.kv(PROBE).unwrap();
+        let order_host = Arc::clone(&order);
+        HostSender {
+            host: store.inner.host.clone(),
+            wake: store.sender().unwrap(),
+        }
+        .send(Box::new(move |tables: &dyn HostTables| {
+            tables
+                .host_put_many(PROBE, &[(b"k".to_vec(), b"v".to_vec())])
+                .unwrap();
+            order_host.lock().unwrap().push("host");
+        }))
+        .unwrap();
+        // A blocking caller (the account owner's login) waits for the long
+        // job, then finishes.
+        let login = std::thread::spawn(move || host.get(b"k"));
+        release.send(()).unwrap();
+        assert_eq!(login.join().unwrap().unwrap(), Some(b"v".to_vec()));
+        block_on(runtime.run(|_| Ok(()))).unwrap();
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec!["host", "runtime", "runtime", "runtime"]
+        );
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn ticks_serve_as_many_sessions_as_fit_in_the_slice() {
+        let slice = TickSlice::default();
+        // Unsized at first: the per-session budget is the only bound.
+        assert!((0..100).all(|_| slice.take()));
+        slice.ticked(TICK_SLICE * 25);
+        assert_eq!(slice.cap.get(), 4, "a session costs a quarter slice");
+        assert!((0..4).all(|_| slice.take()));
+        assert!(!slice.take());
+        // The moving average follows the cost down, and up again.
+        for _ in 0..20 {
+            slice.ticked(TICK_SLICE / 40);
+            assert!(slice.take());
+        }
+        assert!(slice.cap.get() >= 30, "cheap sessions: {}", slice.cap.get());
+        for _ in 0..20 {
+            slice.taken.set(1);
+            slice.ticked(TICK_SLICE * 3);
+        }
+        assert_eq!(slice.cap.get(), 1, "a tick always takes at least one");
     }
 }
