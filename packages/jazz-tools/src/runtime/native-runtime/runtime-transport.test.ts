@@ -590,6 +590,69 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("drops outbound frames a dropped connection produced instead of sending them on its reconnect", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transports: FakeTransport[] = [];
+    const staleFrame = Uint8Array.from([9, 9, 9]);
+    let dropDuringTick = false;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = new FakeTransport([]);
+              transports.push(transport);
+              return transport;
+            },
+            tick: () => {
+              if (!dropDuringTick) return;
+              dropDuringTick = false;
+              // The core produces a frame for the first connection's channel
+              // while its socket drops underneath the tick.
+              transports[0]!.auxiliaryOutgoing.push(staleFrame);
+              sockets[0]!.emitServerClose();
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    await waitForServerPumpTimer();
+
+    dropDuringTick = true;
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([7, 7, 7])]));
+    await waitForServerPumpTimer();
+    await runtime.waitForUpstreamServerConnection();
+    await waitForServerPumpTimer();
+    expect(sockets).toHaveLength(2);
+
+    // The frame belongs to the dropped connection's channel state; the
+    // reconnected socket must never carry it.
+    const sentOnReconnect = sockets[1]!.sent
+      .filter((frame): frame is Uint8Array => frame instanceof Uint8Array)
+      .slice(1)
+      .flatMap((batch) => decodeWebSocketFrameBatch(batch));
+    expect(sentOnReconnect).not.toContainEqual(staleFrame);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
   it("turns a pump failure during a parked read into a transport error, not an unhandled rejection", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const pumpFailure = new Error("core tick failed");

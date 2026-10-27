@@ -3805,11 +3805,10 @@ export class NativeRuntimeAdapter implements Runtime {
     carrier = this.serverCarrier,
     generation = this.serverConnectionGeneration,
   ): void {
-    if (
-      !carrier ||
-      generation !== this.serverConnectionGeneration ||
-      carrier !== this.serverCarrier
-    ) {
+    // A retired connection's frames belong to its channel state; the next
+    // connection must never carry them.
+    if (generation !== this.serverConnectionGeneration) return;
+    if (!carrier || carrier !== this.serverCarrier) {
       this.queuedServerFrames.push(...frames);
       return;
     }
@@ -3884,6 +3883,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
     // Frames the retired socket buffered belong to its channel state, not the next connection's.
     this.pendingInboundServerFrames.length = 0;
+    this.queuedServerFrames.length = 0;
     const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
     const now = Date.now();

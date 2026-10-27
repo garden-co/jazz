@@ -76,7 +76,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await user?.shutdown();
-  await backendSession?.shutdown?.();
+  await backendSession?.getSnapshot().client?.shutdown({ waitForSync: false });
+  await backendSession?.close();
   await server?.stop();
 });
 
