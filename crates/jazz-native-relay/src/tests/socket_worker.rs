@@ -240,14 +240,16 @@ fn retrying_upstream_failure_keeps_foreground_ticking() {
 
 /// A connection attempt the upstream refuses for another reason than the
 /// credential (TLS, a proxy refusing the upgrade, a rejected session) is
-/// surfaced to alice's tick and retried: it can clear without a new
-/// credential, and the next connection clears the failure.
+/// reported to alice as a retrying upstream failure and retried: it can
+/// clear without a new credential, and the next connection clears it.
+/// #4337: it is connection state, so alice's ticks keep running meanwhile,
+/// as on the web and Node transports.
 ///
 /// ```text
 /// alice ─open─► relay ══socket══✗ edge refuses   (worker retries)
-/// alice ─tick─► relay                            (LifecycleFailure)
+/// alice ─tick─► relay                            (Ok, upstream failure, link Failed)
 ///                 ══socket══► edge               (connected)
-/// alice ─tick─► relay                            (Ok)
+/// alice ─tick─► relay                            (Ok, no failure)
 /// ```
 #[test]
 fn a_refused_connection_is_surfaced_and_retried() {
@@ -262,10 +264,20 @@ fn a_refused_connection_is_surfaced_and_retried() {
     });
     assert_eq!(
         host.tick_foreground(alice),
-        Err(JazzNativeRelayStatus::LifecycleFailure)
+        Ok(()),
+        "a refused connection must not fail local ticks"
     );
-    assert_eq!(status(&mut host, alice).1, None, "not a credential problem");
+    let (auth_rejection, failure) = tick_events(&mut host, alice);
+    assert_eq!(auth_rejection, None, "not a credential problem");
+    let failure = failure.expect("the refusal is reported");
+    assert!(failure.retrying, "{failure:?}");
     assert!(!host.private_scope_workers[&scope].terminally_stopped());
+    host.sync_foreground_remote_link(alice);
+    assert_eq!(
+        host.foregrounds[&alice].remote_link_hint,
+        Some(RemoteLinkHint::Failed),
+        "reads must not wait on an upstream that refuses the connection"
+    );
 
     release.send(()).unwrap();
     wait_for(&host, "the retried connection lands", |host| {
@@ -273,6 +285,7 @@ fn a_refused_connection_is_surfaced_and_retried() {
     });
     assert_eq!(connector.bearers().len(), 2, "the same request was retried");
     assert!(host.private_scope_terminal_error(&scope).is_none());
+    assert_eq!(tick_events(&mut host, alice), (None, None));
     assert_eq!(host.tick_foreground(alice), Ok(()));
 }
 
@@ -359,8 +372,12 @@ fn an_expired_bearer_stops_the_worker_and_a_renewed_one_recovers() {
     assert_eq!(host.tick_foreground(alice), Ok(()));
 }
 
-/// alice's drained tick events as the host reports them after a tick.
-fn tick_auth_rejection(host: &mut NativeRelayHost, foreground: u64) -> Option<NativeAuthRejection> {
+/// alice's drained tick events as the host reports them after a tick:
+/// (credential refusal, other upstream failure).
+fn tick_events(
+    host: &mut NativeRelayHost,
+    foreground: u64,
+) -> (Option<NativeAuthRejection>, Option<NativeUpstreamFailure>) {
     match host
         .execute_foreground_command(foreground, ForegroundDbCommandRequest::DrainTickEvents)
         .unwrap()
@@ -368,12 +385,19 @@ fn tick_auth_rejection(host: &mut NativeRelayHost, foreground: u64) -> Option<Na
         ForegroundDbCommandResponse::TickEvents {
             events_json,
             auth_rejection,
+            upstream_failure,
         } => {
             assert_eq!(events_json, "[]");
-            auth_rejection
+            (auth_rejection, upstream_failure)
         }
         other => panic!("unexpected tick events: {other:?}"),
     }
+}
+
+fn tick_auth_rejection(host: &mut NativeRelayHost, foreground: u64) -> Option<NativeAuthRejection> {
+    let (auth_rejection, upstream_failure) = tick_events(host, foreground);
+    assert_eq!(upstream_failure, None, "a refusal is not another failure");
+    auth_rejection
 }
 
 /// #4296: the host reports each refusal once. A renewed bearer that is
@@ -450,17 +474,25 @@ fn tick_events_command_and_response_have_pinned_bytes() {
             sequence: 300,
             reason: "no".to_owned(),
         }),
+        upstream_failure: Some(NativeUpstreamFailure {
+            sequence: 2,
+            reason: "tls".to_owned(),
+            retrying: true,
+        }),
     };
     assert_eq!(
         postcard::to_allocvec(&response).unwrap(),
-        vec![26, 2, b'[', b']', 1, 0xac, 0x02, 2, b'n', b'o']
+        vec![
+            26, 2, b'[', b']', 1, 0xac, 0x02, 2, b'n', b'o', 1, 2, 3, b't', b'l', b's', 1
+        ]
     );
     let response = ForegroundDbCommandResponse::TickEvents {
         events_json: "[]".to_owned(),
         auth_rejection: None,
+        upstream_failure: None,
     };
     assert_eq!(
         postcard::to_allocvec(&response).unwrap(),
-        vec![26, 2, b'[', b']', 0]
+        vec![26, 2, b'[', b']', 0, 0]
     );
 }

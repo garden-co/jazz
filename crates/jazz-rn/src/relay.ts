@@ -238,6 +238,12 @@ export type NativeForegroundResponse =
        * has a new `sequence`, even when its reason repeats.
        */
       authRejection: { sequence: number; reason: string } | null;
+      /**
+       * The upstream's current connection failure other than a refused
+       * credential, and whether the native socket is still retrying it. Each
+       * failure has a new `sequence`.
+       */
+      upstreamFailure: { sequence: number; reason: string; retrying: boolean } | null;
     }
   | { type: "streamingMutationOpened"; upload: number }
   | { type: "streamingMutationPushed" }
@@ -722,22 +728,38 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       : { type: "operationError", code, reasonName, reason };
   }
   if (tag === 26) {
-    // TickEvents: postcard events string, then `Option<NativeAuthRejection>`:
-    // 0, or 1, the sequence varint and the reason string.
+    // TickEvents: postcard events string, then `Option<NativeAuthRejection>`
+    // (0, or 1, the sequence varint and the reason string), then
+    // `Option<NativeUpstreamFailure>` (the same, then a retrying bool).
     const [eventsJson, afterEvents] = decodeForegroundPrefixedString(bytes, 1, "tick events");
-    const option = bytes[afterEvents];
-    if (option === 0 && afterEvents + 1 === bytes.length)
-      return { type: "tickEvents", eventsJson, authRejection: null };
-    if (option !== 1) throw new Error("Malformed native operation auth rejection");
-    let sequenceEnd = afterEvents + 1;
-    while (sequenceEnd < bytes.length && (bytes[sequenceEnd]! & 0x80) !== 0) sequenceEnd++;
-    const sequence = decodeForegroundU64(
-      bytes.subarray(afterEvents + 1, sequenceEnd + 1),
-      "auth rejection sequence",
-    );
-    const [reason, end] = decodeForegroundPrefixedString(bytes, sequenceEnd + 1, "auth rejection");
-    if (end !== bytes.length) throw new Error("Malformed native operation tick events");
-    return { type: "tickEvents", eventsJson, authRejection: { sequence, reason } };
+    const readSequenced = (offset: number, label: string): [number, string, number] | null => {
+      const option = bytes[offset];
+      if (option === 0) return null;
+      if (option !== 1) throw new Error(`Malformed native operation ${label}`);
+      let sequenceEnd = offset + 1;
+      while (sequenceEnd < bytes.length && (bytes[sequenceEnd]! & 0x80) !== 0) sequenceEnd++;
+      const sequence = decodeForegroundU64(
+        bytes.subarray(offset + 1, sequenceEnd + 1),
+        `${label} sequence`,
+      );
+      const [reason, next] = decodeForegroundPrefixedString(bytes, sequenceEnd + 1, label);
+      return [sequence, reason, next];
+    };
+    const rejection = readSequenced(afterEvents, "auth rejection");
+    const afterRejection = rejection ? rejection[2] : afterEvents + 1;
+    const failure = readSequenced(afterRejection, "upstream failure");
+    const retrying = failure ? bytes[failure[2]] : undefined;
+    const end = failure ? failure[2] + 1 : afterRejection + 1;
+    if (end !== bytes.length || (failure && retrying !== 0 && retrying !== 1))
+      throw new Error("Malformed native operation tick events");
+    return {
+      type: "tickEvents",
+      eventsJson,
+      authRejection: rejection ? { sequence: rejection[0], reason: rejection[1] } : null,
+      upstreamFailure: failure
+        ? { sequence: failure[0], reason: failure[1], retrying: retrying === 1 }
+        : null,
+    };
   }
   if (
     tag === 16 &&

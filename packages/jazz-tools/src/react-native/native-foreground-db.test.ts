@@ -223,3 +223,49 @@ it("reports each new upstream credential refusal once while ticks keep running",
   expect(execute).toHaveBeenCalledTimes(6);
   expect(reported).toEqual(["token expired", "token expired"]);
 });
+
+// #4337: another upstream connection failure is connection state too. Each
+// change is reported once: a new failure, the socket giving up retrying it,
+// and its recovery.
+it("reports each upstream connection failure change once while ticks keep running", async () => {
+  const failure = (sequence: number, retrying: boolean) => ({ sequence, reason: "tls", retrying });
+  const drains = [
+    null,
+    failure(1, true),
+    failure(1, true),
+    failure(1, false),
+    failure(1, false),
+    null,
+    null,
+    failure(2, true),
+  ];
+  let upstreamFailure: { sequence: number; reason: string; retrying: boolean } | null = null;
+  const tick = vi.fn(() => {
+    upstreamFailure = drains.shift() ?? null;
+  });
+  const db = new NativeForegroundDb(
+    { execute: (command: Uint8Array) => command, tick, close: () => true },
+    {
+      encodeNativeForegroundCommand: () => Uint8Array.of(35),
+      decodeNativeForegroundResponse: () => ({
+        type: "tickEvents",
+        eventsJson: "[]",
+        authRejection: null,
+        upstreamFailure,
+      }),
+    } as never,
+  );
+  const reported: unknown[] = [];
+  db.onUpstreamFailure((change) => reported.push(change));
+
+  for (let turn = 0; turn < 8; turn += 1) db.tick();
+  await Promise.resolve();
+
+  expect(tick).toHaveBeenCalledTimes(8);
+  expect(reported).toEqual([
+    { reason: "tls", retrying: true },
+    { reason: "tls", retrying: false },
+    null,
+    { reason: "tls", retrying: true },
+  ]);
+});
