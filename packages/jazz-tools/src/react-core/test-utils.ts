@@ -40,7 +40,7 @@ export function makeFakeClient(params: {
       },
       shutdown: async () => {},
       __updateAuthTokenSpy: updateAuthTokenSpy,
-      __markUnauthenticated(reason: "expired" | "invalid" | "missing" | "disabled") {
+      __markUnauthenticated(reason: "expired" | "invalid" | "missing" | "disabled" | "revoked") {
         state = { ...state, error: reason };
         for (const l of listeners) l(state);
       },
