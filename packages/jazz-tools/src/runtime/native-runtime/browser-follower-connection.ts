@@ -491,6 +491,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private fail(error: Error): void {
     if (this.failed || this.closed) return;
     this.failed = error;
+    this.runtime.reportLocalRelayError(error);
     // Tell the worker that this endpoint is gone so it can notify the broker,
     // which will issue a fresh channel while the leadership is still valid.
     try {

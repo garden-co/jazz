@@ -7,7 +7,7 @@ import {
   encodeSchema,
   NativeRuntimeAdapter,
 } from "./native-runtime/native-runtime-adapter.js";
-import { openConfig } from "./native-runtime/native-codec.js";
+import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
@@ -122,6 +122,33 @@ function digests(records: Block[]) {
 }
 
 describe.skipIf(!hasJazzWasmBuild())("SQLite browser file reopening", () => {
+  it("terminates reads, snapshots and a waiting stream when the owner closes", async () => {
+    const owner = await open("/alice-pending-retirement.sqlite");
+    const link = await owner.connectUpstream();
+    await insert(owner, "pending authority settlement");
+    const query = queryFromTable("notes");
+    const read = owner.all(query, { tier: "remote" });
+    const snapshot = owner.captureSnapshot();
+    expect(read.poll()).toBeNull();
+    expect(snapshot.poll()).toBeNull();
+    const reader = owner.subscribe(query, { tier: "local-only" }).getReader();
+    try {
+      expect((await reader.read()).value.type).toBe("delta");
+      const next = reader.read();
+      await close(owner);
+      expect(() => read.poll()).toThrow(/storage owner is retired/);
+      expect(() => snapshot.poll()).toThrow(/storage owner is retired/);
+      await expect(next).resolves.toMatchObject({ done: false, value: { type: "closed" } });
+      await expect(reader.read()).resolves.toMatchObject({ done: true });
+    } finally {
+      read.cancel();
+      snapshot.cancel();
+      link.close();
+      await reader.cancel();
+      reader.releaseLock();
+    }
+  });
+
   it("retires retained views and transports before the next owner opens the file", async () => {
     const path = "/alice-retired-owner.sqlite";
     const owner = await open(path);

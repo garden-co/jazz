@@ -3752,6 +3752,7 @@ impl Db {
         strict: bool,
         view: &ReadViewSourceSpec,
     ) -> Result<Option<u64>, Error> {
+        self.ensure_storage_owner_active()?;
         let tier = reach.tier;
         // Held on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
@@ -3789,6 +3790,18 @@ impl Db {
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
         let answer = poll_fn(|_| {
+            if let Err(error) = self.ensure_storage_owner_active() {
+                if let Some((id, _)) = asked {
+                    self.inner
+                        .borrow_mut()
+                        .client
+                        .as_mut()
+                        .expect("client")
+                        .answers
+                        .remove(&id);
+                }
+                return Poll::Ready(Err(error));
+            }
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
@@ -3869,6 +3882,7 @@ impl Db {
     /// replica can read; writes still pending after that (offline) are
     /// named individually and stay readable here and at the authority.
     pub async fn capture_snapshot(&self) -> Result<SnapshotRef, Error> {
+        self.ensure_storage_owner_active()?;
         let node = self.inner.borrow().identity.node;
         if !self.is_client() {
             return Ok(SnapshotRef {
@@ -3884,6 +3898,9 @@ impl Db {
             client.pending.iter().map(|p| p.tx).collect()
         };
         poll_fn(|_| {
+            if let Err(error) = self.ensure_storage_owner_active() {
+                return Poll::Ready(Err(error));
+            }
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             let settling = client.transport.is_some()
@@ -3892,10 +3909,10 @@ impl Db {
             if settling {
                 Poll::Pending
             } else {
-                Poll::Ready(())
+                Poll::Ready(Ok(()))
             }
         })
-        .await;
+        .await?;
         let inner = self.inner.borrow();
         let client = inner.client.as_ref().expect("client");
         Ok(SnapshotRef {
@@ -4046,6 +4063,10 @@ impl Db {
     /// link fails or the request was cancelled first.
     pub async fn permission_advice(&self, id: u64) -> PermissionAdvice {
         poll_fn(|_| {
+            if self.ensure_storage_owner_active().is_err() {
+                self.cancel_permission_advice_request(id);
+                return Poll::Ready(PermissionAdvice::Unknown);
+            }
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
                 return Poll::Ready(PermissionAdvice::Unknown);

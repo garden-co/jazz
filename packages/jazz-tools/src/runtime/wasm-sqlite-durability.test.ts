@@ -2,9 +2,15 @@ import * as idb from "fake-indexeddb";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { encodeCellsForRow, encodeSchema } from "./native-runtime/native-runtime-adapter.js";
+import {
+  encodeCellsForRow,
+  encodeSchema,
+  NativeRuntimeAdapter,
+} from "./native-runtime/native-runtime-adapter.js";
+import { BrowserWorkerTransportPump } from "./native-runtime/browser-worker-transport.js";
 import { openConfig } from "./native-runtime/native-codec.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
+import { allowAll } from "./testing/allow-all.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
 const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
@@ -49,6 +55,120 @@ async function persistedBlocks(path: string) {
 }
 
 describe.skipIf(!hasJazzWasmBuild())("SQLite browser durability", () => {
+  it.each([
+    { upstream: false, fail: false },
+    { upstream: true, fail: false },
+    { upstream: false, fail: true },
+    { upstream: true, fail: true },
+  ])(
+    "a tab's Local wait observes worker persistence (upstream=$upstream, fail=$fail)",
+    async ({ upstream: connected, fail }) => {
+      const wasm = await loadWasmModuleForTest();
+      const schema = { notes: { ...app.wasmSchema.notes!, policies: allowAll(app).notes } };
+      const author = testAuthorBytes(`alice-worker-durability-${connected}-${fail}`);
+      const workerNode = new Uint8Array(16).fill(81);
+      const tabNode = new Uint8Array(16).fill(82);
+      const storage = { backend: "indexeddb", path: `/alice-worker-${connected}-${fail}.sqlite` };
+      const workerDb = await wasm.WasmDb.openBrowser(
+        storage,
+        encodeSchema(schema),
+        openConfig(workerNode, author),
+        "alice-worker-durability",
+      );
+      const worker = NativeRuntimeAdapter.fromDb(workerDb, schema, workerNode, author, 1, false);
+      const tabDb = wasm.WasmDb.openMemory(encodeSchema(schema), openConfig(tabNode, author));
+      const alice = NativeRuntimeAdapter.fromDb(tabDb, schema, tabNode, author, 1, false);
+      alice.setNonDurableClient();
+      // An attached authority holds final Fate pending; the worker must still
+      // acknowledge Local only after persistence. Offline it sends local Fate.
+      const authority = connected ? await workerDb.connectUpstream() : undefined;
+      const downstream = await worker.acceptPeer();
+      const upstream = await alice.connectUpstreamPeer();
+      await workerDb.flush();
+      const before = await persistedBlocks(storage.path);
+      let failedPuts = 0;
+      const originalPut = idb.IDBObjectStore.prototype.put;
+      const put = vi.spyOn(idb.IDBObjectStore.prototype, "put").mockImplementation(function (
+        this: IDBObjectStore,
+        value: unknown,
+        key?: IDBValidKey,
+      ) {
+        if (fail && failedPuts === 0 && Reflect.get(value as object, "path") === storage.path) {
+          failedPuts += 1;
+          this.transaction.abort();
+          throw new DOMException("injected worker quota failure", "QuotaExceededError");
+        }
+        return originalPut.call(this, value, key);
+      });
+      let workerPump: BrowserWorkerTransportPump;
+      let tabPump: BrowserWorkerTransportPump;
+      const errors: Error[] = [];
+      const onError = (error: unknown) => {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        errors.push(failure);
+        // The browser follower receives this as the worker's terminal `error`
+        // event. Local failure is transport state, not an authority rejection.
+        alice.reportLocalRelayError(failure);
+        workerPump.close();
+        tabPump.close();
+      };
+      workerPump = new BrowserWorkerTransportPump(
+        worker,
+        downstream,
+        (frames) => tabPump.receive(frames),
+        onError,
+      );
+      tabPump = new BrowserWorkerTransportPump(
+        alice,
+        upstream,
+        (frames) => workerPump.receive(frames),
+        onError,
+      );
+      try {
+        const inserted = alice.insert("notes", {
+          text: { type: "Text", value: "persist before acknowledging" },
+        });
+        if (inserted.kind !== "committed") throw new Error("expected a committed insert");
+        const tx = await inserted.txId;
+        let outcome: { ok: boolean; error?: unknown } | undefined;
+        void alice.waitForTransaction(tx, "local").then(
+          () => {
+            outcome = { ok: true };
+          },
+          (error: unknown) => {
+            outcome = { ok: false, error };
+          },
+        );
+        await vi.waitFor(() => expect(outcome).toBeDefined());
+        expect(outcome?.ok).toBe(!fail);
+        if (fail) {
+          expect(failedPuts).toBe(1);
+          expect(outcome?.error).toMatchObject({
+            message: expect.stringContaining("browser storage"),
+          });
+          await expect(alice.waitForTransaction(tx, "local")).rejects.toThrow("browser storage");
+          await expect(alice.flushLocalSettlements()).rejects.toThrow("browser storage");
+          await expect(workerDb.flush()).rejects.toBeDefined();
+          expect(await persistedBlocks(storage.path)).toEqual(before);
+        } else {
+          expect(errors).toEqual([]);
+          // Inspect real IndexedDB bytes at the moment Local has resolved.
+          expect(await persistedBlocks(storage.path)).not.toEqual(before);
+          await alice.flushLocalSettlements();
+        }
+      } finally {
+        put.mockRestore();
+        workerPump.close();
+        tabPump.close();
+        authority?.close();
+        alice.reportLocalRelayError(new Error("fixture closed"));
+        await alice.close();
+        await worker.close().catch(() => undefined);
+        await wasm.WasmDb.destroyBrowserStorage(storage, "alice-worker-durability");
+      }
+    },
+  );
+
   it.each(["put", "commit"] as const)(
     "does not report Local after a background IndexedDB %s fails",
     async (failure) => {

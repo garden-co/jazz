@@ -1272,7 +1272,7 @@ impl Db {
         Ok(())
     }
 
-    fn ensure_storage_owner_active(&self) -> Result<(), Error> {
+    pub(crate) fn ensure_storage_owner_active(&self) -> Result<(), Error> {
         if self.inner.borrow().retired {
             Err(Error::new(ErrorCode::Storage, "storage owner is retired"))
         } else {
