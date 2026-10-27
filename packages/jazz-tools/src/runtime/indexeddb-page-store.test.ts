@@ -246,7 +246,7 @@ describe("IndexedDbPageStore", () => {
     const wasm = await loadWasmModule();
     for (const completed of [false, true]) {
       expect(() => wasm.WasmDb.__browserStorageAdmissionReceipt(completed)).toThrow(
-        "Groove browser epoch admission on SQLite is not supported on SQLite yet",
+        "Groove browser epoch admission on SQLite is not supported yet",
       );
     }
     for (const state of ["opening", "ready"] as const) {

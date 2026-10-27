@@ -283,14 +283,13 @@ it("restricts member writes to their own notes and retains membership checks aft
       .wait({ tier: "global" });
     await reader.db.update(app.notes, bobNote.id, { body: "Bob's edit" }).wait({ tier: "global" });
     await owner.db.e2ee.spaces.revoke(app.projects, project.id, reader.id).wait();
-    // Ownership alone must not allow a write after space membership is removed.
-    // Physical access exercises the deployed policy independently of SDK key checks.
+    // Revocation removes the current row, so SQLite refuses an update before
+    // staging it. A delete by ID still exercises the deployed policy below,
+    // independently of SDK key checks.
     const physicalNotes = new TypedTableQueryBuilder("notes", { ...app.wasmSchema });
-    await expect(
-      reader.db
-        .update(physicalNotes, bobNote.id, { body: new Uint8Array([1]) })
-        .wait({ tier: "global" }),
-    ).rejects.toThrow();
+    expect(() =>
+      reader.db.update(physicalNotes, bobNote.id, { body: new Uint8Array([1]) }),
+    ).toThrow(/NotObserved: UPDATE.*not loaded locally/);
     await expect(
       reader.db.delete(physicalNotes, bobNote.id).wait({ tier: "global" }),
     ).rejects.toThrow();
