@@ -656,3 +656,76 @@ fn writes_complete_in_one_poll_while_another_operation_waits() {
     let notes = ids(&server, Query::from("notes"), ReadTier::LocalOnly);
     assert_eq!(notes.len(), 3);
 }
+
+// ---- JSON Schema at the authority -------------------------------------------
+
+fn json_docs(schema: Option<serde_json::Value>) -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("payload", ColumnType::Json { schema })
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// A JSON object of about `len` bytes: `{"state":<state>,"pad":"aaa…"}`.
+fn json_doc(state: &str, len: usize) -> Value {
+    text(&format!(
+        r#"{{"state":{state},"pad":"{}"}}"#,
+        "a".repeat(len)
+    ))
+}
+
+/// #3553, #3924: the authority checks every uploaded JSON value against the
+/// column's schema, whatever the writer's own replica checked, and a value
+/// large enough to travel in chunks is checked whole like any other.
+#[test]
+fn the_authority_checks_uploaded_json_against_its_schema_at_any_size() {
+    let strict = serde_json::json!({
+        "type": "object",
+        "properties": { "state": { "enum": ["open", "closed"] } },
+        "required": ["state"],
+    });
+    let server = authority(json_docs(Some(strict)));
+    // The writer's replica declares no schema, so it stores anything.
+    let writer = replica(json_docs(None), &server, 0x01, alice());
+    let large = jazz::large_values::INLINE_VALUE_MAX_BYTES + 1024;
+    for (n, len) in [(1, 16), (2, large)] {
+        let valid = drive(
+            &[&writer, &server],
+            writer.insert(
+                "docs",
+                cells(vec![("payload", json_doc("\"open\"", len))]),
+                InsertOptions {
+                    row_id: Some(row(1, n)),
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+        settle(&writer, &server, valid.mergeable_tx_id()).unwrap();
+        let invalid = drive(
+            &[&writer, &server],
+            writer.insert(
+                "docs",
+                cells(vec![("payload", json_doc("\"nope\"", len))]),
+                InsertOptions {
+                    row_id: Some(row(2, n)),
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+        let error = settle(&writer, &server, invalid.mergeable_tx_id())
+            .expect_err("the authority accepted a value its schema refuses");
+        assert!(
+            error
+                .message
+                .contains("JSON schema validation failed for column `payload`"),
+            "{len} bytes: {error}"
+        );
+    }
+}

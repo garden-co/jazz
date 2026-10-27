@@ -233,21 +233,44 @@ pub fn validate(
     schema: &serde_json::Value,
     instance: &serde_json::Value,
 ) -> Result<(), JsonSchemaError> {
-    match &*compiled(schema)? {
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        Compiled::Native(validator) => validator
-            .validate(instance)
-            .map_err(|error| JsonSchemaError::Mismatch(error.to_string())),
-        // The host gets the value re-serialized rather than its source text, so
-        // it sees the numbers `serde_json` parsed, exactly as the native
-        // validator does.
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        Compiled::Host(validator) => match validator.validate(&instance.to_string()) {
-            Ok(None) => Ok(()),
-            Ok(Some(reason)) => Err(JsonSchemaError::Mismatch(reason)),
-            Err(error) => Err(JsonSchemaError::Unavailable(format!(
-                "the JSON Schema validator failed: {error}"
-            ))),
-        },
+    CompiledSchema::new(schema)?.validate(instance)
+}
+
+/// A declared schema compiled once, for a holder that checks many values
+/// against it without looking its schema up again.
+#[derive(Clone)]
+pub struct CompiledSchema(Rc<Compiled>);
+
+impl std::fmt::Debug for CompiledSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CompiledSchema")
+    }
+}
+
+impl CompiledSchema {
+    /// Compile a declared schema, or say why it is invalid.
+    pub fn new(schema: &serde_json::Value) -> Result<Self, JsonSchemaError> {
+        compiled(schema).map(Self)
+    }
+
+    /// Check a value against the schema.
+    pub fn validate(&self, instance: &serde_json::Value) -> Result<(), JsonSchemaError> {
+        match &*self.0 {
+            #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+            Compiled::Native(validator) => validator
+                .validate(instance)
+                .map_err(|error| JsonSchemaError::Mismatch(error.to_string())),
+            // The host gets the value re-serialized rather than its source text, so
+            // it sees the numbers `serde_json` parsed, exactly as the native
+            // validator does.
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            Compiled::Host(validator) => match validator.validate(&instance.to_string()) {
+                Ok(None) => Ok(()),
+                Ok(Some(reason)) => Err(JsonSchemaError::Mismatch(reason)),
+                Err(error) => Err(JsonSchemaError::Unavailable(format!(
+                    "the JSON Schema validator failed: {error}"
+                ))),
+            },
+        }
     }
 }

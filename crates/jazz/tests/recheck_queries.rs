@@ -387,8 +387,9 @@ fn a_projected_aggregate_is_refused_alike_through_both_read_paths() {
 /// #3553, #3917, #3924: a JSON value is checked against its column's
 /// declared JSON Schema wherever the store accepts a write, not only by the
 /// writing client's own validator: a plain insert, an update, an upsert, a
-/// transaction's write, a nullable column and the elements of a JSON
-/// array. Text that is not JSON is refused too.
+/// transaction's write, a nullable column, the elements of a JSON array and
+/// a value large enough to be stored in chunks. Text that is not JSON is
+/// refused too.
 #[test]
 fn json_values_are_validated_against_the_column_schema_on_every_write() {
     let db = open(compile_schema(
@@ -482,6 +483,20 @@ fn json_values_are_validated_against_the_column_schema_on_every_write() {
         )),
         mismatch,
     );
+    // A value large enough to be stored in chunks is checked whole.
+    let pad = "a".repeat(jazz::large_values::INLINE_VALUE_MAX_BYTES + 1024);
+    let large = |state: &str| text(&format!(r#"{{"state":{state},"pad":"{pad}"}}"#));
+    insert_at(4, with("payload", large("\"open\""))).unwrap();
+    refusal(insert_at(5, with("payload", large("\"nope\""))), mismatch);
+    refusal(
+        block_on(db.update(
+            "docs",
+            row(4),
+            cells(vec![("payload", large("1"))]),
+            UpdateOptions::default(),
+        )),
+        mismatch,
+    );
     let open = jazz::tools::OpenTransactionId::new();
     block_on(db.begin_mergeable(open)).unwrap();
     refusal(
@@ -495,6 +510,7 @@ fn json_values_are_validated_against_the_column_schema_on_every_write() {
     db.abandon_transaction_handle(open).unwrap();
 
     let rows = read(&db, &Query::from("docs"));
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     assert_eq!(cell(&rows[0], "payload"), Some(text(r#"{"state":"open"}"#)));
+    assert_eq!(cell(&rows[1], "payload"), Some(large("\"open\"")));
 }

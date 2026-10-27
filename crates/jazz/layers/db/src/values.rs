@@ -1,6 +1,7 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ids::RowUuid;
@@ -369,10 +370,9 @@ pub struct Column {
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
-    /// The declared public type of a column that holds JSON (a JSON column
-    /// or an array of them), which every written value is validated
-    /// against; `None` for any other column.
-    pub json_type: Option<Arc<crate::tools::ColumnType>>,
+    /// How a column that holds JSON (a JSON column or an array of them)
+    /// checks the values written to it; `None` for any other column.
+    pub json_type: Option<Rc<JsonCheck>>,
     /// How concurrent writes to the column merge at the authority.
     pub merge: crate::schema::MergeStrategy,
 }
@@ -661,7 +661,7 @@ impl Schema {
                                 .find(|declared| declared.name_str() == column.name)
                         })
                         .filter(|declared| holds_json(&declared.column_type))
-                        .map(|declared| Arc::new(declared.column_type.clone())),
+                        .map(|declared| Rc::new(JsonCheck::new(declared.column_type.clone()))),
                     merge: table
                         .merge_strategies
                         .get(&column.name)
@@ -1407,28 +1407,81 @@ fn holds_json(ty: &crate::tools::ColumnType) -> bool {
     }
 }
 
-/// Check a JSON-bearing cell against its column's declared type: the text
-/// must be JSON, and match the column's JSON Schema when it declares one.
-/// Every write path stores through here, local or ingested from a peer, so
-/// the schema holds for every row the store accepts, not only for writers
-/// whose own validator agrees.
-pub(crate) fn validate_json_cell(
-    ty: &crate::tools::ColumnType,
-    value: &Value,
-    path: &str,
-) -> Result<(), String> {
-    use crate::tools::ColumnType;
-    match (ty, value) {
-        (_, Value::Nullable(None)) => Ok(()),
-        (_, Value::Nullable(Some(inner))) => validate_json_cell(ty, inner, path),
-        (ColumnType::Json { .. }, Value::String(text)) => {
-            crate::tools::validate_json_value(&crate::tools::Value::Text(text.clone()), ty, path)
+/// How the values written to a column that holds JSON are checked: against
+/// the column's declared public type, whose JSON Schema is compiled once, on
+/// first use. Every value a write authors is checked here, local or uploaded
+/// by a peer, so the schema holds for every value the store accepts, not
+/// only for writers whose own validator agrees.
+#[derive(Debug)]
+pub struct JsonCheck {
+    ty: crate::tools::ColumnType,
+    compiled: std::cell::OnceCell<crate::tools::CompiledSchema>,
+}
+
+impl JsonCheck {
+    pub fn new(ty: crate::tools::ColumnType) -> Self {
+        Self {
+            ty,
+            compiled: std::cell::OnceCell::new(),
         }
-        (ColumnType::Array { element }, Value::Array(items)) => {
-            items.iter().enumerate().try_for_each(|(index, item)| {
-                validate_json_cell(element, item, &format!("{path}[{index}]"))
-            })
+    }
+
+    /// Check a written cell: its JSON text must parse and match the schema.
+    pub(crate) fn check(&self, value: &Value, path: &str) -> Result<(), String> {
+        self.check_as(&self.ty, value, path)
+    }
+
+    fn check_as(
+        &self,
+        ty: &crate::tools::ColumnType,
+        value: &Value,
+        path: &str,
+    ) -> Result<(), String> {
+        use crate::tools::ColumnType;
+        match (ty, value) {
+            (_, Value::Nullable(None)) => Ok(()),
+            (_, Value::Nullable(Some(inner))) => self.check_as(ty, inner, path),
+            (ColumnType::Json { .. }, Value::String(text)) => self.check_text(text, path),
+            (ColumnType::Array { element }, Value::Array(items)) => {
+                items.iter().enumerate().try_for_each(|(index, item)| {
+                    self.check_as(element, item, &format!("{path}[{index}]"))
+                })
+            }
+            _ => Ok(()),
         }
-        _ => Ok(()),
+    }
+
+    /// Check one JSON document, given as its text.
+    pub(crate) fn check_text(&self, text: &str, path: &str) -> Result<(), String> {
+        let instance: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| format!("invalid JSON for column `{path}`: {error}"))?;
+        match self.compiled(path)? {
+            Some(schema) => schema
+                .validate(&instance)
+                .map_err(|error| crate::tools::json_schema_failure(error, path)),
+            None => Ok(()),
+        }
+    }
+
+    /// The declared schema, compiled; `None` if the column declares none. A
+    /// schema that fails to compile is tried again on the next check (a
+    /// browser host may install its validator later).
+    fn compiled(&self, path: &str) -> Result<Option<&crate::tools::CompiledSchema>, String> {
+        let mut ty = &self.ty;
+        while let crate::tools::ColumnType::Array { element } = ty {
+            ty = element;
+        }
+        let crate::tools::ColumnType::Json {
+            schema: Some(schema),
+        } = ty
+        else {
+            return Ok(None);
+        };
+        if let Some(compiled) = self.compiled.get() {
+            return Ok(Some(compiled));
+        }
+        let compiled = crate::tools::CompiledSchema::new(schema)
+            .map_err(|error| crate::tools::json_schema_failure(error, path))?;
+        Ok(Some(self.compiled.get_or_init(|| compiled)))
     }
 }
