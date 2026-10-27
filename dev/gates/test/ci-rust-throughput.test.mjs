@@ -1496,7 +1496,7 @@ test("the jazz-tools launcher reports Windows as unsupported instead of a missin
 test("native release builds need no libclang because no Rust dependency uses bindgen", () => {
   // RocksDB's sys crates pulled in bindgen, which needed libclang on every
   // build host. If bindgen returns, provision libclang where it is needed
-  // (Windows MSVC runners, the AL2023 NAPI image, Vercel) before updating this.
+  // (Windows MSVC runners, the Bullseye NAPI image, Vercel) before updating this.
   const lockfile = fs.readFileSync(path.join(root, "Cargo.lock"), "utf8");
   for (const crate of ["bindgen", "clang-sys", "rust-librocksdb-sys"])
     assert.doesNotMatch(lockfile, new RegExp(`^name = "${crate}"$`, "m"), crate);

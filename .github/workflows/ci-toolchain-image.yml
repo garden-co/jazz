@@ -1,12 +1,14 @@
 name: CI toolchain image
 
 # Builds dev/ci/toolchain/Dockerfile and publishes it as
-# ghcr.io/garden-co/jazz-ci-toolchain, tagged by recipe hash. CI jobs pin the
-# printed digest, so a published image is only used once a reviewed workflow
-# change repins it. Pull requests build without publishing.
+# ghcr.io/garden-co/jazz-ci-toolchain, tagged by recipe hash, from main pushes
+# and dispatches. CI jobs pin the printed digest, so a published image is only
+# used once a reviewed workflow change repins it. Pull requests build without
+# publishing.
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - dev/ci/toolchain/**
       - .github/workflows/ci-toolchain-image.yml
@@ -17,7 +19,8 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A publish runs to completion; only superseded PR builds are cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   image:
@@ -46,18 +49,24 @@ jobs:
           recipe="$(sha256sum dev/ci/toolchain/Dockerfile | cut -c1-16)"
           output=type=docker
           if [[ "${PUBLISH}" == true ]]; then output=type=registry; fi
-          docker buildx create --use --name toolchain >/dev/null
+          docker buildx create --use --name toolchain \
+            --driver-opt image=moby/buildkit:v0.26.2@sha256:de10faf919fc71ba4eb1dd7bd6449566d012b0c9436b1c61bfee21d621b009aa \
+            >/dev/null
           docker buildx build --platform linux/amd64 \
             --tag "${IMAGE}:recipe-${recipe}" \
             --output "${output}" \
             --metadata-file "${RUNNER_TEMP}/metadata.json" \
             dev/ci/toolchain
           digest="$(jq -r '."containerimage.digest"' "${RUNNER_TEMP}/metadata.json")"
+          if [[ "${PUBLISH}" == true ]]; then
+            line="pin: ${IMAGE}@${digest}"
+          else
+            line="not published (pull request build): local digest ${digest}"
+          fi
           {
             echo "### jazz-ci-toolchain"
             echo
             echo "- recipe: \`recipe-${recipe}\`"
-            echo "- published: ${PUBLISH}"
-            echo "- pin: \`${IMAGE}@${digest}\`"
+            echo "- ${line}"
           } >> "${GITHUB_STEP_SUMMARY}"
-          echo "pin: ${IMAGE}@${digest}"
+          echo "${line}"
