@@ -29,7 +29,7 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-use common::{allow_all_policies, compile_schema};
+use common::{allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes};
 
 const MAX_TURNS: usize = 200;
 
@@ -135,8 +135,7 @@ fn wait_for_rejection(
     panic!("subscription rejection did not reach Browser within {MAX_TURNS} turns");
 }
 
-#[test]
-fn prepared_membership_failure_reaches_browser_and_leaves_write_fate_independent() {
+fn prepared_membership_failure(write_at_core: bool) {
     let author = AuthorSubject::for_test_bytes([0x55; 16]);
     let core = open(0, AuthorSubject::SYSTEM);
     core.seed_settled_mergeable_for_bootstrap(
@@ -204,7 +203,8 @@ fn prepared_membership_failure_reaches_browser_and_leaves_write_fate_independent
         "posts",
         Error::new(ErrorCode::Protocol, "private malformed membership payload"),
     ));
-    let write = block_on(browser.insert(
+    let writer = if write_at_core { &core } else { &browser };
+    let write = block_on(writer.insert(
         "posts",
         cells(&[("title", Value::String("write with failing query".into()))]),
         Default::default(),
@@ -215,7 +215,7 @@ fn prepared_membership_failure_reaches_browser_and_leaves_write_fate_independent
         &core,
         &edge,
         &browser,
-        browser.wait_for_transaction(tx, DurabilityTier::Global),
+        writer.wait_for_transaction(tx, DurabilityTier::Global),
     )
     .expect("the write was accepted independently of the subscription failure");
 
@@ -250,4 +250,146 @@ fn prepared_membership_failure_reaches_browser_and_leaves_write_fate_independent
         saw_profile,
         "the unrelated profile subscription remains live"
     );
+}
+
+/// Alice's browser receives Core's query failure through Edge while her write
+/// settles independently and her unrelated profile subscription remains live.
+#[test]
+fn prepared_membership_failure_reaches_browser_and_leaves_write_fate_independent() {
+    prepared_membership_failure(false);
+}
+
+/// Core's write fails Alice's query while her browser and Edge are idle:
+/// Core -- rejection --> idle Edge -- rejection --> Alice.
+#[test]
+fn prepared_membership_failure_reaches_idle_browser() {
+    prepared_membership_failure(true);
+}
+
+fn retained_rows_are_revoked(reject: bool) {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("posts")
+                    .column("title", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(exists(
+                        "grants",
+                        vec![outer_eq("postId", "id")],
+                    ))),
+            )
+            .table(
+                TableSchemaBuilder::new("memberships")
+                    .fk_column("postId", "posts")
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("grants")
+                    .fk_column("postId", "posts")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let alice_author = AuthorSubject::for_test_bytes([0x57; 16]);
+    let config = |node, author| {
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+    };
+    let core = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
+    let alice = block_on(Db::open(config(1, alice_author))).unwrap();
+    core.seed_settled_mergeable_for_bootstrap(
+        "posts",
+        id(1),
+        AuthorSubject::SYSTEM,
+        cells(&[("title", Value::String("protected post".into()))]),
+    )
+    .unwrap();
+    core.seed_settled_mergeable_for_bootstrap(
+        "grants",
+        id(3),
+        AuthorSubject::SYSTEM,
+        cells(&[("postId", Value::Uuid(id(1).0))]),
+    )
+    .unwrap();
+    let (upstream, downstream) = duplex();
+    let _upstream = block_on(alice.connect_upstream(upstream));
+    core.accept_subscriber(downstream, alice_author);
+    let pump = || {
+        for _ in 0..4 {
+            block_on(alice.tick()).unwrap();
+            block_on(core.tick()).unwrap();
+        }
+        block_on(alice.tick()).unwrap();
+    };
+    let query = alice
+        .prepare_query(&Query::from("posts").array_subquery(ArraySubquery::new(
+            "memberships",
+            "memberships",
+            "postId",
+            "id",
+        )))
+        .unwrap();
+    let mut stream = block_on(alice.subscribe(&query, ReadOpts::default())).unwrap();
+    pump();
+    drain_opening(&mut stream);
+    let local = || {
+        let query = alice.prepare_query(&Query::from("posts")).unwrap();
+        block_on(alice.all(
+            &query,
+            ReadOpts::for_read_tier(jazz::db::ReadTier::LocalOnly),
+        ))
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(local(), [id(1)]);
+    if reject {
+        assert!(core.fail_next_membership_refresh_for_test(
+            "posts",
+            Error::new(ErrorCode::Protocol, "injected membership failure"),
+        ));
+        block_on(core.insert(
+            "posts",
+            cells(&[("title", Value::String("trigger".into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+        pump();
+        assert_eq!(
+            stream.try_next_event(),
+            Some(SubscriptionEvent::Rejected {
+                code: SubscriptionServerFailureCode::QueryResultProtocol,
+            }),
+        );
+        assert_eq!(stream.try_next_event(), None);
+    }
+    drop(stream);
+    pump();
+    assert_eq!(core.runtime_stats_for_test().active_subscriptions, 0);
+    assert_eq!(local(), [id(1)], "Alice retains the still-readable post");
+    block_on(core.delete("grants", id(3), Default::default())).unwrap();
+    pump();
+    assert_eq!(
+        local(),
+        [],
+        "Alice loses the cached post when its permission grant is deleted",
+    );
+}
+
+/// Alice's cached post remains subject to Core's policy after normal unsubscribe.
+#[test]
+fn unsubscribe_retains_policy_tracking() {
+    retained_rows_are_revoked(false);
+}
+
+/// Alice's cached post remains subject to Core's policy after a failed query:
+/// Core rejects --> Alice ends subscription --> Core revokes grant --> post leaves.
+#[test]
+fn rejection_retains_policy_tracking() {
+    retained_rows_are_revoked(true);
 }

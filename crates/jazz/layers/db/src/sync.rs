@@ -3758,6 +3758,65 @@ impl Inner {
             client.outbox.push(SyncMessage::Unsubscribe { id });
         }
     }
+
+    /// End a served route while keeping cached rows subject to future policy
+    /// changes. Rejections and explicit unsubscriptions have the same cleanup.
+    fn retire_subscription(&mut self, index: usize, id: u64) -> Result<(), Error> {
+        let policy = self.session_policy(index);
+        self.sessions[index].support.remove(&id);
+        self.sessions[index].resume.remove(&id);
+        self.sessions[index].first_load.remove(&id);
+        if let Some((query, binding, include_deleted)) = self.sessions[index].relayed.remove(&id) {
+            self.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
+        }
+        if let Some((queue, group, ..)) = self.sessions[index].subs.remove(&id) {
+            let dropped = self.fan.dropped.clone();
+            dropped.set(dropped.get() + 1);
+            // Rows the result lost since the last tick were not
+            // re-checked yet: the client may still hold them.
+            let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+            if let Some(group) = group.upgrade() {
+                let table = group.borrow().root().to_owned();
+                for event in events {
+                    let SubscriptionEvent::Delta { removed, .. } = event else {
+                        continue;
+                    };
+                    for gone in removed {
+                        let id = gone.row_uuid.0.as_bytes().to_vec();
+                        for image in self.images_where(&table, false, "id = ?1", &[&id])? {
+                            self.sessions[index].touched.insert((
+                                table.clone(),
+                                gone.row_uuid,
+                                image.key,
+                            ));
+                        }
+                    }
+                }
+            }
+            // The replica keeps the rows it was shipped: held, a
+            // policy dependency's commit still re-checks them, so a
+            // retained copy is evicted once the client loses access.
+            if policy.is_some()
+                && let Some(group) = group.upgrade()
+            {
+                let group = group.borrow();
+                let table = group.root().to_owned();
+                let mut held = std::mem::take(&mut self.sessions[index].held);
+                for row in group.rows.iter().filter(|row| *row.table == *table) {
+                    let rid = row.id.0.as_bytes().to_vec();
+                    let seq = row.seq as i64;
+                    for image in self.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])? {
+                        held.entry(table.clone())
+                            .or_default()
+                            .entry((row.id, image.key))
+                            .or_insert(true);
+                    }
+                }
+                self.sessions[index].held = held;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Db {
@@ -5095,7 +5154,37 @@ impl Db {
                     }
                 }
             }
-            if recheck.is_empty()
+            // A relay's local group can still produce rows after its upstream
+            // subscription has failed. Forward that typed terminal failure
+            // using the downstream subscription id, even if the session has
+            // no other queued work.
+            let mut rejected_routes: Vec<(u64, SubscriptionServerFailureCode)> = {
+                let session = &inner.sessions[index];
+                if let Some(client) = inner.client.as_ref() {
+                    session
+                        .relayed
+                        .iter()
+                        .filter(|(id, _)| session.subs.contains_key(id))
+                        .filter_map(|(id, (query, binding, include_deleted))| {
+                            let key = remote_key(
+                                &remote_query(query),
+                                binding,
+                                *include_deleted,
+                                RemoteReach::REMOTE,
+                            );
+                            let error = client
+                                .remote
+                                .get(&key)
+                                .and_then(|remote| remote.refused.borrow().clone())?;
+                            Some((*id, subscription_server_failure_code(&error)))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            if rejected_routes.is_empty()
+                && recheck.is_empty()
                 && inner.sessions[index].idle()
                 && !written_keys
                     .iter()
@@ -5132,34 +5221,6 @@ impl Db {
             }
             let mut evictions = Vec::new();
             let mut settled = Vec::new();
-            // A relay's local group can still produce rows after its upstream
-            // subscription has failed. Forward that typed terminal failure
-            // using the downstream subscription id.
-            let mut rejected_routes: Vec<(u64, SubscriptionServerFailureCode)> = {
-                let session = &inner.sessions[index];
-                if let Some(client) = inner.client.as_ref() {
-                    session
-                        .relayed
-                        .iter()
-                        .filter(|(id, _)| session.subs.contains_key(id))
-                        .filter_map(|(id, (query, binding, include_deleted))| {
-                            let key = remote_key(
-                                &remote_query(query),
-                                binding,
-                                *include_deleted,
-                                RemoteReach::REMOTE,
-                            );
-                            let error = client
-                                .remote
-                                .get(&key)
-                                .and_then(|remote| remote.refused.borrow().clone())?;
-                            Some((*id, subscription_server_failure_code(&error)))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                }
-            };
             let subs: Vec<(u64, fanout::Queue, Weak<RefCell<fanout::Group>>, bool)> = inner
                 .sessions[index]
                 .subs
@@ -5496,28 +5557,11 @@ impl Db {
                     break;
                 }
             }
-            let mut release = Vec::new();
-            let mut retired = 0;
-            {
-                let session = &mut inner.sessions[index];
+            if !rejected_routes.is_empty() {
                 for (id, _) in rejected_routes {
-                    if session.subs.remove(&id).is_some() {
-                        retired += 1;
-                    }
-                    session.support.remove(&id);
-                    session.resume.remove(&id);
-                    session.first_load.remove(&id);
-                    if let Some(read) = session.relayed.remove(&id) {
-                        release.push(read);
-                    }
+                    inner.retire_subscription(index, id)?;
                 }
-            }
-            inner.fan.dropped.set(inner.fan.dropped.get() + retired);
-            if retired > 0 {
                 inner.fan.collect();
-            }
-            for (query, binding, include_deleted) in release {
-                inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
             }
         }
         Ok(())
@@ -5811,62 +5855,7 @@ impl Db {
                 session.stale.extend(evict);
             }
             SyncMessage::Unsubscribe { id } => {
-                let mut inner = self.inner.borrow_mut();
-                inner.sessions[index].support.remove(&id);
-                inner.sessions[index].first_load.remove(&id);
-                if let Some((query, binding, include_deleted)) =
-                    inner.sessions[index].relayed.remove(&id)
-                {
-                    inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
-                }
-                if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
-                    let dropped = inner.fan.dropped.clone();
-                    dropped.set(dropped.get() + 1);
-                    // Rows the result lost since the last tick were not
-                    // re-checked yet: the client may still hold them.
-                    let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
-                    if let Some(group) = group.upgrade() {
-                        let table = group.borrow().root().to_owned();
-                        for event in events {
-                            let SubscriptionEvent::Delta { removed, .. } = event else {
-                                continue;
-                            };
-                            for gone in removed {
-                                let id = gone.row_uuid.0.as_bytes().to_vec();
-                                for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
-                                    inner.sessions[index].touched.insert((
-                                        table.clone(),
-                                        gone.row_uuid,
-                                        image.key,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    // The replica keeps the rows it was shipped: held, a
-                    // policy dependency's commit still re-checks them, so a
-                    // retained copy is evicted once the client loses access.
-                    if policy.is_some()
-                        && let Some(group) = group.upgrade()
-                    {
-                        let group = group.borrow();
-                        let table = group.root().to_owned();
-                        let mut held = std::mem::take(&mut inner.sessions[index].held);
-                        for row in group.rows.iter().filter(|row| *row.table == *table) {
-                            let rid = row.id.0.as_bytes().to_vec();
-                            let seq = row.seq as i64;
-                            for image in
-                                inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?
-                            {
-                                held.entry(table.clone())
-                                    .or_default()
-                                    .entry((row.id, image.key))
-                                    .or_insert(true);
-                            }
-                        }
-                        inner.sessions[index].held = held;
-                    }
-                }
+                self.inner.borrow_mut().retire_subscription(index, id)?;
             }
             SyncMessage::Advise {
                 id,
