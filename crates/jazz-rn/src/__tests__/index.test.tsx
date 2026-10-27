@@ -179,11 +179,11 @@ it.each([undefined, false, true])(
   (supportsSnapshotCapture) => {
     const foreground = { ...foregroundFixture(), supportsSnapshotCapture };
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V2,
       execute: jest.fn(),
     };
     (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-      abiVersion: NATIVE_RELAY_ABI_V1,
+      abiVersion: NATIVE_RELAY_ABI_V2,
       openAttached: jest.fn(() => foreground),
     };
     const runtime = loadRelay(nativeRelay)
