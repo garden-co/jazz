@@ -101,6 +101,8 @@ mod session_policy_values;
 mod session_write_checks;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../sqlite_sync_ingress.rs"]
+mod sqlite_sync_ingress;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
