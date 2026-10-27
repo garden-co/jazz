@@ -205,9 +205,7 @@ fn stored(path: &Path) -> BTreeMap<String, Vec<String>> {
                 .collect::<Result<Vec<String>, _>>()
                 .unwrap()
                 .into_iter()
-                .filter(|column| {
-                    !column.starts_with(['_', '$']) && column != "id" && column != "rid"
-                })
+                .filter(|column| !column.starts_with(['_', '$']) && column != "id")
                 .collect();
             (table, columns)
         })

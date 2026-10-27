@@ -424,22 +424,20 @@ impl<'a> Ctx<'a> {
         let history = quote(&format!("{}__h", table.stored));
         // Both arms must let SQLite search by a correlated predicate (a
         // policy EXISTS's `m.band = a.band`), or every read through a cut
-        // scans the whole table (#4298). History rows have no `rid`, and its
-        // stand-in needs `rid`'s INTEGER affinity: a bare NULL has none, and
-        // arms that differ in a column's affinity are not flattened, so the
-        // predicate stays outside them. The history arm starts from the
+        // scans the whole table (#4298). Arms that differ in a column's
+        // affinity are not flattened, so both select the same columns from
+        // tables of the same shape. The history arm starts from the
         // current rows changed since the cut (`_seq` is indexed; CROSS JOIN
         // keeps that order) rather than scanning every history row for a
         // column the history table has no index on.
         let h_columns = columns
-            .replace("rid, ", "")
             .split(", ")
             .map(|c| format!("h.{c}"))
             .collect::<Vec<_>>()
             .join(", ");
         format!(
             "(SELECT {columns} FROM {name} WHERE {visible} \
-             UNION ALL SELECT CAST(NULL AS INTEGER), {h_columns} FROM {name} AS c \
+             UNION ALL SELECT {h_columns} FROM {name} AS c \
              CROSS JOIN {history} AS h ON c.id = h.id AND c._b = h._b WHERE {newer} \
              AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
              WHERE h2.id = h.id AND h2._b = h._b AND {h_visible}))"
@@ -453,7 +451,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
-        let mut columns = "rid, id, _b, _seq, _del".to_owned();
+        let mut columns = "id, _b, _seq, _del".to_owned();
         for column in table.stored() {
             columns.push_str(&format!(", {}", quote(&column.stored)));
         }
@@ -473,7 +471,7 @@ impl<'a> Ctx<'a> {
                 // branch columns are the head's, so predicates, policies and
                 // projections see one effective branch.
                 let head_cells = table.selector_cells(&view.head)?;
-                let mut inherited = format!("m.rid, m.id, {head}, m._seq, m._del");
+                let mut inherited = format!("m.id, {head}, m._seq, m._del");
                 for column in table.stored() {
                     match head_cells.get(&column.name) {
                         Some(value) => {
@@ -3384,7 +3382,7 @@ fn is_id(operand: &Operand) -> bool {
 }
 
 /// A row-id predicate on an unbranched table, with the branch key every
-/// such row has (`''`): together they are the whole `UNIQUE (id, _b)` key,
+/// such row has (`''`): together they are the whole `PRIMARY KEY (id, _b)`,
 /// so SQLite seeks the ids instead of preferring a declared index that
 /// also covers the order or another filter.
 fn whole_key(table: &Table, alias: &str, sql: String) -> String {

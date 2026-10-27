@@ -607,12 +607,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
             .map_err(storage)?;
         let columns = columns
             .into_iter()
-            .filter(|column| {
-                !matches!(
-                    column.as_str(),
-                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c"
-                )
-            })
+            .filter(|column| !matches!(column.as_str(), "id" | "_b" | "_seq" | "_del" | "_c"))
             .collect();
         tables.insert(name.clone(), Table::stored_only(name, columns));
     }

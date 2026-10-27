@@ -2342,7 +2342,6 @@ impl Inner {
                 };
                 for (i, name) in names.iter().enumerate() {
                     match name.as_str() {
-                        "rid" => {}
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
                         "_b" => image.key = r.get(i)?,
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,

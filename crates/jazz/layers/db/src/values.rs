@@ -910,15 +910,15 @@ impl Table {
         let name = quote(&table.stored);
         let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
-        // Rows are unique per (id, branch); branch views select by `_b`
+        // Rows are keyed by (id, branch), clustered without a rowid; branch views select by `_b`
         // first, so every index leads with it. `_c` is 1 when the version's
         // commit wrote content (not only a delete or a restore): history
         // reads list those versions.
         sql.push_str(&format!(
-            "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
+            "CREATE TABLE {name} (id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
              _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1{columns}, \
-             UNIQUE (id, _b));\n\
+             PRIMARY KEY (id, _b)) WITHOUT ROWID;\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
              _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1{columns}, \
