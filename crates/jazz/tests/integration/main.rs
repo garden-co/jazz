@@ -17,6 +17,8 @@ mod array_columns;
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]
 mod binding_host;
+#[path = "../branch_column_evolution.rs"]
+mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
 #[path = "../claims_change.rs"]

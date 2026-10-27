@@ -1865,6 +1865,14 @@ impl Db {
                 .iter()
                 .map(|(_, admitted)| inner.named(admitted))
                 .collect();
+            // Before a lens's defaults fill in: a branch column's default
+            // is the schema's own, so a replica that never saw the lens
+            // keys rows the same way.
+            for table in target.tables.values() {
+                if let Some(current) = inner.owner.by_stored(&table.stored) {
+                    check_branch_evolution(current, table, make_current)?;
+                }
+            }
             for table in target.tables.values_mut() {
                 let stored = inner.physical.tables.get(&table.stored);
                 for column in &mut table.columns {
@@ -1936,6 +1944,60 @@ impl Db {
         inner.reset_everything();
         Ok(())
     }
+}
+
+/// How a schema version may change a table's branch columns (SPEC 4,
+/// INV-BVIEW-19): it may add one only as a new column with a default,
+/// which rows written before it and selectors of versions without it read
+/// as (see [`Table::row_branch_key`]); it may not change a branch
+/// column's default, or turn an existing column into a branch column; and
+/// a version made current may not drop one (an older version admitted
+/// beside the current one names it by its default).
+fn check_branch_evolution(current: &Table, next: &Table, make_current: bool) -> Result<(), Error> {
+    let branch_columns = |table: &Table| -> BTreeSet<String> {
+        table
+            .branch_by
+            .iter()
+            .map(|column| table.stored_name(column).to_owned())
+            .collect()
+    };
+    let (before, after) = (branch_columns(current), branch_columns(next));
+    let by_stored = |table: &Table, stored: &str| -> Option<crate::values::Column> {
+        table.columns.iter().find(|c| c.stored == stored).cloned()
+    };
+    for stored in after.difference(&before) {
+        let column = by_stored(next, stored).expect("branch column");
+        if by_stored(current, stored).is_some() {
+            return Err(unsupported(format!(
+                "making the existing column {}.{} a branch column",
+                next.name, column.name
+            )));
+        }
+        if column.default.is_none() {
+            return Err(unsupported(format!(
+                "adding branch column {}.{} without a default",
+                next.name, column.name
+            )));
+        }
+    }
+    for stored in before.intersection(&after) {
+        let (was, now) = (by_stored(current, stored), by_stored(next, stored));
+        if was.map(|c| c.default) != now.as_ref().map(|c| c.default.clone()) {
+            return Err(unsupported(format!(
+                "changing the default of branch column {}.{}",
+                next.name,
+                now.map_or_else(|| stored.clone(), |c| c.name)
+            )));
+        }
+    }
+    if make_current && let Some(stored) = before.difference(&after).next() {
+        let name = by_stored(current, stored).map_or_else(|| stored.clone(), |c| c.name);
+        return Err(unsupported(format!(
+            "removing branch column {}.{name}",
+            next.name
+        )));
+    }
+    Ok(())
 }
 
 /// Whether a policy reads rows besides the one it decides on.
@@ -4186,7 +4248,7 @@ fn policy_is_monotone(
             .is_none_or(|policy| policy_is_monotone(schema, target, policy, seen))
     };
     match policy {
-        PolicyExpr::Not(inner) => !policy_reads_rows(inner),
+        PolicyExpr::Not(inner) => !policy_reads_other_rows(inner),
         PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts
             .iter()
             .all(|part| policy_is_monotone(schema, table, part, seen)),
@@ -4215,19 +4277,6 @@ fn policy_is_monotone(
             ..
         } => inherited(schema, schema.tables.get(source_table), *operation, seen),
         _ => true,
-    }
-}
-
-/// Whether `policy` reads rows other than the one under check.
-fn policy_reads_rows(policy: &PolicyExpr) -> bool {
-    match policy {
-        PolicyExpr::Not(inner) => policy_reads_rows(inner),
-        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(policy_reads_rows),
-        PolicyExpr::Exists { .. }
-        | PolicyExpr::ExistsRel { .. }
-        | PolicyExpr::Inherits { .. }
-        | PolicyExpr::InheritsReferencing { .. } => true,
-        _ => false,
     }
 }
 
