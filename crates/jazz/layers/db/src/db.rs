@@ -49,10 +49,11 @@ use crate::values::{
     in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, NON_DURABLE_BASE,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, Upstream, WireError, WireKind, WireOp, WireTarget, WireTransport,
-    WireTransportAdapter, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    BuiltOn, Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
+    NON_DURABLE_BASE, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
+    SyncMessage, Transport, TransportError, Upstream, WireBase, WireError, WireKind, WireOp,
+    WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
+    encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -444,6 +445,9 @@ struct Inner {
     upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
+    /// Each stored table's column positions, the codes authored-column
+    /// bitmasks use (SPEC 4 §4.6), read on first use.
+    column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
     /// Sessions the server ended for what they sent, with why, until the
     /// host takes them ([`Db::take_closed_subscribers`]).
     closed: Vec<(sync::SubscriberId, Error)>,
@@ -608,10 +612,8 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         let columns = columns
             .into_iter()
             .filter(|column| {
-                !matches!(
-                    column.as_str(),
-                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c"
-                )
+                !jazz_model::model::public_schema_convert::RESERVED_ROW_COLUMNS
+                    .contains(&column.as_str())
             })
             .collect();
         tables.insert(name.clone(), Table::stored_only(name, columns));
@@ -1106,6 +1108,7 @@ impl Db {
                 authority: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
+                column_codes: RefCell::default(),
                 closed: Vec::new(),
                 accepted: 0,
                 since_tick: Vec::new(),
@@ -1624,7 +1627,9 @@ impl Db {
             })?;
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
-            if let Err(error) = self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable) {
+            if let Err(error) =
+                self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None)
+            {
                 let mut inner = self.inner();
                 inner.seq = prior;
                 inner.changed.borrow_mut().truncate(mark);
@@ -1755,7 +1760,7 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable) {
+        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -3525,8 +3530,8 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del, _c{columns}) SELECT id, _b, _seq, _del, _c{columns} \
-             FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _cols{columns}) \
+             SELECT id, _b, _seq, _del, _c, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored)
         );
@@ -3602,8 +3607,11 @@ impl Inner {
     ) -> Result<(), Error> {
         // Right-hand sides read the row before this update: `_seq` is still
         // the previous version's.
+        // What a new version was built on is the authority's to write
+        // (SPEC 4 §4.6).
         let mut sets = vec![
             "_seq = ?1".to_owned(),
+            "_base = NULL, _cols = NULL".to_owned(),
             format!(
                 "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
                 content = content as u8
@@ -5256,9 +5264,12 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) =
-            self.record_upload(ops.iter().map(|(_, op)| op.clone()).collect(), seq, kind)
-        {
+        if let Err(error) = self.record_upload(
+            ops.iter().map(|(_, op)| op.clone()).collect(),
+            seq,
+            kind,
+            None,
+        ) {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);
