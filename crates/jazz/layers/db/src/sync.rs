@@ -2706,7 +2706,7 @@ impl Inner {
         let mut batch = Vec::new();
         let mut size = 0;
         for value in &values {
-            for (request, bytes) in crate::large::unpushed(&self.conn, value)? {
+            for (request, bytes) in crate::large::unpushed(&self.conn, &self.chunks, value)? {
                 locators.push(request.locator);
                 size += bytes.len();
                 batch.push(WireChunk {
@@ -3961,6 +3961,10 @@ impl Db {
     /// again.
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
+        // Offloaded nodes the next tick fetches from the chunk store.
+        if inner.chunks.has_fetch() {
+            return true;
+        }
         inner.client.as_ref().is_some_and(|client| {
             let unavailable = |request: &ChunkRequest| client.unavailable.contains(request);
             client.transport.is_some()
@@ -4905,8 +4909,19 @@ impl Db {
                 _ => None,
             };
             let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
+            // A message served while the chunk store fetches the nodes it
+            // needs is served again once they arrive.
+            let again = (fetch.is_none() && self.inner.borrow().chunks.store().is_some())
+                .then(|| message.clone());
             match (self.serve(index, message), read) {
                 (Ok(()), _) => {}
+                (Err(error), _)
+                    if crate::large::is_missing(&error)
+                        && again.is_some()
+                        && self.inner.borrow().chunks.has_fetch() =>
+                {
+                    held.push_back(again.expect("a copy"));
+                }
                 // A relay's read whose large values it is still fetching
                 // from its upstream is served again once they arrive,
                 // from its store: the upstream is not asked again.
@@ -6019,6 +6034,15 @@ impl Db {
                         }) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
+                        // Its large values need nodes the chunk store is
+                        // still fetching: it is applied again once they
+                        // arrive, not refused.
+                        Err((error, _))
+                            if crate::large::is_missing(&error)
+                                && self.inner.borrow().chunks.has_fetch() =>
+                        {
+                            return Err(error);
+                        }
                         Err((error, rows)) => {
                             let result = Err(wire_error(&error));
                             let inner = self.inner.borrow();
@@ -6101,9 +6125,17 @@ impl Db {
                 let mut nodes = Vec::new();
                 let mut missing = Vec::new();
                 let mut size = 0;
+                let mut fetching = false;
                 for request in requests {
-                    match crate::large::node(&inner.conn, &request.locator)? {
-                        Some((hash, bytes)) if hash.as_slice() == request.hash => {
+                    // A node only in an asynchronous chunk store fails the
+                    // whole batch as missing before anything is sent: it
+                    // is served again once its nodes are fetched.
+                    let stored =
+                        crate::large::stored_bytes(&inner.conn, &inner.chunks, &request.request());
+                    match stored {
+                        Err(error) if crate::large::is_missing(&error) => fetching = true,
+                        Err(error) => return Err(error),
+                        Ok(Some(bytes)) => {
                             size += bytes.len();
                             nodes.push(WireChunk {
                                 locator: request.locator,
@@ -6118,8 +6150,11 @@ impl Db {
                                 size = 0;
                             }
                         }
-                        _ => missing.push(request),
+                        Ok(None) => missing.push(request),
                     }
+                }
+                if fetching {
+                    return Err(crate::large::missing());
                 }
                 replies.push(SyncMessage::Chunks { nodes, missing });
                 inner.sessions[index].outbox.extend(replies);

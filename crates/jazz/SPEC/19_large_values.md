@@ -41,6 +41,8 @@ Invariant digest:
   without turning chunks into canonical Jazz facts.
 - `INV-CONTENT-8`: collection cannot remove chunks reachable from retained
   readable history or live staged/publication leases.
+- `INV-CONTENT-9`: a chunk store holds only node bytes; metadata commits with
+  the rows, and bytes move or go only after the commit that allows it.
 
 ## 19.1 Cross-layer boundary
 
@@ -349,37 +351,68 @@ inside their nullable wrapper. Partial reads and edits preserve that wrapper;
 serializable and mergeable transactions share the same lowering seam before
 version publication.
 
-## 19.5 Groove storage contract
+## 19.5 Chunk storage contract
 
-Groove owns a policy-blind asynchronous chunk KV dependency. Jazz neither
-implements nor wraps it. At minimum the byte plane supports exact immutable
-operations:
+The SQLite engine keeps every node's metadata in the store's own file: the
+`_jazz_lv_node` row (locator, object hash), child edges, per-root reference
+counts kept by triggers, pushed-node receipts, upload leases and the
+reclamation queue. They commit in the same SQLite transaction as the rows that
+reference them, so one transaction owner decides what exists.
 
-```text
-put_if_absent(locator, expected_hash, bytes)
-get(locator)
-delete(locator, expected_hash)
-```
+The node bytes have one of two homes:
 
-Groove owns locator allocation, integrity verification, staging, refcounts and
-deletion scheduling. Jazz owns ingress/expiry policy, the decision that grants
-descriptor roots, and public error shaping. The storage implementation receives
-no Jazz policy context and may privately deduplicate by content hash.
+- **The SQLite file** (the default): `_jazz_lv_node.bytes`. Nothing else is
+  involved, and the file is self-contained.
+- **A chunk store** (`jazz::chunk_store::ChunkStore`, given with
+  `DbConfig::with_chunk_store`): an immutable, policy-blind byte KV keyed by
+  locator, with asynchronous operations
 
-Crash-consistent metadata—child edges, durable counts, staging generations and
-the reclamation queue—must commit with Groove physical-record mutations. An
-implementation may keep this metadata in Groove's ordered transactional store
-while composing a simpler async byte KV for large blobs; exposing two unrelated
-transaction owners to Jazz is forbidden.
+  ```text
+  put(locator, hash, bytes)   idempotent: a node's bytes never change
+  get(locator, hash) -> bytes | absent
+  delete(locator, hash)       deleting an absent key succeeds
+  get_now(...)                optional: answer without waiting
+  ```
 
-Deployments may implement the backend with memory, filesystem, RocksDB, OPFS,
-S3, R2, another blob service, or a composition of local cache and remote store.
-Backend choice and completion timing do not alter schema, query, authorization,
-history, conflict, or synchronization semantics.
+  A directory (`FileChunkStore`) answers at once; object stores reached over
+  the network (S3, R2 from a Durable Object) answer only asynchronously.
+
+With a chunk store, a new node is still written to SQLite with its row. A tick
+moves settled leaves: leaves no upload lease, receipt or unpushed mark holds.
+Branch nodes stay in the file. Moving a leaf is three steps, each crash-safe:
+
+1. Mark it as being put, in its own committed SQLite transaction.
+2. Put its bytes to the chunk store.
+3. Drop its bytes from SQLite (an empty blob, which no encoded node is) and
+   clear the mark, unless it was reclaimed meanwhile.
+
+A crash after step 1 puts the leaf again. Reclaiming a leaf whose bytes are in
+the chunk store, or whose put may be in flight, queues its deletion there in
+the reclamation's transaction. A tick deletes queued leaves only after that
+commit, and after any put the same tick started. A leaf stored again before its
+deletion ran (a replica fetching it back, a client pushing it again) cancels
+the deletion and is moved again later. A store in memory never moves leaves.
+
+Every byte a chunk store returns is verified against the hash its parent or
+descriptor commits to. A leaf the chunk store does not hold is data loss and
+fails the read with a storage error. A read of a leaf only an asynchronous chunk
+store holds is demand, as a replica's reads of chunks its upstream holds are:
+the read fails as missing chunks, the leaf is fetched, and the read runs again.
+One-shot reads and writes on `Db` await the fetch themselves. Subscriptions are
+refreshed after the tick that fetched their leaves. A server holds a session's
+messages that need such leaves (chunk requests, commits, reads) and serves them
+in order once they arrive. A commit is never refused because its leaves were
+still being fetched.
+
+A file that moved leaves to a chunk store refuses to open without one. A file
+first opened with a chunk store queues every leaf it already holds.
 
 `INV-CONTENT-6`: no chunk storage implementation may evaluate Jazz policy or
-understand Jazz schemas/queries. Replacing it MUST preserve exact immutable KV,
-durable metadata and availability semantics.
+understand Jazz schemas/queries.
+
+`INV-CONTENT-9`: a chunk store holds only bytes. Metadata commits with rows. A
+leaf leaves the file only after its put succeeded, and leaves the chunk store
+only after its reclamation committed.
 
 ## 19.6 Sync, views, and completeness
 

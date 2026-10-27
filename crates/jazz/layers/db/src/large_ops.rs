@@ -363,7 +363,11 @@ impl Db {
         column: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
-        self.inner().read_range(table, row, column, range, false)
+        self.fetching(|| {
+            self.inner()
+                .read_range(table, row, column, range.clone(), false)
+        })
+        .await
     }
 
     /// A UTF-16 code-unit range of a string cell. A boundary inside a
@@ -375,13 +379,29 @@ impl Db {
         column: &str,
         range: std::ops::Range<u64>,
     ) -> Result<String, Error> {
-        let bytes = self.inner().read_range(table, row, column, range, true)?;
+        let bytes = self
+            .fetching(|| {
+                self.inner()
+                    .read_range(table, row, column, range.clone(), true)
+            })
+            .await?;
         String::from_utf8(bytes).map_err(|_| query("UTF-16 range splits a surrogate pair"))
     }
 
     /// The value at a JSON pointer of a JSON cell, reading the document
     /// only as far as the pointer needs when it starts with an array index.
     pub async fn read_json_pointer(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        self.fetching(|| self.json_pointer(table, row, column, pointer))
+            .await
+    }
+
+    fn json_pointer(
         &self,
         table: &str,
         row: RowUuid,
@@ -461,7 +481,10 @@ impl Db {
         bytes: Vec<u8>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        self.edit_cell(table, row, column, Edit::Append(bytes), opts)
+        self.fetching_with((Edit::Append(bytes), opts), |(edit, opts)| {
+            self.edit_cell(table, row, column, edit, opts)
+        })
+        .await
     }
 
     /// Replace `splice.delete` bytes at byte offset `splice.at` of a cell
@@ -479,7 +502,10 @@ impl Db {
             delete: splice.delete,
             insert: splice.insert,
         };
-        self.edit_cell(table, row, column, edit, opts)
+        self.fetching_with((edit, opts), |(edit, opts)| {
+            self.edit_cell(table, row, column, edit, opts)
+        })
+        .await
     }
 
     fn edit_cell(
@@ -492,10 +518,18 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let value = {
             let mut inner = self.inner();
-            let (col, cell) =
-                inner.physical_cell(table, row, column, identity_of(opts.identity))?;
-            let value = inner.edited(table, &col, cell, edit)?;
-            nullable(&col, value)
+            let edited = inner
+                .physical_cell(table, row, column, identity_of(opts.identity))
+                .and_then(|(col, cell)| Ok(nullable(&col, inner.edited(table, &col, cell, edit)?)));
+            match edited {
+                Ok(value) => value,
+                Err(error) => {
+                    // Nothing derived survives a failed edit (which may be
+                    // retried once its chunks are fetched).
+                    inner.clear_derived();
+                    return Err(error);
+                }
+            }
         };
         let cells = BTreeMap::from([(column.to_owned(), value)]);
         let result = self.write_op(
@@ -509,6 +543,20 @@ impl Db {
     /// Apply partial large-value updates together with an ordinary patch,
     /// as one row update. A failing update leaves the row unchanged.
     pub async fn update_with_large_value_mutations(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: BTreeMap<String, Value>,
+        mutations: Vec<LargeValueUpdate>,
+        opts: UpdateOptions,
+    ) -> Result<WriteHandle, Error> {
+        self.fetching_with((patch, mutations, opts), |(patch, mutations, opts)| {
+            self.update_with_mutations(table, row, patch, mutations, opts)
+        })
+        .await
+    }
+
+    fn update_with_mutations(
         &self,
         table: &str,
         row: RowUuid,

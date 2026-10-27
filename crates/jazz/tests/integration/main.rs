@@ -49,6 +49,8 @@ mod history_reads;
 mod include_live;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
+#[path = "../large_value_chunk_store.rs"]
+mod large_value_chunk_store;
 #[path = "../large_value_read_scaling.rs"]
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]

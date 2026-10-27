@@ -78,6 +78,7 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: None,
+        chunk_store: None,
     }))
     .expect("alice opens a database");
 

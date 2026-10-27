@@ -457,6 +457,12 @@ struct Inner {
 /// Large-value nodes one tick may reclaim.
 const RECLAIM_NODES_PER_TICK: usize = 256;
 
+/// Leaves one tick may move to, or delete from, the chunk store.
+const CHUNK_STORE_NODES_PER_TICK: usize = 256;
+
+/// Chunk-store operations in flight at once.
+const CHUNK_STORE_CONCURRENCY: usize = 16;
+
 /// File store settings.
 #[derive(Clone, Copy, Debug)]
 pub struct FileOptions {
@@ -622,7 +628,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
+pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
     let mut start = 0;
     for (end, _) in script.match_indices(';') {
         let statement = &script[start..=end];
@@ -1017,11 +1023,12 @@ impl Db {
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
-        let chunks = crate::large::Chunks::install(path)?;
+        let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         conn.execute_batch(crate::large::DDL).map_err(storage)?;
+        crate::large::open_offload(&conn, &chunks)?;
         // Nodes a transaction writes stay cached until it ends: until then
         // the reader connection cannot see them.
         let committed = chunks.clone();
@@ -1206,10 +1213,166 @@ impl Db {
 
     pub async fn tick(&self) -> Result<(), Error> {
         self.sync_tick()?;
-        let mut inner = self.inner();
-        inner.fan.collect();
-        inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
-        Ok(())
+        {
+            let mut inner = self.inner();
+            inner.fan.collect();
+            inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+        }
+        self.pump_chunk_store().await
+    }
+
+    /// Fetch the offloaded nodes reads wait on, move settled leaves to the
+    /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]).
+    /// A failed operation is retried next tick; the first failure is
+    /// returned once the rest ran.
+    async fn pump_chunk_store(&self) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        let Some(store) = chunks.store().cloned() else {
+            return Ok(());
+        };
+        let Some(wanted) = chunks.begin_fetch() else {
+            return Ok(());
+        };
+        let any = !wanted.is_empty();
+        let mut fetched = self.fetch_from(&chunks, &*store, wanted).await;
+        if any && fetched.is_ok() {
+            // Messages held for those nodes are served now, not a tick later.
+            fetched = self.sync_tick();
+        }
+        let moved = match chunks.offload_store() {
+            Some(_) => self.offload_to(&*store).await,
+            None => Ok(()),
+        };
+        chunks.end_fetch();
+        fetched.and(moved)
+    }
+
+    /// Install what the chunk store holds for `wanted`; reads waiting on
+    /// those nodes run again.
+    async fn fetch_from(
+        &self,
+        chunks: &crate::large::Chunks,
+        store: &dyn crate::chunk_store::ChunkStore,
+        wanted: Vec<jazz_types::large_values::chunks::ChunkRequest>,
+    ) -> Result<(), Error> {
+        use futures::StreamExt;
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let keys: Vec<_> = wanted
+            .iter()
+            .map(crate::chunk_store::NodeKey::from)
+            .collect();
+        let answers: Vec<_> = futures::stream::iter(keys.iter().map(|key| store.get(key)))
+            .buffered(CHUNK_STORE_CONCURRENCY)
+            .collect()
+            .await;
+        let mut first = None;
+        for (request, answer) in wanted.iter().zip(answers) {
+            match answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
+                Ok(()) => {}
+                Err(error) => {
+                    // Asked again by the next read that needs it.
+                    first.get_or_insert(error);
+                }
+            }
+        }
+        self.inner().retry_awaiting();
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Move a batch of settled leaves to the chunk store, then delete a
+    /// batch of reclaimed ones from it. Puts start only between SQLite
+    /// transactions, so the mark that a put may have landed is durable
+    /// before it does.
+    async fn offload_to(&self, store: &dyn crate::chunk_store::ChunkStore) -> Result<(), Error> {
+        use futures::StreamExt;
+        let mut first = None;
+        let batch = {
+            let inner = self.inner();
+            if inner.conn.is_autocommit() {
+                crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?
+            } else {
+                Vec::new()
+            }
+        };
+        if !batch.is_empty() {
+            let puts: Vec<_> =
+                futures::stream::iter(batch.iter().map(|(key, bytes)| store.put(key, bytes)))
+                    .buffered(CHUNK_STORE_CONCURRENCY)
+                    .collect()
+                    .await;
+            let inner = self.inner();
+            in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
+                for ((key, _), put) in batch.iter().zip(puts) {
+                    match put {
+                        Ok(()) => crate::large::offloaded(&inner.conn, key)?,
+                        Err(error) => {
+                            first.get_or_insert(error);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        let deletes =
+            crate::large::pending_deletes(&self.inner().conn, CHUNK_STORE_NODES_PER_TICK)?;
+        if !deletes.is_empty() {
+            let done: Vec<_> = futures::stream::iter(deletes.iter().map(|key| store.delete(key)))
+                .buffered(CHUNK_STORE_CONCURRENCY)
+                .collect()
+                .await;
+            let inner = self.inner();
+            in_savepoint(&inner.conn, "jazz_lv_deleted", || {
+                for (key, done) in deletes.iter().zip(done) {
+                    match done {
+                        Ok(()) => crate::large::deleted(&inner.conn, key)?,
+                        Err(error) => {
+                            first.get_or_insert(error);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// [`Self::fetching`] over a fresh copy of `arg` per attempt; without a
+    /// chunk store `arg` is not copied.
+    async fn fetching_with<A: Clone, T>(
+        &self,
+        arg: A,
+        attempt: impl Fn(A) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if self.inner().chunks.store().is_none() {
+            return attempt(arg);
+        }
+        self.fetching(|| attempt(arg.clone())).await
+    }
+
+    /// Run `attempt` until it no longer waits on offloaded nodes that only
+    /// an asynchronous chunk store can answer, fetching them in between.
+    /// Without such a store (or while a tick's fetch runs) a wait is the
+    /// usual missing-chunks error.
+    async fn fetching<T>(&self, mut attempt: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+        loop {
+            match attempt() {
+                Err(error) if crate::large::is_missing(&error) => {
+                    let chunks = self.inner().chunks.clone();
+                    let Some(store) = chunks.store().cloned().filter(|_| chunks.has_fetch()) else {
+                        return Err(error);
+                    };
+                    let Some(wanted) = chunks.begin_fetch() else {
+                        return Err(error);
+                    };
+                    let fetched = self.fetch_from(&chunks, &*store, wanted).await;
+                    chunks.end_fetch();
+                    fetched?;
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
@@ -1313,8 +1476,11 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let inner = self.inner();
-        inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+        self.fetching(|| {
+            let inner = self.inner();
+            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+        })
+        .await
     }
 
     /// Root rows with each array relation nested in a cell under its
@@ -1543,7 +1709,8 @@ impl Db {
             opts.row_id = Some(self.inner().ids.next_row_id());
         }
         let who = who(opts.identity);
-        self.write_op(StagedOp::Insert(table.to_owned(), cells, opts), who)
+        let op = StagedOp::Insert(table.to_owned(), cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn update(
@@ -1554,7 +1721,8 @@ impl Db {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Update(table.to_owned(), row, cells, opts), who)
+        let op = StagedOp::Update(table.to_owned(), row, cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn upsert(
@@ -1565,7 +1733,8 @@ impl Db {
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Upsert(table.to_owned(), row, cells, opts), who)
+        let op = StagedOp::Upsert(table.to_owned(), row, cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn delete(
@@ -1575,7 +1744,8 @@ impl Db {
         opts: DeleteOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Delete(table.to_owned(), row, opts), who)
+        let op = StagedOp::Delete(table.to_owned(), row, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn restore(
@@ -1586,7 +1756,8 @@ impl Db {
         opts: RestoreOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Restore(table.to_owned(), row, content, opts), who)
+        let op = StagedOp::Restore(table.to_owned(), row, content, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     /// One write. On a client, a local (unauthenticated) write is also an
@@ -5257,6 +5428,14 @@ impl Db {
 }
 
 impl TxRef<'_> {
+    /// Stage one write, fetching what an asynchronous chunk store holds for
+    /// it first if it needs that.
+    async fn stage(&self, op: StagedOp) -> Result<(), Error> {
+        self.db
+            .fetching_with(op, |op| self.db.stage(self.id, op))
+            .await
+    }
+
     pub async fn insert(
         &self,
         table: &str,
@@ -5269,8 +5448,8 @@ impl TxRef<'_> {
             None => self.db.inner.staging().ids.next_row_id(),
         };
         opts.row_id = Some(row);
-        self.db
-            .stage(self.id, StagedOp::Insert(table.to_owned(), cells, opts))?;
+        self.stage(StagedOp::Insert(table.to_owned(), cells, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -5281,10 +5460,8 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Update(table.to_owned(), row, cells, opts),
-        )?;
+        self.stage(StagedOp::Update(table.to_owned(), row, cells, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -5295,10 +5472,8 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Upsert(table.to_owned(), row, cells, opts),
-        )?;
+        self.stage(StagedOp::Upsert(table.to_owned(), row, cells, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -5308,8 +5483,8 @@ impl TxRef<'_> {
         row: RowUuid,
         opts: DeleteOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db
-            .stage(self.id, StagedOp::Delete(table.to_owned(), row, opts))?;
+        self.stage(StagedOp::Delete(table.to_owned(), row, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -5321,10 +5496,8 @@ impl TxRef<'_> {
         content: Option<BTreeMap<String, Value>>,
         opts: RestoreOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Restore(table.to_owned(), row, content, opts),
-        )?;
+        self.stage(StagedOp::Restore(table.to_owned(), row, content, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 

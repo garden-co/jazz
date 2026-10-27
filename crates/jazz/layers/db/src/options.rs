@@ -26,6 +26,9 @@ pub struct DbConfig {
     pub identity: DbIdentity,
     /// Row id source used by inserts. `None` selects the production source.
     pub id_source: Option<Box<dyn RowIdSource>>,
+    /// Where settled large-value leaf bytes live. `None` keeps them in the
+    /// SQLite file ([`crate::chunk_store`]).
+    pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
 }
 
 impl DbConfig {
@@ -35,12 +38,23 @@ impl DbConfig {
             schema,
             identity,
             id_source: None,
+            chunk_store: None,
         }
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
     pub fn with_id_source(mut self, id_source: impl RowIdSource + 'static) -> Self {
         self.id_source = Some(Box::new(id_source));
+        self
+    }
+
+    /// Keep settled large-value leaf bytes in `store` instead of the SQLite
+    /// file. A store that once had one must always be opened with it.
+    pub fn with_chunk_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::chunk_store::ChunkStore>,
+    ) -> Self {
+        self.chunk_store = Some(store);
         self
     }
 }
