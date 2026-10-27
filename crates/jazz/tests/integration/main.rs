@@ -79,6 +79,8 @@ mod policy_activation;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../recheck_queries.rs"]
+mod recheck_queries;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_queries.rs"]
