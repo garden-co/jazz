@@ -208,7 +208,8 @@ pub enum LinkPhase {
     /// The server refused the credential; nothing happens until a new one
     /// arrives or the application reconnects explicitly.
     AwaitingCredential(AuthFailureReason),
-    /// A fatal failure; nothing happens until an explicit reconnect.
+    /// A fatal failure; nothing happens until an explicit reconnect. The one
+    /// phase in which waits for the server should fail rather than wait.
     Stopped,
 }
 
@@ -220,8 +221,10 @@ pub struct LinkStatus {
     pub reason: Option<String>,
     /// Network failures since the link was last admitted.
     pub consecutive_failures: u32,
-    /// The server has been unreachable long enough that reads which require
-    /// it should fail instead of waiting.
+    /// The server has been unreachable for the reporting window. This is a
+    /// report, not a verdict: pending waits for the server stay pending
+    /// across an outage and its reconnects (#3923); only a link that stops
+    /// for good ([`LinkPhase::Stopped`]) fails them.
     pub outage_published: bool,
 }
 
