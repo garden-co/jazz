@@ -131,6 +131,18 @@ const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// such as expiring staged large-value chunks.
 const IDLE_TICK: Duration = Duration::from_secs(1);
 
+/// How often an idle store looks for reads the reader pool finished.
+const POOL_POLL: Duration = Duration::from_micros(500);
+
+/// Read-only connections beside each file store's writer
+/// (`JAZZ_READER_POOL`, a prototype knob; 0 turns the pool off).
+fn reader_pool_size() -> usize {
+    std::env::var("JAZZ_READER_POOL")
+        .ok()
+        .and_then(|readers| readers.parse().ok())
+        .unwrap_or(2)
+}
+
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
 
@@ -557,8 +569,15 @@ impl StoreLoop {
                     Err(std_mpsc::TryRecvError::Empty) => None,
                     Err(std_mpsc::TryRecvError::Disconnected) => break,
                 }
-            } else if self.owner().is_some() {
-                match self.work.recv_timeout(IDLE_TICK) {
+            } else if let Some(owner) = self.owner() {
+                // Reads on the reader pool are finished by a tick: look for
+                // their rows often while any run.
+                let wait = if owner.db.pool_reads_pending() {
+                    POOL_POLL
+                } else {
+                    IDLE_TICK
+                };
+                match self.work.recv_timeout(wait) {
                     Ok(next) => Some(next),
                     Err(std_mpsc::RecvTimeoutError::Timeout) => None,
                     Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
@@ -691,6 +710,14 @@ impl StoreLoop {
         });
         match opened {
             Ok(owner) => {
+                // A prototype: remote reads too heavy for the writer run on
+                // read-only connections to the WAL file beside it.
+                if let Source::File(path) = &self.source
+                    && reader_pool_size() > 0
+                    && let Err(error) = owner.db.attach_reader_pool(path, reader_pool_size())
+                {
+                    tracing::warn!(%error, "server store reader pool unavailable");
+                }
                 self.state = State::Running(owner);
                 self.started = Some(runtime);
                 // A runtime is serving again: the server is healthy.

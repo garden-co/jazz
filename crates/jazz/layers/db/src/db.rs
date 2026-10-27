@@ -2,7 +2,7 @@
 
 use crate::values::CachedRow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
@@ -456,6 +456,18 @@ struct Inner {
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
+    /// Read-only connections for reads too heavy for this one (a
+    /// prototype: one-shot remote reads only), with the writer's
+    /// statement budget.
+    pool: Option<(
+        Arc<crate::reader_pool::ReaderPool>,
+        crate::reader_pool::Budget,
+    )>,
+    /// Compiled reads that outran the writer's slice: they go straight
+    /// to the pool.
+    heavy: HashSet<String>,
+    /// Remote reads running on the pool, finished on a later tick.
+    pool_reads: Vec<sync::PoolRead>,
 }
 
 /// Large-value nodes one tick may reclaim.
@@ -1100,6 +1112,9 @@ impl Db {
                 since_tick: Vec::new(),
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
+                pool: None,
+                heavy: HashSet::new(),
+                pool_reads: Vec::new(),
             })),
         };
         {
@@ -1191,6 +1206,25 @@ impl Db {
         let mut inner = self.inner();
         inner.claims.insert(identity, claims);
         inner.refresh_identity(identity);
+    }
+
+    /// Run remote reads that outrun a slice of `slice_steps` SQLite
+    /// instructions on this store on `readers` read-only connections to
+    /// its WAL file at `path` instead (a prototype).
+    #[doc(hidden)]
+    pub fn attach_reader_pool(&self, path: &std::path::Path, readers: usize) -> Result<(), Error> {
+        let mut inner = self.inner();
+        let pool = crate::reader_pool::ReaderPool::open(path, readers, Arc::clone(&inner.chunks))?;
+        let budget = crate::reader_pool::Budget::install(&inner.conn)?;
+        inner.pool = Some((Arc::new(pool), budget));
+        Ok(())
+    }
+
+    /// Remote reads running on the reader pool.
+    #[doc(hidden)]
+    pub fn pool_reads_pending(&self) -> bool {
+        let inner = self.inner();
+        !inner.pool_reads.is_empty() || inner.fan.pooled()
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
@@ -2330,7 +2364,21 @@ impl Inner {
         compiled: &Compiled,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
+        execute_rows(&self.conn, &self.chunks, sql, compiled, table)
+    }
+}
+
+/// Run a compiled read's statement on `conn` (the store's own or a
+/// reader's) and decode its rows.
+pub(crate) fn execute_rows(
+    conn: &Connection,
+    chunks: &crate::large::Chunks,
+    sql: &str,
+    compiled: &Compiled,
+    table: &str,
+) -> Result<Vec<CurrentRow>, Error> {
+    {
+        let mut statement = conn.prepare_cached(sql).map_err(storage)?;
         let names: Arc<str> = Arc::from(table);
         let types: Arc<[ValueType]> = compiled
             .projection
@@ -2349,7 +2397,7 @@ impl Inner {
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
                 let key = match row.get_ref(0).map_err(storage)? {
-                    ValueRef::Text(cell) => format!("{:?}", self.chunks.materialize(cell)?),
+                    ValueRef::Text(cell) => format!("{:?}", chunks.materialize(cell)?),
                     cell => format!("{:?}", Sql::from(cell)),
                 };
                 blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
@@ -2412,7 +2460,7 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
-                    match from_sql(ty, cell, &self.chunks) {
+                    match from_sql(ty, cell, chunks) {
                         Err(error) if crate::large::is_missing(&error) => {
                             blocked = true;
                             Ok((name.clone(), None))
@@ -2441,7 +2489,9 @@ impl Inner {
         }
         Ok(out)
     }
+}
 
+impl Inner {
     /// Root rows with each array relation nested in a cell under its
     /// column name ([`ResultNode::into_nested_row`]), read as `identity`.
     pub(crate) fn nest_relations(

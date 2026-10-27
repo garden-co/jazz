@@ -82,6 +82,11 @@ pub(super) struct Group {
     awaiting: bool,
     /// Whether the opening was published.
     opened: bool,
+    /// A run on the reader pool, finished on a later tick (a prototype):
+    /// meanwhile the group re-runs on nothing else.
+    pooled: Option<std::sync::mpsc::Receiver<Result<Vec<CurrentRow>, Error>>>,
+    /// A commit woke the group while its pool run was out: it runs again.
+    dirty: bool,
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -229,6 +234,13 @@ impl Fanout {
             .collect()
     }
 
+    /// Whether a group's run is out on the reader pool.
+    pub(super) fn pooled(&self) -> bool {
+        self.groups
+            .values()
+            .any(|group| group.borrow().pooled.is_some())
+    }
+
     pub(super) fn stats(&self) -> FanoutStats {
         FanoutStats {
             groups: self.groups.len(),
@@ -316,12 +328,32 @@ impl Inner {
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
+        // A prototype: a first run that outruns the writer's slice (or
+        // whose statement did before) runs on the reader pool, and the
+        // group opens once its rows come back.
+        let poolable = self.poolable(prepared, &compiled);
+        let mut pooled = None;
+        let first = if poolable && self.heavy.contains(&compiled.sql) {
+            Ok(None)
+        } else if poolable {
+            let budget = self.pool.as_ref().expect("a reader pool").1.clone();
+            budget.within(sync::writer_slice(), || {
+                self.execute(&compiled, &prepared.query.table)
+            })
+        } else {
+            self.execute(&compiled, &prepared.query.table)
+                .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
+                .map(Some)
+        };
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
-        {
-            Ok(rows) => (rows, false),
+        let (rows, awaiting) = match first {
+            Ok(Some(rows)) => (rows, false),
+            Ok(None) => {
+                self.heavy.insert(compiled.sql.clone());
+                let pool = Arc::clone(&self.pool.as_ref().expect("a reader pool").0);
+                pooled = Some(pool.run(compiled.clone(), prepared.query.table.clone())?);
+                (Vec::new(), true)
+            }
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
             Err(error) => return Err(error),
         };
@@ -361,6 +393,8 @@ impl Inner {
             includes,
             awaiting,
             opened: !awaiting,
+            pooled,
+            dirty: false,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -1110,11 +1144,79 @@ impl Inner {
         })
     }
 
+    /// Whether a read of `prepared` compiled to `compiled` can run on the
+    /// reader pool: no joined rows, no relations to nest.
+    fn poolable(&self, prepared: &PreparedQuery, compiled: &Compiled) -> bool {
+        self.pool.is_some() && compiled.joined == 0 && prepared.query.array_subqueries.is_empty()
+    }
+
+    /// Run a heavy group again on the reader pool; false when it cannot
+    /// go there (it ran on this connection instead).
+    fn pool_group(&self, group: &mut Group) -> bool {
+        let compiled = match self.compile_tracked(&group.prepared, group.identity, &group.read) {
+            Ok((compiled, _)) if self.poolable(&group.prepared, &compiled) => compiled,
+            _ => return false,
+        };
+        let pool = Arc::clone(&self.pool.as_ref().expect("a reader pool").0);
+        match pool.run(compiled, group.prepared.query.table.clone()) {
+            Ok(rows) => group.pooled = Some(rows),
+            Err(error) => group.push(SubscriptionEvent::Rejected {
+                reason: error.to_string(),
+            }),
+        }
+        true
+    }
+
+    /// Publish the groups whose pool runs came back; true while any run.
+    pub(super) fn finish_pool_groups(&self) -> bool {
+        let mut running = false;
+        for handle in self.fan.groups.values() {
+            let mut group = handle.borrow_mut();
+            let Some(pending) = &group.pooled else {
+                continue;
+            };
+            let rows = match pending.try_recv() {
+                Ok(rows) => rows,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    running = true;
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err(Error::new(ErrorCode::Storage, "the reader pool closed"))
+                }
+            };
+            group.pooled = None;
+            match rows {
+                Ok(rows) => {
+                    group.awaiting = false;
+                    if group.opened {
+                        if let Some(event) = diff(&group.rows, &rows) {
+                            group.push(event);
+                        }
+                    } else {
+                        group.opened = true;
+                        group.push(opening(&rows));
+                    }
+                    group.rows = rows;
+                    group.keys.clear();
+                    self.read_keys(&mut group);
+                }
+                Err(error) => group.push(SubscriptionEvent::Rejected {
+                    reason: error.to_string(),
+                }),
+            }
+            if std::mem::take(&mut group.dirty) && self.pool_group(&mut group) {
+                running |= group.pooled.is_some();
+            }
+        }
+        running
+    }
+
     /// Re-run every result that waited for large-value chunks.
     pub(super) fn retry_awaiting(&self) {
         for handle in self.fan.groups.values() {
             let mut group = handle.borrow_mut();
-            if !group.awaiting {
+            if !group.awaiting || group.pooled.is_some() {
                 continue;
             }
             if group.opened {
@@ -1174,6 +1276,13 @@ impl Inner {
 
     /// Bring a group's result up to date; true when it re-ran the query.
     fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+        if group.pooled.is_some() {
+            group.dirty = true;
+            return false;
+        }
+        if self.heavy.contains(&group.key.sql) && !(group.recheck && ids.is_some()) {
+            return self.pool_group(group);
+        }
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
                 Some(Ok(Some(event))) => {
