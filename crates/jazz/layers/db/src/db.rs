@@ -1939,10 +1939,15 @@ impl Db {
                 .collect();
             // Before a lens's defaults fill in: a branch column's default
             // is the schema's own, so a replica that never saw the lens
-            // keys rows the same way.
+            // keys rows the same way. Every admitted version reads the
+            // same stored rows, so each must agree with the new one, not
+            // only the current one.
             for table in target.tables.values() {
                 if let Some(current) = inner.owner.by_stored(&table.stored) {
                     check_branch_evolution(current, table, make_current)?;
+                }
+                for earlier in admitted.iter().filter_map(|a| a.by_stored(&table.stored)) {
+                    check_branch_evolution(earlier, table, false)?;
                 }
             }
             for table in target.tables.values_mut() {
@@ -2022,9 +2027,11 @@ impl Db {
 /// INV-BVIEW-19): it may add one only as a new column with a default,
 /// which rows written before it and selectors of versions without it read
 /// as (see [`Table::row_branch_key`]); it may not change a branch
-/// column's default, or turn an existing column into a branch column; and
-/// a version made current may not drop one (an older version admitted
-/// beside the current one names it by its default).
+/// column's default, or turn an existing column into a branch column or a
+/// branch column into an ordinary one; and a version made current may not
+/// drop one (an older version admitted beside the current one names it by
+/// its default). Admission checks the new version against the current one
+/// and against every other admitted version that has the table.
 fn check_branch_evolution(current: &Table, next: &Table, make_current: bool) -> Result<(), Error> {
     let branch_columns = |table: &Table| -> BTreeSet<String> {
         table
@@ -2037,6 +2044,14 @@ fn check_branch_evolution(current: &Table, next: &Table, make_current: bool) -> 
     let by_stored = |table: &Table, stored: &str| -> Option<crate::values::Column> {
         table.columns.iter().find(|c| c.stored == stored).cloned()
     };
+    for stored in before.difference(&after) {
+        if let Some(column) = by_stored(next, stored) {
+            return Err(unsupported(format!(
+                "making branch column {}.{} an ordinary column",
+                next.name, column.name
+            )));
+        }
+    }
     for stored in after.difference(&before) {
         let column = by_stored(next, stored).expect("branch column");
         if by_stored(current, stored).is_some() {

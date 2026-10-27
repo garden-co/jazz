@@ -208,6 +208,57 @@ fn every_other_branch_column_change_is_not_supported_yet() {
     );
 }
 
+/// Every admitted version reads the same stored rows, so a new version is
+/// checked against each of them, not only the current one: with v2 (region
+/// defaulting to "eu") admitted beside a current v1, a version with region
+/// defaulting to "us" is refused whether admitted or made current, and so
+/// is one keeping region as an ordinary column.
+#[test]
+fn a_branch_column_s_default_agrees_with_every_admitted_version() {
+    let db = open(v1());
+    write(&db, space("a"), "before");
+    block_on(db.admit_schema_with_lenses(v2(), &[])).unwrap();
+    let error =
+        block_on(db.admit_schema_with_lenses(v2_with("us", ColumnType::Text), &[])).unwrap_err();
+    assert!(
+        error.to_string().contains("not supported"),
+        "admitted: {error}"
+    );
+    let error = block_on(db.activate_schema(v2_with("us", ColumnType::Text))).unwrap_err();
+    assert!(
+        error.to_string().contains("not supported"),
+        "activated: {error}"
+    );
+    let ordinary = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column("space", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .column_with_default(
+                        "region",
+                        ColumnType::Text,
+                        jazz::tools::Value::Text("eu".to_owned()),
+                    )
+                    .branch_by("space")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let error = block_on(db.admit_schema_with_lenses(ordinary, &[])).unwrap_err();
+    assert!(
+        error.to_string().contains("not supported"),
+        "ordinary: {error}"
+    );
+
+    // Planted positive: the admitted v2 itself can still be made current.
+    block_on(db.activate_schema(v2())).unwrap();
+    assert_eq!(
+        bodies(&db, space_region("a", "eu")),
+        vec![(text("before"), text("eu"))]
+    );
+}
+
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
