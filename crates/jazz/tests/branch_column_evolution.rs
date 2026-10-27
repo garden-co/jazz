@@ -337,6 +337,60 @@ fn a_reopened_store_keeps_the_branch_columns_it_admitted() {
     );
 }
 
+fn add_region(default: &str) -> jazz::protocol::MigrationLens {
+    jazz::protocol::MigrationLens::new(
+        v1().version_id(),
+        v2().version_id(),
+        vec![jazz::protocol::TableLens {
+            source_table: "docs".into(),
+            target_table: "docs".into(),
+            ops: vec![jazz::protocol::LensOp::AddColumn {
+                column: "region".into(),
+                default: Value::String(default.into()),
+            }],
+        }],
+    )
+    .unwrap()
+}
+
+/// Rows are keyed by a branch column's declared default, so a lens may not
+/// add the column with another one: the store would key the old rows by
+/// the lens's default and then refuse its own schema on reopen.
+#[test]
+fn a_lens_may_not_key_rows_by_another_branch_default() {
+    let path = scratch("lens");
+    let open_at = |schema: JazzSchema| {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    {
+        let db = open_at(v1());
+        write(&db, space("a"), "before");
+        let error = block_on(db.activate_schema_with_lenses(v2(), &[add_region("us")]))
+            .err()
+            .expect("a lens keying rows by us");
+        assert!(error.to_string().contains("not supported"), "{error}");
+
+        // Planted positive: a lens with the declared default.
+        block_on(db.activate_schema_with_lenses(v2(), &[add_region("eu")])).unwrap();
+    }
+    let db = open_at(v2());
+    assert_eq!(
+        bodies(&db, space_region("a", "eu")),
+        vec![(text("before"), text("eu"))]
+    );
+}
+
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 

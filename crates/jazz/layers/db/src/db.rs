@@ -1982,6 +1982,17 @@ impl Db {
                     }
                     if let Some(default) = defaults.get(&(table.name.clone(), column.name.clone()))
                     {
+                        // Rows are keyed by the schema's own default (see
+                        // `check_branches` above), so a lens may not key
+                        // them by another one.
+                        if table.branch_by.contains(&column.name)
+                            && column.default.as_ref() != Some(default)
+                        {
+                            return Err(unsupported(format!(
+                                "a lens default for branch column {}.{} other than its declared default",
+                                table.name, column.name
+                            )));
+                        }
                         column.default = Some(default.clone());
                     }
                     // A copy is filled from its source.
@@ -1994,30 +2005,7 @@ impl Db {
                     }
                 }
             }
-            let ddl = inner.physical.union(&target)?;
-            execute_script(&inner.conn, &ddl)?;
-            // A new copy holds its source's values, in every row version.
-            for cell in &cells {
-                if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                    for table in [cell.table.clone(), format!("{}__h", cell.table)] {
-                        inner
-                            .conn
-                            .execute(
-                                &format!(
-                                    "UPDATE {} SET {} = {}",
-                                    quote(&table),
-                                    quote(&cell.column),
-                                    quote(source)
-                                ),
-                                [],
-                            )
-                            .map_err(storage)?;
-                    }
-                }
-            }
-            let Inner { names, conn, .. } = &mut *inner;
-            names.admit(conn, &target)?;
-            names.record_lens_cells(conn, cells)?;
+            inner.write_admission(&target, cells)?;
             if make_current {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
@@ -2033,6 +2021,57 @@ impl Db {
         let mut inner = self.inner();
         inner.reset_everything();
         Ok(())
+    }
+}
+
+impl Inner {
+    /// Write an admitted version's stored tables and columns, its lens
+    /// copies, names and lens cells: whole or not at all, in the file and
+    /// in memory.
+    fn write_admission(
+        &mut self,
+        target: &Schema,
+        cells: Vec<crate::names::LensCell>,
+    ) -> Result<(), Error> {
+        let (physical, names) = (self.physical.clone(), self.names.clone());
+        begin_savepoint(&self.conn, "jazz_admit")?;
+        let written = self.write_admission_steps(target, cells);
+        let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
+        let written = written.and(ended);
+        if written.is_err() {
+            self.physical = physical;
+            self.names = names;
+        }
+        written
+    }
+
+    fn write_admission_steps(
+        &mut self,
+        target: &Schema,
+        cells: Vec<crate::names::LensCell>,
+    ) -> Result<(), Error> {
+        let ddl = self.physical.union(target)?;
+        execute_script(&self.conn, &ddl)?;
+        // A new copy holds its source's values, in every row version.
+        for cell in &cells {
+            if let crate::names::LensCellRule::Copy(source) = &cell.rule {
+                for table in [cell.table.clone(), format!("{}__h", cell.table)] {
+                    self.conn
+                        .execute(
+                            &format!(
+                                "UPDATE {} SET {} = {}",
+                                quote(&table),
+                                quote(&cell.column),
+                                quote(source)
+                            ),
+                            [],
+                        )
+                        .map_err(storage)?;
+                }
+            }
+        }
+        self.names.admit(&self.conn, target)?;
+        self.names.record_lens_cells(&self.conn, cells)
     }
 }
 
@@ -3345,7 +3384,6 @@ impl Inner {
         }))
     }
 
-    /// Whether `row`'s current version on branch `key` is a tombstone.
     /// Whether the row was live in the state a unit written at `seq` was
     /// made over.
     fn was_live_before(
@@ -3368,6 +3406,7 @@ impl Inner {
         ))
     }
 
+    /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
             "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2",
@@ -5058,13 +5097,10 @@ impl Db {
             let base = inner.owner.names();
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
             inner.names.check_branches(&logical)?;
+            inner.write_admission(&logical, Vec::new())?;
             if !inner.admitted.iter().any(|(id, _)| *id == version) {
                 inner.admitted.push((version, schema.clone()));
             }
-            let ddl = inner.physical.union(&logical)?;
-            execute_script(&inner.conn, &ddl)?;
-            let Inner { names, conn, .. } = &mut *inner;
-            names.admit(conn, &logical)?;
             inner
                 .views
                 .entry(SchemaViewId::for_schema(&schema))
