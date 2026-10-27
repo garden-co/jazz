@@ -634,6 +634,13 @@ transport:
   input runs out with requests held, the receiver sends the answers it has
   ready and serves the requests they release in that same turn, so the
   barrier costs no extra turn when the write is handled at once.
+- A receiver whose large-value ingress limit holds a commit back holds with
+  it every later message of the link that could observe it: a read that
+  depends on a table the held commits write (its query's tables and the
+  tables their read policies read), and anything whose effect on reads is
+  not known. Other reads, unsubscribes of reads not held, and permission
+  advice are served ahead. A read held this way waits until the bytes
+  queued ahead of it are admitted, i.e. for (bytes ahead) / (admitted rate).
 - "Answered" means stored or decided **at this node**. A Core answers with the
   terminal fate. A relay or local receiver answers with its local
   acknowledgement once the write is durable there, so its clients keep reading

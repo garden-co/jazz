@@ -509,6 +509,20 @@ pub enum WireOp {
     },
 }
 
+impl WireOp {
+    /// The table the op writes, as the sender's schema names it.
+    pub fn table(&self) -> &str {
+        match self {
+            WireOp::Insert { table, .. }
+            | WireOp::Update { table, .. }
+            | WireOp::Upsert { table, .. }
+            | WireOp::Delete { table, .. }
+            | WireOp::Restore { table, .. }
+            | WireOp::Move { table, .. } => table,
+        }
+    }
+}
+
 /// One read of a serializable transaction: the rows it returned at the
 /// snapshot, with their server versions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2140,7 +2154,7 @@ impl Inner {
 
     /// Stored tables stored table `table`'s read policy reads, as `author`
     /// (claims do not change which tables a policy names).
-    fn read_policy_tables(
+    pub(super) fn read_policy_tables(
         &self,
         table: &str,
         author: AuthorSubject,
@@ -4858,14 +4872,17 @@ impl Db {
         for message in relayed.into_iter().rev() {
             inbound.push_front(message);
         }
-        // Writes held back by the ingress limit, and everything the session
-        // sent after them, in order. A read is never answered ahead of a
-        // commit sent before it: it would miss the writer's own write. (A
-        // client sends a value's chunks right before its commit, so a read
-        // that came after held chunks also came after their commit.)
+        // Writes held back by the ingress limit, and what the session sent
+        // after them, in order. A read is never answered ahead of a commit
+        // sent before it that it could observe (INV-SYNC-49); a read that
+        // depends on no table the held commits write, and an unsubscribe
+        // or advice request, overtakes them, so a client uploading a large
+        // value can still read everything else.
         let mut held: VecDeque<SyncMessage> = VecDeque::new();
+        let mut barrier = HeldWrites::default();
         while let Some(message) = inbound.pop_front() {
-            if !held.is_empty() {
+            if !held.is_empty() && !self.overtakes(index, &barrier, &message) {
+                self.note_held(index, &mut barrier, &message);
                 held.push_back(message);
                 continue;
             }
@@ -4922,7 +4939,9 @@ impl Db {
                     self.inner.borrow_mut().sessions[index]
                         .fetched_upstream
                         .insert(id);
-                    held.push_back(fetch.expect("a fetch"));
+                    let fetch = fetch.expect("a fetch");
+                    self.note_held(index, &mut barrier, &fetch);
+                    held.push_back(fetch);
                 }
                 (Err(error), Some(id)) => {
                     self.inner.borrow_mut().sessions[index]
@@ -4950,6 +4969,89 @@ impl Db {
             });
         }
         Ok(())
+    }
+
+    /// Whether `message` may be served ahead of what session `index` has
+    /// held: an unsubscribe of a read not itself held, an advice request
+    /// (advisory, it changes nothing), or a read that depends on no table
+    /// the held commits write.
+    fn overtakes(&self, index: usize, barrier: &HeldWrites, message: &SyncMessage) -> bool {
+        match message {
+            SyncMessage::Unsubscribe { id } => !barrier.reads.contains(id),
+            SyncMessage::Advise { .. } => true,
+            SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. } => {
+                let Some(written) = &barrier.tables else {
+                    return false;
+                };
+                self.read_dependencies(index, message)
+                    .is_some_and(|reads| reads.is_disjoint(written))
+            }
+            _ => false,
+        }
+    }
+
+    /// Record what a message held for session `index` may change.
+    fn note_held(&self, index: usize, barrier: &mut HeldWrites, message: &SyncMessage) {
+        match message {
+            SyncMessage::PushChunks { .. } | SyncMessage::ChunkRequests { .. } => {}
+            SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => {
+                barrier.reads.insert(*id);
+            }
+            SyncMessage::Unsubscribe { .. } | SyncMessage::Advise { .. } => {}
+            SyncMessage::Commit { ops, .. } => {
+                let schema = {
+                    let mut inner = self.inner.borrow_mut();
+                    inner
+                        .session_schema(index)
+                        .unwrap_or_else(|| inner.owner.clone())
+                };
+                for op in ops {
+                    let stored = schema.stored_table(op.table()).map(str::to_owned);
+                    match (&mut barrier.tables, stored) {
+                        (Some(tables), Ok(table)) => {
+                            tables.insert(table);
+                        }
+                        (tables, _) => *tables = None,
+                    }
+                }
+            }
+            // Anything else (a schema change, say) may change what every
+            // later read sees: nothing overtakes it.
+            _ => barrier.tables = None,
+        }
+    }
+
+    /// The stored tables a read session `index` sent depends on, read as
+    /// that session (its policies and claims); `None` when they cannot be
+    /// told, so the read is not let ahead of anything.
+    fn read_dependencies(&self, index: usize, message: &SyncMessage) -> Option<BTreeSet<String>> {
+        let (SyncMessage::Subscribe { query, binding, .. }
+        | SyncMessage::Fetch { query, binding, .. }) = message
+        else {
+            return None;
+        };
+        let (identity, policy, claims) = {
+            let inner = self.inner.borrow();
+            let session = &inner.sessions[index];
+            (
+                session.identity,
+                inner.session_policy(index),
+                session.claims.clone(),
+            )
+        };
+        let vouched = claims
+            .filter(|_| identity != AuthorSubject::SYSTEM)
+            .map(|claims| (identity, claims));
+        self.with_claims(vouched, || {
+            let prepared = self
+                .session_db(index)
+                .prepare_query_bound(query, binding.clone())
+                .ok()?;
+            self.inner
+                .borrow()
+                .read_dependencies(&prepared, policy)
+                .ok()
+        })
     }
 
     /// Server half of a tick: take every session's messages (commits apply
@@ -6429,6 +6531,25 @@ fn owned_table<'a>(schema: &'a Schema, stored: &str) -> Result<&'a Table, Error>
     schema
         .by_stored(stored)
         .ok_or_else(|| query_error(format!("unknown table {stored}")))
+}
+
+/// What a session's held messages may change, so a later read that cannot
+/// observe it is served ahead of them.
+struct HeldWrites {
+    /// Stored tables the held commits write; `None` once something is held
+    /// whose effect on reads is not known.
+    tables: Option<BTreeSet<String>>,
+    /// Held reads, which their unsubscribes must not overtake.
+    reads: HashSet<u64>,
+}
+
+impl Default for HeldWrites {
+    fn default() -> Self {
+        Self {
+            tables: Some(BTreeSet::new()),
+            reads: HashSet::new(),
+        }
+    }
 }
 
 // ---- names on the wire ------------------------------------------------------
