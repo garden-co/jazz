@@ -227,8 +227,6 @@ impl Inner {
             let stored = |cells: &BTreeMap<String, Value>| {
                 cells
                     .keys()
-                    // A text write's base edits are not a column.
-                    .filter(|name| crate::text_merge::based_column(name).is_none())
                     .map(|name| schema_table.stored_name(name).to_owned())
                     .collect::<Vec<_>>()
             };
@@ -466,14 +464,13 @@ impl Inner {
     /// authored the column. `None` takes the fast path: nothing to merge
     /// with, so the write's value stands as sent. A base on an unsettled
     /// commit gives that commit's version as accepted.
-    #[cfg_attr(not(feature = "testing"), allow(dead_code))] // Text merging reads it.
     pub(crate) fn merge_base(
         &self,
         (table, row, key): (&str, RowUuid, &[u8]),
         built: Built,
         before: u64,
         column: &str,
-    ) -> Result<Option<rusqlite::types::Value>, Error> {
+    ) -> Result<Option<Sql>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let knew = Knowledge::of(built, &history);
         let code = self.column_code(table, column)?;
@@ -502,7 +499,7 @@ impl Inner {
             .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key, at as i64],
-                |r| r.get::<_, rusqlite::types::Value>(0),
+                |r| r.get::<_, Sql>(0),
             )
             .optional()
             .map_err(storage)
@@ -558,6 +555,6 @@ impl Db {
             .column(column)
             .ok_or_else(|| unknown_base("a column"))?
             .ty;
-        crate::values::from_sql(ty, (&cell).into(), &inner.chunks)
+        crate::values::from_sql(ty, cell.as_ref(), &inner.chunks)
     }
 }

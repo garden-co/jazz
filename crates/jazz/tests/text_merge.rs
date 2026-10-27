@@ -1,10 +1,11 @@
 //! Text-merging string columns (SPEC 4 §4.3): a column declared `text`,
 //! `markdown` or `html` stores a plain string, and concurrent writes to it
-//! merge. Each write carries the edits back to the value its writer saw, so
-//! every node applying it (the authority, and each client replaying its
-//! pending writes) merges that base, the value it holds and the write's
-//! value. Disjoint edits all survive, on every replica, for inline and
-//! large values alike; overlapping replacements go to the later write.
+//! merge. Writes travel as plain values; the authority merges a write that
+//! missed a version authoring the column, over the version it was built on
+//! (SPEC 4 §4.6), and every replica converges to its image. Disjoint edits
+//! all survive, for inline and large values alike; overlapping
+//! replacements go to the later write; a write without anything to merge
+//! takes the fast path.
 
 use crate::common;
 
@@ -195,6 +196,16 @@ impl Net {
         .mergeable_tx_id()
     }
 
+    /// The seq of `row`'s current version at the authority.
+    fn seq_of(&self, row: RowUuid) -> u64 {
+        self.core
+            .write_conflicts("docs", row, None)
+            .unwrap()
+            .last()
+            .expect("an accepted version")
+            .seq
+    }
+
     /// Column `column` of `row` as `db` holds it.
     fn read(db: &Db, row: RowUuid, column: &str) -> String {
         let prepared = db.prepare_query(&Query::from("docs")).unwrap();
@@ -291,18 +302,44 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
 }
 
 #[test]
-fn a_pending_edit_rebases_over_writes_that_arrive_before_it_settles() {
+fn only_a_write_that_missed_an_edit_to_the_column_merges() {
     let mut net = Net::new(2);
-    let row = net.seed(0, &[("body", "alpha beta gamma")]);
+    let row = net.seed(0, &[("body", "alpha beta gamma"), ("title", "seed")]);
+    // Nothing missed: the fast path, no base read.
+    let first = net.edit(0, row, &[("body", "alpha beta gamma delta")]);
+    net.settle(0, first);
+    let first_seq = net.seq_of(row);
+    assert_eq!(
+        net.core.merge_base("docs", row, first_seq, "body").unwrap(),
+        None
+    );
+    // A missed write that set only the title: still nothing to merge.
     net.offline(0);
-    let alice = net.edit(0, row, &[("body", "alpha beta gamma delta")]);
-    let bob = net.edit(1, row, &[("body", "ALPHA beta gamma")]);
+    let second = net.edit(0, row, &[("body", "alpha beta gamma delta epsilon")]);
+    let bob = net.edit(1, row, &[("title", "bob")]);
     net.settle(1, bob);
     net.online(0);
-    // Her replica shows bob's edit merged under hers, settled or not.
-    assert_eq!(Net::read(net.db(0), row, "body"), "ALPHA beta gamma delta");
-    net.settle(0, alice);
-    net.assert_everywhere(row, "body", "ALPHA beta gamma delta");
+    net.settle(0, second);
+    let second_seq = net.seq_of(row);
+    assert_eq!(
+        net.core
+            .merge_base("docs", row, second_seq, "body")
+            .unwrap(),
+        None
+    );
+    // A missed write to the body: merged over the version it was built on.
+    net.offline(0);
+    let third = net.edit(0, row, &[("body", "alpha beta gamma delta epsilon zeta")]);
+    let carol = net.edit(1, row, &[("body", "ALPHA beta gamma delta epsilon")]);
+    net.settle(1, carol);
+    net.online(0);
+    net.settle(0, third);
+    let third_seq = net.seq_of(row);
+    assert_eq!(
+        net.core.merge_base("docs", row, third_seq, "body").unwrap(),
+        Some(Value::String("alpha beta gamma delta epsilon".to_owned()))
+    );
+    net.assert_everywhere(row, "body", "ALPHA beta gamma delta epsilon zeta");
 }
 
 #[test]
@@ -357,17 +394,6 @@ fn large_values_merge_edits_at_both_ends() {
     net.online(1);
     net.settle(1, bob);
     net.assert_everywhere(row, "body", &format!("Preface. {base} The end."));
-}
-
-#[test]
-fn a_write_cannot_supply_its_own_base() {
-    let net = Net::new(1);
-    let row = net.seed(0, &[("body", "x")]);
-    let mut forged = cells(&[("body", "y")]);
-    forged.insert("$base.body".to_owned(), Value::Array(Vec::new()));
-    let error = block_on(net.db(0).update("docs", row, forged, Default::default()))
-        .expect_err("bases are engine-maintained");
-    assert!(error.to_string().contains("engine-maintained"), "{error}");
 }
 
 #[test]

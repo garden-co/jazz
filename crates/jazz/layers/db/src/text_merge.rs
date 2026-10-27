@@ -1,12 +1,14 @@
 //! Three-way merge of a text-merging string column (SPEC 4 §4.3).
 //!
 //! A column declared `text`, `markdown` or `html` stores its value as a
-//! plain string. A write to it carries, beside the value it set, the edits
-//! that turn that value back into the base its writer saw (`$base.<column>`,
-//! see [`base_cell`]). Every node applying the write (the authority, a relay,
-//! a client replaying its pending writes) merges the base, the value it holds
-//! and the write's value: each side's changes are diffed against the base and
-//! both applied. Nothing but the merged string is stored.
+//! plain string; writes travel as plain values. Only the authority merges:
+//! when the version a write was built on (its base, SPEC 4 §4.6) is not the
+//! last to author the column, it merges the base's value, the value it
+//! holds and the write's value: each side's changes are diffed against the
+//! base and both applied. For a write its merge changed, the authority
+//! keeps the edits back to its value as sent (`_jazz_text_in`, see
+//! [`encode_in`]), so a later write built on it merges over what its writer
+//! saw.
 //!
 //! Values are cut into tokens first (words, single whitespace and
 //! other characters; for markdown also delimiter runs and link destinations, for
@@ -21,29 +23,19 @@
 //! - otherwise (two replacements of overlapping spans) the incoming write,
 //!   which the authority sequences later, wins that span.
 
-use crate::options::Error;
-use crate::records::Value;
+use crate::options::{Error, ErrorCode};
 use crate::schema::TextFormat;
 use std::collections::HashMap;
-
-/// The cell name a write's base edits for text column `column` travel under.
-pub(crate) fn base_cell(column: &str) -> String {
-    format!("{BASE_PREFIX}{column}")
-}
-
-/// The text column a `$base.` cell belongs to.
-pub(crate) fn based_column(name: &str) -> Option<&str> {
-    name.strip_prefix(BASE_PREFIX)
-}
-
-const BASE_PREFIX: &str = "$base.";
 
 /// Past this many edit steps in one diff the changed middle is treated as
 /// one replacement, so a rewrite costs linear time.
 const MAX_EDIT_DISTANCE: usize = 4096;
 
 fn malformed(message: impl std::fmt::Display) -> Error {
-    crate::db::rejected(format!("malformed text base: {message}"))
+    Error::new(
+        ErrorCode::Storage,
+        format!("malformed text edit: {message}"),
+    )
 }
 
 /// One replacement of `value[start..end]` (byte offsets) by `insert`.
@@ -55,8 +47,7 @@ pub(crate) struct Edit {
 }
 
 /// The edit that turns `from` into `to`: their differing middle, past the
-/// common prefix and suffix (none when they are equal). A base travels as
-/// this one edit; where it lands is what the merge's diff decides.
+/// common prefix and suffix (none when they are equal).
 pub(crate) fn edits(from: &str, to: &str) -> Vec<Edit> {
     if from == to {
         return Vec::new();
@@ -106,41 +97,65 @@ pub(crate) fn apply(value: &str, edits: &[Edit]) -> Result<String, Error> {
     Ok(out)
 }
 
-/// `edits` as the `$base.` cell value: an array of (start, end, insert).
-pub(crate) fn encode(edits: &[Edit]) -> Value {
-    Value::Array(
-        edits
-            .iter()
-            .map(|edit| {
-                Value::Tuple(vec![
-                    Value::U64(edit.start as u64),
-                    Value::U64(edit.end as u64),
-                    Value::String(edit.insert.clone()),
-                ])
-            })
-            .collect(),
-    )
+/// A version's `_jazz_text_in` entry: per stored column its merge changed,
+/// the edits from the merged value back to the write's value as sent.
+pub(crate) fn encode_in(entries: &[(String, Vec<Edit>)]) -> Vec<u8> {
+    fn put(out: &mut Vec<u8>, n: usize) {
+        out.extend_from_slice(&(n as u64).to_le_bytes());
+    }
+    let mut out = Vec::new();
+    put(&mut out, entries.len());
+    for (column, edits) in entries {
+        put(&mut out, column.len());
+        out.extend_from_slice(column.as_bytes());
+        put(&mut out, edits.len());
+        for edit in edits {
+            put(&mut out, edit.start);
+            put(&mut out, edit.end);
+            put(&mut out, edit.insert.len());
+            out.extend_from_slice(edit.insert.as_bytes());
+        }
+    }
+    out
 }
 
-/// The edits a `$base.` cell value holds.
-pub(crate) fn decode(value: &Value) -> Result<Vec<Edit>, Error> {
-    let Value::Array(items) = value else {
-        return Err(malformed("not an array of edits"));
-    };
-    items
-        .iter()
-        .map(|item| match item {
-            Value::Tuple(fields) => match fields.as_slice() {
-                [Value::U64(start), Value::U64(end), Value::String(insert)] => Ok(Edit {
-                    start: usize::try_from(*start).map_err(|_| malformed("offset too large"))?,
-                    end: usize::try_from(*end).map_err(|_| malformed("offset too large"))?,
-                    insert: insert.clone(),
-                }),
-                _ => Err(malformed("an edit is not (start, end, insert)")),
-            },
-            _ => Err(malformed("an edit is not (start, end, insert)")),
-        })
-        .collect()
+/// The entries [`encode_in`] wrote.
+pub(crate) fn decode_in(mut bytes: &[u8]) -> Result<Vec<(String, Vec<Edit>)>, Error> {
+    fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
+        if bytes.len() < n {
+            return Err(malformed("truncated"));
+        }
+        let (head, rest) = bytes.split_at(n);
+        *bytes = rest;
+        Ok(head)
+    }
+    fn number(bytes: &mut &[u8]) -> Result<usize, Error> {
+        let raw: [u8; 8] = take(bytes, 8)?.try_into().expect("eight bytes");
+        usize::try_from(u64::from_le_bytes(raw)).map_err(|_| malformed("offset too large"))
+    }
+    fn text(bytes: &mut &[u8]) -> Result<String, Error> {
+        let n = number(bytes)?;
+        String::from_utf8(take(bytes, n)?.to_vec()).map_err(|_| malformed("not UTF-8"))
+    }
+    let mut entries = Vec::new();
+    for _ in 0..number(&mut bytes)? {
+        let column = text(&mut bytes)?;
+        let mut edits = Vec::new();
+        for _ in 0..number(&mut bytes)? {
+            let start = number(&mut bytes)?;
+            let end = number(&mut bytes)?;
+            edits.push(Edit {
+                start,
+                end,
+                insert: text(&mut bytes)?,
+            });
+        }
+        entries.push((column, edits));
+    }
+    if !bytes.is_empty() {
+        return Err(malformed("trailing bytes"));
+    }
+    Ok(entries)
 }
 
 /// The merge of `held` and `incoming`, both made from `base`.
@@ -551,7 +566,8 @@ mod tests {
         for (from, to) in cases {
             let edits = edits(from, to);
             assert_eq!(apply(from, &edits).unwrap(), to, "{from:?} -> {to:?}");
-            assert_eq!(decode(&encode(&edits)).unwrap(), edits);
+            let entries = vec![("body".to_owned(), edits.clone())];
+            assert_eq!(decode_in(&encode_in(&entries)).unwrap(), entries);
         }
     }
 

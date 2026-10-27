@@ -378,6 +378,16 @@ struct Inner {
     /// INV-HIST-8). A fresh local write over a tombstone it can see is
     /// refused instead.
     merging: bool,
+    /// On the authority, what each row of the upload being applied was
+    /// built on (SPEC 4 §4.6), by (stored table, row, branch key): a text
+    /// merge reads its base from it. Empty otherwise.
+    merge_bases: HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
+    /// The edits back to the values as sent the upload's text writes made
+    /// (see [`crate::text_merge::encode_in`]), by row version, stored column
+    /// first; empty for a write left as sent.
+    text_in: RefCell<
+        BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Vec<crate::text_merge::Edit>>>,
+    >,
     /// A transaction handle's staged writes left applied between its
     /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
     /// other use of the store.
@@ -649,6 +659,12 @@ fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+
+/// Where the authority keeps, for a row version whose text merge changed
+/// its write's values, the edits back to the values as sent (SPEC 4 §4.3).
+const TEXT_IN_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_text_in (t TEXT NOT NULL, \
+     id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, edits BLOB NOT NULL, \
+     PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;";
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
@@ -1096,6 +1112,8 @@ impl Db {
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
+                merge_bases: HashMap::new(),
+                text_in: RefCell::new(BTreeMap::new()),
                 overlay: None,
                 derived: Vec::new(),
                 staging: LargeValueStagingPolicy::default(),
@@ -1639,8 +1657,8 @@ impl Db {
             };
             let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
                 let edits = inner.chunk_large_cells(&mut op)?;
+                inner.counter_deltas(&mut op)?;
                 inner.pending_nodes.extend(edits.pending_nodes);
-                inner.merge_inputs(&mut op)?;
                 let applied = inner.apply_as(&op, who, seq);
                 inner.clear_derived();
                 applied
@@ -3210,16 +3228,6 @@ impl Inner {
 
     fn validate_cells(table: &Table, cells: &BTreeMap<String, Value>) -> Result<(), Error> {
         for name in cells.keys() {
-            // A text write's base edits travel beside the value they belong
-            // to (see [`crate::text_merge`]).
-            if let Some(column) = crate::text_merge::based_column(name)
-                && table
-                    .column(column)
-                    .is_some_and(|c| c.merge.text_format().is_some())
-                && cells.contains_key(column)
-            {
-                continue;
-            }
             if name.starts_with('$') {
                 return Err(rejected(format!(
                     "`{}.{name}` is engine-maintained provenance and cannot be written",
@@ -3437,11 +3445,9 @@ impl Inner {
         Ok(edits)
     }
 
-    /// Turn a write's merging cells into what every node applying it merges
-    /// (see [`crate::merge`], [`crate::text_merge`]): a counter cell from the
-    /// value it sets into the change it makes to what this node holds, and a
-    /// text cell gains the edits back to the value this node holds.
-    pub(crate) fn merge_inputs(&self, op: &mut StagedOp) -> Result<(), Error> {
+    /// Turn a write's counter cells from the values it sets into the
+    /// changes it makes to what this node holds (see [`crate::merge`]).
+    pub(crate) fn counter_deltas(&self, op: &mut StagedOp) -> Result<(), Error> {
         let (table_name, row, cells, target) = match op {
             StagedOp::Update(t, r, c, o) => (t.clone(), *r, c, &o.target),
             StagedOp::Upsert(t, r, c, o) => (t.clone(), *r, c, &o.target),
@@ -3449,23 +3455,17 @@ impl Inner {
         };
         let schema = self.schema.clone();
         let table = schema.table(&table_name)?;
-        // Bases are this node's to make.
-        if let Some(name) = cells.keys().find(|name| name.starts_with('$')) {
-            return Err(rejected(format!(
-                "`{}.{name}` is engine-maintained provenance and cannot be written",
-                table.name
-            )));
-        }
-        let merging: Vec<(String, MergeStrategy)> = table
-            .columns
-            .iter()
-            .filter(|c| {
-                cells.contains_key(&c.name)
-                    && (c.merge == MergeStrategy::Counter || c.merge.text_format().is_some())
+        let counters: Vec<String> = cells
+            .keys()
+            .filter(|name| {
+                table
+                    .columns
+                    .iter()
+                    .any(|c| &c.name == *name && c.merge == MergeStrategy::Counter)
             })
-            .map(|c| (c.name.clone(), c.merge))
+            .cloned()
             .collect();
-        if merging.is_empty() {
+        if counters.is_empty() {
             return Ok(());
         }
         let target = Target::of(target, self)?;
@@ -3478,56 +3478,27 @@ impl Inner {
             Located::Inherited { from, .. } => Some(from),
             _ => None,
         };
-        for (name, merge) in merging {
+        for name in counters {
             let seen = match &held_at {
                 Some(key) => self.cell_at(table, row, key, &name)?,
                 None => None,
             };
-            if merge == MergeStrategy::Counter {
-                let delta = crate::merge::counter_delta(&name, &cells[&name], seen.as_ref())?;
-                cells.insert(name, delta);
-                continue;
-            }
-            // A write over no value merges with nothing.
-            let Some(seen) = seen else {
-                continue;
-            };
-            let seen = self.logical_text(&name, &seen)?;
-            let incoming = self.logical_text(&name, &cells[&name])?;
-            let base = crate::text_merge::encode(&crate::text_merge::edits(&incoming, &seen));
-            cells.insert(crate::text_merge::base_cell(&name), base);
+            let delta = crate::merge::counter_delta(&name, &cells[&name], seen.as_ref())?;
+            cells.insert(name, delta);
         }
         Ok(())
     }
 
-    /// The whole string a text column's cell value holds: a large value
-    /// this write chunked is read from the nodes it staged.
-    fn logical_text(&self, column: &str, value: &Value) -> Result<String, Error> {
-        match value {
-            Value::String(text) => Ok(text.clone()),
-            Value::Large(large) => {
-                let bytes = match self
-                    .pending_nodes
-                    .iter()
-                    .find(|prepared| prepared.value_ref.root == large.root)
-                {
-                    Some(prepared) => self.chunks.prepared_bytes(prepared)?,
-                    None => self.chunks.value_bytes(large)?,
-                };
-                String::from_utf8(bytes)
-                    .map_err(|_| rejected(format!("`{column}` holds a value that is not UTF-8")))
-            }
-            _ => Err(rejected(format!("`{column}` is not a string"))),
-        }
-    }
-
     /// A write's merged cells against what branch `held` (if any) holds:
-    /// counter changes added, g-sets unioned.
+    /// counter changes added, g-sets unioned, and on the authority text
+    /// merged over the write's base. `at` is the branch key and seq the
+    /// write lands at.
     fn merged_cells(
         &self,
         table: &Table,
         row: RowUuid,
         held: Option<&[u8]>,
+        at: Option<(&[u8], u64)>,
         mut cells: BTreeMap<String, Value>,
     ) -> Result<BTreeMap<String, Value>, Error> {
         for column in &table.columns {
@@ -3537,25 +3508,10 @@ impl Inner {
             let merged = match column.merge {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
-                    let base = cells.remove(&crate::text_merge::base_cell(&column.name));
-                    let current = match held {
-                        Some(key) => self.cell_at(table, row, key, &column.name)?,
-                        None => None,
-                    };
-                    // A write without a base, or over no value, sets it.
-                    let (Some(base), Some(current)) = (base, current) else {
-                        continue;
-                    };
-                    let incoming = self.logical_text(&column.name, &cells[&column.name])?;
-                    let base =
-                        crate::text_merge::apply(&incoming, &crate::text_merge::decode(&base)?)?;
-                    let current = self.logical_text(&column.name, &current)?;
-                    let format = column.merge.text_format().expect("a text strategy");
-                    let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
-                    if merged == incoming {
-                        continue;
+                    match self.text_merged(table, row, held, at, column, value)? {
+                        Some(merged) => merged,
+                        None => continue,
                     }
-                    Value::String(merged)
                 }
                 MergeStrategy::Counter | MergeStrategy::GSet => {
                     let current = match held {
@@ -3577,6 +3533,174 @@ impl Inner {
             cells.insert(column.name.clone(), merged);
         }
         Ok(cells)
+    }
+
+    /// A text write merged on the authority (SPEC 4 §4.3): when a version
+    /// its writer never saw authored the column, the merge of the value it
+    /// was built on, the value held and its own; `None` keeps its value as
+    /// sent. Every text write of an upload notes the edits back from what is
+    /// stored to its value as sent (none when unmerged): a later write
+    /// built on it, in the same upload or a later one, was built on that
+    /// value.
+    fn text_merged(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        held: Option<&[u8]>,
+        at: Option<(&[u8], u64)>,
+        column: &crate::values::Column,
+        value: &Value,
+    ) -> Result<Option<Value>, Error> {
+        let Some((key, seq)) = at else {
+            return Ok(None);
+        };
+        let version = (table.stored.clone(), row, key.to_vec());
+        let Some(&built) = self.merge_bases.get(&version) else {
+            return Ok(None);
+        };
+        let merged = self.text_merge(table, row, held, (key, seq), built, column, value)?;
+        let sent = match &merged {
+            Some((merged, incoming)) => crate::text_merge::edits(merged, incoming),
+            None => Vec::new(),
+        };
+        self.text_in
+            .borrow_mut()
+            .entry(version)
+            .or_default()
+            .insert(column.stored.clone(), sent);
+        Ok(merged.map(|(merged, _)| Value::String(merged)))
+    }
+
+    /// [`Self::text_merged`]'s merge, with the write's value: `None` when
+    /// there is nothing to merge or the merge leaves the value as sent.
+    #[allow(clippy::too_many_arguments)]
+    fn text_merge(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        held: Option<&[u8]>,
+        (key, seq): (&[u8], u64),
+        built: sync::Built,
+        column: &crate::values::Column,
+        value: &Value,
+    ) -> Result<Option<(String, String)>, Error> {
+        let Some(current) = held
+            .map(|held| self.cell_at(table, row, held, &column.name))
+            .transpose()?
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let current = self.logical_text(&column.name, &current)?;
+        let earlier = self
+            .text_in
+            .borrow()
+            .get(&(table.stored.clone(), row, key.to_vec()))
+            .and_then(|columns| columns.get(&column.stored).cloned());
+        let base = match earlier {
+            // Built on an earlier write of the same upload, as sent.
+            Some(sent) => crate::text_merge::apply(&current, &sent)?,
+            None => {
+                let Some(base) =
+                    self.merge_base((&table.stored, row, key), built, seq, &column.stored)?
+                else {
+                    return Ok(None);
+                };
+                let Some(base) = from_sql(&column.ty, base.as_ref(), &self.chunks)? else {
+                    return Ok(None);
+                };
+                let base = self.logical_text(&column.name, &base)?;
+                match built {
+                    // A base on a commit is its value as sent, not as merged.
+                    sync::Built::On(on) => crate::text_merge::apply(
+                        &base,
+                        &self.sent_edits((&table.stored, row, key), on, &column.stored)?,
+                    )?,
+                    sync::Built::Seq(_) => base,
+                }
+            }
+        };
+        let incoming = self.logical_text(&column.name, value)?;
+        let format = column.merge.text_format().expect("a text strategy");
+        let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
+        Ok((merged != incoming).then_some((merged, incoming)))
+    }
+
+    /// The edits back from stored column `column`'s value at version `seq`
+    /// of a row to the value its write sent; none when it was not merged.
+    fn sent_edits(
+        &self,
+        (table, row, key): (&str, RowUuid, &[u8]),
+        seq: u64,
+        column: &str,
+    ) -> Result<Vec<crate::text_merge::Edit>, Error> {
+        let exists = self
+            .conn
+            .cached_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_text_in'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(storage)?;
+        if exists == 0 {
+            return Ok(Vec::new());
+        }
+        let sent: Option<Vec<u8>> = self
+            .conn
+            .cached_row(
+                "SELECT edits FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND seq = ?4",
+                rusqlite::params![table, row.0.as_bytes().to_vec(), key, seq as i64],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some(sent) = sent else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::text_merge::decode_in(&sent)?
+            .into_iter()
+            .find(|(name, _)| name == column)
+            .map(|(_, edits)| edits)
+            .unwrap_or_default())
+    }
+
+    /// Keep, for each row version the upload at `seq` wrote, the edits its
+    /// text merges made back to the values as sent (`_jazz_text_in`, made
+    /// on the first merge that changes a value).
+    pub(crate) fn record_text_in(&self, seq: u64) -> Result<(), Error> {
+        for ((table, row, key), edits) in std::mem::take(&mut *self.text_in.borrow_mut()) {
+            let entries: Vec<_> = edits
+                .into_iter()
+                .filter(|(_, edits)| !edits.is_empty())
+                .collect();
+            if entries.is_empty() {
+                continue;
+            }
+            self.conn.execute_batch(TEXT_IN_DDL).map_err(storage)?;
+            self.exec(
+                "INSERT OR REPLACE INTO _jazz_text_in (t, id, k, seq, edits) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    table,
+                    row.0.as_bytes().to_vec(),
+                    key,
+                    seq as i64,
+                    crate::text_merge::encode_in(&entries)
+                ],
+            )
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    /// The whole string a text column's value holds.
+    fn logical_text(&self, column: &str, value: &Value) -> Result<String, Error> {
+        match value {
+            Value::String(text) => Ok(text.clone()),
+            Value::Large(large) => String::from_utf8(self.chunks.value_bytes(large)?)
+                .map_err(|_| rejected(format!("`{column}` holds a value that is not UTF-8"))),
+            _ => Err(rejected(format!("`{column}` is not a string"))),
+        }
     }
 
     /// Copy the row's current image into its history before it is
@@ -3737,7 +3861,7 @@ impl Inner {
         }
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
-        let cells = self.merged_cells(table, row, None, cells)?;
+        let cells = self.merged_cells(table, row, None, None, cells)?;
         match self.existing(&table.stored, row, &key)? {
             Some((_, true)) => return Err(row_already_deleted(row)),
             Some((_, false)) => return Err(row_already_exists(row)),
@@ -3970,8 +4094,8 @@ impl Inner {
                 if cells.is_empty() && !staged_tombstone {
                     return Ok(WriteHandle { row, seq: current });
                 }
-                let cells =
-                    self.merged_cells(table, row, (!staged_tombstone).then_some(&key[..]), cells)?;
+                let held = (!staged_tombstone).then_some(&key[..]);
+                let cells = self.merged_cells(table, row, held, Some((&key, seq)), cells)?;
                 self.snapshot(table, row, &key, seq)?;
                 // An upsert over a tombstone replaces it.
                 self.set_cells(
@@ -3992,7 +4116,7 @@ impl Inner {
                 at,
             } => {
                 self.authorize_patch(table, row, &from, &who, verb)?;
-                let cells = self.merged_cells(table, row, Some(&from), cells)?;
+                let cells = self.merged_cells(table, row, Some(&from), Some((&to, seq)), cells)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
                 self.set_cells(table, row, &to, &cells, seq, None, true)?;
                 to
@@ -5341,7 +5465,7 @@ impl Db {
         let mark = inner.changed.borrow().len();
         let joins = extra.is_some();
         let applied = match extra {
-            Some(op) => inner.merge_inputs(op).and_then(|()| {
+            Some(op) => inner.counter_deltas(op).and_then(|()| {
                 let schema = inner.schema.clone();
                 inner.apply_all_checking(&[(schema, op.clone())], 0, own)
             }),

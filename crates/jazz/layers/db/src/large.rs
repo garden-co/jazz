@@ -598,27 +598,6 @@ impl Chunks {
         }
     }
 
-    /// The whole logical value of a write's prepared value, read from the
-    /// nodes it staged (which are not stored yet).
-    pub(crate) fn prepared_bytes(
-        &self,
-        prepared: &lv::PreparedLargeValue,
-    ) -> Result<Vec<u8>, Error> {
-        let mut installed = false;
-        self.run(|inputs| {
-            if !installed {
-                for chunk in &prepared.staged_chunks {
-                    inputs.install_chunk(
-                        request_of(&chunk.node_ref),
-                        Bytes::from(chunk.encoded.clone()),
-                    );
-                }
-                installed = true;
-            }
-            lv::materialize_attempt(&prepared.value_ref, inputs)
-        })
-    }
-
     /// Logical bytes `range` of a value.
     fn range(&self, value: &Logical<'_>, range: std::ops::Range<u64>) -> Result<Vec<u8>, Error> {
         match value {

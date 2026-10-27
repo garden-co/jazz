@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column and for `_deletion`, Core MUST apply each accepted write to the row's post-image as a patch in the order it accepts the writes: every cell the write authored takes the write's value (last arrival wins), every cell it did not author keeps the row's value, and nothing a write authored is dropped. Concurrent writes to different cells of one row therefore all apply, and a write that does not author `_deletion` keeps the row's deletion state, so an edit made over an image older than an accepted delete leaves the row deleted.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
-- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a non-nullable string user column and MUST store a plain string. A write to it MUST carry the edits from its value back to the value its writer saw (`$base.<column>`, made by the writer's node; a write naming one itself is refused), and every node applying the write MUST three-way merge that base, the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union, and of two overlapping replacements the write sequenced later wins.
+- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a non-nullable string user column and MUST store a plain string; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value of the version the write was built on (a commit's version as that commit sent it), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union, and of two overlapping replacements the write sequenced later wins. Otherwise the write's value stands as sent. For a version whose value a merge changed, Core MUST keep the edits back to the value as sent (`_jazz_text_in`).
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
@@ -141,15 +141,18 @@ Text-merging columns merge concurrent edits to one string. The text
 strategies (`MergeStrategy::Text`, `Markdown`, `Html`; `text`, `markdown`
 and `html` in the DSL) are opt-in and may be declared only on non-nullable
 string columns (`INV-HIST-24`). The column stores a plain string, inline or
-as a large value (ch. 19); nothing but the merged string is kept. A write
-to it carries, beside the value it sets, the edits that turn that value back
-into the value its writer saw, as the cell `$base.<column>`: an array of
-`(start, end, insert)` byte-offset replacements, normally one (the differing
-middle of the two values), made by the writer's node when it stages the
-write (a write that names a `$base.` cell itself is refused). Every node
-applying the write, Core and each client replaying its pending writes over
-the images it receives (`INV-REF-4`), rebuilds that base and merges it, the
-value it holds and the write's value:
+as a large value (ch. 19), and a write to it travels as its plain value.
+Only Core merges; replicas apply a pending text write as sent, like any
+patched cell, until Core's image arrives.
+
+Core reads what the write was built on from its base (§4.6). When no
+version before the write that its writer never saw authored the column
+(the common case: nothing concurrent, or a concurrent write to other
+columns), the write's value stands as sent: no base is read and nothing is
+diffed. Otherwise Core merges three values: the base, i.e. the column's
+value in the version the write was built on (for a base on an unsettled
+commit, that commit's value as it sent it); the value Core holds; and the
+write's value:
 
 - each value is cut into tokens (words, single whitespace and other
   characters; for `Markdown` also delimiter runs, ordered-list markers and
@@ -164,11 +167,15 @@ value it holds and the write's value:
   wins that span.
 
 From `The cat sat.`, a concurrent `The black cat sat.` and `The cat
-slept.` merge to `The black cat slept.` in either order. Because the base
-travels with the write, a chain of offline edits merges each one over what
-its writer saw, even when that is the writer's own rebased prediction that
-no accepted version holds. A write over no value (an insert, or an upsert
-creating the row) carries no base and sets the value. The merge is
+slept.` merge to `The black cat slept.` in either order. When a merge
+changes a write's value, Core keeps for the merged version (in
+`_jazz_text_in`, keyed by table, row, branch key and seq, made with the first
+such merge) the edits from the merged value back to the value as sent, per
+column: a later write built on that commit (an offline
+chain) is merged over what its writer saw, the value as sent. A later write
+of the same upload to the row was built on the earlier one as sent, and
+merges over it the same way. A write built on a rejected commit is rejected
+too (§4.6), so a base is always a value Core accepted. The merge is
 token-level, not tree-aware: it keeps markup tokens whole but does not
 check that merged markdown or HTML is well formed. Conflict analysis
 (`INV-HIST-21`) stays column-granular, so concurrent writes to one
