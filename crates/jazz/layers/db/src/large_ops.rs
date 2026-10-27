@@ -503,6 +503,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let value = {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             let (col, cell) =
                 inner.physical_cell(table, row, column, identity_of(opts.identity))?;
             let value = inner.edited(table, &col, cell, edit)?;
@@ -529,6 +530,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let lowered = {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
             inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
         };
@@ -644,6 +646,7 @@ impl Db {
         cells: &BTreeMap<String, Value>,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
+        self.inner().require_mutation_admission()?;
         let col = streaming_column(&self.inner(), table, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
@@ -693,6 +696,7 @@ impl Db {
     ) -> Result<(), Error> {
         self.check_streaming_upload(upload)?;
         let inner = self.inner();
+        inner.require_mutation_admission()?;
         let now = streaming_now_ms();
         if upload.preparation.is_none() {
             return Err(closed());
@@ -775,6 +779,7 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         self.check_streaming_upload(&mut upload)?;
         if upload.table != table || upload.column != column {
             return Err(schema_error(
@@ -1210,6 +1215,7 @@ impl TxRef<'_> {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.db.inner().require_mutation_admission()?;
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
             let identity = identity_of(opts.identity);
             let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);
