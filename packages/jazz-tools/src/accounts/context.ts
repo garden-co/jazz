@@ -176,11 +176,9 @@ export async function createAccountDbWithRuntimeSource(
         renewals.reset(),
       );
     };
-    const renew = () => {
-      const delay = renewals.next();
-      if (delay === 0) void refresh();
-      else scheduleIn(delay);
-    };
+    // Always through the timer, never inline: `schedule()` runs inside a
+    // refresh, which an inline refresh would find still running and skip.
+    const renew = () => scheduleIn(renewals.next());
     const refresh = async () => {
       // A retained account refreshes when revalidation binds its credential.
       if (refreshing || stopped || isProvisionalAccount(account)) return;
@@ -200,7 +198,10 @@ export async function createAccountDbWithRuntimeSource(
       }
     };
     const stopAuth = opened.onAuthChanged((state) => {
-      if (state.error === "expired" || state.error === "missing") renew();
+      // A refused credential renews whatever the server called it: a
+      // rotated signing key reads as "invalid" until a new token is issued.
+      // A disabled account does not.
+      if (state.error && state.error !== "disabled") renew();
     });
     stopBound = onAccountCredentialBound(account, () => {
       renewals.reset();

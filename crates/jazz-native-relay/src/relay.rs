@@ -1868,12 +1868,10 @@ impl std::fmt::Debug for NativeRelaySocketConfig {
 pub enum NativeRelaySocketEvent {
     Connected,
     Reconnecting,
-    /// A connection or transport failed non-retryably. An established link
-    /// that failed is retried; a connection attempt that failed is not
-    /// (the same request would fail again), so `Stopped` follows. The
-    /// scope-owned host surfaces a failure before `Connected` (the upstream
-    /// rejected the session), or one the worker stops on, to foreground
-    /// ticks until a later `Connected`.
+    /// A connection or transport failed non-retryably; the worker retries
+    /// unless `Stopped` follows. The scope-owned host surfaces a failure
+    /// before `Connected` (the upstream rejected the session), or one the
+    /// worker stops on, to foreground ticks until a later `Connected`.
     TerminalError(String),
     /// The upstream refused the worker's credential. `Stopped` follows: only
     /// a worker built with a refreshed credential can connect.
@@ -2042,7 +2040,17 @@ async fn run_socket_worker(
         };
         let connected = match connected {
             Ok(connected) => connected,
-            Err(NativeTransportError::Retryable(_)) => {
+            Err(
+                error @ (NativeTransportError::Retryable(_) | NativeTransportError::Terminal(_)),
+            ) => {
+                // Another non-retryable failure (TLS, a proxy refusing the
+                // upgrade, a rejected session) is surfaced and retried: it
+                // can clear without a new credential.
+                if !error.is_retryable() {
+                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
+                        "native relay socket connect failed: {error}"
+                    )));
+                }
                 (config.on_event)(NativeRelaySocketEvent::Reconnecting);
                 tokio::select! {
                     _ = tokio::time::sleep(config.reconnect_delay) => {},
@@ -2054,12 +2062,6 @@ async fn run_socket_worker(
             // succeed: stop, so the host can replace this worker (#4248).
             Err(NativeTransportError::AuthRejected(error)) => {
                 (config.on_event)(NativeRelaySocketEvent::AuthRejected(format!(
-                    "native relay socket connect failed: {error}"
-                )));
-                break;
-            }
-            Err(NativeTransportError::Terminal(error)) => {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
                     "native relay socket connect failed: {error}"
                 )));
                 break;

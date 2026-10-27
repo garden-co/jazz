@@ -238,39 +238,40 @@ fn retrying_upstream_failure_keeps_foreground_ticking() {
     assert_eq!(host.tick_foreground(alice), Ok(()));
 }
 
-/// A connection attempt the upstream refuses non-retryably is not retried
-/// with the same request: the worker stops, alice's tick reports it, and an
-/// explicit reconnect replaces the stopped worker in one call.
+/// A connection attempt the upstream refuses for another reason than the
+/// credential (TLS, a proxy refusing the upgrade, a rejected session) is
+/// surfaced to alice's tick and retried: it can clear without a new
+/// credential, and the next connection clears the failure.
 ///
 /// ```text
-/// alice ─open─► relay ══socket══✗ edge refuses   worker stops
+/// alice ─open─► relay ══socket══✗ edge refuses   (worker retries)
 /// alice ─tick─► relay                            (LifecycleFailure)
-/// alice ─reconnect─► relay ══socket══► edge      (connected)
+///                 ══socket══► edge               (connected)
 /// alice ─tick─► relay                            (Ok)
 /// ```
 #[test]
-fn a_refused_connection_stops_the_worker_and_reconnect_replaces_it() {
+fn a_refused_connection_is_surfaced_and_retried() {
     let root = tempfile::tempdir().unwrap();
     let (release, released) = tokio::sync::oneshot::channel();
-    release.send(()).unwrap();
     let connector = ScriptedConnector::new([Step::Refuse, Step::ConnectWhenReleased(released)]);
     let (mut host, _, alice) =
         scripted_foreground(root.path(), "refused-upstream", connector.clone());
     let scope = host.foregrounds[&alice].scope.clone();
-    wait_for(&host, "worker gives up", |host| {
-        host.private_scope_workers[&scope].terminally_stopped()
+    wait_for(&host, "the refusal is surfaced", |host| {
+        host.private_scope_terminal_error(&scope).is_some()
     });
     assert_eq!(
         host.tick_foreground(alice),
         Err(JazzNativeRelayStatus::LifecycleFailure)
     );
-    assert_eq!(connector.bearers().len(), 1, "the refusal was not retried");
     assert_eq!(status(&mut host, alice).1, None, "not a credential problem");
+    assert!(!host.private_scope_workers[&scope].terminally_stopped());
 
-    host.foreground_connectivity(alice, Some(false)).unwrap();
-    wait_for(&host, "replacement worker connects", |host| {
+    release.send(()).unwrap();
+    wait_for(&host, "the retried connection lands", |host| {
         connected(host, &scope)
     });
+    assert_eq!(connector.bearers().len(), 2, "the same request was retried");
     assert!(host.private_scope_terminal_error(&scope).is_none());
     assert_eq!(host.tick_foreground(alice), Ok(()));
 }
