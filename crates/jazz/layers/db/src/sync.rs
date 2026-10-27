@@ -5283,6 +5283,7 @@ impl Db {
                 // Rows a resumed client already holds: not shipped, but
                 // their supporting rows are re-watched (and shipped if newer).
                 let mut held = Vec::new();
+                let mut terminal = upstream_failed;
                 for event in events {
                     let SubscriptionEvent::Delta {
                         added,
@@ -5291,12 +5292,13 @@ impl Db {
                         ..
                     } = event
                     else {
-                        // A rejection is terminal for this route. Preserve
-                        // deltas produced before it, and ignore anything
-                        // queued after the failure.
-                        break;
+                        terminal = true;
+                        continue;
                     };
-                    for row in added.iter().chain(updated.iter()) {
+                    // Stop publishing result additions after rejection, but
+                    // still re-check every removal: the replica may hold a row
+                    // whose permission was revoked after the queued failure.
+                    for row in added.iter().chain(updated.iter()).filter(|_| !terminal) {
                         for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
                             images.extend(inner.joined_images(table, joined, &mut history_seqs)?);
                         }

@@ -266,7 +266,7 @@ fn prepared_membership_failure_reaches_idle_browser() {
     prepared_membership_failure(true);
 }
 
-fn retained_rows_are_revoked(reject: bool) {
+fn retained_rows_are_revoked(reject: bool, revoke_before_drain: bool) {
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -359,6 +359,10 @@ fn retained_rows_are_revoked(reject: bool) {
             Default::default(),
         ))
         .unwrap();
+        if revoke_before_drain {
+            // Queue the removal behind the rejection before Core drains either.
+            block_on(core.delete("grants", id(3), Default::default())).unwrap();
+        }
         pump();
         assert_eq!(
             stream.try_next_event(),
@@ -371,9 +375,11 @@ fn retained_rows_are_revoked(reject: bool) {
     drop(stream);
     pump();
     assert_eq!(core.runtime_stats_for_test().active_subscriptions, 0);
-    assert_eq!(local(), [id(1)], "Alice retains the still-readable post");
-    block_on(core.delete("grants", id(3), Default::default())).unwrap();
-    pump();
+    if !revoke_before_drain {
+        assert_eq!(local(), [id(1)], "Alice retains the still-readable post");
+        block_on(core.delete("grants", id(3), Default::default())).unwrap();
+        pump();
+    }
     assert_eq!(
         local(),
         [],
@@ -384,12 +390,19 @@ fn retained_rows_are_revoked(reject: bool) {
 /// Alice's cached post remains subject to Core's policy after normal unsubscribe.
 #[test]
 fn unsubscribe_retains_policy_tracking() {
-    retained_rows_are_revoked(false);
+    retained_rows_are_revoked(false, false);
 }
 
 /// Alice's cached post remains subject to Core's policy after a failed query:
 /// Core rejects --> Alice ends subscription --> Core revokes grant --> post leaves.
 #[test]
 fn rejection_retains_policy_tracking() {
-    retained_rows_are_revoked(true);
+    retained_rows_are_revoked(true, false);
+}
+
+/// Alice loses her cached post even when Core revokes access before sending
+/// the query failure: reject --> revoke grant --> drain --> Alice loses post.
+#[test]
+fn rejection_preserves_queued_permission_revocations() {
+    retained_rows_are_revoked(true, true);
 }

@@ -932,10 +932,9 @@ function decodeForegroundSubscriptionEvents(
       const length = readVarint();
       const rawCode = decodeForegroundUtf8(bytes, offset, length, "rejection");
       offset += length;
-      if (!isNativeForegroundSubscriptionFailureCode(rawCode)) {
-        throw new Error("Jazz native foreground returned unknown subscription failure code");
-      }
-      const code = rawCode;
+      // Earlier ABI 3 native builds send diagnostic text in this same string
+      // slot. Keep OTA bundles compatible without exposing those diagnostics.
+      const code = isNativeForegroundSubscriptionFailureCode(rawCode) ? rawCode : "Internal";
       events.push({ type: "rejected", code });
     } else if (tag === 2) events.push({ type: "closed" });
     else throw new Error("Jazz native foreground returned unknown subscription event");

@@ -6,3 +6,5 @@
 ---
 
 Server-side failures in served subscriptions now reach clients as typed terminal rejections instead of leaving subscriptions waiting indefinitely. Failed routes are retired while independent write Fate and unaffected subscriptions continue.
+
+Permission revocations queued behind a rejection still evict cached rows, and Rust client streams end after delivering the rejection. React Native decodes rejection messages from older compatible native builds as `Internal` without exposing their diagnostic text.

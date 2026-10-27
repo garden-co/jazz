@@ -255,7 +255,8 @@ impl Shared {
                     },
                     SubscriptionEvent::Closed => return false,
                 };
-                if forwarder.sender.send(item).is_err() {
+                let rejected = matches!(item, SubscriptionStreamItem::Rejected { .. });
+                if forwarder.sender.send(item).is_err() || rejected {
                     return false;
                 }
             }
@@ -2057,5 +2058,84 @@ fn provenance(row: &CurrentRow) -> crate::model::metadata::RowProvenance {
         updated_by: author("$updatedBy").unwrap_or_else(|| created_by.clone()),
         created_by,
         created_at,
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+    use crate::db::{ErrorCode, SubscriptionServerFailureCode};
+    use crate::query::ArraySubquery;
+    use crate::tools::{SchemaBuilder, TableSchemaBuilder};
+
+    /// Alice's public stream yields one rejection, then ends without waiting
+    /// for cancellation: query refresh fails --> rejection --> next returns None.
+    /// Her independent flat subscription still receives the triggering post.
+    /// This lower-level test needs the private Db only to inject a refresh
+    /// failure; receipt and exhaustion use the public subscription API.
+    #[tokio::test]
+    async fn subscription_stream_ends_after_rejection() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let schema = SchemaBuilder::new()
+                    .table(TableSchemaBuilder::new("posts").column("title", ColumnType::Text))
+                    .table(TableSchemaBuilder::new("memberships").fk_column("postId", "posts"))
+                    .build();
+                let alice = JazzClient::test_client(schema).await;
+                let query = Query::from("posts").array_subquery(ArraySubquery::new(
+                    "memberships",
+                    "memberships",
+                    "postId",
+                    "id",
+                ));
+                let mut stream = alice
+                    .subscribe_with_opts(
+                        query,
+                        ReadOpts::for_read_tier(crate::db::ReadTier::LocalOnly),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    stream.next().await,
+                    Some(SubscriptionStreamItem::Delta(_))
+                ));
+                let mut flat = alice
+                    .subscribe_with_read_tier(Query::from("posts"), ReadTier::LocalOnly)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    flat.next().await,
+                    Some(SubscriptionStreamItem::Delta(_))
+                ));
+                assert!(alice.shared.db.fail_next_membership_refresh_for_test(
+                    "posts",
+                    CoreError::new(ErrorCode::Protocol, "injected membership failure"),
+                ));
+                alice
+                    .insert(
+                        "posts",
+                        HashMap::from([("title".to_owned(), Value::Text("trigger".to_owned()))]),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    stream.next().await,
+                    Some(SubscriptionStreamItem::Rejected {
+                        reason: SubscriptionRejectReason::ServerFailure {
+                            code: SubscriptionServerFailureCode::QueryResultProtocol,
+                        },
+                    }),
+                ));
+                let ended = tokio::time::timeout(Duration::from_secs(1), stream.next()).await;
+                assert!(matches!(
+                    flat.next().await,
+                    Some(SubscriptionStreamItem::Delta(delta)) if delta.added.len() == 1,
+                ));
+                alice.shutdown().await.unwrap();
+                assert!(
+                    matches!(ended, Ok(None)),
+                    "terminal stream stayed pending: {ended:?}"
+                );
+            })
+            .await;
     }
 }
