@@ -1140,12 +1140,32 @@ impl NapiDb {
 ///
 /// A directory that holds a store from before storage format 1 is refused
 /// with the `unsupported_storage_codecs` code rather than opened empty next to
-/// its data.
+/// its data. `jazz.sqlite.native-root.v1` admits only regular SQLite database
+/// and sidecar files. Validate before SQLite opens or creates any of them.
 fn store_file(data_path: &str) -> napi::Result<std::path::PathBuf> {
     let dir = std::path::Path::new(data_path);
     jazz::format::refuse_groove_store(dir).map_err(|error| host_error(HostError::Engine(error)))?;
     std::fs::create_dir_all(dir)
         .map_err(|error| napi::Error::from_reason(format!("create {data_path}: {error}")))?;
+    let io_error = |error: std::io::Error| {
+        napi::Error::from_reason(format!("inspect native database root {data_path}: {error}"))
+    };
+    for entry in std::fs::read_dir(dir).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let name = entry.file_name();
+        let known = matches!(
+            name.to_str(),
+            Some("jazz.sqlite" | "jazz.sqlite-wal" | "jazz.sqlite-shm" | "jazz.sqlite-journal")
+        );
+        // DirEntry::file_type does not follow symlinks. A recognised basename
+        // cannot redirect the database or a SQLite sidecar into another root.
+        if !known || !entry.file_type().map_err(io_error)?.is_file() {
+            return Err(napi_core_error(&CoreError::new(
+                jazz::db::ErrorCode::UnsupportedStorageCodecs,
+                "native database root uses an unsupported storage layout; expected jazz.sqlite.native-root.v1",
+            )));
+        }
+    }
     Ok(dir.join("jazz.sqlite"))
 }
 
