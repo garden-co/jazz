@@ -22,7 +22,7 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
-    ReadOpts, ReadTier, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
+    ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
     UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
@@ -650,52 +650,56 @@ pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
 
-const ROW_ALREADY_DELETED: &str = "row already deleted: ";
-const ROW_ALREADY_EXISTS: &str = "encoding error: object already exists: ";
-const ROW_NOT_DELETED: &str = "row not deleted: ";
-
-const MISSING_REQUIRED: &str = "missing required field ";
-const BRANCH_MOVE: &str = "invalid mergeable commit: branch column does not match exact branch key";
+/// A write rejected for `reason`.
+fn rejected_for(reason: Reason, message: impl Into<String>) -> Error {
+    Error::with_reason(ErrorCode::WriteRejected, reason, message)
+}
 
 /// A new row (or restored content) without a value for a required column.
 fn missing_required(table: &str, column: &str) -> Error {
-    rejected(format!("{MISSING_REQUIRED}`{column}` in `{table}`"))
+    rejected_for(
+        Reason::MissingRequired,
+        format!("missing required field `{column}` in `{table}`"),
+    )
 }
 
 /// A write to (or an insert reusing the id of) a deleted row.
 fn row_already_deleted(row: RowUuid) -> Error {
-    rejected(format!("{ROW_ALREADY_DELETED}{}", row.0))
+    rejected_for(
+        Reason::RowAlreadyDeleted,
+        format!("row already deleted: {}", row.0),
+    )
 }
 
 /// A restore of a live row.
 fn row_not_deleted(row: RowUuid) -> Error {
-    rejected(format!("{ROW_NOT_DELETED}{}", row.0))
+    rejected_for(Reason::RowNotDeleted, format!("row not deleted: {}", row.0))
 }
 
 /// An insert reusing a live row's id.
 fn row_already_exists(row: RowUuid) -> Error {
-    rejected(format!("{ROW_ALREADY_EXISTS}{}", row.0))
+    rejected_for(
+        Reason::RowAlreadyExists,
+        format!("encoding error: object already exists: {}", row.0),
+    )
+}
+
+/// A mergeable commit that would move a row to another branch.
+fn branch_move() -> Error {
+    Error::with_reason(
+        ErrorCode::Schema,
+        Reason::BranchMove,
+        "invalid mergeable commit: branch column does not match exact branch key",
+    )
 }
 
 impl Error {
     /// Whether a write was refused for the stored state of its row rather
-    /// than for its arguments: its id is deleted or taken, it restores a
-    /// live row, it would create a row without a required value (an upsert
-    /// may create or patch), or it would move a row to another branch. A host reports it through
-    /// the write's handle, as an apply-time rejection, not from the call.
+    /// than for its arguments ([`Reason::is_apply_time`]). A host reports it
+    /// through the write's handle, as an apply-time rejection, not from the
+    /// call.
     pub fn is_apply_time_rejection(&self) -> bool {
-        match self.code {
-            ErrorCode::WriteRejected => [
-                ROW_ALREADY_DELETED,
-                ROW_ALREADY_EXISTS,
-                ROW_NOT_DELETED,
-                MISSING_REQUIRED,
-            ]
-            .iter()
-            .any(|prefix| self.message.starts_with(prefix)),
-            ErrorCode::Schema => self.message == BRANCH_MOVE,
-            _ => false,
-        }
+        self.reason.is_some_and(Reason::is_apply_time)
     }
 }
 
@@ -909,31 +913,31 @@ pub(crate) fn is_windowed(query: &Query) -> bool {
             .is_some_and(|parts| parts.limit.is_some() || parts.offset.is_some_and(|o| o > 0))
 }
 
-/// The reason a policy rejects a write, leading its message (the code
-/// stays `WriteRejected`): authority rejections are reported by it.
-pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
+/// The text leading a policy rejection's message (its reason is
+/// [`Reason::AuthorizationDenied`], its code `WriteRejected`).
+pub const AUTHORIZATION_DENIED: &str = Reason::AuthorizationDenied.as_str();
 
 /// How far ahead of the authority's clock a session's explicit write
 /// timestamp may be (SPEC 3, INV-TX-7).
 pub const SKEW_TOLERANCE_MS: i64 = 30_000;
 
-/// The reason the authority refuses a write timestamped too far ahead,
-/// leading its message (the code stays `WriteRejected`).
-pub const CLIENT_CLOCK_TOO_FAR_AHEAD: &str = "client_clock_too_far_ahead";
+/// The text leading the message of a write the authority refuses for a
+/// timestamp too far ahead (its reason is
+/// [`Reason::ClientClockTooFarAhead`], its code `WriteRejected`).
+pub const CLIENT_CLOCK_TOO_FAR_AHEAD: &str = Reason::ClientClockTooFarAhead.as_str();
 
 /// A write a policy rejects.
 fn denied(detail: impl std::fmt::Display) -> Error {
-    rejected(format!("{AUTHORIZATION_DENIED}: {detail}"))
+    rejected_for(
+        Reason::AuthorizationDenied,
+        format!("{AUTHORIZATION_DENIED}: {detail}"),
+    )
 }
 
 impl Error {
     /// Whether a policy rejected the write.
     pub fn is_authorization_denied(&self) -> bool {
-        self.code == ErrorCode::WriteRejected
-            && self
-                .message
-                .strip_prefix(AUTHORIZATION_DENIED)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        self.reason == Some(Reason::AuthorizationDenied)
     }
 }
 
@@ -1288,6 +1292,21 @@ impl Db {
             plan.push(row.map_err(storage)?);
         }
         Ok((compiled.sql.clone(), plan.join(" | ")))
+    }
+
+    /// Diagnostics: SQLite's query plan for the INSERT check a commit
+    /// would run on `row` of `table` as `author`, with `grounded` rows of
+    /// that table overlaid as a later grounding round sees them.
+    #[doc(hidden)]
+    pub fn explain_write_check_plan(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+        grounded: &[RowUuid],
+    ) -> Result<String, Error> {
+        self.inner()
+            .explain_write_check(table, row, author, grounded)
     }
 
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
@@ -2730,6 +2749,25 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
+        let (sql, params, preps) = self.policy_check(table, row, key, cut, policy)?;
+        let value: i64 = self.with_preps(&preps, |_| {
+            self.conn
+                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .map_err(storage)
+        })?;
+        Ok(value != 0)
+    }
+
+    /// The statement [`Inner::holds_at`] runs: the policy SQL boolean for
+    /// one stored row, its parameters, and the preps it needs.
+    fn policy_check(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
@@ -2744,12 +2782,44 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        let value: i64 = self.with_preps(&preps, |_| {
-            self.conn
-                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .map_err(storage)
+        Ok((sql, params, preps))
+    }
+
+    /// SQLite's plan for the INSERT check a unit ending now would run on
+    /// `row` (SPEC 7): its policy reads committed state, overlaid with the
+    /// `grounded` rows of the same table, as a later round sees them.
+    fn explain_write_check(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+        grounded: &[RowUuid],
+    ) -> Result<String, Error> {
+        let table = self.schema.table(table)?;
+        let own = self.seq + 1;
+        let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
+        let cut = Cut {
+            seq: self.seq,
+            own,
+            extra: Vec::new(),
+            grounded: Some(Arc::new(BTreeMap::from([(table.stored.clone(), ids)]))),
+        };
+        let session = self.session(author);
+        let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
+            ctx.operation_policy(table, Operation::Insert, "a", &session)
         })?;
-        Ok(value != 0)
+        let mut statement = self
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(params_from_iter(params.iter()), |r| r.get::<_, String>(3))
+            .map_err(storage)?;
+        let mut plan = Vec::new();
+        for row in rows {
+            plan.push(row.map_err(storage)?);
+        }
+        Ok(plan.join(" | "))
     }
 
     /// [`Inner::holds`] for `row` as of `cut`: the row under check and
@@ -3754,7 +3824,7 @@ impl Inner {
                 .any(|column| cells.contains_key(column))
             && table.branch_key_after(key, &cells) != *key
         {
-            return Err(schema_error(BRANCH_MOVE));
+            return Err(branch_move());
         }
         // An upsert over a row this commit deleted writes it anew: it is
         // checked as the insert it is, not as an update of the deleted row.
@@ -4750,10 +4820,13 @@ impl Inner {
         if let Some(at) = op.updated_at_ms()
             && at as i64 > now.saturating_add(SKEW_TOLERANCE_MS)
         {
-            return Err(rejected(format!(
-                "{CLIENT_CLOCK_TOO_FAR_AHEAD}: the write's timestamp is {}ms ahead of the authority's clock",
-                at as i64 - now
-            )));
+            return Err(rejected_for(
+                Reason::ClientClockTooFarAhead,
+                format!(
+                    "{CLIENT_CLOCK_TOO_FAR_AHEAD}: the write's timestamp is {}ms ahead of the authority's clock",
+                    at as i64 - now
+                ),
+            ));
         }
         Ok(())
     }

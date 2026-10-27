@@ -34,7 +34,7 @@ use base64::Engine;
 use duplex_transport::duplex;
 use jazz::db::{
     CurrentRow, Db, DbConfig, DbIdentity, ErrorCode, ExactWriteTarget, FileOptions, InsertOptions,
-    ReadOpts, ReadTier, UpdateOptions, WriteIdentity, block_on,
+    ReadOpts, ReadTier, Reason, UpdateOptions, WireError, WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, LensOp, MigrationLens, TableLens};
@@ -54,11 +54,13 @@ const SERVER_FILE: &str = "sqlite-storage-v1/server.sqlite.gz.base64";
 const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// SHA-256 of the decoded SQLite files. The corpus is immutable: a new
 /// storage format gets a new corpus beside this one.
-const SERVER_SHA256: &str = "03246f5bb4bf356b5c07b4da69cae2d943072dca53cebb5a0e8d18a9f95d8c18";
-const CLIENT_SHA256: &str = "d5384c1c4684b20c99cfcc0530c72e1717bf6fafda0d5f337f288720042f7fed";
+const SERVER_SHA256: &str = "9cce55030ad6f58f45dba9ae8bbf57b0dc619d47cfa0a6573982572ada9f8968";
+const CLIENT_SHA256: &str = "c80e4301d3e30661e89660ab71deff2790a1863b616c07292eeadeb05680ed4a";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
+/// A write time far ahead of any real clock (the year 3000).
+const FAR_FUTURE_MS: u64 = 32_503_680_000_000;
 /// Large enough to be stored as a chunked large value.
 const LARGE: usize = 300 * 1024;
 
@@ -452,6 +454,25 @@ fn produce_sqlite_storage_corpus_v1() {
             client.wait_for_pending_writes(DurabilityTier::Global),
         )
         .unwrap();
+        // A write stamped far ahead of the server's clock: the server
+        // records its rejection, with its reason, as the commit's fate.
+        block_on(client.insert(
+            "projects",
+            cells(&[("name", string("From the future"))]),
+            InsertOptions {
+                row_id: Some(project(7)),
+                identity: WriteIdentity::Session(user(3)),
+                updated_at_ms: Some(FAR_FUTURE_MS),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let refused = drive(
+            &[&client, &server, &client],
+            client.wait_for_pending_writes(DurabilityTier::Global),
+        )
+        .expect_err("the server refuses a write from the future");
+        assert_eq!(refused.reason, Some(Reason::ClientClockTooFarAhead));
         insert_as(
             &client,
             "projects",
@@ -722,6 +743,45 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
     assert_eq!(
         names,
         ["Alpha 2", "Beta", "Gamma", "Pending", "Epsilon"].map(string)
+    );
+}
+
+/// The server's recorded fates are format 1 too: the rejected commit's fate
+/// still decodes, with its reason name, from `_jazz_applied`.
+#[test]
+fn pinned_server_corpus_keeps_a_rejected_fate_with_its_reason() {
+    let dir = scratch("fates");
+    let server_path = install(SERVER_FILE, SERVER_SHA256, &dir);
+    let conn = rusqlite::Connection::open(&server_path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT node, result FROM _jazz_applied ORDER BY node, tx")
+        .unwrap();
+    let fates: Vec<(Vec<u8>, Result<(), WireError>)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)))
+        .unwrap()
+        .map(|row| {
+            let (node, bytes) = row.unwrap();
+            let fate = postcard::from_bytes(&bytes).expect("a recorded fate decodes");
+            (node, fate)
+        })
+        .collect();
+    let rejected: Vec<_> = fates
+        .iter()
+        .filter_map(|(node, fate)| match fate {
+            Err(WireError::Rejected { reason, message }) => Some((node, reason, message)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rejected.len(), 1, "{fates:?}");
+    let (node, reason, message) = rejected[0];
+    assert_eq!(node.as_slice(), CLIENT_NODE.as_slice());
+    assert_eq!(
+        reason.as_deref(),
+        Some(Reason::ClientClockTooFarAhead.as_str())
+    );
+    assert!(
+        message.starts_with(jazz::db::CLIENT_CLOCK_TOO_FAR_AHEAD),
+        "{message}"
     );
 }
 

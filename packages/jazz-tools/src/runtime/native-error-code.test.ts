@@ -6,7 +6,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
-import { nativeCoreErrorCode, nativeErrorCode } from "./native-runtime/native-error-code.js";
+import {
+  NATIVE_CORE_ERROR_REASONS,
+  nativeCoreErrorCode,
+  nativeCoreErrorReason,
+  nativeErrorCode,
+} from "./native-runtime/native-error-code.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/schema-codec.js";
 import {
@@ -14,6 +19,7 @@ import {
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
+import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
 // A core error crossing a native binding keeps its Rust display text as the
@@ -43,6 +49,27 @@ async function missingTableReadError(read: (query: Uint8Array) => unknown): Prom
   }
   throw new Error("reading an undeclared table unexpectedly succeeded");
 }
+
+describe("native core error reasons", () => {
+  it("reads a core reason name and ignores anything else", () => {
+    const denied = Object.assign(new Error("WriteRejected: authorization_denied: x"), {
+      code: "write_rejected",
+      reason: "authorization_denied",
+    });
+    expect(nativeCoreErrorReason(denied)).toBe("authorization_denied");
+    expect(nativeCoreErrorReason(new Error("no reason"))).toBeUndefined();
+    expect(nativeCoreErrorReason({ reason: "a_reason_from_a_newer_engine" })).toBeUndefined();
+    expect(nativeCoreErrorReason("authorization_denied")).toBeUndefined();
+  });
+
+  it("knows exactly the reasons the engine has", async () => {
+    // A test-only export (`skip_typescript`), absent from the declarations.
+    const napi = (await loadNapiModule()) as unknown as {
+      __testCoreErrorReasonNames(): string[];
+    };
+    expect([...NATIVE_CORE_ERROR_REASONS].sort()).toEqual(napi.__testCoreErrorReasonNames().sort());
+  });
+});
 
 describe("native core error codes", () => {
   it("NAPI throws a core error as an Error with its message and stable code", async () => {

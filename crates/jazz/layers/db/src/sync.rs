@@ -549,7 +549,12 @@ pub enum WireKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireError {
     Conflict(String),
-    Rejected(String),
+    /// `reason`: the [`Reason`] by its stable name. A name this build does
+    /// not know arrives as a rejection without a reason, its message intact.
+    Rejected {
+        reason: Option<String>,
+        message: String,
+    },
     Other(String),
 }
 
@@ -1513,7 +1518,10 @@ impl SubscriberId {
 fn wire_error(error: &Error) -> WireError {
     match error.code {
         ErrorCode::TransactionConflict => WireError::Conflict(error.message.clone()),
-        ErrorCode::WriteRejected => WireError::Rejected(error.message.clone()),
+        ErrorCode::WriteRejected => WireError::Rejected {
+            reason: error.reason.map(|reason| reason.as_str().to_owned()),
+            message: error.message.clone(),
+        },
         _ => WireError::Other(error.to_string()),
     }
 }
@@ -1521,7 +1529,11 @@ fn wire_error(error: &Error) -> WireError {
 fn from_wire_error(error: WireError) -> Error {
     match error {
         WireError::Conflict(m) => Error::new(ErrorCode::TransactionConflict, m),
-        WireError::Rejected(m) => Error::new(ErrorCode::WriteRejected, m),
+        WireError::Rejected { reason, message } => Error {
+            code: ErrorCode::WriteRejected,
+            reason: reason.as_deref().and_then(Reason::from_name),
+            message,
+        },
         WireError::Other(m) => Error::new(ErrorCode::Protocol, m),
     }
 }
@@ -2817,7 +2829,14 @@ impl Inner {
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
         ) {
-            Ok(bytes) => Ok(postcard::from_bytes(&bytes).ok()),
+            // An unreadable fate is a damaged store, not an unseen commit:
+            // treating it as unseen would authorize a resend afresh.
+            Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(|error| {
+                Error::new(
+                    ErrorCode::Storage,
+                    format!("undecodable recorded fate of commit {tx}: {error}"),
+                )
+            }),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
@@ -4905,10 +4924,10 @@ impl Db {
         // A client that sent what this server cannot decode is
         // disconnected; nothing it sent is served.
         if failed {
-            return Err(Error {
-                code: ErrorCode::Protocol,
-                message: "sync message the server cannot decode".to_owned(),
-            });
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "sync message the server cannot decode",
+            ));
         }
         let mut inbound: VecDeque<SyncMessage> = inbound.into();
         self.serve_due_first_loads(index)?;
@@ -6132,9 +6151,10 @@ impl Db {
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
                         through,
-                        result: Err(WireError::Rejected(
-                            "commit names a node another identity writes as".to_owned(),
-                        )),
+                        result: Err(WireError::Rejected {
+                            reason: None,
+                            message: "commit names a node another identity writes as".to_owned(),
+                        }),
                         held: Vec::new(),
                         global: true,
                     });
