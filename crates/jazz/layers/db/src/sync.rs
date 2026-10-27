@@ -7,7 +7,10 @@
 //! * Replica rows carry the server's commit seq in `_seq`, so history and
 //!   as-of cuts on the client are over server versions. Optimistic local
 //!   writes take seqs from `LOCAL_BASE` up, above any server seq, and are
-//!   therefore invisible to every cut at a server seq.
+//!   therefore invisible to every cut at a server seq. A non-durable client
+//!   (a worker's tab) numbers its own from `NON_DURABLE_BASE` up: its
+//!   replica also holds its worker's unsettled versions at the worker's
+//!   local seqs, and the two numberings must never meet.
 //! * A row touched by a pending (unsettled) local transaction keeps its
 //!   settled image in the shadow. Server images for it update the shadow;
 //!   a rebase restores every shadowed row and replays the pending
@@ -64,6 +67,12 @@ fn now_ms() -> i64 {
 /// 2^53, so seqs stay exact where SQLite integers surface as JS numbers
 /// (Durable Objects).
 pub const LOCAL_BASE: u64 = 1 << 52;
+
+/// A non-durable client's optimistic local seqs start here, so they never
+/// collide with its upstream relay's (from `LOCAL_BASE` up, which a relay
+/// ships to it for versions it has not settled). A relay would need 2^51
+/// local commits to reach it. Still below 2^53.
+pub const NON_DURABLE_BASE: u64 = LOCAL_BASE + (1 << 51);
 
 /// A message transport between a client and its server.
 pub trait Transport {
@@ -3412,7 +3421,7 @@ impl Db {
         if inner.client.is_some() {
             return;
         }
-        inner.seq = inner.seq.max(LOCAL_BASE);
+        inner.seq = inner.seq.max(inner.local_base());
         let node = *inner.identity.node.as_bytes();
         inner.client = Some(Client::new(node));
         inner
@@ -4526,6 +4535,15 @@ impl Db {
 }
 
 impl Inner {
+    /// Where this replica's optimistic local seqs start.
+    fn local_base(&self) -> u64 {
+        if self.non_durable {
+            NON_DURABLE_BASE
+        } else {
+            LOCAL_BASE
+        }
+    }
+
     /// Drop the upstream link: reads stop waiting, writes queue.
     fn detach_upstream(&mut self) {
         let Some(client) = self.client.as_mut() else {
@@ -5369,6 +5387,28 @@ impl Db {
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
+            // A relay's versions of the session's own commits it still
+            // uploads are the session's pending writes, which it holds as
+            // it wrote them: shipped at the relay's seqs, they would stand
+            // in for them as another writer's.
+            if let Some(client) = &inner.client {
+                let own: HashSet<u64> = client
+                    .relayed_fates
+                    .iter()
+                    .filter(|(_, sessions)| sessions.iter().any(|(s, _, _)| *s == index))
+                    .map(|(seq, _)| *seq)
+                    .collect();
+                if !own.is_empty() {
+                    out.retain_mut(|message| match message {
+                        SyncMessage::Rows { images } => {
+                            images.retain(|image| !own.contains(&image.seq));
+                            !images.is_empty()
+                        }
+                        _ => true,
+                    });
+                }
+            }
+            let session = &mut inner.sessions[index];
             for message in out {
                 let Some(message) = message_out(&names, message) else {
                     continue;
@@ -6616,9 +6656,14 @@ impl Db {
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
     /// whatever its tier, waits for the upstream's answer (the relay's
-    /// stored view, or its upstream's once that answers).
+    /// stored view, or its upstream's once that answers). Its own writes
+    /// take seqs from [`NON_DURABLE_BASE`] up.
     pub fn set_non_durable_client(&self) {
-        self.inner.borrow_mut().non_durable = true;
+        let mut inner = self.inner.borrow_mut();
+        inner.non_durable = true;
+        if inner.client.is_some() {
+            inner.seq = inner.seq.max(inner.local_base());
+        }
     }
 }
 
