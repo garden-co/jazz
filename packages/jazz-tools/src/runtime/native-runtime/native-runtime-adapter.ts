@@ -3828,6 +3828,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private handleServerTransportError(
     error: unknown,
     generation = this.serverConnectionGeneration,
+    reconnecting = false,
   ): void {
     if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
@@ -3835,7 +3836,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.remoteLink.changed();
-    this.failRemoteSubscriptions(this.serverTransportError);
+    // An outage the client keeps reconnecting through leaves remote
+    // subscriptions open: their native sources resume on the next connection.
+    if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
@@ -3917,7 +3920,7 @@ export class NativeRuntimeAdapter implements Runtime {
     void recovery.catch(() => undefined);
     if (publishOutage) {
       this.serverOutageReported = true;
-      this.handleServerTransportError(new Error(error.message));
+      this.handleServerTransportError(new Error(error.message), generation, true);
     }
     return recovery;
   }
