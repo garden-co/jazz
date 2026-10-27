@@ -76,10 +76,10 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf }) => {
   policy.__e2ee_spaces.allowRead.where(authenticated);
   policy.__e2ee_spaces.allowInsert.where((space) =>
     allOf([
-      { accountId: session.user.account, "$createdBy.account": session.user.account },
+      { creatorAccountId: session.user.account, "$createdBy.account": session.user.account },
       // Account correlation comes first: it is the shared declared-reference join.
       policy.chatOwners.existsIncludingCreated.where({
-        accountId: space.accountId,
+        accountId: space.creatorAccountId,
         chatId: space.identifier,
       }),
     ]),
