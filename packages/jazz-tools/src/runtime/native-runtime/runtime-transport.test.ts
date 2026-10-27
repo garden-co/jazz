@@ -905,6 +905,75 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("fails a remote subscription that survived an outage once the reconnect hits a terminal error", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    let serverDown = false;
+    let refuseNextConnection = false;
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+        if (serverDown) queueMicrotask(() => this.emitServerClose());
+        // A frame the client cannot decode is a protocol error, which is never retried.
+        else if (refuseNextConnection)
+          queueMicrotask(() => this.emitMessage(new Uint8Array([0xff, 0xff, 0xff])));
+      }
+    } as unknown as typeof WebSocket;
+    const nativeSubscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            subscribe: () => nativeSubscription,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+
+      serverDown = true;
+      sockets[0]!.emitServerClose();
+      await vi.advanceTimersByTimeAsync(60_000);
+      // The outage is reported, and the subscription waits it out.
+      expect(terminal).toHaveBeenCalledTimes(1);
+      expect(nativeSubscription.closed).toBe(false);
+      expect(updates).not.toHaveBeenCalledWith(expect.any(Error));
+
+      serverDown = false;
+      refuseNextConnection = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(nativeSubscription.closed).toBe(true);
+      expect(updates).toHaveBeenCalledWith(expect.any(Error));
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not reject a Global wait issued once a short outage ends", async () => {
     vi.useFakeTimers();
     // Worst-case jitter: every backoff step takes its full ceiling.

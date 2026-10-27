@@ -806,7 +806,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
   private readonly remoteLink = new RemoteLinkStatePublisher(() => this.readRemoteLinkState());
-  private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -1436,7 +1435,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
     this.localSettlementListeners.clear();
-    this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     const serverTransport = this.serverTransport;
     this.serverTransport = null;
@@ -2498,7 +2496,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
           this.handleServerTransportError(error, generation),
         );
-        this.flushQueuedServerFrames(carrier);
         this.pumpServerTransport().catch((error) =>
           this.handleServerTransportError(error, generation),
         );
@@ -2607,7 +2604,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransport = null;
     this.serverEndpointUrl = null;
     this.serverAuthJson = null;
-    this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
@@ -3802,26 +3798,15 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private sendServerFrames(
     frames: Uint8Array[],
-    carrier = this.serverCarrier,
-    generation = this.serverConnectionGeneration,
+    carrier: WebSocketCarrier,
+    generation: number,
   ): void {
     // A retired connection's frames belong to its channel state; the next
-    // connection must never carry them.
-    if (generation !== this.serverConnectionGeneration) return;
-    if (!carrier || carrier !== this.serverCarrier) {
-      this.queuedServerFrames.push(...frames);
-      return;
-    }
+    // connection must never carry them. Every carrier change starts a new
+    // generation, so frames are only ever sent on the carrier they were made for.
+    if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) return;
     void carrier.sendBatch(frames).catch((error) => {
       this.handleServerTransportError(error, generation);
-    });
-  }
-
-  private flushQueuedServerFrames(carrier: WebSocketCarrier): void {
-    if (this.queuedServerFrames.length === 0 || carrier !== this.serverCarrier) return;
-    const frames = this.queuedServerFrames.splice(0);
-    void carrier.sendBatch(frames).catch((error) => {
-      this.handleServerTransportError(error);
     });
   }
 
@@ -3886,7 +3871,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.finishServerConnectionAttempt(attempt, new Error(error.message));
     // Frames the retired socket buffered belong to its channel state, not the next connection's.
     this.pendingInboundServerFrames.length = 0;
-    this.queuedServerFrames.length = 0;
     const generation = this.serverConnectionGeneration;
     this.resolveServerTransportWorkWaiters();
     const now = Date.now();
