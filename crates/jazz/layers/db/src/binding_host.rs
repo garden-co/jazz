@@ -721,6 +721,7 @@ struct WriteResultPayload {
 /// A committed write as a binding returns it.
 #[derive(Clone, Debug)]
 pub struct Write {
+    node: NodeUuid,
     /// postcard `{ row_id, tx_id }`.
     pub payload: Vec<u8>,
     /// The written row (zero for a transaction commit).
@@ -910,6 +911,7 @@ impl Binding {
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
         let tx_id = TxId::new(TxTime(seq), self.node);
         Ok(Write {
+            node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
                 .map_err(|error| HostError::Argument(error.to_string()))?,
             row_id,
@@ -1454,6 +1456,9 @@ impl Binding {
     /// Resolve once `write` reached `tier`; fail at once with its
     /// rejection, if it was rejected.
     pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
         if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
