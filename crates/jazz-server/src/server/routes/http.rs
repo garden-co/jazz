@@ -491,6 +491,54 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json, serde_json::json!({ "status": "healthy" }));
     }
+
+    /// A runtime that panics is restarted and the server stays healthy. One
+    /// that panics again soon after stays stopped: the server answers 503
+    /// with why, so it is restarted.
+    #[tokio::test]
+    async fn a_runtime_that_cannot_restart_makes_the_server_unhealthy() {
+        let state = ServerBuilder::new(AppId::from_name("health-fault"))
+            .with_schema(
+                jazz::tools::public_schema::SchemaBuilder::new()
+                    .table(
+                        jazz::tools::public_schema::TableSchema::builder("notes")
+                            .column("body", jazz::tools::public_schema::ColumnType::Text),
+                    )
+                    .build(),
+            )
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build server")
+            .state;
+        let runtime = state.runtime_for_client().expect("a runtime");
+
+        let panicked = runtime
+            .with_db_for_test::<()>(|_| panic!("injected runtime failure"))
+            .await;
+        assert!(panicked.is_err());
+        let (status, json) = health(Arc::clone(&state)).await;
+        assert_eq!(status, StatusCode::OK, "restarted: {json}");
+
+        let _ = runtime
+            .with_db_for_test::<()>(|_| panic!("injected runtime failure"))
+            .await;
+        // The caller hears of the panic as it unwinds; host work queued
+        // after it runs once the store thread has handled it.
+        state
+            .store
+            .as_ref()
+            .expect("a store")
+            .kv(jazz::host::HostTable::new("probe"))
+            .expect("host table")
+            .write_many(&[(b"k".to_vec(), b"v".to_vec())])
+            .expect("host tables stay available");
+        let (status, json) = health(state).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json["status"], "unhealthy");
+        let reason = json["reason"].as_str().expect("a reason");
+        assert!(reason.contains("injected runtime failure"), "{reason}");
+    }
 }
 /// Commit a complete, validated deployment. Detached execution makes request
 /// cancellation independent of the durable commit/activation boundary.

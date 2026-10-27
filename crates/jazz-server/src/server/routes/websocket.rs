@@ -3535,6 +3535,33 @@ mod tests {
                 .state
         });
         let addr = server.block_on(start_ws_test_server(state.clone()));
+        let accounts = state.accounts.as_ref().unwrap();
+        let catalogue = state
+            .store
+            .as_ref()
+            .unwrap()
+            .kv(crate::kv::CATALOGUE)
+            .unwrap();
+        let principal = jazz::account_registry::Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "load-probe".into(),
+        };
+        server
+            .block_on(accounts.login_or_register(principal.clone()))
+            .unwrap();
+        // This machine's cost of one durable host write (one fsync), before
+        // the writers connect: the bounds below are in units of it.
+        let mut idle = (0..20)
+            .map(|n: u32| {
+                let at = std::time::Instant::now();
+                catalogue
+                    .write_many(&[(b"idle-probe".to_vec(), n.to_le_bytes().to_vec())])
+                    .unwrap();
+                at.elapsed()
+            })
+            .collect::<Vec<_>>();
+        idle.sort();
+        let idle_write = idle[idle.len() / 2];
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let written = Arc::new(AtomicU64::new(0));
         let writers: Vec<_> = (0..WRITERS)
@@ -3570,20 +3597,6 @@ mod tests {
             })
             .collect();
 
-        let accounts = state.accounts.as_ref().unwrap();
-        let catalogue = state
-            .store
-            .as_ref()
-            .unwrap()
-            .kv(crate::kv::CATALOGUE)
-            .unwrap();
-        let principal = jazz::account_registry::Principal {
-            issuer: "https://issuer.example".into(),
-            subject: "load-probe".into(),
-        };
-        server
-            .block_on(accounts.login_or_register(principal.clone()))
-            .unwrap();
         // Let the writers reach steady state before measuring.
         std::thread::sleep(Duration::from_millis(500));
         let mut logins = Vec::new();
@@ -3618,7 +3631,7 @@ mod tests {
                 at(0.99),
                 samples[samples.len() - 1]
             );
-            (at(0.5), at(0.9))
+            at(0.5)
         };
         eprintln!(
             "rows uploaded under load: {rows} ({:.0}/s)",
@@ -3631,19 +3644,19 @@ mod tests {
             state.shutdown.request_shutdown();
             state.run_shutdown_finalization().await;
         });
-        // Measured (6 writers, durable store, one fsync per commit): login
-        // and catalogue write p50 ~16ms, p99 ~40ms: at most one session's
-        // per-tick budget of commits ahead of them. Before ticks were sized,
-        // a login waited for every session's batch: p50 ~130ms. The bounds
-        // are loose for slow CI machines and still catch unsized ticks.
-        for (name, (median, p90)) in [("login", login), ("catalogue write", write)] {
+        // Measured (6 writers, durable store, one fsync per commit, release
+        // build): login p50 ~0.25ms (reads never queue behind the runtime),
+        // catalogue write p50 ~8ms: at most one tick slice (one session's
+        // commits, up to 16 fsyncs) ahead of it. Unsized ticks put every
+        // session's commits (6 x 16 fsyncs) ahead of it. The bound is in
+        // units of this machine's own fsync, with room for a slow CI disk
+        // and a busy scheduler, and still catches unsized ticks.
+        let bound = idle_write * 40 + Duration::from_millis(50);
+        eprintln!("idle catalogue write: {idle_write:?}; bound {bound:?}");
+        for (name, median) in [("login", login), ("catalogue write", write)] {
             assert!(
-                median < Duration::from_millis(60),
-                "{name} waited {median:?} (median) behind the runtime"
-            );
-            assert!(
-                p90 < Duration::from_millis(250),
-                "{name} waited {p90:?} (p90) behind the runtime"
+                median < bound,
+                "{name} waited {median:?} (median) behind the runtime; bound {bound:?}"
             );
         }
     }

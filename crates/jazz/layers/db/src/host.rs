@@ -299,6 +299,33 @@ impl HostTables for Db {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl Db {
+    /// Tests: a host write that fails half done. Writes `pairs` inside the
+    /// write's savepoint, then panics before releasing it.
+    pub fn host_put_many_then_panic_for_test(
+        &self,
+        table: HostTable,
+        pairs: &[HostPair],
+    ) -> Result<(), Error> {
+        self.with_host_connection(|conn| {
+            crate::values::begin_savepoint(conn, "host_write")?;
+            create(conn, table)?;
+            for (key, value) in pairs {
+                conn.execute(
+                    &format!(
+                        "INSERT OR REPLACE INTO {} (k, v) VALUES (?1, ?2)",
+                        table.sql_name()
+                    ),
+                    params![key, value],
+                )
+                .map_err(storage)?;
+            }
+            panic!("injected failure mid host write")
+        })
+    }
+}
+
 /// Whether `table` exists yet; reads of one that does not find nothing.
 fn exists(conn: &Connection, table: HostTable) -> Result<bool, Error> {
     conn.prepare_cached("SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1")

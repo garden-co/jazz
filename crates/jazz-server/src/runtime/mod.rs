@@ -621,8 +621,7 @@ impl StoreLoop {
         let ran = match &self.state {
             State::Idle(Ok(file)) => catch_unwind(AssertUnwindSafe(|| job(file))),
             State::Idle(Err(error)) => {
-                job(&Unavailable(error.clone()));
-                Ok(())
+                catch_unwind(AssertUnwindSafe(|| job(&Unavailable(error.clone()))))
             }
             State::Running(owner) => catch_unwind(AssertUnwindSafe(|| job(&owner.db))),
         };
@@ -694,6 +693,10 @@ impl StoreLoop {
             Ok(owner) => {
                 self.state = State::Running(owner);
                 self.started = Some(runtime);
+                // A runtime is serving again: the server is healthy.
+                if let Ok(mut fault) = self.fault.lock() {
+                    *fault = None;
+                }
                 Ok(())
             }
             Err(error) => {
@@ -1956,14 +1959,17 @@ mod tests {
     }
 
     /// Host work that never stops coming does not stop the runtime: each
-    /// round of host work is cut at a tick slice and a tick runs.
+    /// round of host work is cut at a tick slice and a tick runs. Counted in
+    /// ticks between host jobs, not in wall time, so a slow machine only
+    /// ticks more often.
     #[test]
     fn ticks_keep_running_under_constant_host_work() {
+        const JOBS: usize = 200;
         let store = AppStore::memory().unwrap();
         let runtime = store
             .start_runtime(schema(), NodeRole::Core, false, false)
             .unwrap();
-        // A session with more inbound messages than many ticks take.
+        // A session with more inbound messages than the window's ticks take.
         block_on(runtime.run(|owner| {
             let (output, _) = tokio_mpsc::unbounded_channel();
             owner.open_session(
@@ -1981,31 +1987,82 @@ mod tests {
             Ok(())
         }))
         .unwrap();
-        // Keep a backlog of host work queued for the whole window.
+        // Queue all the host work at once, each job at least 1ms: a tick
+        // slice fits at most a handful.
+        let release = hold(&runtime);
         let host = host_sender(&store);
-        let flooding = Arc::new(AtomicBool::new(true));
-        let flood = {
-            let flooding = Arc::clone(&flooding);
-            std::thread::spawn(move || {
-                while flooding.load(Ordering::Relaxed) {
-                    for _ in 0..8 {
-                        host.send(Box::new(|_: &dyn HostTables| {
-                            std::thread::sleep(Duration::from_millis(1))
-                        }))
-                        .unwrap();
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            })
-        };
-        std::thread::sleep(Duration::from_millis(50));
-        let before = store.inner.ticks.load(Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(300));
-        let during = store.inner.ticks.load(Ordering::Relaxed) - before;
-        flooding.store(false, Ordering::Relaxed);
-        flood.join().unwrap();
-        assert!(during >= 10, "{during} ticks in 300ms of host work");
+        let (seen, ticks_seen) = std_mpsc::channel();
+        for _ in 0..JOBS {
+            let ticks = Arc::clone(&store.inner.ticks);
+            let seen = seen.clone();
+            host.send(Box::new(move |_: &dyn HostTables| {
+                std::thread::sleep(Duration::from_millis(1));
+                let _ = seen.send(ticks.load(Ordering::Relaxed));
+            }))
+            .unwrap();
+        }
+        release.send(()).unwrap();
+        let ticks = (0..JOBS)
+            .map(|_| ticks_seen.recv().unwrap())
+            .collect::<Vec<_>>();
+        let during = ticks[JOBS - 1] - ticks[0];
+        // 200ms of host work in 4ms slices: about 40 ticks.
+        assert!(during >= 20, "{during} ticks during {JOBS} host jobs");
         store.close().unwrap();
+    }
+
+    /// A host write that panics half done, on the runtime's connection,
+    /// leaves nothing behind: the restart reopens the file, rolling back
+    /// the open write, and the next writes commit.
+    #[test]
+    fn a_panic_mid_host_write_rolls_the_write_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap();
+        let kv = store.kv(PROBE).unwrap();
+        kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false, false)
+            .unwrap();
+        let panicked = block_on(runtime.with_db_for_test(|db| {
+            db.host_put_many_then_panic_for_test(
+                PROBE,
+                &[
+                    (b"a".to_vec(), b"overwritten".to_vec()),
+                    (b"half".to_vec(), b"done".to_vec()),
+                ],
+            )
+            .map_err(|error| error.to_string())
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(store.fault(), None, "restarted");
+        let on_runtime = block_on(runtime.with_db_for_test(|db| {
+            Ok((
+                db.host_get(PROBE, b"a")
+                    .map_err(|error| error.to_string())?,
+                db.host_get(PROBE, b"half")
+                    .map_err(|error| error.to_string())?,
+            ))
+        }))
+        .unwrap();
+        assert_eq!(on_runtime, (Some(b"1".to_vec()), None));
+        kv.write_many(&[(b"b".to_vec(), b"2".to_vec())]).unwrap();
+        assert_eq!(
+            kv.prefix(b"").unwrap(),
+            vec![
+                (b"a".to_vec(), b"1".to_vec()),
+                (b"b".to_vec(), b"2".to_vec())
+            ]
+        );
+        store.close().unwrap();
+        let reopened = AppStore::open(&StorageConfig::data_dir(dir.path())).unwrap();
+        assert_eq!(
+            reopened.kv(PROBE).unwrap().prefix(b"").unwrap(),
+            vec![
+                (b"a".to_vec(), b"1".to_vec()),
+                (b"b".to_vec(), b"2".to_vec())
+            ]
+        );
+        reopened.close().unwrap();
     }
 
     /// A runtime job that panics restarts the runtime on the store, as a
@@ -2042,6 +2099,12 @@ mod tests {
                 (b"c".to_vec(), b"3".to_vec())
             ]
         );
+        // Starting a runtime again (a redeploy) clears the fault.
+        let restarted = store
+            .start_runtime(schema(), NodeRole::Core, false, false)
+            .unwrap();
+        assert_eq!(store.fault(), None);
+        block_on(restarted.run(|_| Ok(()))).unwrap();
         store.close().unwrap();
     }
 
