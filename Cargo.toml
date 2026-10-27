@@ -45,7 +45,13 @@ members = [
   "dev/benchmarks/storage/bench-core",
   "dev/spikes/linear-history",
 ]
-exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ruzstd"]
+exclude = [
+  "examples/todo-server-rs",
+  "examples/docs/todo-server-rs",
+  "vendor/ruzstd",
+  # One-time alpha.59 -> SQLite store migration; its own workspaces, never shipped.
+  "dev/migrate-alpha59",
+]
 
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }

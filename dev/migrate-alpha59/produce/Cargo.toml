@@ -1,0 +1,16 @@
+# Built inside the alpha.59 checkout by ../prepare.sh, like the exporter.
+[package]
+name = "migrate-alpha59-produce"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "a59-produce"
+path = "src/main.rs"
+
+[dependencies]
+jazz = { workspace = true, features = ["runtime"] }
+jazz-storage-rocksdb.workspace = true
+uuid = "1"
+serde_json = "1.0"
