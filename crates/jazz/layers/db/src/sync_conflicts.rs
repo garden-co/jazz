@@ -1,17 +1,25 @@
-//! Whether an accepted write maybe conflicts (SPEC 4 §4.6, INV-HIST-21).
+//! What an accepted write was built on, and whether it maybe conflicts
+//! (SPEC 4 §4.6, INV-HIST-21).
 //!
-//! Every uploaded write names the image its writer made it over (its base:
-//! the settled image the writer held and its own newest unsettled write to
-//! the row). The authority keeps, beside each row version an upload wrote,
-//! that base, the writer's (node, tx) and the columns the write authored
-//! (`_jazz_writes`, as a bitmask over per-table column codes that
-//! `_jazz_columns` interns). From those and the row's accepted history it derives on
-//! demand whether the write overrode values its writer never saw, and which
-//! intervening writes it overlapped. Nothing derived is stored.
+//! Every uploaded write names, for each row it writes over a held image,
+//! the version of the row that image was ([`BuiltOn`]): an accepted version, or
+//! an unsettled commit of its sender's. A relay renames each base into
+//! terms its upstream knows (its own commits), so the authority only ever
+//! reads names of its own history and of its senders' commits.
 //!
-//! The authority's own writes are not recorded: it writes over the row's
-//! current image, so they never maybe conflict, and in another write's
-//! analysis they author every column (a full image).
+//! The authority resolves each base before it applies the write: an
+//! accepted seq, or where the named commit landed. A write built on a
+//! rejected commit is rejected too. It keeps, in the version the write
+//! made (the row table and history alike), `_base` (the accepted seq it was
+//! built on) or `_on` (the seq the commit it was built on landed at), and
+//! `_cols`, the columns it authored (a bitmask over per-table codes that
+//! `_jazz_columns` interns). From those and the row's history it derives on
+//! demand whether the write overrode a version its writer never saw, and
+//! which; nothing derived is stored. Text merging reads the same base.
+//!
+//! The authority's own writes keep nothing: made over the current image,
+//! they never maybe conflict, and in another write's analysis they author
+//! every column.
 
 use super::*;
 
@@ -21,72 +29,84 @@ use super::*;
 pub struct WriteConflict {
     /// The seq the write landed at.
     pub seq: u64,
-    /// Its writer's (node, tx): the session commit's, through a relay.
+    /// The commit that wrote it, as the authority received it: (sender
+    /// node, sender tx); a relayed write's is the relay's.
     pub writer: ([u8; 16], u64),
-    /// The newest accepted version of the row its writer had seen: its
-    /// seen seq, moved forward over the versions it also saw that directly
-    /// follow it (its own chain's, and a relayed version it was shipped). `None` for a write without a base, and for a
-    /// chain with no settled image under it whose first accepted version is
-    /// not the writer's own.
+    /// The newest accepted version of the row its writer had seen with
+    /// every version before it: `None` for a write with no base, and for
+    /// one whose writer saw no accepted version before the first it missed.
     pub resolved_base: Option<u64>,
     /// The seq of the row's accepted version immediately before the write.
     pub previous: Option<u64>,
-    /// The write has a base, and another writer's accepted version lies
-    /// between its seen seq and the write; equivalently, `resolved_base` is
-    /// not `previous`.
+    /// The write has a base, and an accepted version before it is one its
+    /// writer never saw.
     pub maybe_conflicting: bool,
-    /// The conflict analysis: the other writers' accepted writes after the
-    /// seen seq and before the write whose authored columns overlap the
-    /// write's, as (seq, writer), in seq order. The writer's own chain never
-    /// appears.
+    /// The conflict analysis: the versions before the write its writer
+    /// never saw whose authored columns overlap the write's, as (seq,
+    /// writer), in seq order.
     pub overlapping: Vec<(u64, ([u8; 16], u64))>,
+}
+
+/// What an accepted write was built on, at the authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Built {
+    /// The row's accepted version at this seq.
+    Seq(u64),
+    /// The version an unsettled commit wrote, which landed at this seq: its
+    /// writer saw it as it was sent, and what it was built on.
+    On(u64),
 }
 
 /// One accepted version of a row, as the conflict walk reads it.
 struct Version {
     seq: u64,
-    writer: ([u8; 16], u64),
-    base_seq: Option<u64>,
-    /// `base_seq` is where a relay's unsettled version the writer was
-    /// shipped landed: the writer saw that version and what its write was
-    /// made over.
-    base_via: bool,
-    base_pending: Option<([u8; 16], u64)>,
+    built: Option<Built>,
     /// Bitmask over the table's column codes; `None` authors every
     /// column, `_del` included.
-    authored: Option<Vec<u8>>,
+    cols: Option<Vec<u8>>,
 }
 
-/// One row of the accepted-versions read: a version and, when an upload
-/// wrote it, what `_jazz_writes` kept of it.
-struct Recorded {
-    seq: u64,
-    node: Option<Vec<u8>>,
-    tx: Option<i64>,
-    base_seq: Option<i64>,
-    base_via: bool,
-    pending_node: Option<Vec<u8>>,
-    pending_tx: Option<i64>,
-    authored: Option<Vec<u8>>,
+/// What a write's writer saw of its row: every version up to `floor`, and
+/// the versions in `also`.
+struct Knowledge {
+    floor: u64,
+    also: BTreeSet<u64>,
 }
 
-impl Version {
-    fn has_base(&self) -> bool {
-        self.base_seq.is_some() || self.base_pending.is_some()
+impl Knowledge {
+    /// What a write built on `built` saw: an accepted version and every
+    /// version before it, or an unsettled commit's version and what that
+    /// was built on, down the chain.
+    fn of(built: Built, versions: &[Version]) -> Self {
+        let mut also = BTreeSet::new();
+        let mut at = built;
+        loop {
+            match at {
+                Built::Seq(floor) => return Self { floor, also },
+                Built::On(on) => {
+                    also.insert(on);
+                    // A chain only runs back: a base newer than its write
+                    // is not followed.
+                    match versions.iter().find(|v| v.seq == on).and_then(|v| v.built) {
+                        Some(next @ Built::Seq(seq) | next @ Built::On(seq)) if seq < on => {
+                            at = next;
+                        }
+                        _ => return Self { floor: 0, also },
+                    }
+                }
+            }
+        }
+    }
+
+    fn saw(&self, seq: u64) -> bool {
+        seq <= self.floor || self.also.contains(&seq)
     }
 }
 
-/// What the authority keeps of each row version an accepted upload wrote,
-/// and the per-table codes its authored-column bitmasks use (assigned in
-/// order of first use, never reused).
-const WRITES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_writes (t TEXT NOT NULL, \
-     id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, node BLOB NOT NULL, \
-     tx INTEGER NOT NULL, base_seq INTEGER, base_via INTEGER, pending_node BLOB, \
-     pending_tx INTEGER, \
-     authored BLOB, \
-     PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID; \
-     CREATE TABLE IF NOT EXISTS _jazz_columns (t TEXT NOT NULL, name TEXT NOT NULL, \
-     code INTEGER NOT NULL, PRIMARY KEY (t, name)) WITHOUT ROWID;";
+/// The per-table codes authored-column bitmasks use, assigned in order of
+/// first use and never reused.
+const COLUMNS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_columns (t TEXT NOT NULL, \
+     name TEXT NOT NULL, code INTEGER NOT NULL, PRIMARY KEY (t, name)) WITHOUT ROWID;";
 
 /// The authored-column name a deletion or restore writes.
 const DELETION: &str = "_del";
@@ -101,13 +121,28 @@ fn authored_overlap(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     }
 }
 
-/// Whether accepted version `record` belongs to the chain a write's pending
-/// predecessor `pending` names: the predecessor's node's accepted writes no
-/// newer than it (INV-HIST-21). Such versions never count against the write.
-/// The only place the analysis assumes a chain is one writer's own
-/// (INV-REF-4): a peer chain would replace this one predicate.
-fn in_writers_chain(pending: ([u8; 16], u64), record: ([u8; 16], u64)) -> bool {
-    record.0 == pending.0 && record.1 <= pending.1
+/// Whether a bitmask authors column `code`; `None` authors every column.
+fn authors(cols: Option<&[u8]>, code: u32) -> bool {
+    cols.is_none_or(|cols| {
+        cols.get(code as usize / 8)
+            .is_some_and(|byte| byte & (1 << (code % 8)) != 0)
+    })
+}
+
+fn predecessor_rejected() -> Error {
+    Error::with_reason(
+        ErrorCode::WriteRejected,
+        Reason::PredecessorRejected,
+        "the write was built on a write the authority rejected",
+    )
+}
+
+/// A relay's base it cannot rename: named nothing it received.
+fn unknown_base(what: &str) -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        format!("a write's base names {what} this store never received"),
+    )
 }
 
 impl Inner {
@@ -128,6 +163,11 @@ impl Inner {
     /// The code `_jazz_columns` gives stored column `name` of `table`,
     /// assigned on first use.
     fn column_code(&self, table: &str, name: &str) -> Result<u32, Error> {
+        // Created in the caller's transaction on first use; known to exist
+        // once that commits ([`Self::note_columns_table`]).
+        if !self.columns_table.get() {
+            self.conn.execute_batch(COLUMNS_DDL).map_err(storage)?;
+        }
         let known = self
             .conn
             .cached_row(
@@ -147,6 +187,23 @@ impl Inner {
         )
         .map_err(storage)?;
         self.column_code(table, name)
+    }
+
+    /// Remember, once an upload's savepoint is released, whether
+    /// `_jazz_columns` now exists.
+    pub(super) fn note_columns_table(&self) -> Result<(), Error> {
+        if !self.columns_table.get() {
+            let exists = self
+                .conn
+                .cached_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_columns'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(storage)?;
+            self.columns_table.set(exists > 0);
+        }
+        Ok(())
     }
 
     /// The stored columns `ops` author on stored table `table`'s row `row`,
@@ -202,51 +259,115 @@ impl Inner {
         Ok(Some(mask))
     }
 
-    /// Keep, beside each row version an accepted upload wrote at `seq`, its
-    /// writer, its base and the columns it authored (`_jazz_writes`).
-    pub(super) fn record_writes(
+    /// A session's bases, renamed into this relay's terms for its upstream:
+    /// an accepted upstream seq stays; this relay's own unsettled version
+    /// (one it shipped the session) and a commit of the session's (or of a
+    /// relay below it) become the commit of this relay's that carries it.
+    /// A base on a commit this relay rejected rejects the write.
+    pub(super) fn relay_bases(
         &self,
+        sender: ([u8; 16], u64),
+        bases: Vec<WireBase>,
+    ) -> Result<Vec<WireBase>, Error> {
+        let me = *self.identity.node.as_bytes();
+        let carried = |commit: Option<Option<u64>>| match commit {
+            Some(Some(seq)) if seq >= LOCAL_BASE => Ok(BuiltOn::Commit { node: me, tx: seq }),
+            Some(Some(_)) => Err(unsupported(
+                "a base on a session's commit an authority without an upstream accepted",
+            )),
+            Some(None) => Err(predecessor_rejected()),
+            None => Err(unknown_base("a commit")),
+        };
+        bases
+            .into_iter()
+            .map(|base| {
+                let on = match base.on {
+                    BuiltOn::Seq(seq) if seq < LOCAL_BASE => BuiltOn::Seq(seq),
+                    BuiltOn::Seq(seq) if seq < NON_DURABLE_BASE => {
+                        BuiltOn::Commit { node: me, tx: seq }
+                    }
+                    BuiltOn::Seq(_) => return Err(unknown_base("a version")),
+                    BuiltOn::Own { back } => {
+                        let tx = sender
+                            .1
+                            .checked_sub(back)
+                            .ok_or_else(|| unknown_base("a commit"))?;
+                        carried(self.settled(sender.0, tx)?)?
+                    }
+                    BuiltOn::Commit { node, tx } => carried(self.settled(node, tx)?)?,
+                };
+                Ok(WireBase { on, ..base })
+            })
+            .collect()
+    }
+
+    /// What each based row of an upload was built on, in this authority's
+    /// history, keyed by the row: an accepted seq, or where the commit it
+    /// names landed. A base on a rejected commit rejects the upload.
+    pub(super) fn resolve_bases(
+        &self,
+        sender: ([u8; 16], u64),
         ops: &[StagedOp],
         bases: &[WireBase],
-        (sender, writer): ([u8; 16], ([u8; 16], u64)),
-        seq: u64,
-        rows: &[(String, RowUuid, Vec<u8>)],
-    ) -> Result<(), Error> {
-        if !self.writes_table.get() {
-            self.conn.execute_batch(WRITES_DDL).map_err(storage)?;
-        }
-        for (table, row, key) in rows {
-            let op = self.op_writing(ops, table, *row);
-            let base = bases
-                .iter()
-                .find(|base| Some(base.op) == op && base.key == *key);
-            let (base_seq, via) = match base.and_then(|base| base.seq) {
-                Some(seen) => self.resolve_seen(sender, seen)?,
-                None => (None, false),
+    ) -> Result<HashMap<RowKey, Built>, Error> {
+        let landed = |commit: Option<Option<u64>>| match commit {
+            Some(Some(seq)) => Ok(Built::On(seq)),
+            Some(None) => Err(predecessor_rejected()),
+            None => Err(unknown_base("a commit")),
+        };
+        let mut built = HashMap::new();
+        for base in bases {
+            let Some(op) = ops.get(base.op as usize) else {
+                return Err(unknown_base("an op"));
             };
-            let pending = base
-                .and_then(|base| base.pending)
-                .and_then(|pending| pending.resolve(writer));
-            let authored = self.authored(ops, table, *row)?;
+            let (Some(row), Ok(table)) = (op.row(), self.schema.stored_table(op.table())) else {
+                return Err(unknown_base("an op"));
+            };
+            let on = match base.on {
+                BuiltOn::Seq(seq) if seq < LOCAL_BASE => Built::Seq(seq),
+                BuiltOn::Seq(_) => return Err(unknown_base("a version")),
+                BuiltOn::Own { back } => {
+                    let tx = sender
+                        .1
+                        .checked_sub(back)
+                        .ok_or_else(|| unknown_base("a commit"))?;
+                    landed(self.settled(sender.0, tx)?)?
+                }
+                BuiltOn::Commit { node, tx } => landed(self.settled(node, tx)?)?,
+            };
+            built.insert((table.to_owned(), row, base.key.clone()), on);
+        }
+        Ok(built)
+    }
+
+    /// Keep, in each row version an accepted upload wrote at `seq`, what it
+    /// was built on and the columns it authored.
+    pub(super) fn record_bases(
+        &self,
+        ops: &[StagedOp],
+        built: &HashMap<RowKey, Built>,
+        seq: u64,
+        rows: &[RowKey],
+    ) -> Result<(), Error> {
+        for row_key @ (table, row, key) in rows {
+            let (base, on) = match built.get(row_key) {
+                Some(Built::Seq(seq)) => (Some(*seq as i64), None),
+                Some(Built::On(seq)) => (None, Some(*seq as i64)),
+                None => (None, None),
+            };
             self.exec(
-                "INSERT OR REPLACE INTO _jazz_writes \
-                 (t, id, k, seq, node, tx, base_seq, base_via, pending_node, pending_tx, authored) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                &format!(
+                    "UPDATE {} SET _base = ?1, _on = ?2, _cols = ?3 \
+                     WHERE id = ?4 AND _b = ?5 AND _seq = ?6",
+                    quote(table)
+                ),
                 rusqlite::params![
-                    table,
+                    base,
+                    on,
+                    self.authored(ops, table, *row)?,
                     row.0.as_bytes().to_vec(),
                     key,
-                    seq as i64,
-                    writer.0.to_vec(),
-                    writer.1 as i64,
-                    base_seq.map(|seq| seq as i64),
-                    via.then_some(1),
-                    // The writer's own node is not repeated.
-                    pending
-                        .filter(|(node, _)| *node != writer.0)
-                        .map(|(node, _)| node.to_vec()),
-                    pending.map(|(_, tx)| tx as i64),
-                    authored,
+                    seq as i64
                 ],
             )
             .map_err(storage)?;
@@ -254,132 +375,42 @@ impl Inner {
         Ok(())
     }
 
-    /// A base's seen seq in this store's history, and whether it names a
-    /// relayed version. A seq below [`LOCAL_BASE`] is one this store
-    /// accepted. Above it, it is the sender's unsettled version at that
-    /// commit tx, which the sender (a relay) shipped its session: the
-    /// writer saw that version and what its commit was made over, so it
-    /// resolves to where that commit landed, flagged. A sender's commit that
-    /// never landed leaves the writer having seen no accepted version (seq
-    /// 0), so every earlier version counts against it.
-    fn resolve_seen(&self, sender: [u8; 16], seen: u64) -> Result<(Option<u64>, bool), Error> {
-        if seen < LOCAL_BASE {
-            return Ok((Some(seen), false));
-        }
-        Ok(match self.settled(sender, seen)? {
-            Some(Some(landed)) => (Some(landed), true),
-            _ => (Some(0), false),
-        })
-    }
-
-    /// The accepted versions of a row, in seq order, with what
-    /// `_jazz_writes` kept of each.
+    /// The accepted versions of a row, in seq order.
     fn accepted_versions(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
     ) -> Result<Vec<Version>, Error> {
-        if !self.writes_table.get() {
-            let exists = self
-                .conn
-                .cached_row(
-                    "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_writes'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .map_err(storage)?
-                > 0;
-            self.writes_table.set(exists);
-        }
-        let recorded = if self.writes_table.get() {
-            "_jazz_writes"
-        } else {
-            // Nothing was recorded: every version reads as unrecorded.
-            "(SELECT NULL AS t, NULL AS id, NULL AS k, NULL AS seq, NULL AS node, NULL AS tx, \
-             NULL AS base_seq, NULL AS base_via, NULL AS pending_node, NULL AS pending_tx, \
-             NULL AS authored)"
-        };
         let sql = format!(
-            "SELECT v.s, w.node, w.tx, w.base_seq, w.base_via, w.pending_node, w.pending_tx, \
-             w.authored \
-             FROM (SELECT _seq AS s FROM {} WHERE id = ?1 AND _b = ?2 \
-             UNION SELECT _seq FROM {} WHERE id = ?1 AND _b = ?2) AS v \
-             LEFT JOIN {recorded} AS w ON w.t = ?3 AND w.id = ?1 AND w.k = ?2 AND w.seq = v.s \
-             ORDER BY v.s",
+            "SELECT _seq, _base, _on, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
+             UNION ALL SELECT _seq, _base, _on, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
+             ORDER BY 1",
             quote(table),
             quote(&format!("{table}__h"))
         );
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-        let rows = statement
-            .query_map(
-                rusqlite::params![row.0.as_bytes().to_vec(), key, table],
-                |r| {
-                    Ok(Recorded {
-                        seq: r.get::<_, i64>(0)? as u64,
-                        node: r.get(1)?,
-                        tx: r.get(2)?,
-                        base_seq: r.get(3)?,
-                        base_via: r.get::<_, Option<i64>>(4)?.is_some(),
-                        pending_node: r.get(5)?,
-                        pending_tx: r.get(6)?,
-                        authored: r.get(7)?,
-                    })
-                },
-            )
+        let versions = statement
+            .query_map(rusqlite::params![row.0.as_bytes().to_vec(), key], |r| {
+                let base = r
+                    .get::<_, Option<i64>>(1)?
+                    .map(|seq| Built::Seq(seq as u64));
+                let on = r.get::<_, Option<i64>>(2)?.map(|seq| Built::On(seq as u64));
+                Ok(Version {
+                    seq: r.get::<_, i64>(0)? as u64,
+                    built: base.or(on),
+                    cols: r.get(3)?,
+                })
+            })
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
-        drop(statement);
-        // Versions no upload wrote: who committed them.
-        let unrecorded: BTreeSet<u64> = rows
-            .iter()
-            .filter(|recorded| recorded.node.is_none())
-            .map(|recorded| recorded.seq)
-            .collect();
-        let origins: BTreeMap<u64, ([u8; 16], u64)> = self
-            .origins(&unrecorded)?
-            .into_iter()
-            .map(|(seq, node, tx)| (seq, (node, tx)))
-            .collect();
-        let corrupt = || Error::new(ErrorCode::Storage, "a recorded write is malformed");
-        rows.into_iter()
-            .map(|recorded| {
-                let Some(node) = recorded.node else {
-                    return Ok(Version {
-                        seq: recorded.seq,
-                        writer: origins[&recorded.seq],
-                        base_seq: None,
-                        base_via: false,
-                        base_pending: None,
-                        authored: None,
-                    });
-                };
-                let node: [u8; 16] = node.try_into().map_err(|_| corrupt())?;
-                let tx = recorded.tx.ok_or_else(corrupt)? as u64;
-                Ok(Version {
-                    seq: recorded.seq,
-                    writer: (node, tx),
-                    base_seq: recorded.base_seq.map(|seq| seq as u64),
-                    base_via: recorded.base_via,
-                    // No pending node is the writer's own.
-                    base_pending: match (recorded.pending_node, recorded.pending_tx) {
-                        (Some(node), Some(tx)) => {
-                            Some((node.try_into().map_err(|_| corrupt())?, tx as u64))
-                        }
-                        (None, Some(tx)) => Some((node, tx as u64)),
-                        _ => None,
-                    },
-                    authored: recorded.authored,
-                })
-            })
-            .collect()
+        Ok(versions)
     }
 
     /// Whether each accepted write of a row maybe conflicts, and its
     /// conflict analysis (SPEC 4 §4.6, "Maybe conflicting"), in seq order:
-    /// one walk of the row's accepted versions, derived on demand and never
-    /// stored.
+    /// derived on demand and never stored.
     #[cfg_attr(not(feature = "testing"), allow(dead_code))] // Derived on demand; tests read it.
     pub(super) fn row_write_conflicts(
         &self,
@@ -388,81 +419,93 @@ impl Inner {
         key: &[u8],
     ) -> Result<Vec<WriteConflict>, Error> {
         let history = self.accepted_versions(table, row, key)?;
-        // Per version, the seq its writer had seen everything up to: the
-        // larger of its own base seq (the settled image its node held) and
-        // its chain root's settled base seq. `None` for an empty base.
-        let mut seen: Vec<Option<u64>> = Vec::with_capacity(history.len());
+        let writers: BTreeMap<u64, ([u8; 16], u64)> = self
+            .origins(&history.iter().map(|v| v.seq).collect())?
+            .into_iter()
+            .map(|(seq, node, tx)| (seq, (node, tx)))
+            .collect();
+        let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
         let mut conflicts = Vec::with_capacity(history.len());
         for (index, version) in history.iter().enumerate() {
             let earlier = &history[..index];
             let previous = earlier.last().map(|v| v.seq);
-            if !version.has_base() {
-                // An insert or a blind write.
-                seen.push(None);
+            let Some(built) = version.built else {
+                // An insert, a blind write, or the authority's own.
                 conflicts.push(WriteConflict {
                     seq: version.seq,
-                    writer: version.writer,
+                    writer: writer(version.seq),
                     resolved_base: None,
                     previous,
                     maybe_conflicting: false,
                     overlapping: Vec::new(),
                 });
                 continue;
-            }
-            // The writer's own chain: its accepted writes no newer than its
-            // pending predecessor. They never count against the write.
-            let own_chain = |record: ([u8; 16], u64)| {
-                version
-                    .base_pending
-                    .is_some_and(|pending| in_writers_chain(pending, record))
             };
-            // A writer's writes reach the authority in its own order, and a
-            // rejected write is not in history: the pending predecessor is
-            // the newest accepted write of the chain (itself when accepted,
-            // otherwise the rejected one's own predecessor). The writer saw
-            // the settled image its chain rests on, never a predecessor's
-            // later seq: a write another writer got accepted before the
-            // predecessor landed was not in that image.
-            let predecessor = earlier.iter().rposition(|v| own_chain(v.writer));
-            // A relayed version the writer was shipped: it saw that version
-            // and what that version's writer had seen, nothing between.
-            let (base_seen, shipped) = if version.base_via {
-                let at = version
-                    .base_seq
-                    .and_then(|landed| earlier.iter().position(|v| v.seq == landed));
-                (at.and_then(|at| seen[at]), at.map(|at| earlier[at].seq))
-            } else {
-                (version.base_seq, None)
-            };
-            let seen_seq = base_seen.max(predecessor.and_then(|at| seen[at]));
-            seen.push(seen_seq);
-            // Versions after the seen seq the writer still saw.
-            let saw = |v: &Version| own_chain(v.writer) || Some(v.seq) == shipped;
-            let after_seen = seen_seq.map_or(0, |seen| earlier.partition_point(|v| v.seq <= seen));
-            let walk = &earlier[after_seen..];
-            let first_foreign = walk.iter().position(|v| !saw(v));
-            let resolved_base = match first_foreign.unwrap_or(walk.len()) {
-                // Seq 0: the writer saw no accepted version.
-                0 => seen_seq.filter(|&seen| seen > 0),
-                own => Some(walk[own - 1].seq),
-            };
-            let overlapping = walk
-                .iter()
-                .filter(|v| {
-                    !saw(v) && authored_overlap(version.authored.as_deref(), v.authored.as_deref())
-                })
-                .map(|v| (v.seq, v.writer))
-                .collect();
+            let knew = Knowledge::of(built, &history);
+            let seen = earlier.iter().take_while(|v| knew.saw(v.seq)).count();
+            let missed: Vec<&Version> = earlier.iter().filter(|v| !knew.saw(v.seq)).collect();
             conflicts.push(WriteConflict {
                 seq: version.seq,
-                writer: version.writer,
-                resolved_base,
+                writer: writer(version.seq),
+                resolved_base: seen.checked_sub(1).map(|last| earlier[last].seq),
                 previous,
-                maybe_conflicting: first_foreign.is_some(),
-                overlapping,
+                maybe_conflicting: !missed.is_empty(),
+                overlapping: missed
+                    .iter()
+                    .filter(|v| authored_overlap(version.cols.as_deref(), v.cols.as_deref()))
+                    .map(|v| (v.seq, writer(v.seq)))
+                    .collect(),
             });
         }
         Ok(conflicts)
+    }
+
+    /// The value stored column `column` of a row had in the version a write
+    /// landing after `before` was built on, when merging the write needs it
+    /// (SPEC 4 §4.6): a version before `before` the writer never saw
+    /// authored the column. `None` takes the fast path: nothing to merge
+    /// with, so the write's value stands as sent. A base on an unsettled
+    /// commit gives that commit's version as accepted.
+    #[cfg_attr(not(feature = "testing"), allow(dead_code))] // Text merging reads it.
+    pub(crate) fn merge_base(
+        &self,
+        (table, row, key): (&str, RowUuid, &[u8]),
+        built: Built,
+        before: u64,
+        column: &str,
+    ) -> Result<Option<rusqlite::types::Value>, Error> {
+        let history = self.accepted_versions(table, row, key)?;
+        let knew = Knowledge::of(built, &history);
+        let code = self.column_code(table, column)?;
+        let missed = history
+            .iter()
+            .take_while(|v| v.seq < before)
+            .any(|v| !knew.saw(v.seq) && authors(v.cols.as_deref(), code));
+        if !missed {
+            return Ok(None);
+        }
+        let at = match built {
+            Built::Seq(seq) => history.iter().rev().find(|v| v.seq <= seq).map(|v| v.seq),
+            Built::On(seq) => Some(seq),
+        };
+        let Some(at) = at else {
+            return Ok(None);
+        };
+        let sql = format!(
+            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3 \
+             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            quote(table),
+            quote(&format!("{table}__h")),
+            column = quote(column),
+        );
+        self.conn
+            .cached_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key, at as i64],
+                |r| r.get::<_, rusqlite::types::Value>(0),
+            )
+            .optional()
+            .map_err(storage)
     }
 }
 
@@ -482,5 +525,39 @@ impl Db {
         let stored = inner.schema.stored_table(table)?.to_owned();
         let key = branch.map_or_else(Vec::new, |branch| crate::values::branch_key(&branch.values));
         inner.row_write_conflicts(&stored, row, &key)
+    }
+
+    /// The value column `column` of `table`'s unbranched row `row` had in
+    /// the version the accepted write at `seq` was built on, when merging
+    /// that write needed it (SPEC 4 §4.6); `None` when it took the fast path
+    /// or kept no base.
+    #[cfg(feature = "testing")]
+    pub fn merge_base(
+        &self,
+        table: &str,
+        row: RowUuid,
+        seq: u64,
+        column: &str,
+    ) -> Result<Option<Value>, Error> {
+        let inner = self.inner();
+        let schema_table = inner.schema.table(table)?;
+        let stored = schema_table.stored.clone();
+        let stored_column = schema_table.stored_name(column).to_owned();
+        let built = inner
+            .accepted_versions(&stored, row, &[])?
+            .into_iter()
+            .find(|v| v.seq == seq)
+            .and_then(|v| v.built);
+        let Some(built) = built else {
+            return Ok(None);
+        };
+        let Some(cell) = inner.merge_base((&stored, row, &[]), built, seq, &stored_column)? else {
+            return Ok(None);
+        };
+        let ty = &schema_table
+            .column(column)
+            .ok_or_else(|| unknown_base("a column"))?
+            .ty;
+        crate::values::from_sql(ty, (&cell).into(), &inner.chunks)
     }
 }

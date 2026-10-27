@@ -6,17 +6,18 @@
 use crate::common;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionStream, SyncMessage,
-    Transport, TransportError, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
+    SubscriptionStream, SyncMessage, Transport, TransportError, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, Operation, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -31,8 +32,36 @@ fn open(node: u8, author: AuthorSubject) -> Db {
         .column("title", ColumnType::Text)
         .index_only(["title"])
         .policies(allow_all_policies());
+    // Readable while any doc exists: its read policy reads `docs`.
+    let notes = TableSchemaBuilder::new("notes")
+        .column("text", ColumnType::Text)
+        .policies(allow_all_policies().with_select(PolicyExpr::Exists {
+            table: "docs".into(),
+            condition: Box::new(PolicyExpr::True),
+        }));
+    // Readable as its note is: its read policy reads `notes`, and through
+    // the note's, `docs`.
+    let comments = TableSchemaBuilder::new("comments")
+        .fk_column("note", "notes")
+        .policies(allow_all_policies().with_select(PolicyExpr::Inherits {
+            operation: Operation::Select,
+            via_column: "note".into(),
+            max_depth: None,
+        }));
+    // Reads that include their doc read `docs`.
+    let links = TableSchemaBuilder::new("links")
+        .fk_column("doc", "docs")
+        .policies(allow_all_policies());
     let config = DbConfig::new(
-        compile_schema(&SchemaBuilder::new().table(docs).table(titled).build()),
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(docs)
+                .table(titled)
+                .table(notes)
+                .table(comments)
+                .table(links)
+                .build(),
+        ),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -92,6 +121,14 @@ type Log = Rc<RefCell<Vec<&'static str>>>;
 /// Connect `client` to `server` as `identity`; the log records what both
 /// sides sent, in order.
 fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> Log {
+    connect_wires(server, client, identity).0
+}
+
+type Wire = Rc<RefCell<VecDeque<SyncMessage>>>;
+
+/// [`connect`], also handing back the wire up to the server and the wire
+/// down from it, to inject or inspect messages.
+fn connect_wires(server: &Db, client: &Db, identity: AuthorSubject) -> (Log, Wire, Wire) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let log = Rc::new(RefCell::new(Vec::new()));
@@ -102,13 +139,13 @@ fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> Log {
     })));
     server.accept_subscriber(
         Box::new(Pipe {
-            out: down,
-            inbound: up,
+            out: down.clone(),
+            inbound: up.clone(),
             log: log.clone(),
         }),
         identity,
     );
-    log
+    (log, up, down)
 }
 
 fn pump(server: &Db, clients: &[&Db]) {
@@ -427,17 +464,9 @@ fn a_backends_streamed_upload_for_a_session_reaches_the_server() {
     }
 }
 
-/// A client uploading past the server's ingress limit can still read: its
-/// held-back pushes and commit wait for a later window, but a subscription it
-/// opens after them is served now.
-///
-/// ```text
-/// alice ──push 1, commit 1──► server (within the window)
-/// alice ──push 2, commit 2──► held until the next window
-/// alice ──subscribe(titled)──► served, settles with the server's row
-/// ```
-#[test]
-fn reads_overtake_uploads_held_by_the_ingress_limit() {
+/// Alice's second large upload, held back by the server's ingress limit:
+/// the first lands within the window, the second waits for a later one.
+fn held_upload() -> (Db, Db, (Log, Wire, Wire)) {
     let server = open(0, AuthorSubject::SYSTEM);
     server.set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
         incoming_bytes_per_window: LARGE as u64,
@@ -451,7 +480,7 @@ fn reads_overtake_uploads_held_by_the_ingress_limit() {
         vec![("title", Value::String("on the server".into()))],
     );
     let alice = open(1, user(1));
-    let _log = connect(&server, &alice, user(1));
+    let wires = connect_wires(&server, &alice, user(1));
     pump(&server, &[&alice]);
     for n in [1, 2] {
         insert(
@@ -471,28 +500,216 @@ fn reads_overtake_uploads_held_by_the_ingress_limit() {
         None,
         "the second upload waits for the next ingress window"
     );
+    (server, alice, wires)
+}
 
-    let titled = alice.prepare_query(&Query::from("titled")).unwrap();
-    let mut stream = block_on(alice.subscribe(
-        &titled,
+fn remote_subscribe(db: &Db, table: &str) -> SubscriptionStream {
+    let query = db.prepare_query(&Query::from(table)).unwrap();
+    block_on(db.subscribe(
+        &query,
         ReadOpts {
             tier: ReadTier::Remote,
             ..ReadOpts::default()
         },
     ))
-    .unwrap();
+    .unwrap()
+}
+
+/// Applies a subscription's pending events to `shown`; whether the server
+/// answered it.
+fn drain(stream: &mut SubscriptionStream, shown: &mut BTreeSet<RowUuid>) -> bool {
+    let mut answered = false;
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Delta {
+            added,
+            removed,
+            settled,
+            ..
+        } = event
+        {
+            for gone in removed {
+                shown.remove(&gone.row_uuid);
+            }
+            shown.extend(added.iter().map(|row| row.row.row_uuid()));
+            answered |= settled;
+        }
+    }
+    answered
+}
+
+/// A client uploading past the server's ingress limit can still read what
+/// its held-back writes cannot change: a subscription to another table is
+/// served now, while the upload waits.
+///
+/// ```text
+/// alice ──push 2, commit 2(docs)──► held until the next window
+/// alice ──subscribe(titled)───────► served, settles with the server's row
+/// ```
+#[test]
+fn reads_of_other_tables_overtake_commits_held_by_the_ingress_limit() {
+    let (server, alice, _log) = held_upload();
+    let mut stream = remote_subscribe(&alice, "titled");
     pump(&server, &[&alice]);
-    let opening = std::iter::from_fn(|| stream.try_next_event())
-        .find_map(|event| match event {
-            jazz::db::SubscriptionEvent::Delta {
-                settled: true,
-                added,
-                ..
-            } => Some(added),
+    let mut shown = BTreeSet::new();
+    assert!(
+        drain(&mut stream, &mut shown),
+        "the read is served while the upload is held"
+    );
+    assert_eq!(shown.into_iter().collect::<Vec<_>>(), [row(9)]);
+    assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
+}
+
+/// A read that could observe a write the ingress limit holds back waits for
+/// it, and is answered with it once the upload is let through.
+///
+/// ```text
+/// alice ──push 2, commit 2(docs)──► held
+/// alice ──subscribe(docs)─────────► held behind commit 2
+/// (limit lifted)                  ► commit 2, then the read: rows 1 and 2
+/// ```
+#[test]
+fn reads_wait_for_commits_held_by_the_ingress_limit() {
+    let (server, alice, _log) = held_upload();
+    let mut stream = remote_subscribe(&alice, "docs");
+    let mut shown = BTreeSet::new();
+    pump(&server, &[&alice]);
+    assert!(
+        !drain(&mut stream, &mut shown),
+        "the read waits behind the held commit"
+    );
+    assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
+
+    server.set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    pump(&server, &[&alice]);
+    assert!(local_cell(&server, "docs", 2, "body").unwrap().is_some());
+    assert!(
+        drain(&mut stream, &mut shown),
+        "the read is answered once the upload lands"
+    );
+    assert_eq!(
+        shown.into_iter().collect::<Vec<_>>(),
+        [row(1), row(2)],
+        "the read includes the writer's own upload"
+    );
+}
+
+/// A read that reaches a table the held commits write only through its
+/// policy (directly, or inherited through another table's) or through an
+/// include waits too: the held write could change what it sees.
+#[test]
+fn reads_reaching_a_held_table_through_policies_or_includes_wait() {
+    for (what, query) in [
+        ("a policy reading docs", Query::from("notes")),
+        (
+            "a policy inherited from one reading docs",
+            Query::from("comments"),
+        ),
+        ("an include of docs", Query::from("links").include("doc")),
+    ] {
+        let (server, alice, _wires) = held_upload();
+        let mut stream = block_on(alice.subscribe(
+            &alice.prepare_query(&query).unwrap(),
+            ReadOpts {
+                tier: ReadTier::Remote,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        let mut shown = BTreeSet::new();
+        pump(&server, &[&alice]);
+        assert!(
+            !drain(&mut stream, &mut shown),
+            "a read through {what} waits behind the held commit"
+        );
+        server.set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
+            incoming_bytes_per_window: u64::MAX,
+            window_ms: 60_000,
+            max_age_ms: 10 * 60 * 1_000,
+        });
+        pump(&server, &[&alice]);
+        assert!(
+            drain(&mut stream, &mut shown),
+            "a read through {what} is answered once the upload lands"
+        );
+    }
+    // The control: the same tables without the include, the policy-free
+    // `links`, depend on nothing held and are served at once.
+    let (server, alice, _wires) = held_upload();
+    let mut stream = remote_subscribe(&alice, "links");
+    pump(&server, &[&alice]);
+    assert!(
+        drain(&mut stream, &mut BTreeSet::new()),
+        "a read of links alone overtakes"
+    );
+}
+
+/// A read frozen at a snapshot that names the writer's held commit waits
+/// for it, though its table is another: the server cannot resolve the
+/// snapshot before that commit applies, and would refuse it.
+#[test]
+fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
+    let (server, alice, (_log, up, down)) = held_upload();
+    // Captured offline, the reference names the unsettled upload.
+    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    let snapshot = block_on(alice.capture_snapshot()).unwrap();
+    assert!(
+        !snapshot.dots.is_empty(),
+        "the capture names the held commit"
+    );
+    // Alice's own store answers that read itself, so the read goes up as a
+    // relay would send it: on the wire, behind the held commit.
+    const READ: u64 = 9_999;
+    up.borrow_mut().push_back(SyncMessage::Fetch {
+        id: READ,
+        query: Query::from("titled"),
+        binding: BTreeMap::new(),
+        at: None,
+        include_deleted: false,
+        tier: ReadTier::Remote,
+        wait: None,
+        view: ReadViewSourceSpec::Snapshot { snapshot },
+    });
+    let reply = || {
+        down.borrow().iter().find_map(|message| match message {
+            SyncMessage::Answer { id: READ, .. } => Some(Ok(())),
+            SyncMessage::Refused {
+                id: READ, message, ..
+            } => Some(Err(message.clone())),
             _ => None,
         })
-        .expect("the read is served while the upload is held");
-    assert_eq!(opening.len(), 1);
-    assert_eq!(opening[0].row.row_uuid(), row(9));
+    };
+    for _ in 0..3 {
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(reply(), None, "the read waits behind the held commit");
+
+    server.set_large_value_staging_policy(jazz::db::LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    for _ in 0..3 {
+        block_on(server.tick()).unwrap();
+    }
+    assert!(local_cell(&server, "docs", 2, "body").unwrap().is_some());
+    assert_eq!(reply(), Some(Ok(())), "then the snapshot resolves");
+}
+
+/// One session's held upload holds back only its own reads: another
+/// session reading the same table is served from what the server has.
+#[test]
+fn a_held_upload_does_not_hold_other_sessions_reads() {
+    let (server, alice, _log) = held_upload();
+    let bob = open(2, user(2));
+    let _bob = connect(&server, &bob, user(2));
+    let mut stream = remote_subscribe(&bob, "docs");
+    pump(&server, &[&alice, &bob]);
+    let mut shown = BTreeSet::new();
+    assert!(drain(&mut stream, &mut shown), "bob's read is served");
+    assert_eq!(shown.into_iter().collect::<Vec<_>>(), [row(1)]);
     assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
 }

@@ -2,19 +2,25 @@
 
 The GNU NAPI packages support **Linux x64 and ARM64 with glibc >= 2.34 and
 libstdc++ providing GLIBCXX_3.4.29 / CXXABI_1.3.13**. This includes the AL2023
-userspace used by Vercel builds and Debian Bookworm. Alpine/musl is not a GNU
+userspace used by Vercel builds and Debian Bookworm. Built on Bullseye, the
+binding currently needs no more than GLIBC_2.30. Alpine/musl is not a GNU
 NAPI target; the standalone CLI has a separate support matrix.
 
 `dev/artifacts/linux-napi/build.sh linux-x64-gnu` (or `linux-arm64-gnu`) builds
-inside the pinned AL2023 image on a host of the corresponding architecture.
-The runner's own Ubuntu userspace is not linked into the binding. Image base
-indexes, Rust and Node versions are pinned in `Dockerfile`; the AL2023 package
-repository release is pinned by the base image. Compiler/libc versions, image
-identity and recipe identity are recorded in the producer manifest.
+inside the pinned Debian Bullseye image on a host of the corresponding
+architecture. The runner's own Ubuntu userspace is not linked into the binding.
+Image base indexes, Rust, Node and CMake versions are pinned in `Dockerfile`;
+it installs nothing from Bullseye's moving apt repositories. Compiler/libc
+versions, image identity and recipe identity are recorded in the producer
+manifest.
 
-The baseline intentionally uses GCC11: a bounded Bullseye/GCC10 build trial
-failed on RocksDB11.1.1's C++20 `using enum`. Moving to Ubuntu22.04 would still
-require glibc2.35, above AL2023's glibc2.34. Details and follow-up belong in
+The build baseline is Bullseye (GCC10, glibc2.31), the oldest userspace the
+binding builds on. AL2023 (GCC11) was only needed while RocksDB's C++20
+`using enum` was in the build. The ELF gate (`verify-elf.mjs`) still caps the
+binding at glibc2.34, the AL2023 userspace Vercel builds run on, and the packed
+smoke runs the installed binding on Bullseye, on AL2023 (`al2023/Dockerfile`, a
+runtime-only image) and in the Lambda Node runtime. Ubuntu22.04 would require
+glibc2.35. Details and follow-up belong in
 [#3048](https://github.com/garden-co/jazz/issues/3048) and
 [#2675](https://github.com/garden-co/jazz/issues/2675).
 

@@ -7,12 +7,12 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
-are stored).
+are stored, and a rejection's reason name changed how fates are recorded).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `67e2f52d307a8af1b2500045e21042b4d46d337c5ed468470df21be4ba38219e`.
+  the SQLite file `4788bd5c2c36e2662477f889cf05b9f551d4d0b0d062f282921d4916f8ac709e`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `58a2925f56b0a95da9cb7bc29e86acf73da02781d2b3e4f602854a77f1db9720`.
+  `b6e783eff4b418e9cacf16b662cf9cfc0e1ea70067533c18143cccd1a537b45a`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -23,7 +23,9 @@ nodes and write times:
 - two interned authors, updates (history versions), a soft delete and a row
   on a branch;
 - a client that synced `projects` and `documents`, wrote one row that
-  settled, then two writes (an insert and an update) that never reached the
+  settled, one stamped far ahead of the server's clock that the server
+  rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
+  then two writes (an insert and an update) that never reached the
   server: its pending uploads;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.

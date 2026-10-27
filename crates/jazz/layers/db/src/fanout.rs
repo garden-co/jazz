@@ -404,6 +404,36 @@ impl Inner {
         Ok(out)
     }
 
+    /// The stored tables a read of `prepared` as `identity` depends on: what
+    /// its live subscription would watch, its compiled SQL reads, and what
+    /// those tables' read policies read. A write to any other table cannot
+    /// change its result.
+    pub(super) fn read_dependencies(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+    ) -> Result<BTreeSet<String>, Error> {
+        let read = ReadSpec::default();
+        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        let mut tables = compiled.tables.clone();
+        for watch in self.watches(prepared, identity, &read, &compiled)? {
+            match watch {
+                Watch::Table(table) | Watch::Key(table, ..) => {
+                    tables.insert(table);
+                }
+            }
+        }
+        if let Some(author) = identity {
+            for table in tables.clone() {
+                // Internal tables (history, branches) carry no policy.
+                if self.owner.by_stored(&table).is_some() {
+                    tables.extend(self.read_policy_tables(&table, author)?);
+                }
+            }
+        }
+        Ok(tables)
+    }
+
     fn compile_tracked(
         &self,
         prepared: &PreparedQuery,
