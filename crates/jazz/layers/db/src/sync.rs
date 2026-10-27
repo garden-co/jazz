@@ -2816,7 +2816,14 @@ impl Inner {
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
         ) {
-            Ok(bytes) => Ok(postcard::from_bytes(&bytes).ok()),
+            // An unreadable fate is a damaged store, not an unseen commit:
+            // treating it as unseen would authorize a resend afresh.
+            Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(|error| {
+                Error::new(
+                    ErrorCode::Storage,
+                    format!("undecodable recorded fate of commit {tx}: {error}"),
+                )
+            }),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }

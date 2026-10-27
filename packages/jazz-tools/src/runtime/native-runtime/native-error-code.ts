@@ -56,7 +56,8 @@ export function nativeCoreErrorCode(error: unknown): NativeCoreErrorCode | undef
  * finer than its code: the Rust `Reason::as_str` name, set as `error.reason`
  * by WASM, by NAPI promise rejections and by React Native. A NAPI synchronous
  * throw carries only its code, since napi-rs creates it from a code and a
- * message alone.
+ * message alone; that includes a pollable NAPI read or `waitForPendingWrites`
+ * whose `poll()` throws.
  */
 export type NativeCoreErrorReason =
   | "authorization_denied"
@@ -70,7 +71,8 @@ export type NativeCoreErrorReason =
   | "missing_chunks"
   | "permissions_head_missing";
 
-const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
+/** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
+export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
   "authorization_denied",
   "client_clock_too_far_ahead",
   "serialization_conflict",

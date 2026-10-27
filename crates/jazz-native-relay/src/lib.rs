@@ -2155,7 +2155,7 @@ pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
 }
 
 /// Optional foreground capture support in the linked native artifact.
-/// Existing ABI 2 builds remain compatible without advertising this feature.
+/// A feature query outside the command layout, so it does not change the ABI.
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_supports_snapshot_capture() -> bool {
     true
@@ -2941,4 +2941,13 @@ mod tests {
 
     mod host;
     mod snapshot_capture_codec;
+
+    /// The C header's ABI define, which the C and C++ probes compare the
+    /// artifact against, is the ABI this crate speaks.
+    #[test]
+    fn c_header_names_the_relay_abi() {
+        let header = include_str!("../include/jazz_native_relay.h");
+        let define = format!("#define JAZZ_NATIVE_RELAY_ABI_VERSION {NATIVE_RELAY_ABI_V1}\n");
+        assert!(header.contains(&define), "header must contain {define:?}");
+    }
 }

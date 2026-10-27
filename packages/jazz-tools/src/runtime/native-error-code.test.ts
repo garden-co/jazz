@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import {
+  NATIVE_CORE_ERROR_REASONS,
   nativeCoreErrorCode,
   nativeCoreErrorReason,
   nativeErrorCode,
@@ -58,6 +59,14 @@ describe("native core error reasons", () => {
     expect(nativeCoreErrorReason(new Error("no reason"))).toBeUndefined();
     expect(nativeCoreErrorReason({ reason: "a_reason_from_a_newer_engine" })).toBeUndefined();
     expect(nativeCoreErrorReason("authorization_denied")).toBeUndefined();
+  });
+
+  it("knows exactly the reasons the engine has", async () => {
+    // A test-only export (`skip_typescript`), absent from the declarations.
+    const napi = (await import("jazz-napi")) as unknown as {
+      __testCoreErrorReasonNames(): string[];
+    };
+    expect([...NATIVE_CORE_ERROR_REASONS].sort()).toEqual(napi.__testCoreErrorReasonNames().sort());
   });
 });
 

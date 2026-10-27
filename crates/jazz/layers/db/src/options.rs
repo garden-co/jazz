@@ -380,6 +380,7 @@ impl From<crate::query::QueryError> for Error {
 /// Why an error happened, finer than its [`ErrorCode`]: the kinds the
 /// engine, hosts and bindings act on differently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Reason {
     /// A write policy denied the write (code `WriteRejected`).
     AuthorizationDenied,

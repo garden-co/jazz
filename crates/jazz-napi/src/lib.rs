@@ -132,6 +132,16 @@ fn corpus_reader(name: &str) -> std::result::Result<jazz::db::CorpusReader, Stri
     }
 }
 
+/// Test-only: every core `Reason` name, so the TypeScript reason list is
+/// checked against the engine's rather than copied from it.
+#[napi(js_name = "__testCoreErrorReasonNames", skip_typescript)]
+pub fn test_core_error_reason_names() -> Vec<String> {
+    jazz::db::Reason::ALL
+        .into_iter()
+        .map(|reason| reason.as_str().to_owned())
+        .collect()
+}
+
 /// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
 pub fn test_wire_frame_corpus_features() -> String {

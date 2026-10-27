@@ -175,15 +175,15 @@ it("accepts only the matching capability-only JSI foreground factory", () => {
 });
 
 it.each([undefined, false, true])(
-  "forwards optional native capture support %s without rejecting ABI 2",
+  "forwards optional native capture support %s",
   (supportsSnapshotCapture) => {
     const foreground = { ...foregroundFixture(), supportsSnapshotCapture };
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => 2,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
       execute: jest.fn(),
     };
     (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-      abiVersion: 2,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       openAttached: jest.fn(() => foreground),
     };
     const runtime = loadRelay(nativeRelay)

@@ -81,6 +81,11 @@ fn every_reason_has_its_pinned_stable_string() {
     for reason in Reason::ALL {
         assert_eq!(reason.as_str(), pinned_reason(reason), "{reason:?}");
         assert_eq!(Reason::from_name(reason.as_str()), Some(reason));
+        assert_eq!(
+            serde_json::to_value(reason).unwrap(),
+            reason.as_str(),
+            "serde spells {reason:?} by its stable name"
+        );
         assert!(
             seen.insert(reason.as_str()),
             "duplicate reason string for {reason:?}"
