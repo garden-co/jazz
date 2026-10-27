@@ -129,6 +129,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../text_merge.rs"]
+mod text_merge;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
 #[path = "../union_queries.rs"]

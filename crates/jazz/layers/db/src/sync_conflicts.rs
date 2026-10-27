@@ -170,6 +170,8 @@ impl Inner {
             let stored = |cells: &BTreeMap<String, Value>| {
                 cells
                     .keys()
+                    // A text write's base edits are not a column.
+                    .filter(|name| crate::text_merge::based_column(name).is_none())
                     .map(|name| schema_table.stored_name(name).to_owned())
                     .collect::<Vec<_>>()
             };
