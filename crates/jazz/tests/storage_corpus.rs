@@ -54,8 +54,8 @@ const SERVER_FILE: &str = "sqlite-storage-v1/server.sqlite.gz.base64";
 const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// SHA-256 of the decoded SQLite files. The corpus is immutable: a new
 /// storage format gets a new corpus beside this one.
-const SERVER_SHA256: &str = "03246f5bb4bf356b5c07b4da69cae2d943072dca53cebb5a0e8d18a9f95d8c18";
-const CLIENT_SHA256: &str = "d5384c1c4684b20c99cfcc0530c72e1717bf6fafda0d5f337f288720042f7fed";
+const SERVER_SHA256: &str = "1ac7d4b5443c565dbd83ac69ce88afa51a087ac4d267c27e94c78de019f134bb";
+const CLIENT_SHA256: &str = "358ad6dceaacc1cfbeb022228065968d7b9b374a7f93461fefdce864715fe297";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];

@@ -30,7 +30,7 @@ Invariant digest:
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
 - `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's presence over origin under an index, read whole or by origin's candidates' row ids, whichever reads fewer rows; the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
-- `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in validation and in the conflict walk, never encoded in stored or sent bytes.
+- `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in the conflict walk, never encoded in stored or sent bytes: a write's base names its pending predecessor by its full (node, tx), and the writer's replica rebases its remaining pending commits over each settled image it receives.
 - `INV-REF-5`: A node MUST store its local ref only as the sparse delta over origin: committing, rebasing and settling a pending write MUST NOT store a copy of the origin image it overrides, and a read MUST mask origin by the delta itself.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
@@ -455,9 +455,21 @@ seq (every earlier accepted record when it is none) and less than the
 write's own, not of its own chain, whose authored columns overlap the
 write's (a full image authors every column; `_deletion` counts as a column).
 A maybe conflicting write whose intervening foreign writes all touched other
-columns has an empty conflict analysis. The flag and the walk are exposed by
-the node (`NodeState::write_conflict`); no public read API or TypeScript
-surface carries them yet.
+columns has an empty conflict analysis.
+
+On SQLite a commit carries, beside its operations, the base of each row it
+writes over an image its writer held (`WireBase`: the settled seq and the
+pending predecessor's `(node, tx)`; an insert or a write over no held image
+carries none). A relay forwards its sessions' bases and names the session as
+the commit's origin, so each session stays its own writer; a base naming a
+relay's unsettled version is moved down to the settled version under it.
+The authority keeps, beside each row version an accepted upload wrote, its
+writer, its base and its authored stored columns (`_jazz_writes`, created
+with the first accepted upload). Its own writes are not kept there: they are
+made over the current image, so they are never maybe conflicting, and in
+another write's analysis they author every column. The flag and the walk are
+derived on demand (`Db::write_conflicts`, behind the `testing` feature); no
+public read API or TypeScript surface carries them yet.
 
 **Across schema versions.** Core merges every write into the row one
 physical column at a time, whatever schema version it was authored under

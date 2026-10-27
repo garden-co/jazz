@@ -51,7 +51,11 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
+
+#[path = "sync_conflicts.rs"]
+mod conflicts;
 pub use crate::wire::TransportError;
+pub use conflicts::WriteConflict;
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
@@ -409,6 +413,23 @@ fn echo_digest(image: &Image) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
+/// What the writer of a row version had seen of the row (SPEC 4 §4.6,
+/// "Base of a write"): `seq`, the settled image it held (an upstream seq,
+/// or a relay's unsettled one it was shipped); `pending`, its own newest
+/// unsettled commit to the row, whose writes its image included, as
+/// (node, tx). Both none is an empty base, which is never sent. Nothing
+/// here says the predecessor is the writer's own: only the conflict walk
+/// assumes it (INV-REF-4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireBase {
+    /// The row's table as the writer's schema names it.
+    pub table: String,
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub seq: Option<u64>,
+    pub pending: Option<([u8; 16], u64)>,
+}
+
 /// A row of a commit's `expect` the server did not ship (see
 /// `SyncMessage::Fate`), with the authority's [`STAMPS`] for it: `None`
 /// where its version has no such cell.
@@ -668,6 +689,15 @@ pub enum SyncMessage {
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
         expect: Vec<Expect>,
+        /// The base of each row the commit writes over an image its
+        /// writer held (SPEC 4 §4.6); a row it inserted, or wrote without
+        /// holding, has none. Only the authority's conflict derivation
+        /// reads it (INV-HIST-21).
+        bases: Vec<WireBase>,
+        /// The session commit a relay uploads this one for, as (node, tx),
+        /// when it is not the sender's own: the writer whose chain its
+        /// bases' `pending` names.
+        origin: Option<([u8; 16], u64)>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
     /// (pull by locator; holding the locator is the read capability).
@@ -961,6 +991,13 @@ pub(crate) struct Client {
     /// A new session has not yet been told which rows this replica holds:
     /// the next send reads them and puts the `Hold` right after `Schema`.
     hold_owed: bool,
+}
+
+/// A session's commit a relay uploads as its own, for its upload: the
+/// session commit's (node, tx) and its bases in this store's terms.
+pub(crate) struct Relayed {
+    origin: ([u8; 16], u64),
+    bases: Vec<WireBase>,
 }
 
 /// A session's commit a relay uploads as its own: (session, the session's
@@ -3446,6 +3483,7 @@ impl Db {
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
+        relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
@@ -3473,18 +3511,53 @@ impl Db {
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq)?;
         let mut shadows = Vec::new();
-        for (table, row, key) in &rows {
-            let shadowed = inner
-                .client
-                .as_ref()
-                .is_some_and(|c| c.shadow.contains_key(&(table.clone(), *row, key.clone())));
-            if !shadowed {
-                shadows.push((
-                    (table.clone(), *row, key.clone()),
-                    inner.settled_before(table, *row, key)?,
-                ));
+        // What this replica had seen of each row it wrote (SPEC 4 §4.6): the
+        // settled image under its pending writes, and the newest of those.
+        let mut bases = Vec::new();
+        // The newest pending commit to each written row, in one pass over
+        // the pending rows (not one per written row).
+        let mut newest_pending: HashMap<&RowKey, u64> = HashMap::new();
+        if relayed.is_none() {
+            let written: HashSet<&RowKey> = rows.iter().collect();
+            for pending in &inner.client.as_ref().expect("client").pending {
+                for row in &pending.rows {
+                    if let Some(row) = written.get(row) {
+                        newest_pending.insert(row, pending.tx);
+                    }
+                }
             }
         }
+        let node = inner.client.as_ref().expect("client").node;
+        for (table, row, key) in &rows {
+            let row_key = (table.clone(), *row, key.clone());
+            let client = inner.client.as_ref().expect("client");
+            let settled = match client.shadow.get(&row_key) {
+                Some(image) => image.as_ref().map(|image| image.seq),
+                None => {
+                    let image = inner.settled_before(table, *row, key)?;
+                    let seq = image.as_ref().map(|image| image.seq);
+                    shadows.push((row_key.clone(), image));
+                    seq
+                }
+            };
+            let pending = newest_pending.get(&row_key).map(|tx| (node, *tx));
+            if relayed.is_none()
+                && (settled.is_some() || pending.is_some())
+                && let Some(named) = inner.op_table_name(&ops, table, *row)
+            {
+                bases.push(WireBase {
+                    table: named,
+                    id: *row.0.as_bytes(),
+                    key: key.clone(),
+                    seq: settled,
+                    pending,
+                });
+            }
+        }
+        let (bases, origin) = match relayed {
+            Some(relayed) => (relayed.bases, Some(relayed.origin)),
+            None => (bases, None),
+        };
         let wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
         // Each written row as this replica now holds it, so the authority
         // can skip echoing a version that is exactly this.
@@ -3530,6 +3603,8 @@ impl Db {
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
                     expect,
+                    bases,
+                    origin,
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
@@ -5989,6 +6064,8 @@ impl Db {
                 author,
                 session,
                 expect,
+                bases,
+                origin,
             } => {
                 let identity = self.inner.borrow().sessions[index].identity;
                 if !self.inner.borrow().claim_node(node, &identity)? {
@@ -6005,6 +6082,18 @@ impl Db {
                     });
                     return Ok(());
                 }
+                // The writer whose chain the bases name: a relay's session,
+                // when the link may write as its node (a trusted link, or
+                // one whose identity writes as that node too).
+                let writer = match origin {
+                    Some(origin)
+                        if policy.is_none()
+                            || self.inner.borrow().claim_node(origin.0, &identity)? =>
+                    {
+                        origin
+                    }
+                    _ => (node, tx),
+                };
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
@@ -6014,7 +6103,14 @@ impl Db {
                         .and_then(|who| {
                             let vouched = vouched(policy, who, session);
                             self.with_claims(vouched, || {
-                                db.authorize_commit(who, policy, kind, ops, (node, tx))
+                                db.authorize_commit(
+                                    who,
+                                    policy,
+                                    kind,
+                                    ops,
+                                    (node, tx),
+                                    (bases, writer),
+                                )
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
@@ -6167,6 +6263,7 @@ impl Db {
         mut kind: WireKind,
         ops: Vec<WireOp>,
         origin: ([u8; 16], u64),
+        (bases, writer): (Vec<WireBase>, ([u8; 16], u64)),
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
@@ -6312,12 +6409,33 @@ impl Db {
         // The relay's own upload record and the rows the sender hears about
         // are read before the commit is released, so a storage error
         // rejects it whole instead of leaving it applied but not relayed.
+        // The authority keeps what the conflict derivation needs of each
+        // version it wrote (INV-HIST-21); a relay passes it on instead.
         let finished = if relay {
-            self.record_upload(ops.clone(), seq, upload)
+            let relayed = self.inner.borrow().relayed_bases(bases.clone());
+            relayed.and_then(|bases| {
+                self.record_upload(
+                    ops.clone(),
+                    seq,
+                    upload,
+                    Some(Relayed {
+                        origin: writer,
+                        bases,
+                    }),
+                )
+            })
         } else {
             Ok(())
         }
-        .and_then(|()| self.inner.borrow().written_rows(&ops, seq));
+        .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
+        .and_then(|rows| {
+            if !relay {
+                self.inner
+                    .borrow()
+                    .record_writes(&ops, &bases, writer, seq, &rows)?;
+            }
+            Ok(rows)
+        });
         let mut inner = self.inner();
         match finished {
             Ok(rows) => {

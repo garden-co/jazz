@@ -51,8 +51,9 @@ use crate::values::{
 pub use sync::{
     Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    Upstream, WireError, WireKind, WireOp, WireTarget, WireTransport, WireTransportAdapter,
-    decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    Upstream, WireBase, WireError, WireKind, WireOp, WireTarget, WireTransport,
+    WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -440,6 +441,9 @@ struct Inner {
     upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
+    /// `_jazz_writes` exists: the authority creates it with the first
+    /// upload it accepts, so other stores keep their file as it was.
+    writes_table: std::cell::Cell<bool>,
     /// Sessions the server ended for what they sent, with why, until the
     /// host takes them ([`Db::take_closed_subscribers`]).
     closed: Vec<(sync::SubscriberId, Error)>,
@@ -1115,6 +1119,7 @@ impl Db {
                 authority: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
+                writes_table: std::cell::Cell::new(false),
                 closed: Vec::new(),
                 accepted: 0,
                 since_tick: Vec::new(),
@@ -1609,7 +1614,9 @@ impl Db {
             })?;
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
-            if let Err(error) = self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable) {
+            if let Err(error) =
+                self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None)
+            {
                 let mut inner = self.inner();
                 inner.seq = prior;
                 inner.changed.borrow_mut().truncate(mark);
@@ -1740,7 +1747,7 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable) {
+        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -5035,9 +5042,12 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) =
-            self.record_upload(ops.iter().map(|(_, op)| op.clone()).collect(), seq, kind)
-        {
+        if let Err(error) = self.record_upload(
+            ops.iter().map(|(_, op)| op.clone()).collect(),
+            seq,
+            kind,
+            None,
+        ) {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);
