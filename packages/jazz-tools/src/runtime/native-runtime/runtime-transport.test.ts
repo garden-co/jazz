@@ -590,6 +590,69 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("drops outbound frames a dropped connection produced instead of sending them on its reconnect", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transports: FakeTransport[] = [];
+    const staleFrame = Uint8Array.from([9, 9, 9]);
+    let dropDuringTick = false;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => {
+              const transport = new FakeTransport([]);
+              transports.push(transport);
+              return transport;
+            },
+            tick: () => {
+              if (!dropDuringTick) return;
+              dropDuringTick = false;
+              // The core produces a frame for the first connection's channel
+              // while its socket drops underneath the tick.
+              transports[0]!.auxiliaryOutgoing.push(staleFrame);
+              sockets[0]!.emitServerClose();
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    await waitForServerPumpTimer();
+
+    dropDuringTick = true;
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([7, 7, 7])]));
+    await waitForServerPumpTimer();
+    await runtime.waitForUpstreamServerConnection();
+    await waitForServerPumpTimer();
+    expect(sockets).toHaveLength(2);
+
+    // The frame belongs to the dropped connection's channel state; the
+    // reconnected socket must never carry it.
+    const sentOnReconnect = sockets[1]!.sent
+      .filter((frame): frame is Uint8Array => frame instanceof Uint8Array)
+      .slice(1)
+      .flatMap((batch) => decodeWebSocketFrameBatch(batch));
+    expect(sentOnReconnect).not.toContainEqual(staleFrame);
+    expect(terminal).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
   it("turns a pump failure during a parked read into a transport error, not an unhandled rejection", async () => {
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     const pumpFailure = new Error("core tick failed");
@@ -837,6 +900,75 @@ describe("NativeRuntimeAdapter server transport", () => {
       expect(terminal).toHaveBeenCalledTimes(1);
     } finally {
       settlement.resolve();
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails a remote subscription that survived an outage once the reconnect hits a terminal error", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    let serverDown = false;
+    let refuseNextConnection = false;
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+        if (serverDown) queueMicrotask(() => this.emitServerClose());
+        // A frame the client cannot decode is a protocol error, which is never retried.
+        else if (refuseNextConnection)
+          queueMicrotask(() => this.emitMessage(new Uint8Array([0xff, 0xff, 0xff])));
+      }
+    } as unknown as typeof WebSocket;
+    const nativeSubscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            subscribe: () => nativeSubscription,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+
+      serverDown = true;
+      sockets[0]!.emitServerClose();
+      await vi.advanceTimersByTimeAsync(60_000);
+      // The outage is reported, and the subscription waits it out.
+      expect(terminal).toHaveBeenCalledTimes(1);
+      expect(nativeSubscription.closed).toBe(false);
+      expect(updates).not.toHaveBeenCalledWith(expect.any(Error));
+
+      serverDown = false;
+      refuseNextConnection = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(nativeSubscription.closed).toBe(true);
+      expect(updates).toHaveBeenCalledWith(expect.any(Error));
+    } finally {
       await runtime.close();
       vi.useRealTimers();
     }

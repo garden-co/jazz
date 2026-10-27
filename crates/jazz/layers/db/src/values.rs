@@ -1,6 +1,7 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ids::RowUuid;
@@ -369,6 +370,9 @@ pub struct Column {
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
+    /// How a column that holds JSON (a JSON column or an array of them)
+    /// checks the values written to it; `None` for any other column.
+    pub json_type: Option<Rc<JsonCheck>>,
     /// How concurrent writes to the column merge at the authority.
     pub merge: crate::schema::MergeStrategy,
 }
@@ -509,6 +513,7 @@ fn stored_provenance_columns() -> Vec<Column> {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         })
         .collect()
@@ -538,6 +543,7 @@ fn provenance_columns() -> Vec<Column> {
             })),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         })
         .collect()
@@ -646,6 +652,16 @@ impl Schema {
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: column.large_value_kind == crate::schema::LargeValueSemanticKind::Json,
+                    json_type: public
+                        .and_then(|public| {
+                            public
+                                .columns
+                                .columns
+                                .iter()
+                                .find(|declared| declared.name_str() == column.name)
+                        })
+                        .filter(|declared| holds_json(&declared.column_type))
+                        .map(|declared| Rc::new(JsonCheck::new(declared.column_type.clone()))),
                     merge: table
                         .merge_strategies
                         .get(&column.name)
@@ -857,6 +873,7 @@ impl Table {
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
                     json: false,
+                    json_type: None,
                     merge: Default::default(),
                 })
                 .collect(),
@@ -913,16 +930,19 @@ impl Table {
         // Rows are unique per (id, branch); branch views select by `_b`
         // first, so every index leads with it. `_c` is 1 when the version's
         // commit wrote content (not only a delete or a restore): history
-        // reads list those versions.
+        // reads list those versions. `_base` and `_cols` are what the
+        // authority keeps of the version an accepted upload wrote: what it
+        // was built on and the columns it authored (SPEC 4 §4.6); NULL
+        // everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1{columns}, \
-             UNIQUE (id, _b));\n\
+             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1, \
+             _base INTEGER, _cols BLOB{columns}, UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1{columns}, \
-             PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1, _base INTEGER, \
+             _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
@@ -1410,4 +1430,91 @@ fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
         }
         (value, _) => value.clone(),
     })
+}
+
+fn holds_json(ty: &crate::tools::ColumnType) -> bool {
+    match ty {
+        crate::tools::ColumnType::Json { .. } => true,
+        crate::tools::ColumnType::Array { element } => holds_json(element),
+        _ => false,
+    }
+}
+
+/// How the values written to a column that holds JSON are checked: against
+/// the column's declared public type, whose JSON Schema is compiled once, on
+/// first use. Every value a write authors is checked here, local or uploaded
+/// by a peer, so the schema holds for every value the store accepts, not
+/// only for writers whose own validator agrees.
+#[derive(Debug)]
+pub struct JsonCheck {
+    ty: crate::tools::ColumnType,
+    compiled: std::cell::OnceCell<crate::tools::CompiledSchema>,
+}
+
+impl JsonCheck {
+    pub fn new(ty: crate::tools::ColumnType) -> Self {
+        Self {
+            ty,
+            compiled: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Check a written cell: its JSON text must parse and match the schema.
+    pub(crate) fn check(&self, value: &Value, path: &str) -> Result<(), String> {
+        self.check_as(&self.ty, value, path)
+    }
+
+    fn check_as(
+        &self,
+        ty: &crate::tools::ColumnType,
+        value: &Value,
+        path: &str,
+    ) -> Result<(), String> {
+        use crate::tools::ColumnType;
+        match (ty, value) {
+            (_, Value::Nullable(None)) => Ok(()),
+            (_, Value::Nullable(Some(inner))) => self.check_as(ty, inner, path),
+            (ColumnType::Json { .. }, Value::String(text)) => self.check_text(text, path),
+            (ColumnType::Array { element }, Value::Array(items)) => {
+                items.iter().enumerate().try_for_each(|(index, item)| {
+                    self.check_as(element, item, &format!("{path}[{index}]"))
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Check one JSON document, given as its text.
+    pub(crate) fn check_text(&self, text: &str, path: &str) -> Result<(), String> {
+        let instance: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| format!("invalid JSON for column `{path}`: {error}"))?;
+        match self.compiled(path)? {
+            Some(schema) => schema
+                .validate(&instance)
+                .map_err(|error| crate::tools::json_schema_failure(error, path)),
+            None => Ok(()),
+        }
+    }
+
+    /// The declared schema, compiled; `None` if the column declares none. A
+    /// schema that fails to compile is tried again on the next check (a
+    /// browser host may install its validator later).
+    fn compiled(&self, path: &str) -> Result<Option<&crate::tools::CompiledSchema>, String> {
+        let mut ty = &self.ty;
+        while let crate::tools::ColumnType::Array { element } = ty {
+            ty = element;
+        }
+        let crate::tools::ColumnType::Json {
+            schema: Some(schema),
+        } = ty
+        else {
+            return Ok(None);
+        };
+        if let Some(compiled) = self.compiled.get() {
+            return Ok(Some(compiled));
+        }
+        let compiled = crate::tools::CompiledSchema::new(schema)
+            .map_err(|error| crate::tools::json_schema_failure(error, path))?;
+        Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
 }

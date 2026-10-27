@@ -201,10 +201,12 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
+    // The readable room's messages, and alice's membership their read
+    // policy rests on.
     assert_eq!(
         *shipped.borrow(),
-        1000,
-        "the first opening ships the readable room"
+        1001,
+        "the first opening ships the readable room and its membership"
     );
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
 
@@ -261,7 +263,11 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     pump(&server, &client);
     assert_eq!(ids(&client, None).len(), 2000);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
-    assert_eq!(*shipped.borrow(), 1000, "the newly readable room, once");
+    assert_eq!(
+        *shipped.borrow(),
+        1001,
+        "the newly readable room and the membership that opened it, once"
+    );
 }
 
 /// Timing probe (run with `--release -- --nocapture`): a caught-up client

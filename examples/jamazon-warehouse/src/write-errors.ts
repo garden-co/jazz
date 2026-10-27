@@ -23,7 +23,7 @@ export function writeRejectionCode(error: unknown): string | undefined {
   return undefined;
 }
 
-const RETRYABLE = new Set(["serialization_conflict", "transaction_conflict", "cascade_rejected"]);
+const RETRYABLE = new Set(["serialization_conflict", "transaction_conflict"]);
 const DEFINITIVE = new Set(["permission_denied", "write_rejected"]);
 
 /** A serializable transaction lost to a concurrent write; running it again may succeed. */

@@ -22,7 +22,7 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
-    ReadOpts, ReadTier, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
+    ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
     UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
@@ -49,10 +49,11 @@ use crate::values::{
     in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, Upstream, WireError, WireKind, WireOp, WireTarget, WireTransport,
-    WireTransportAdapter, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    BuiltOn, Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
+    NON_DURABLE_BASE, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
+    SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase, WireError, WireKind,
+    WireOp, WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
+    encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -421,6 +422,10 @@ struct Inner {
     authors: RefCell<AuthorCodes>,
     ids: Box<dyn RowIdSource>,
     seq: u64,
+    /// `seq` jumped to a replica's local base (`to`) from `from` without
+    /// handing either out: until a commit takes a seq, `from` is the high
+    /// water (see [`Db::seq_high_water`]).
+    base_jump: Option<(u64, u64)>,
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
@@ -443,6 +448,9 @@ struct Inner {
     upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
+    /// Each stored table's column positions, the codes authored-column
+    /// bitmasks use (SPEC 4 §4.6), read on first use.
+    column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
     /// Sessions the server ended for what they sent, with why, until the
     /// host takes them ([`Db::take_closed_subscribers`]).
     closed: Vec<(sync::SubscriberId, Error)>,
@@ -607,10 +615,8 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         let columns = columns
             .into_iter()
             .filter(|column| {
-                !matches!(
-                    column.as_str(),
-                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c"
-                )
+                !jazz_model::model::public_schema_convert::RESERVED_ROW_COLUMNS
+                    .contains(&column.as_str())
             })
             .collect();
         tables.insert(name.clone(), Table::stored_only(name, columns));
@@ -649,52 +655,67 @@ pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
 
-const ROW_ALREADY_DELETED: &str = "row already deleted: ";
-const ROW_ALREADY_EXISTS: &str = "encoding error: object already exists: ";
-const ROW_NOT_DELETED: &str = "row not deleted: ";
-
-const MISSING_REQUIRED: &str = "missing required field ";
-const BRANCH_MOVE: &str = "invalid mergeable commit: branch column does not match exact branch key";
+/// A write rejected for `reason`.
+fn rejected_for(reason: Reason, message: impl Into<String>) -> Error {
+    Error::with_reason(ErrorCode::WriteRejected, reason, message)
+}
 
 /// A new row (or restored content) without a value for a required column.
 fn missing_required(table: &str, column: &str) -> Error {
-    rejected(format!("{MISSING_REQUIRED}`{column}` in `{table}`"))
+    rejected_for(
+        Reason::MissingRequired,
+        format!("missing required field `{column}` in `{table}`"),
+    )
 }
 
 /// A write to (or an insert reusing the id of) a deleted row.
 fn row_already_deleted(row: RowUuid) -> Error {
-    rejected(format!("{ROW_ALREADY_DELETED}{}", row.0))
+    rejected_for(
+        Reason::RowAlreadyDeleted,
+        format!("row already deleted: {}", row.0),
+    )
 }
 
 /// A restore of a live row.
 fn row_not_deleted(row: RowUuid) -> Error {
-    rejected(format!("{ROW_NOT_DELETED}{}", row.0))
+    rejected_for(Reason::RowNotDeleted, format!("row not deleted: {}", row.0))
 }
 
 /// An insert reusing a live row's id.
 fn row_already_exists(row: RowUuid) -> Error {
-    rejected(format!("{ROW_ALREADY_EXISTS}{}", row.0))
+    rejected_for(
+        Reason::RowAlreadyExists,
+        format!("encoding error: object already exists: {}", row.0),
+    )
+}
+
+/// Where a write's cells come from. Only values a write authors are checked
+/// against their column's JSON Schema. Values it carries from the store (a
+/// branch move, a copy-on-write) were accepted under the schema of their
+/// time and are not new writes: schemas evolve through migrations and
+/// lenses, and carrying a row never fails on a schema tightened since.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cells {
+    Authored,
+    Carried,
+}
+
+/// A mergeable commit that would move a row to another branch.
+fn branch_move() -> Error {
+    Error::with_reason(
+        ErrorCode::Schema,
+        Reason::BranchMove,
+        "invalid mergeable commit: branch column does not match exact branch key",
+    )
 }
 
 impl Error {
     /// Whether a write was refused for the stored state of its row rather
-    /// than for its arguments: its id is deleted or taken, it restores a
-    /// live row, it would create a row without a required value (an upsert
-    /// may create or patch), or it would move a row to another branch. A host reports it through
-    /// the write's handle, as an apply-time rejection, not from the call.
+    /// than for its arguments ([`Reason::is_apply_time`]). A host reports it
+    /// through the write's handle, as an apply-time rejection, not from the
+    /// call.
     pub fn is_apply_time_rejection(&self) -> bool {
-        match self.code {
-            ErrorCode::WriteRejected => [
-                ROW_ALREADY_DELETED,
-                ROW_ALREADY_EXISTS,
-                ROW_NOT_DELETED,
-                MISSING_REQUIRED,
-            ]
-            .iter()
-            .any(|prefix| self.message.starts_with(prefix)),
-            ErrorCode::Schema => self.message == BRANCH_MOVE,
-            _ => false,
-        }
+        self.reason.is_some_and(Reason::is_apply_time)
     }
 }
 
@@ -706,15 +727,16 @@ impl Error {
     }
 }
 
-/// An update of a row this replica does not hold: a missing observation,
+/// A write over a row this replica does not hold: a missing observation,
 /// not a read-policy decision.
 fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error {
     Error::new(
         ErrorCode::NotObserved,
         format!(
             "{operation} on table {table} needs the current row, but row {} is not loaded \
-             locally; read or subscribe to the row before updating it",
-            row.0
+             locally; read or subscribe to the row before you {} it",
+            row.0,
+            operation.to_lowercase()
         ),
     )
 }
@@ -908,31 +930,31 @@ pub(crate) fn is_windowed(query: &Query) -> bool {
             .is_some_and(|parts| parts.limit.is_some() || parts.offset.is_some_and(|o| o > 0))
 }
 
-/// The reason a policy rejects a write, leading its message (the code
-/// stays `WriteRejected`): authority rejections are reported by it.
-pub const AUTHORIZATION_DENIED: &str = "authorization_denied";
+/// The text leading a policy rejection's message (its reason is
+/// [`Reason::AuthorizationDenied`], its code `WriteRejected`).
+pub const AUTHORIZATION_DENIED: &str = Reason::AuthorizationDenied.as_str();
 
 /// How far ahead of the authority's clock a session's explicit write
 /// timestamp may be (SPEC 3, INV-TX-7).
 pub const SKEW_TOLERANCE_MS: i64 = 30_000;
 
-/// The reason the authority refuses a write timestamped too far ahead,
-/// leading its message (the code stays `WriteRejected`).
-pub const CLIENT_CLOCK_TOO_FAR_AHEAD: &str = "client_clock_too_far_ahead";
+/// The text leading the message of a write the authority refuses for a
+/// timestamp too far ahead (its reason is
+/// [`Reason::ClientClockTooFarAhead`], its code `WriteRejected`).
+pub const CLIENT_CLOCK_TOO_FAR_AHEAD: &str = Reason::ClientClockTooFarAhead.as_str();
 
 /// A write a policy rejects.
 fn denied(detail: impl std::fmt::Display) -> Error {
-    rejected(format!("{AUTHORIZATION_DENIED}: {detail}"))
+    rejected_for(
+        Reason::AuthorizationDenied,
+        format!("{AUTHORIZATION_DENIED}: {detail}"),
+    )
 }
 
 impl Error {
     /// Whether a policy rejected the write.
     pub fn is_authorization_denied(&self) -> bool {
-        self.code == ErrorCode::WriteRejected
-            && self
-                .message
-                .strip_prefix(AUTHORIZATION_DENIED)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with(':'))
+        self.reason == Some(Reason::AuthorizationDenied)
     }
 }
 
@@ -952,58 +974,28 @@ impl Db {
         path: &std::path::Path,
         options: FileOptions,
     ) -> Result<Self, Error> {
-        // SQLite cannot open a directory; one the Groove engine wrote gets
-        // the typed refusal.
-        if path.is_dir() {
-            crate::format::refuse_groove_store(path)?;
-        }
-        let flags = rusqlite::OpenFlags::default();
-        let conn = match options.vfs {
-            None => Connection::open_with_flags(path, flags),
-            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
-        }
-        .map_err(storage)?;
-        let synchronous = match (options.journal, options.synchronous_full) {
-            (Journal::Memory, _) => "OFF",
-            (_, true) => "FULL",
-            (_, false) => "NORMAL",
-        };
-        let journal = match options.journal {
-            Journal::Wal => "WAL",
-            Journal::Rollback => "TRUNCATE",
-            Journal::Memory => "MEMORY",
-        };
-        let cache_spill = if options.journal == Journal::Wal {
-            ""
-        } else {
-            " PRAGMA cache_spill = OFF;"
-        };
-        // Before anything writes: a new file takes it on creation.
-        if let Some(page_size) = options.page_size {
-            conn.execute_batch(&format!("PRAGMA page_size = {page_size}"))
-                .map_err(storage)?;
-        }
-        // Before the journal mode, which rewrites the header: a refused file
-        // is left as it was.
-        crate::format::admit(&conn)?;
-        // `journal_mode` answers with a row, so it is queried, not batched.
-        let mode: String = conn
-            .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
-                r.get(0)
-            })
-            .map_err(storage)?;
-        if !mode.eq_ignore_ascii_case(journal) {
-            return Err(Error::new(
-                ErrorCode::Storage,
-                format!("journal_mode {journal} is not supported on this VFS yet (got {mode})"),
-            ));
-        }
-        conn.execute_batch(&format!(
-            "PRAGMA synchronous = {synchronous}; PRAGMA cache_size = -{};{cache_spill}",
-            options.cache_kib
-        ))
-        .map_err(storage)?;
-        Self::open_on(config, conn, Some((path, options.vfs)))
+        Self::open_file(config, crate::host::StoreFile::open(path, options)?).await
+    }
+
+    /// Open on a file [`crate::host::StoreFile::open`] admitted, whose host
+    /// tables may already have been read or written.
+    pub async fn open_file(config: DbConfig, file: crate::host::StoreFile) -> Result<Self, Error> {
+        let crate::host::StoreFile { conn, path } = file;
+        Self::open_on(
+            config,
+            conn,
+            path.as_ref().map(|(path, vfs)| (path.as_path(), *vfs)),
+        )
+    }
+
+    /// Run `f` on the store's connection, outside any transaction handle's
+    /// overlay (see [`crate::host`]).
+    pub(crate) fn with_host_connection<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let inner = self.inner.borrow_mut();
+        f(&inner.conn)
     }
 
     fn open_on(
@@ -1109,6 +1101,7 @@ impl Db {
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
+                base_jump: None,
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
@@ -1120,6 +1113,7 @@ impl Db {
                 authority: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
+                column_codes: RefCell::default(),
                 closed: Vec::new(),
                 accepted: 0,
                 since_tick: Vec::new(),
@@ -1147,7 +1141,7 @@ impl Db {
                 inner.upstream_rejections = Some(retained);
             }
             if inner.client.is_some() {
-                inner.seq = inner.seq.max(LOCAL_BASE);
+                inner.raise_to_local_base();
             }
         }
         Ok(db)
@@ -1159,13 +1153,22 @@ impl Db {
     /// [`Db::seed_seq_floor`], so no transaction id is reused: the
     /// authority deduplicates uploads by id and would drop the new write.
     pub fn seq_high_water(&self) -> u64 {
-        self.inner.borrow().seq
+        let inner = self.inner.borrow();
+        match inner.base_jump {
+            Some((from, to)) if inner.seq == to => from,
+            _ => inner.seq,
+        }
     }
 
     /// Never hand out a commit seq at or below `floor`.
     pub fn seed_seq_floor(&self, floor: u64) {
         let mut inner = self.inner.borrow_mut();
         inner.seq = inner.seq.max(floor);
+        if let Some((from, to)) = &mut inner.base_jump
+            && floor <= *to
+        {
+            *from = (*from).max(floor);
+        }
     }
 
     /// Every SQLite store holds complete history; this one is also the
@@ -1322,6 +1325,21 @@ impl Db {
             plan.push(row.map_err(storage)?);
         }
         Ok((compiled.sql.clone(), plan.join(" | ")))
+    }
+
+    /// Diagnostics: SQLite's query plan for the INSERT check a commit
+    /// would run on `row` of `table` as `author`, with `grounded` rows of
+    /// that table overlaid as a later grounding round sees them.
+    #[doc(hidden)]
+    pub fn explain_write_check_plan(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+        grounded: &[RowUuid],
+    ) -> Result<String, Error> {
+        self.inner()
+            .explain_write_check(table, row, author, grounded)
     }
 
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
@@ -1657,7 +1675,9 @@ impl Db {
             })?;
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
-            if let Err(error) = self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable) {
+            if let Err(error) =
+                self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None)
+            {
                 let mut inner = self.inner();
                 inner.seq = prior;
                 inner.changed.borrow_mut().truncate(mark);
@@ -1788,7 +1808,7 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable) {
+        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -2840,6 +2860,26 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(bool, usize), Error> {
+        let (sql, params, preps, overlaid) = self.policy_check(table, row, key, cut, policy)?;
+        let value: i64 = self.with_preps(&preps, |_| {
+            self.conn
+                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .map_err(storage)
+        })?;
+        Ok((value != 0, overlaid))
+    }
+
+    /// The statement [`Inner::holds_at`] runs: the policy SQL boolean for
+    /// one stored row, its parameters, the preps it needs, and how many
+    /// grounded rows it reads.
+    fn policy_check(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>, usize), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
@@ -2855,12 +2895,94 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        let value: i64 = self.with_preps(&preps, |_| {
+        Ok((sql, params, preps, overlaid))
+    }
+
+    /// SQLite's plan for the INSERT check a unit ending now would run on
+    /// `row` (SPEC 7): its policy reads committed state, overlaid with the
+    /// `grounded` rows of the same table, as a later round sees them.
+    fn explain_write_check(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+        grounded: &[RowUuid],
+    ) -> Result<String, Error> {
+        let table = self.schema.table(table)?;
+        let own = self.seq + 1;
+        let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
+        let cut = Cut {
+            seq: self.seq,
+            own,
+            extra: Vec::new(),
+            grounded: Some(Arc::new(BTreeMap::from([(table.stored.clone(), ids)]))),
+        };
+        let session = self.session(author);
+        let (sql, params, _, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
+            ctx.operation_policy(table, Operation::Insert, "a", &session)
+        })?;
+        let mut statement = self
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .map_err(storage)?;
+        let rows = statement
+            .query_map(params_from_iter(params.iter()), |r| r.get::<_, String>(3))
+            .map_err(storage)?;
+        let mut plan = Vec::new();
+        for row in rows {
+            plan.push(row.map_err(storage)?);
+        }
+        Ok(plan.join(" | "))
+    }
+
+    /// [`Inner::holds`] for `row` as of `cut`: the row under check and
+    /// the policy's other rows are each read as of `cut`.
+    fn holds_as_of(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Cut,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<bool, Error> {
+        let binding = BTreeMap::new();
+        let claims = Session::default();
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let condition = policy(&mut ctx)?;
+        let source = ctx.source(table)?;
+        let preps = std::mem::take(&mut ctx.preps);
+        let mut params = ctx.params;
+        params.push(Sql::Blob(row.0.as_bytes().to_vec()));
+        params.push(Sql::Blob(key.to_vec()));
+        let sql = format!(
+            "SELECT COALESCE({condition}, 0) FROM {source} AS a WHERE a.id = ?{} AND a._b = ?{}",
+            params.len() - 1,
+            params.len()
+        );
+        let value: Option<i64> = self.with_preps(&preps, |_| {
             self.conn
                 .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                .optional()
                 .map_err(storage)
         })?;
-        Ok((value != 0, overlaid))
+        Ok(value.is_some_and(|value| value != 0))
+    }
+
+    /// Whether `author` may `operation` the version of `row` at `seq`, with
+    /// the policy's other rows as they stood then too.
+    pub(crate) fn check_version(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
+        let session = self.session(author);
+        self.holds_as_of(table, row, key, Cut::at(seq), |ctx| {
+            ctx.operation_policy(table, operation, "a", &session)
+        })
     }
 
     /// The current version of each of `ids`' rows in `table`: (id, branch
@@ -3325,7 +3447,11 @@ impl Inner {
     /// land here, so the store never holds a value its schema does not
     /// describe. A nullable column also takes the bare value; a large
     /// value's reference is checked where it is bound.
-    fn check_cell(column: &crate::values::Column, value: &Value) -> Result<(), Error> {
+    fn check_cell(
+        column: &crate::values::Column,
+        value: &Value,
+        cells: Cells,
+    ) -> Result<(), Error> {
         let mut bare = value;
         while let Value::Nullable(Some(inner)) = bare {
             bare = inner;
@@ -3340,7 +3466,13 @@ impl Inner {
         value.check_type(ty).map_err(|error| match value {
             Value::Nullable(None) => rejected(format!("`{}` is required", column.name)),
             _ => rejected(format!("`{}`: {error}", column.name)),
-        })
+        })?;
+        if let Some(json) = &column.json_type
+            && cells == Cells::Authored
+        {
+            json.check(value, &column.name).map_err(rejected)?;
+        }
+        Ok(())
     }
 
     fn bind_value(value: &Value) -> Result<Sql, Error> {
@@ -3350,8 +3482,13 @@ impl Inner {
     /// A value as the cell `column` stores. A string, JSON or bytes value
     /// above the inline threshold is chunked: its nodes are stored in this
     /// transaction and the cell holds their descriptor.
-    fn bind_cell(&self, column: &crate::values::Column, value: &Value) -> Result<Sql, Error> {
-        Self::check_cell(column, value)?;
+    fn bind_cell(
+        &self,
+        column: &crate::values::Column,
+        value: &Value,
+        cells: Cells,
+    ) -> Result<Sql, Error> {
+        Self::check_cell(column, value, cells)?;
         let mut inner = value;
         while let Value::Nullable(Some(value)) = inner {
             inner = value;
@@ -3359,7 +3496,7 @@ impl Inner {
         let logical = match inner {
             Value::String(text) => text.as_bytes(),
             Value::Bytes(bytes) => bytes.as_slice(),
-            Value::Large(large) => return self.bind_large(column, large),
+            Value::Large(large) => return self.bind_large(column, large, cells),
             _ => return Self::bind_value(value),
         };
         if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
@@ -3379,11 +3516,14 @@ impl Inner {
 
     /// A chunked value written by reference: an edit's consolidated tree
     /// (stored now, inside the write's transaction), or a tree whose nodes
-    /// this store already holds.
+    /// this store already holds. An authored JSON value is checked whole,
+    /// wherever its tree is complete here: always at the authority, so no
+    /// writer gets past a schema by sending a value large enough to chunk.
     fn bind_large(
         &self,
         column: &crate::values::Column,
         large: &jazz_types::large_values::LargeValueRef,
+        cells: Cells,
     ) -> Result<Sql, Error> {
         if !crate::large::large_capable(column) || large.kind != crate::large::kind(column) {
             return Err(rejected(format!(
@@ -3391,6 +3531,7 @@ impl Inner {
                 column.name, large.kind
             )));
         }
+        let mut complete = true;
         if let Some(prepared) = self
             .pending_nodes
             .iter()
@@ -3399,7 +3540,12 @@ impl Inner {
             crate::large::store(&self.conn, &self.chunks, prepared, self.client.is_some())?;
         } else if self.derived.contains(large) {
             // Derived here from a stored tree by an append or splice.
-        } else if self.client.is_none() {
+            complete = self.client.is_none();
+        } else if self.client.is_some() {
+            // A replica's tree may be only partly fetched: the authority
+            // checks the value when it admits the write.
+            complete = false;
+        } else {
             // An authority admits a descriptor only over a complete, honest
             // tree. A replica's edits build on trees its upstream holds,
             // which it may have only partly fetched.
@@ -3410,6 +3556,19 @@ impl Inner {
                 )));
             }
             crate::large::admit(&self.conn, &self.chunks, large)?;
+        }
+        if let Some(json) = &column.json_type
+            && cells == Cells::Authored
+            && complete
+        {
+            let bytes = self.chunks.value_bytes(large)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                rejected(format!(
+                    "invalid JSON for column `{}`: not UTF-8",
+                    column.name
+                ))
+            })?;
+            json.check_text(text, &column.name).map_err(rejected)?;
         }
         crate::large::settle_receipts(&self.conn, &large.root.locator)?;
         self.large_cell(large)
@@ -3604,8 +3763,8 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del, _c{columns}) SELECT id, _b, _seq, _del, _c{columns} \
-             FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _cols{columns}) \
+             SELECT id, _b, _seq, _del, _c, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored)
         );
@@ -3661,7 +3820,7 @@ impl Inner {
         );
         self.exec(&sql, rusqlite::params![to, seq as i64, id, from])
             .map_err(storage)?;
-        self.set_cells(table, row, to, head_cells, seq, None, false)
+        self.set_cells(table, row, to, head_cells, Cells::Carried, seq, None, false)
     }
 
     /// Write cells (and the deletion flag) into a row's current version
@@ -3674,14 +3833,18 @@ impl Inner {
         row: RowUuid,
         key: &[u8],
         cells: &BTreeMap<String, Value>,
+        source: Cells,
         seq: u64,
         deleted: Option<bool>,
         content: bool,
     ) -> Result<(), Error> {
         // Right-hand sides read the row before this update: `_seq` is still
         // the previous version's.
+        // What a new version was built on is the authority's to write
+        // (SPEC 4 §4.6).
         let mut sets = vec![
             "_seq = ?1".to_owned(),
+            "_base = NULL, _cols = NULL".to_owned(),
             format!(
                 "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
                 content = content as u8
@@ -3694,7 +3857,7 @@ impl Inner {
         }
         for (name, value) in cells {
             values.push(match table.column(name) {
-                Some(column) => self.bind_cell(column, value)?,
+                Some(column) => self.bind_cell(column, value, source)?,
                 None => Self::bind_value(value)?,
             });
             sets.push(format!(
@@ -3724,10 +3887,12 @@ impl Inner {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
         table_name: &str,
         mut cells: BTreeMap<String, Value>,
+        source: Cells,
         row_id: Option<RowUuid>,
         target: &Target,
         who: Who,
@@ -3780,8 +3945,8 @@ impl Inner {
         ];
         for column in &table.columns {
             let value = match (cells.get(&column.name), &column.default) {
-                (Some(value), _) => self.bind_cell(column, value)?,
-                (None, Some(default)) => self.bind_cell(column, default)?,
+                (Some(value), _) => self.bind_cell(column, value, source)?,
+                (None, Some(default)) => self.bind_cell(column, default, Cells::Authored)?,
                 (None, None) if column.nullable() => Sql::Null,
                 (None, None) => {
                     return Err(missing_required(table_name, &column.name));
@@ -3922,7 +4087,7 @@ impl Inner {
                 .any(|column| cells.contains_key(column))
             && table.branch_key_after(key, &cells) != *key
         {
-            return Err(schema_error(BRANCH_MOVE));
+            return Err(branch_move());
         }
         // An upsert over a row this commit deleted writes it anew: it is
         // checked as the insert it is, not as an update of the deleted row.
@@ -3931,7 +4096,15 @@ impl Inner {
             Located::Absent { cells: branch, .. } if upsert => {
                 let mut cells = cells;
                 cells.extend(branch);
-                return self.insert(table_name, cells, Some(row), &Target::Root, who, seq);
+                return self.insert(
+                    table_name,
+                    cells,
+                    Cells::Authored,
+                    Some(row),
+                    &Target::Root,
+                    who,
+                    seq,
+                );
             }
             // An update stages against the row's current cells, so a
             // replica must hold it. Saying so discloses nothing: the answer
@@ -3996,6 +4169,7 @@ impl Inner {
                     row,
                     &key,
                     &cells,
+                    Cells::Authored,
                     seq,
                     staged_tombstone.then_some(false),
                     true,
@@ -4011,7 +4185,7 @@ impl Inner {
                 self.authorize_patch(table, row, &from, &who, verb)?;
                 let cells = self.merged_cells(table, row, Some(&from), cells)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
-                self.set_cells(table, row, &to, &cells, seq, None, true)?;
+                self.set_cells(table, row, &to, &cells, Cells::Authored, seq, None, true)?;
                 to
             }
             Located::Absent { .. } => unreachable!("absent upserts insert"),
@@ -4088,7 +4262,16 @@ impl Inner {
             } => {
                 check(self, &key)?;
                 self.snapshot(table, row, &key, seq)?;
-                self.set_cells(table, row, &key, &BTreeMap::new(), seq, Some(true), false)?;
+                self.set_cells(
+                    table,
+                    row,
+                    &key,
+                    &BTreeMap::new(),
+                    Cells::Authored,
+                    seq,
+                    Some(true),
+                    false,
+                )?;
             }
             // Deleting an inherited row is a head register: a head tombstone
             // that masks the base row.
@@ -4100,7 +4283,16 @@ impl Inner {
             } => {
                 check(self, &from)?;
                 self.copy_on_write(table, row, &from, &to, &head_cells, at.as_ref(), seq)?;
-                self.set_cells(table, row, &to, &BTreeMap::new(), seq, Some(true), false)?;
+                self.set_cells(
+                    table,
+                    row,
+                    &to,
+                    &BTreeMap::new(),
+                    Cells::Authored,
+                    seq,
+                    Some(true),
+                    false,
+                )?;
             }
             // As for a patch: a replica leaves an unknown row to the authority.
             Located::Absent { .. } if self.client.is_some() => {}
@@ -4117,11 +4309,13 @@ impl Inner {
         Ok(WriteHandle { row, seq })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn restore(
         &mut self,
         table_name: &str,
         row: RowUuid,
         content: Option<BTreeMap<String, Value>>,
+        source: Cells,
         target: &Target,
         who: Who,
         seq: u64,
@@ -4132,6 +4326,11 @@ impl Inner {
             Located::Row {
                 key, deleted: true, ..
             } => key,
+            // As for an update: a replica must hold the row to restore it,
+            // and saying so discloses nothing.
+            Located::Absent { .. } if self.client.is_some() => {
+                return Err(update_target_not_loaded("RESTORE", table_name, row));
+            }
             Located::Absent { .. } => {
                 return Err(rejected(format!(
                     "RESTORE target {row:?} does not exist in `{table_name}`"
@@ -4165,6 +4364,7 @@ impl Inner {
             row,
             &key,
             &cells,
+            source,
             seq,
             Some(false),
             content.is_some(),
@@ -4495,11 +4695,27 @@ impl Inner {
             }
         }
         self.delete(table, row, &Target::Exact(from), Who::Local, seq)?;
-        match self.locate(t, row, &Target::Exact(to.clone()))? {
-            Located::Row { deleted: true, .. } => {
-                self.restore(table, row, Some(cells), &Target::Exact(to), Who::Local, seq)
-            }
-            _ => self.insert(table, cells, Some(row), &Target::Exact(to), Who::Local, seq),
+        // The moved row carries its stored cells: they are not re-checked.
+        let to = Target::Exact(to);
+        match self.locate(t, row, &to)? {
+            Located::Row { deleted: true, .. } => self.restore(
+                table,
+                row,
+                Some(cells),
+                Cells::Carried,
+                &to,
+                Who::Local,
+                seq,
+            ),
+            _ => self.insert(
+                table,
+                cells,
+                Cells::Carried,
+                Some(row),
+                &to,
+                Who::Local,
+                seq,
+            ),
         }
     }
 }
@@ -5058,10 +5274,13 @@ impl Inner {
         if let Some(at) = op.updated_at_ms()
             && at as i64 > now.saturating_add(SKEW_TOLERANCE_MS)
         {
-            return Err(rejected(format!(
-                "{CLIENT_CLOCK_TOO_FAR_AHEAD}: the write's timestamp is {}ms ahead of the authority's clock",
-                at as i64 - now
-            )));
+            return Err(rejected_for(
+                Reason::ClientClockTooFarAhead,
+                format!(
+                    "{CLIENT_CLOCK_TOO_FAR_AHEAD}: the write's timestamp is {}ms ahead of the authority's clock",
+                    at as i64 - now
+                ),
+            ));
         }
         Ok(())
     }
@@ -5069,7 +5288,8 @@ impl Inner {
     fn apply_op(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         match op.clone() {
             StagedOp::Insert(t, c, o) => {
-                self.insert(&t, c, o.row_id, &Target::exact(&o.target), who, seq)
+                let target = Target::exact(&o.target);
+                self.insert(&t, c, Cells::Authored, o.row_id, &target, who, seq)
             }
             StagedOp::Update(t, r, c, o) => {
                 let target = Target::of(&o.target, self)?;
@@ -5084,7 +5304,8 @@ impl Inner {
                 self.delete(&t, r, &target, who, seq)
             }
             StagedOp::Restore(t, r, c, o) => {
-                self.restore(&t, r, c, &Target::exact(&o.target), who, seq)
+                let target = Target::exact(&o.target);
+                self.restore(&t, r, c, Cells::Authored, &target, who, seq)
             }
             StagedOp::Move(t, from, to, r) => self.move_row(&t, from, to, r, seq),
         }
@@ -5272,13 +5493,19 @@ impl Db {
             // A row a later local commit wrote (one not unsettled at begin)
             // changed since the snapshot: the authority gets that commit
             // first, so it would refuse this one too.
+            // An own commit unsettled at begin counts wherever it landed.
+            let landed = self.inner().own_landings(own)?;
             {
                 let inner = self.inner();
                 for (schema, op) in &batch.ops {
                     if let Some(row) = op.row()
                         && inner
                             .newest_seq(schema.stored_table(op.table())?, row)?
-                            .is_some_and(|seq| seq >= LOCAL_BASE && !own.contains(&seq))
+                            .is_some_and(|seq| {
+                                seq >= LOCAL_BASE
+                                    && !own.contains(&seq)
+                                    && !landed.values().any(|&at| at == seq)
+                            })
                     {
                         return Err(conflict(
                             "row visible parent changed since transaction write was staged",
@@ -5304,8 +5531,9 @@ impl Db {
             // and the authority, which gets this replica's earlier writes
             // first, would refuse the commit too; so it is a conflict now.
             // A row read at an own unsettled commit's local version that now
-            // holds a server version may only have settled: the authority
-            // decides that one.
+            // holds a server version (or the version a relay with no server
+            // settled it at) may only have settled: the authority decides
+            // that one.
             {
                 let inner = self.inner();
                 for read in reads {
@@ -5318,7 +5546,9 @@ impl Db {
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
                                 || (now.1 != then.1
-                                    && !(own.contains(&then.1) && now.1 < LOCAL_BASE))
+                                    && !(own.contains(&then.1)
+                                        && (now.1 < LOCAL_BASE
+                                            || landed.get(&then.1) == Some(&now.1))))
                         });
                     if changed {
                         return Err(conflict(
@@ -5407,9 +5637,12 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) =
-            self.record_upload(ops.iter().map(|(_, op)| op.clone()).collect(), seq, kind)
-        {
+        if let Err(error) = self.record_upload(
+            ops.iter().map(|(_, op)| op.clone()).collect(),
+            seq,
+            kind,
+            None,
+        ) {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);

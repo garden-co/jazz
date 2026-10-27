@@ -1047,7 +1047,7 @@ Default result ordering is a conformance requirement for every public query
 surface. The test plan below records additional intended coverage.
 
 - Strengthen the maintained-vs-one-shot differential oracle command
-  `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+  `cargo test -p jazz --test maintained_differential maintained_one_shot_differential_oracle -- --ignored`
   to compare the canonical `ResultTree` specified in appendix D, rather than a
   root-id set. The oracle should keep using public query shapes/builders and
   compare the maintained stream's reduced result to the one-shot result at each

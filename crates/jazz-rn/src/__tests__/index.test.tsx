@@ -175,15 +175,15 @@ it("accepts only the matching capability-only JSI foreground factory", () => {
 });
 
 it.each([undefined, false, true])(
-  "forwards optional native capture support %s without rejecting ABI 2",
+  "forwards optional native capture support %s",
   (supportsSnapshotCapture) => {
     const foreground = { ...foregroundFixture(), supportsSnapshotCapture };
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => 2,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
       execute: jest.fn(),
     };
     (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-      abiVersion: 2,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       openAttached: jest.fn(() => foreground),
     };
     const runtime = loadRelay(nativeRelay)
@@ -425,16 +425,67 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   );
 });
 
-it("decodes a core operation error with its stable code beside the unchanged reason", () => {
+it("decodes the native connection status with a refused credential's reason", () => {
   const relay = loadRelay(null);
-  const code = Array.from("not_observed", (char) => char.charCodeAt(0));
-  const reason = Array.from("NotObserved: oops", (char) => char.charCodeAt(0));
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 1, 0))).toEqual({
+    type: "nativeConnectionStatus",
+    configured: true,
+    explicitlyOffline: false,
+    connected: true,
+    authRejected: null,
+  });
+  const reason = Array.from("token expired", (char) => char.charCodeAt(0));
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 0, 1, reason.length, ...reason)),
+  ).toEqual({
+    type: "nativeConnectionStatus",
+    configured: true,
+    explicitlyOffline: false,
+    connected: false,
+    authRejected: "token expired",
+  });
+  // A status from before the reason existed, or one cut short, fails closed.
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 1))).toThrow(
+    "unknown or malformed command response",
+  );
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 0, 0, 7))).toThrow(
+    "unknown or malformed command response",
+  );
+});
 
+it("decodes a core operation error with its stable code and reason name beside the unchanged reason", () => {
+  const relay = loadRelay(null);
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  const code = ascii("not_observed");
+  const reasonName = ascii("missing_chunks");
+  const reason = ascii("NotObserved: oops");
+
+  // Without a reason name: the option tag is 0.
   expect(
     relay.decodeNativeForegroundResponse(
-      Uint8Array.of(25, code.length, ...code, reason.length, ...reason),
+      Uint8Array.of(25, code.length, ...code, 0, reason.length, ...reason),
     ),
   ).toEqual({ type: "operationError", code: "not_observed", reason: "NotObserved: oops" });
+  // With one (ABI 3): tag 1, then the name.
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(
+        25,
+        code.length,
+        ...code,
+        1,
+        reasonName.length,
+        ...reasonName,
+        reason.length,
+        ...reason,
+      ),
+    ),
+  ).toEqual({
+    type: "operationError",
+    code: "not_observed",
+    reasonName: "missing_chunks",
+    reason: "NotObserved: oops",
+  });
   // An uncoded failure keeps response 8 and has no code.
   expect(relay.decodeNativeForegroundResponse(Uint8Array.of(8, 4, 111, 111, 112, 115))).toEqual({
     type: "operationError",

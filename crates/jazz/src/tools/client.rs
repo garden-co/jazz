@@ -663,7 +663,10 @@ impl JazzClient {
                     attach(&shared, link.transport).await;
                     Some(link.terminal)
                 }
-                Err(NativeTransportError::Terminal(error)) => {
+                Err(
+                    NativeTransportError::Terminal(error)
+                    | NativeTransportError::AuthRejected(error),
+                ) => {
                     return Err(JazzError::Connection(error));
                 }
                 Err(NativeTransportError::Retryable(error)) => {

@@ -427,6 +427,15 @@ impl<'a> Ctx<'a> {
             )
         };
         let history = quote(&format!("{}__h", table.stored));
+        // Both arms must let SQLite search by a correlated predicate (a
+        // policy EXISTS's `m.band = a.band`), or every read through a cut
+        // scans the whole table (#4298). History rows have no `rid`, and its
+        // stand-in needs `rid`'s INTEGER affinity: a bare NULL has none, and
+        // arms that differ in a column's affinity are not flattened, so the
+        // predicate stays outside them. The history arm starts from the
+        // current rows changed since the cut (`_seq` is indexed; CROSS JOIN
+        // keeps that order) rather than scanning every history row for a
+        // column the history table has no index on.
         let h_columns = columns
             .replace("rid, ", "")
             .split(", ")
@@ -435,8 +444,8 @@ impl<'a> Ctx<'a> {
             .join(", ");
         format!(
             "(SELECT {columns} FROM {name} WHERE {visible} \
-             UNION ALL SELECT NULL, {h_columns} FROM {history} AS h JOIN {name} AS c \
-             ON c.id = h.id AND c._b = h._b WHERE {newer} \
+             UNION ALL SELECT CAST(NULL AS INTEGER), {h_columns} FROM {name} AS c \
+             CROSS JOIN {history} AS h ON c.id = h.id AND c._b = h._b WHERE {newer} \
              AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
              WHERE h2.id = h.id AND h2._b = h._b AND {h_visible}))"
         )
@@ -446,7 +455,7 @@ impl<'a> Ctx<'a> {
     /// table is its effective rows: head rows (tombstones included, so they
     /// mask), then base rows the head does not override. Filters, policies,
     /// ordering and windows all apply after this masking.
-    fn source(&mut self, table: &Table) -> Result<String, Error> {
+    pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
         let mut columns = "rid, id, _b, _seq, _del".to_owned();

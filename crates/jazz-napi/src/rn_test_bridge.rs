@@ -444,11 +444,28 @@ pub fn foreground_response_corpus() -> Result<String> {
         ForegroundDbCommandResponse::OperationError {
             reason: "codec boundary: λ".into(),
         },
+        ForegroundDbCommandResponse::CodedOperationError {
+            code: "query".into(),
+            reason_name: None,
+            reason: "Query: unknown table λ".into(),
+        },
+        ForegroundDbCommandResponse::CodedOperationError {
+            code: "write_rejected".into(),
+            reason_name: Some("authorization_denied".into()),
+            reason: "WriteRejected: authorization_denied: λ".into(),
+        },
         ForegroundDbCommandResponse::TransactionSettled { tx_id: [7; 16] },
         ForegroundDbCommandResponse::NativeConnectionStatus {
             configured: true,
             explicitly_offline: false,
             connected: true,
+            auth_rejected: None,
+        },
+        ForegroundDbCommandResponse::NativeConnectionStatus {
+            configured: true,
+            explicitly_offline: false,
+            connected: false,
+            auth_rejected: Some("bearer expired: λ".into()),
         },
         ForegroundDbCommandResponse::NativeSessionMetadata {
             node: [9; 16],
