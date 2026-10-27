@@ -142,7 +142,7 @@ fn range_reads_do_not_rebuild_the_whole_value_at_any_size() {
 ///
 /// alice ──insert 3 files with large notes and contents──► db
 /// alice ──read select(name)──────────────► 3 names, 0 full rebuilds
-/// alice ──read select(name, contents)────► 3 complete contents
+/// alice ──read select(name, contents)────► 3 complete contents, ≥1 full rebuild
 /// alice ──read *─────────────────────────► complete notes and contents
 #[test]
 fn projected_listing_leaves_excluded_large_columns_unread() {
@@ -174,7 +174,11 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
     let with_contents = db
         .prepare_query(&Query::from(FILES).select(["name", "contents"]))
         .expect("prepare contents listing");
-    let rows = db.read(&with_contents).expect("contents listing");
+    let (rows, rebuilds) = counting(|| db.read(&with_contents).expect("contents listing"));
+    assert!(
+        rebuilds >= 1,
+        "selecting the chunked contents rebuilds them on this thread"
+    );
     for (id, name, _, bytes) in &files {
         let row = rows
             .iter()

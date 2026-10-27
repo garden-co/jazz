@@ -164,6 +164,13 @@ async fn enrolled_native_audio_survives_offline_reopen() {
                 wav[middle as usize..middle as usize + 128]
             );
             assert_eq!(full_materializations_for_test() - before, 0);
+            // The counter is per thread and this client runs on this one, so
+            // a whole-row read of the audio does count here.
+            alice
+                .query(Query::from("audio"), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            assert!(full_materializations_for_test() - before >= 1);
 
             let mut bob_context = server.make_client_context_for_user(schema, "bob");
             bob_context.admin_secret = None;

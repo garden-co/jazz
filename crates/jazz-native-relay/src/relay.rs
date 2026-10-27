@@ -1161,11 +1161,12 @@ impl RelayWorker {
 // ---- foreground commands ------------------------------------------------------------
 
 /// The response for a failed foreground operation: a core error keeps its
-/// display text and adds its stable code, exactly as NAPI throws it.
+/// display text and adds its stable code and reason name.
 fn operation_error(error: HostError) -> ForegroundDbCommandResponse {
     match error {
         HostError::Engine(error) => ForegroundDbCommandResponse::CodedOperationError {
             code: error.code.as_str().to_owned(),
+            reason_name: error.reason.map(|reason| reason.as_str().to_owned()),
             reason: error.to_string(),
         },
         HostError::Argument(reason) => ForegroundDbCommandResponse::OperationError { reason },
