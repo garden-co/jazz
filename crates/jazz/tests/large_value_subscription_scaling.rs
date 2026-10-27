@@ -268,6 +268,18 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let deleted = next_delta(&mut listing);
     assert_eq!(deleted.removed, vec![row(0x83)]);
     assert!(deleted.added.is_empty());
+
+    // Positive control: reading the chunked contents does count on this
+    // thread, so the zero and baseline counts above are not vacuous.
+    let with_contents = db
+        .prepare_query(&Query::from(FILES).select(["name", "contents"]))
+        .expect("prepare contents read");
+    let (rows, rebuilds) = counting(|| db.read(&with_contents).expect("contents read"));
+    assert_eq!(rows.len(), 2, "b2.bin and c.bin remain");
+    assert!(
+        rebuilds >= 1,
+        "reading the contents rebuilds them on this thread"
+    );
 }
 
 /// A listing and a subscription that selects the contents may share graph
