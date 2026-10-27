@@ -12,6 +12,7 @@ type NativeForegroundCommand =
   | "tick"
   | "close"
   | { type: "captureSnapshot" }
+  | { type: "drainTickEvents" }
   | {
       type: "all";
       query: Uint8Array;
