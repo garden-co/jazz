@@ -200,7 +200,8 @@ export async function createAccountDbWithRuntimeSource(
     const stopAuth = opened.onAuthChanged((state) => {
       // A refused credential renews whatever the server called it: a
       // rotated signing key reads as "invalid" until a new token is issued.
-      // A disabled account does not.
+      // "disabled" means the app has that auth mode turned off, which a new
+      // token cannot fix.
       if (state.error && state.error !== "disabled") renew();
     });
     stopBound = onAccountCredentialBound(account, () => {
