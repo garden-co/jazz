@@ -1012,6 +1012,7 @@ impl Db {
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
+        names.check_branches(&schema)?;
         let chunks = crate::large::Chunks::install(path)?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
@@ -1373,6 +1374,7 @@ impl Db {
         let overlay = CutOverlay::Except {
             table: stored,
             row: *row.0.as_bytes(),
+            key: Vec::new(),
         };
         inner.explain_write_check(table, row, author, overlay)
     }
@@ -1952,15 +1954,13 @@ impl Db {
                 .collect();
             // Before a lens's defaults fill in: a branch column's default
             // is the schema's own, so a replica that never saw the lens
-            // keys rows the same way. Every admitted version reads the
-            // same stored rows, so each must agree with the new one, not
-            // only the current one.
-            for table in target.tables.values() {
-                if let Some(current) = inner.owner.by_stored(&table.stored) {
-                    check_branch_evolution(current, table, make_current)?;
-                }
-                for earlier in admitted.iter().filter_map(|a| a.by_stored(&table.stored)) {
-                    check_branch_evolution(earlier, table, false)?;
+            // keys rows the same way.
+            inner.names.check_branches(&target)?;
+            if make_current {
+                for table in target.tables.values() {
+                    if let Some(current) = inner.owner.by_stored(&table.stored) {
+                        check_branch_removal(current, table)?;
+                    }
                 }
             }
             for table in target.tables.values_mut() {
@@ -2036,66 +2036,19 @@ impl Db {
     }
 }
 
-/// How a schema version may change a table's branch columns (SPEC 4,
-/// INV-BVIEW-19): it may add one only as a new column with a default,
-/// which rows written before it and selectors of versions without it read
-/// as (see [`Table::row_branch_key`]); it may not change a branch
-/// column's default, or turn an existing column into a branch column or a
-/// branch column into an ordinary one; and a version made current may not
-/// drop one (an older version admitted beside the current one names it by
-/// its default). Admission checks the new version against the current one
-/// and against every other admitted version that has the table.
-fn check_branch_evolution(current: &Table, next: &Table, make_current: bool) -> Result<(), Error> {
-    let branch_columns = |table: &Table| -> BTreeSet<String> {
-        table
-            .branch_by
-            .iter()
-            .map(|column| table.stored_name(column).to_owned())
-            .collect()
-    };
-    let (before, after) = (branch_columns(current), branch_columns(next));
-    let by_stored = |table: &Table, stored: &str| -> Option<crate::values::Column> {
-        table.columns.iter().find(|c| c.stored == stored).cloned()
-    };
-    for stored in before.difference(&after) {
-        if let Some(column) = by_stored(next, stored) {
+/// A version made current may not drop a branch column of the current
+/// one (SPEC 4, INV-BVIEW-19): an older version admitted beside it names
+/// that column by its default. The other branch-column changes are refused
+/// for every admitted version ([`crate::names::Names::check_branches`]).
+fn check_branch_removal(current: &Table, next: &Table) -> Result<(), Error> {
+    for column in &current.branch_by {
+        let stored = current.stored_name(column);
+        if !next.columns.iter().any(|c| c.stored == stored) {
             return Err(unsupported(format!(
-                "making branch column {}.{} an ordinary column",
-                next.name, column.name
+                "removing branch column {}.{column}",
+                next.name
             )));
         }
-    }
-    for stored in after.difference(&before) {
-        let column = by_stored(next, stored).expect("branch column");
-        if by_stored(current, stored).is_some() {
-            return Err(unsupported(format!(
-                "making the existing column {}.{} a branch column",
-                next.name, column.name
-            )));
-        }
-        if column.default.is_none() {
-            return Err(unsupported(format!(
-                "adding branch column {}.{} without a default",
-                next.name, column.name
-            )));
-        }
-    }
-    for stored in before.intersection(&after) {
-        let (was, now) = (by_stored(current, stored), by_stored(next, stored));
-        if was.map(|c| c.default) != now.as_ref().map(|c| c.default.clone()) {
-            return Err(unsupported(format!(
-                "changing the default of branch column {}.{}",
-                next.name,
-                now.map_or_else(|| stored.clone(), |c| c.name)
-            )));
-        }
-    }
-    if make_current && let Some(stored) = before.difference(&after).next() {
-        let name = by_stored(current, stored).map_or_else(|| stored.clone(), |c| c.name);
-        return Err(unsupported(format!(
-            "removing branch column {}.{name}",
-            next.name
-        )));
     }
     Ok(())
 }
@@ -3140,6 +3093,7 @@ impl Inner {
             key: key.to_vec(),
             author,
             check,
+            replaces: false,
         };
         if let Some(pending) = self.deferred.borrow_mut().as_mut() {
             // A row's first write decides which policy its unit's end state
@@ -3181,9 +3135,14 @@ impl Inner {
     fn ground(&self, mut pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
         let schema = self.schema.clone();
         let mut live = Vec::with_capacity(pending.len());
-        for check in pending.drain(..) {
+        let several = pending.len() > 1;
+        for mut check in pending.drain(..) {
             let table = schema.table(&check.table)?;
             if !self.is_deleted_version(table, check.row, &check.key)? {
+                // Only a unit of several writes has a post-state pass.
+                check.replaces = several
+                    && (matches!(check.check, WriteCheck::WithCheck { .. })
+                        || self.was_live_before(table, check.row, &check.key, seq)?);
                 live.push(check);
             }
         }
@@ -3300,7 +3259,7 @@ impl Inner {
                 .entry(stored.clone())
                 .or_insert_with(|| (vec![0; last + 2], vec![0; last + 2]));
             written[*round] += 1;
-            if check.replaces() {
+            if check.replaces {
                 replaced[*round] += 1;
             }
             stored_of.push(stored);
@@ -3324,7 +3283,7 @@ impl Inner {
             }
             if tables.contains(stored) {
                 others -= 1;
-                others_replacing -= usize::from(check.replaces());
+                others_replacing -= usize::from(check.replaces);
             }
             if others == 0 {
                 continue;
@@ -3350,6 +3309,7 @@ impl Inner {
                 overlay: Some(CutOverlay::Except {
                     table: stored.clone(),
                     row: *check.row.0.as_bytes(),
+                    key: check.key.clone(),
                 }),
             };
             if !self.write_check_holds(schema, check, cut, evidence)?.0 {
@@ -3386,6 +3346,28 @@ impl Inner {
     }
 
     /// Whether `row`'s current version on branch `key` is a tombstone.
+    /// Whether the row was live in the state a unit written at `seq` was
+    /// made over.
+    fn was_live_before(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<bool, Error> {
+        let before = seq.saturating_sub(1);
+        let cut = Cut {
+            seq: before,
+            own: before,
+            extra: Vec::new(),
+            overlay: None,
+        };
+        Ok(matches!(
+            self.existing_at(&table.stored, row, key, Some(&cut))?,
+            Some((_, false))
+        ))
+    }
+
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
             "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2",
@@ -4474,6 +4456,10 @@ struct DeferredCheck {
     key: Vec<u8>,
     author: AuthorSubject,
     check: WriteCheck,
+    /// Whether the write replaces content its row had before the unit: an
+    /// update, or an insert or restore over a row the unit deleted first.
+    /// A write that only adds a row to what policies read does not.
+    replaces: bool,
 }
 
 impl WriteCheck {
@@ -4483,14 +4469,6 @@ impl WriteCheck {
             WriteCheck::WithCheck { .. } => 1,
             WriteCheck::Restore => 2,
         }
-    }
-}
-
-impl DeferredCheck {
-    /// Whether this write replaces content the row had before the unit
-    /// (an insert or a restore only adds a row to what policies read).
-    fn replaces(&self) -> bool {
-        matches!(self.check, WriteCheck::WithCheck { .. })
     }
 }
 
@@ -5076,10 +5054,13 @@ impl Db {
                 if inner.names.get(&version).is_none() {
                     check_direct_lens(&inner.owner.jazz, &schema)?;
                 }
-                inner.admitted.push((version, schema.clone()));
             }
             let base = inner.owner.names();
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
+            inner.names.check_branches(&logical)?;
+            if !inner.admitted.iter().any(|(id, _)| *id == version) {
+                inner.admitted.push((version, schema.clone()));
+            }
             let ddl = inner.physical.union(&logical)?;
             execute_script(&inner.conn, &ddl)?;
             let Inner { names, conn, .. } = &mut *inner;

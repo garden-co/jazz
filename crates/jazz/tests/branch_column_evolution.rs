@@ -259,6 +259,84 @@ fn a_branch_column_s_default_agrees_with_every_admitted_version() {
     );
 }
 
+/// A schema view is admitted under the same rules: with v2 (region
+/// defaulting to "eu") current, a view whose region defaults to "us" is
+/// refused instead of reading the "eu" rows as `(a, us)`.
+#[test]
+fn a_schema_view_keys_rows_as_every_admitted_version_does() {
+    let db = open(v1());
+    write(&db, space("a"), "before");
+    block_on(db.activate_schema(v2())).unwrap();
+    let error = block_on(db.register_schema_view(v2_with("us", ColumnType::Text)))
+        .err()
+        .expect("a view keyed by us");
+    assert!(error.to_string().contains("not supported"), "{error}");
+
+    // Planted positive: a view of v1 still reads the doc in its space.
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    assert_eq!(bodies(&old, space("a")), vec![(text("before"), None)]);
+    assert_eq!(
+        bodies(&db, space_region("a", "eu")),
+        vec![(text("before"), text("eu"))]
+    );
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("jazz-branch-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("store.sqlite")
+}
+
+/// The store keeps how it keys rows: after a reopen, a version that
+/// changes a branch column's default is refused, whether it is admitted
+/// beside the opening one or opens the store itself.
+#[test]
+fn a_reopened_store_keeps_the_branch_columns_it_admitted() {
+    let path = scratch("reopen");
+    let open_at = |schema: JazzSchema| {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+    };
+    {
+        let db = open_at(v1()).unwrap();
+        write(&db, space("a"), "before");
+        block_on(db.admit_schema_with_lenses(v2(), &[])).unwrap();
+    }
+    {
+        let db = open_at(v1()).unwrap();
+        let error = block_on(db.admit_schema_with_lenses(v2_with("us", ColumnType::Text), &[]))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not supported"),
+            "admitted: {error}"
+        );
+    }
+    let error = open_at(v2_with("us", ColumnType::Text))
+        .err()
+        .expect("opening as us");
+    assert!(
+        error.to_string().contains("not supported"),
+        "opened: {error}"
+    );
+
+    // Planted positive: the store opens as v2 and reads the doc at "eu".
+    let db = open_at(v2()).unwrap();
+    assert_eq!(
+        bodies(&db, space_region("a", "eu")),
+        vec![(text("before"), text("eu"))]
+    );
+}
+
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 

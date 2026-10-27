@@ -282,9 +282,13 @@ pub struct Cut {
 pub enum Overlay {
     /// The live rows grounded so far, by stored table.
     Grounded(std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>),
-    /// Every live row but `row` of stored table `table`: the unit's
-    /// post-state, without the row under check.
-    Except { table: String, row: [u8; 16] },
+    /// Every live row but `row` in branch `key` of stored table `table`:
+    /// the unit's post-state, without the row under check.
+    Except {
+        table: String,
+        row: [u8; 16],
+        key: Vec<u8>,
+    },
 }
 
 impl Cut {
@@ -432,11 +436,16 @@ impl<'a> Ctx<'a> {
             }
             // No id list: SQLite reaches the overlaid rows through the
             // policy's correlated keys, as it does committed ones.
-            Some(Overlay::Except { table: except, row }) if *except == table.stored => {
+            Some(Overlay::Except {
+                table: except,
+                row,
+                key,
+            }) if *except == table.stored => {
                 let row = self.bind(Sql::Blob(row.to_vec()));
+                let key = self.bind(Sql::Blob(key.clone()));
                 (
-                    format!("(_seq = {own} AND _del = 0 AND id <> {row})"),
-                    format!("(c._seq = {own} AND c._del = 0 AND c.id <> {row})"),
+                    format!("(_seq = {own} AND _del = 0 AND (id <> {row} OR _b <> {key}))"),
+                    format!("(c._seq = {own} AND c._del = 0 AND (c.id <> {row} OR c._b <> {key}))"),
                 )
             }
             Some(Overlay::Except { .. }) => (

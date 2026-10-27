@@ -39,7 +39,9 @@ Invariant digest:
   on every decision path. A unit is accepted only if every WITH CHECK
   clause also passes against the unit's full post-state; a write whose policy
   is monotone in the rows present is re-checked there only when a table it
-  reads holds a unit update that was not yet grounded when it passed.
+  reads holds a unit write that replaced a row's earlier content (an update,
+  or an insert or restore of a row live before the unit) and was not yet
+  grounded when it passed.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
 - `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
 - `INV-RLS-12`: Serializable transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
@@ -309,9 +311,11 @@ client made them, so the checks run in two stages:
    policy:
    - A **monotone** policy (see below) can only grant more as rows are added,
      so grounding an insert or a restore cannot turn its pass into a failure;
-     only an update can, by replacing committed content. Such a write is
-     re-checked only when a table its policy reads holds a unit update that
-     was not grounded when the write passed.
+     only a write that replaces committed content can: an update, or an
+     insert or restore of a row that was live before the unit (the unit
+     deleted it first). Such a write is re-checked only when a table its
+     policy reads holds a replacing write that was not grounded when the
+     write passed.
    - Any other policy is re-checked when a table it reads holds any unit row
      that was not grounded when the write passed.
 

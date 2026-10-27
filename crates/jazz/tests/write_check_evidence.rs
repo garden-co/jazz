@@ -497,6 +497,65 @@ fn a_write_must_hold_on_the_unit_s_post_state() {
     assert_eq!(count(&server, "gigs"), 1);
 }
 
+/// Deleting a row and writing it anew in the same unit replaces its
+/// content just as an update does: the rewrite is checked as an insert or
+/// a restore, but a write that relied on the old content is still checked
+/// against the post-state.
+///
+/// ```text
+/// alice ──tx{ gig(show), delete show, upsert show closed }────► core ──► Rejected
+/// alice ──tx{ gig(show), delete show, restore show closed }───► core ──► Rejected
+/// alice ──tx{ gig(show), delete show, upsert show open }──────► core ──► Accepted
+/// ```
+#[test]
+fn rewriting_a_deleted_row_in_the_same_unit_is_checked_against_the_post_state() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let (server, alice_db) = venue(alice);
+    let show = RowUuid::from_bytes([0x43; 16]);
+    commit(&alice_db, &server, |batch| {
+        block_on(
+            alice_db
+                .tx_ref(batch)
+                .insert("shows", show_cells(alice, true), options(show)),
+        )
+        .unwrap();
+    })
+    .unwrap();
+
+    let refused = commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+        block_on(tx.delete("shows", show, Default::default())).unwrap();
+        block_on(tx.upsert("shows", show, show_cells(alice, false), Default::default())).unwrap();
+    });
+    assert!(
+        refused.is_err(),
+        "an upsert over the deleted show closes it"
+    );
+    let refused = commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+        block_on(tx.delete("shows", show, Default::default())).unwrap();
+        block_on(tx.restore(
+            "shows",
+            show,
+            Some(show_cells(alice, false)),
+            Default::default(),
+        ))
+        .unwrap();
+    });
+    assert!(refused.is_err(), "a restore of the deleted show closes it");
+    // Planted positive: the rewrite keeps the show open.
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+        block_on(tx.delete("shows", show, Default::default())).unwrap();
+        block_on(tx.upsert("shows", show, show_cells(alice, true), Default::default())).unwrap();
+    })
+    .expect("a rewrite that keeps the evidence passes the post-state check");
+    assert_eq!(count(&server, "gigs"), 1);
+}
+
 /// `folders` nest in a folder their writer owns.
 fn folder_schema() -> JazzSchema {
     let in_my_folder = PolicyExpr::Exists {

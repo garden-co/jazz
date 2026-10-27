@@ -601,8 +601,9 @@ impl Inner {
                     return false;
                 };
                 let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
-                callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
-                true
+                // A call the queue dropped did not reach JS: keep the
+                // refusal for the next delivery.
+                callback.call(event, ThreadsafeFunctionCallMode::NonBlocking) == napi::Status::Ok
             }));
         Self { binding, host }
     }
