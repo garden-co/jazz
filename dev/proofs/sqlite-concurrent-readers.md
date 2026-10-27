@@ -72,12 +72,16 @@ ordinary persistent scratch table is unchanged.
 `crates/jazz/tests/concurrent_readers.rs` uses public database APIs and a test-only
 worker barrier to fix the interleaving after snapshots are pinned. It checks
 unrelated reader/writer progress, row-policy and membership revocation, claim
-changes, schema-policy changes, chunked predicates and per-connection scratch,
-abandoned reads, worker panic recovery and final WAL cleanup. The barrier is
+changes, required-include changes, schema-policy changes, bounded saturation,
+chunked predicates and per-connection scratch, abandoned reads, worker panic
+recovery and final WAL cleanup. A server lifecycle test checks that completion
+wakers do not retain a dropped store thread. The barrier is
 gated with `cfg(any(test, feature = "testing"))` in the lower database crate.
 
-The benchmark remains the exact harness introduced by the benchmark-only PR.
-Before/after receipts must identify each executable and source tree and use the
-same fixture and request parameters. Developer-machine measurements do not
+The benchmark gives each point request a distinct, true predicate binding so
+live-group reuse cannot answer it without fresh SQL. Both before/after builds
+use that identical harness, including the control runtime exported from the
+benchmark-only commit. Receipts identify each executable and source tree and use
+the same fixture and request parameters. Developer-machine measurements do not
 replace the repository's same-base CodSpeed comparison for a performance-win
 claim.

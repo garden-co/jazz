@@ -4,12 +4,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, SeededRowIdSource, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{Query, col, contains, eq, lit};
+use jazz::query::{Query, col, contains, eq, lit, lte};
 use jazz::records::Value as CoreValue;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
@@ -29,6 +29,7 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 const TIMEOUT: Duration = Duration::from_secs(60);
 const PROBE: Uuid = Uuid::from_u128(1);
+static NEXT_PROBE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 struct Config {
@@ -212,7 +213,15 @@ async fn connect(server: &JazzServer, schema: &Schema, user: usize) -> Result<Ja
 }
 
 async fn probe(client: &JazzClient) -> Result<()> {
-    let query = Query::from("probes").filter(eq(col("id"), lit(CoreValue::Uuid(PROBE))));
+    // The indexed id selects the same fixture row. A fresh, true bound on
+    // its known value makes each invocation a new server opening, so a warm
+    // live group cannot answer it without executing this request's SQL.
+    let bound = i64::try_from(NEXT_PROBE.fetch_add(1, Ordering::Relaxed))?
+        .checked_add(7)
+        .ok_or("point-read nonce exhausted")?;
+    let query = Query::from("probes")
+        .filter(eq(col("id"), lit(CoreValue::Uuid(PROBE))))
+        .filter(lte(col("n"), lit(CoreValue::I64(bound))));
     let rows = tokio::time::timeout(TIMEOUT, client.query(query, ReadTier::Remote)).await??;
     if rows.len() != 1
         || rows[0].key.row_id().map(|id| *id.uuid()) != Some(PROBE)

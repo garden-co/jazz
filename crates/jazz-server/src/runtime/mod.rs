@@ -198,7 +198,7 @@ pub struct AppStore {
 }
 
 struct StoreThread {
-    work: Mutex<Option<std_mpsc::Sender<Work>>>,
+    work: Mutex<Option<Arc<std_mpsc::Sender<Work>>>>,
     host: std_mpsc::Sender<HostJob>,
     /// Committed host tables, read without waiting for the store's thread.
     /// An in-memory store lives as long as this connection to it.
@@ -268,15 +268,19 @@ impl AppStore {
     pub fn open(storage: &StorageConfig) -> Result<Self, String> {
         let source = Source::new(storage);
         let (work, receiver) = std_mpsc::channel::<Work>();
+        let work = Arc::new(work);
         let (host, host_jobs) = std_mpsc::channel::<HostJob>();
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
         let fault = Arc::new(Mutex::new(None));
         let (thread_source, thread_ticks, thread_fault) =
             (source.clone(), Arc::clone(&tick_queued), Arc::clone(&fault));
-        let reader_work = work.clone();
+        // Completion must not keep its own receiving store thread alive.
+        let reader_work = Arc::downgrade(&work);
         let reader_wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            let _ = reader_work.send(Work::Owner(Box::new(|_| {})));
+            if let Some(work) = reader_work.upgrade() {
+                let _ = work.send(Work::Owner(Box::new(|_| {})));
+            }
         });
         #[cfg(test)]
         let ticks = Arc::new(AtomicU64::new(0));
@@ -368,7 +372,8 @@ impl AppStore {
             .work
             .lock()
             .map_err(|_| "server store lock poisoned".to_owned())?
-            .clone()
+            .as_ref()
+            .map(|work| work.as_ref().clone())
             .ok_or_else(|| "server store is closed".to_owned())
     }
 
@@ -1910,6 +1915,26 @@ mod tests {
             host: store.inner.host.clone(),
             wake: store.sender().unwrap(),
         }
+    }
+
+    /// Alice drops her last store handle without explicitly closing it.
+    /// The completion waker must not retain the store thread forever.
+    /// This unit test observes the thread handle because file reads cannot
+    /// distinguish a leaked idle SQLite connection from a closed store.
+    #[test]
+    fn dropping_the_store_stops_its_thread() {
+        let store = AppStore::memory().unwrap();
+        let join = store.inner.join.lock().unwrap().take().unwrap();
+        drop(store);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !join.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "store thread retained by its waker"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        join.join().unwrap();
     }
 
     /// Hold the store thread in a runtime job until the returned sender

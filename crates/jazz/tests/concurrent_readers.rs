@@ -2,7 +2,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,7 @@ use jazz::db::{
     SubscriptionEvent, SubscriptionStream, UpdateOptions, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{Query, col, contains, lit};
+use jazz::query::{Include, Query, col, contains, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
@@ -110,12 +110,21 @@ impl Drop for Paused {
 }
 
 fn pause_first(db: &Db) -> Paused {
-    let first = AtomicBool::new(true);
+    pause_workers(db, 1)
+}
+
+fn pause_workers(db: &Db, workers: usize) -> Paused {
+    let remaining = AtomicUsize::new(workers);
     let (entered, receiver) = mpsc::channel();
     let release = Arc::new((Mutex::new(false), Condvar::new()));
     let worker_release = release.clone();
     db.set_read_worker_hook_for_test(Arc::new(move || {
-        if !first.swap(false, Ordering::AcqRel) {
+        if remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
+                left.checked_sub(1)
+            })
+            .is_err()
+        {
             return;
         }
         entered.send(()).unwrap();
@@ -166,6 +175,49 @@ fn a_paused_opening_does_not_block_an_unrelated_write_or_reader() {
         panic!("opening delta")
     };
     assert_eq!(added.len(), 1);
+}
+
+/// Alice and Carol occupy both readers. Bob's third opening waits for a
+/// worker while Dana's write still commits, then Bob reads the new value.
+/// alice/carol: pin -> pause ----------------------> finish
+/// bob:                    queue -----------------> read Dana's value
+/// dana:                          insert -> commit
+#[test]
+fn saturated_readers_queue_openings_without_blocking_writes() {
+    let (_dir, db) = open(schema(PolicyExpr::True));
+    note(&db, "hello", "alice");
+    let paused = pause_workers(&db, 2);
+    let _alice = subscribe(
+        &db,
+        Query::from("notes").filter(contains(col("body"), lit("hel"))),
+    );
+    let _carol = subscribe(
+        &db,
+        Query::from("notes").filter(contains(col("body"), lit("ell"))),
+    );
+    block_on(db.tick()).unwrap();
+    for _ in 0..2 {
+        paused.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    let mut bob = subscribe(&db, Query::from("probes"));
+    block_on(db.tick()).unwrap();
+    block_on(db.insert(
+        "probes",
+        BTreeMap::from([("n".to_owned(), Value::I64(42))]),
+        InsertOptions::default(),
+    ))
+    .unwrap();
+    block_on(db.tick()).unwrap();
+    assert!(
+        bob.try_next_event().is_none(),
+        "both workers are still occupied"
+    );
+    drop(paused);
+    let SubscriptionEvent::Delta { added, .. } = next(&db, &mut bob) else {
+        panic!("opening delta")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.cell("n"), Some(Value::I64(42)));
 }
 
 /// Bob revokes Alice's row access after her snapshot is pinned. Alice's
@@ -263,6 +315,41 @@ fn revoking_a_policy_dependency_discards_an_in_flight_opening() {
     assert!(
         added.is_empty(),
         "a revoked membership must not authorize publication"
+    );
+}
+
+/// Bob deletes the note required by Alice's membership query while its
+/// opening is pinned. The earlier membership result must never publish.
+/// alice: pin membership + required note -> pause --------> empty opening
+/// bob:                                         delete note
+#[test]
+fn a_required_include_change_discards_an_in_flight_opening() {
+    let (_dir, db) = open(schema(PolicyExpr::True));
+    let row = note(&db, "hello", "alice");
+    block_on(db.insert(
+        "memberships",
+        BTreeMap::from([
+            ("note".to_owned(), Value::Uuid(row.0)),
+            ("member".to_owned(), Value::String("alice".to_owned())),
+        ]),
+        InsertOptions::default(),
+    ))
+    .unwrap();
+    let paused = pause_first(&db);
+    let mut stream = subscribe(
+        &db,
+        Query::from("memberships").include_with(Include::new("note").require_includes()),
+    );
+    block_on(db.tick()).unwrap();
+    paused.entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    block_on(db.delete("notes", row, DeleteOptions::default())).unwrap();
+    drop(paused);
+    let SubscriptionEvent::Delta { added, .. } = next(&db, &mut stream) else {
+        panic!("opening delta")
+    };
+    assert!(
+        added.is_empty(),
+        "a deleted required note must exclude its membership"
     );
 }
 
