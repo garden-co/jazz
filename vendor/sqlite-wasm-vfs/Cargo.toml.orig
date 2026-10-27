@@ -1,0 +1,39 @@
+[package]
+name = "sqlite-wasm-vfs"
+version = "0.2.0"
+edition = "2021"
+authors = ["Spxg <unsafe@outlook.es>"]
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/Spxg/sqlite-wasm-rs"
+description = "some experimental VFS implementations."
+categories = ["development-tools::ffi", "wasm", "database"]
+keywords = ["sqlite", "sqlite-wasm", "wasm", "webassembly", "javascript"]
+
+[dependencies]
+rsqlite-vfs = "0.1"
+
+wasm-bindgen = "0.2.104"
+js-sys = "0.3.81"
+wasm-bindgen-futures = "0.4.54"
+tokio = { version = "1.45.1", features = ["sync"] }
+thiserror = "2.0.12"
+web-sys = { version = "0.3.81", features = [
+  "StorageManager",
+  "FileSystemSyncAccessHandle",
+  "FileSystemDirectoryHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemReadWriteOptions",
+  "WorkerGlobalScope",
+  "WorkerNavigator",
+  "FileSystemGetFileOptions",
+  "FileSystemFileHandle",
+] }
+indexed_db_futures = "0.6.4"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.54"
+sqlite-wasm-rs = { version = "0.5.1", default-features = false }
+
+[package.metadata.docs.rs]
+targets = ["wasm32-unknown-unknown"]

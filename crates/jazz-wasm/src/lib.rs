@@ -739,9 +739,9 @@ impl WasmWrite {
         Err(not_supported("write state snapshots"))
     }
 
-    /// Resolve once the write reached `tier`: at once for `none` and
-    /// `local` (the commit is in the store when the write call returns), on
-    /// the server's acceptance for `global`, rejecting if it refused.
+    /// Resolve once the write reached `tier`: immediately for `none`, after
+    /// the backing-store flush for `local`, or on authority acceptance for
+    /// `global`. A known rejection fails the wait at every tier.
     #[wasm_bindgen(js_name = wait)]
     pub fn wait(
         &self,
@@ -758,7 +758,15 @@ impl WasmWrite {
         if !observe_only.unwrap_or(false) {
             self.claimed.set(true);
         }
-        Ok(host_promise(fate, |()| JsValue::UNDEFINED))
+        let db = db.clone();
+        let local = durability_tier_from_str(&tier)? == DurabilityTier::Local;
+        Ok(future_to_promise(async move {
+            fate.await.map_err(host_error)?;
+            if local {
+                db.host.flush().await?;
+            }
+            Ok(JsValue::UNDEFINED)
+        }))
     }
 
     #[wasm_bindgen]
