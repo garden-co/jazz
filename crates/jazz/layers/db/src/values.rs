@@ -369,6 +369,10 @@ pub struct Column {
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
+    /// The declared public type of a column that holds JSON (a JSON column
+    /// or an array of them), which every written value is validated
+    /// against; `None` for any other column.
+    pub json_type: Option<Arc<crate::tools::ColumnType>>,
     /// How concurrent writes to the column merge at the authority.
     pub merge: crate::schema::MergeStrategy,
 }
@@ -509,6 +513,7 @@ fn stored_provenance_columns() -> Vec<Column> {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         })
         .collect()
@@ -538,6 +543,7 @@ fn provenance_columns() -> Vec<Column> {
             })),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         })
         .collect()
@@ -646,6 +652,16 @@ impl Schema {
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: column.large_value_kind == crate::schema::LargeValueSemanticKind::Json,
+                    json_type: public
+                        .and_then(|public| {
+                            public
+                                .columns
+                                .columns
+                                .iter()
+                                .find(|declared| declared.name_str() == column.name)
+                        })
+                        .filter(|declared| holds_json(&declared.column_type))
+                        .map(|declared| Arc::new(declared.column_type.clone())),
                     merge: table
                         .merge_strategies
                         .get(&column.name)
@@ -857,6 +873,7 @@ impl Table {
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
                     json: false,
+                    json_type: None,
                     merge: Default::default(),
                 })
                 .collect(),
@@ -1380,4 +1397,38 @@ fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
         }
         (value, _) => value.clone(),
     })
+}
+
+fn holds_json(ty: &crate::tools::ColumnType) -> bool {
+    match ty {
+        crate::tools::ColumnType::Json { .. } => true,
+        crate::tools::ColumnType::Array { element } => holds_json(element),
+        _ => false,
+    }
+}
+
+/// Check a JSON-bearing cell against its column's declared type: the text
+/// must be JSON, and match the column's JSON Schema when it declares one.
+/// Every write path stores through here, local or ingested from a peer, so
+/// the schema holds for every row the store accepts, not only for writers
+/// whose own validator agrees.
+pub(crate) fn validate_json_cell(
+    ty: &crate::tools::ColumnType,
+    value: &Value,
+    path: &str,
+) -> Result<(), String> {
+    use crate::tools::ColumnType;
+    match (ty, value) {
+        (_, Value::Nullable(None)) => Ok(()),
+        (_, Value::Nullable(Some(inner))) => validate_json_cell(ty, inner, path),
+        (ColumnType::Json { .. }, Value::String(text)) => {
+            crate::tools::validate_json_value(&crate::tools::Value::Text(text.clone()), ty, path)
+        }
+        (ColumnType::Array { element }, Value::Array(items)) => {
+            items.iter().enumerate().try_for_each(|(index, item)| {
+                validate_json_cell(element, item, &format!("{path}[{index}]"))
+            })
+        }
+        _ => Ok(()),
+    }
 }

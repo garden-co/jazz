@@ -383,3 +383,118 @@ fn a_projected_aggregate_is_refused_alike_through_both_read_paths() {
         (direct.code, direct.message)
     );
 }
+
+/// #3553, #3917, #3924: a JSON value is checked against its column's
+/// declared JSON Schema wherever the store accepts a write, not only by the
+/// writing client's own validator: a plain insert, an update, an upsert, a
+/// transaction's write, a nullable column and the elements of a JSON
+/// array. Text that is not JSON is refused too.
+#[test]
+fn json_values_are_validated_against_the_column_schema_on_every_write() {
+    let db = open(compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("docs")
+                    .column(
+                        "payload",
+                        ColumnType::Json {
+                            schema: Some(serde_json::json!({
+                                "type": "object",
+                                "properties": { "state": { "enum": ["open", "closed"] } },
+                                "required": ["state"],
+                            })),
+                        },
+                    )
+                    .nullable_column("notes", ColumnType::Json { schema: None })
+                    .column(
+                        "counts",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Json {
+                                schema: Some(serde_json::json!({ "type": "integer" })),
+                            }),
+                        },
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    ));
+    let text = |s: &str| Value::String(s.to_owned());
+    let valid = || {
+        cells(vec![
+            ("payload", text(r#"{"state":"open"}"#)),
+            ("notes", some(text(r#"{"any":"thing"}"#))),
+            ("counts", Value::Array(vec![text("1"), text("2")])),
+        ])
+    };
+    let with = |name: &str, value: Value| {
+        let mut cells = valid();
+        cells.insert(name.to_owned(), value);
+        cells
+    };
+    let refusal = |result: Result<jazz::db::WriteHandle, jazz::db::Error>, needle: &str| {
+        let error = result.expect_err("an invalid JSON value was stored");
+        assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected, "{error}");
+        assert!(error.message.contains(needle), "{error}");
+    };
+    let insert_at = |n: u8, cells| {
+        block_on(db.insert(
+            "docs",
+            cells,
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+    };
+    insert_at(1, valid()).unwrap();
+
+    let mismatch = "JSON schema validation failed for column `payload`";
+    refusal(
+        insert_at(2, with("payload", text(r#"{"state":"not-a-state"}"#))),
+        mismatch,
+    );
+    refusal(
+        insert_at(2, with("notes", some(text("not json")))),
+        "invalid JSON for column `notes`",
+    );
+    refusal(
+        insert_at(
+            2,
+            with("counts", Value::Array(vec![text("1"), text("\"x\"")])),
+        ),
+        "JSON schema validation failed for column `counts[1]`",
+    );
+    refusal(
+        block_on(db.update(
+            "docs",
+            row(1),
+            cells(vec![("payload", text(r#"{"state":1}"#))]),
+            UpdateOptions::default(),
+        )),
+        mismatch,
+    );
+    refusal(
+        block_on(db.upsert(
+            "docs",
+            row(3),
+            with("payload", text("{}")),
+            Default::default(),
+        )),
+        mismatch,
+    );
+    let open = jazz::tools::OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    refusal(
+        block_on(db.tx_ref(open).insert(
+            "docs",
+            with("payload", text(r#"{"state":"maybe"}"#)),
+            InsertOptions::default(),
+        )),
+        mismatch,
+    );
+    db.abandon_transaction_handle(open).unwrap();
+
+    let rows = read(&db, &Query::from("docs"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(cell(&rows[0], "payload"), Some(text(r#"{"state":"open"}"#)));
+}

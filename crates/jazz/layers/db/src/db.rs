@@ -3213,7 +3213,11 @@ impl Inner {
         value.check_type(ty).map_err(|error| match value {
             Value::Nullable(None) => rejected(format!("`{}` is required", column.name)),
             _ => rejected(format!("`{}`: {error}", column.name)),
-        })
+        })?;
+        if let Some(json_type) = &column.json_type {
+            crate::values::validate_json_cell(json_type, value, &column.name).map_err(rejected)?;
+        }
+        Ok(())
     }
 
     fn bind_value(value: &Value) -> Result<Sql, Error> {
