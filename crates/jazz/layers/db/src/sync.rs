@@ -176,12 +176,12 @@ pub struct WireTransportAdapter<W> {
 /// the carrier's count and length prefixes.
 const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
 
-/// `jazz.sqlite.sync.v2`: an explicit semantic codec header, independent of
-/// the websocket carrier's Hello version. V1 SQLite and pre-SQLite payloads
+/// `jazz.sqlite.sync.v3`: an explicit semantic codec header, independent of
+/// the websocket carrier's Hello version. Earlier SQLite and pre-SQLite payloads
 /// cannot be interpreted with this enum's field layout.
-pub const SYNC_ENCODING_PREFIX: &[u8] = b"JSQL\x02";
+pub const SYNC_ENCODING_PREFIX: &[u8] = b"JSQL\x03";
 
-/// Encode one v2 semantic message, including its codec header. Carriers should
+/// Encode one v3 semantic message, including its codec header. Carriers should
 /// use [`encode_frames`] to enforce frame limits and split row publications.
 pub fn encode_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
     let mut bytes = SYNC_ENCODING_PREFIX.to_vec();
@@ -247,7 +247,7 @@ fn split_rows(
     split_rows(rest, parts)
 }
 
-/// One v2 frame's [`SyncMessage`], with exact canonical postcard bytes.
+/// One v3 frame's [`SyncMessage`], with exact canonical postcard bytes.
 /// An unknown version, overlong varint or suffix is refused before delivery.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
     if frame.len() > MAX_MESSAGE_FRAME_BYTES {

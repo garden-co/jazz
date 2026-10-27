@@ -1,0 +1,10 @@
+{
+  "role": "jazz.sqlite.write-fate.v2",
+  "version": 2,
+  "accepted": "00",
+  "conflict": "0100026e6f",
+  "other": "0102026e6f",
+  "rejected": "010100026e6f",
+  "rejected_reason": "0101011a636c69656e745f636c6f636b5f746f6f5f6661725f6168656164026e6f",
+  "rejected_unknown_reason": "0101010d6675747572655f726561736f6e026e6f"
+}

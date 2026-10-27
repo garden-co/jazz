@@ -29,7 +29,7 @@ use crate::options::{Error, ErrorCode};
 use crate::values::storage;
 
 /// The storage format this build writes and reads.
-pub const STORAGE_FORMAT: i64 = 2;
+pub const STORAGE_FORMAT: i64 = 3;
 
 const STAMP_TABLE: &str = "_jazz_format";
 

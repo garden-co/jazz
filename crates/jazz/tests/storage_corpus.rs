@@ -347,6 +347,28 @@ fn produce_sqlite_storage_corpus_v2() {
     );
 }
 
+/// Alice's authority and Bob's replica pin format 3, including the authority's
+/// structured rejection reason. Historical format-1 and format-2 files stay
+/// unchanged; this lower-level producer records a complete SQLite store once.
+#[test]
+#[ignore = "#1787: manual corpus producer; run once per new storage format"]
+fn produce_sqlite_storage_corpus_v3() {
+    assert_eq!(jazz::format::STORAGE_FORMAT, 3);
+    for file in ["server.sqlite.gz.base64", "client.sqlite.gz.base64"] {
+        assert!(
+            !Path::new(FIXTURES)
+                .join("sqlite-storage-v3")
+                .join(file)
+                .exists(),
+            "never overwrite a pinned format-3 store"
+        );
+    }
+    produce_storage_corpus(
+        "sqlite-storage-v3/server.sqlite.gz.base64",
+        "sqlite-storage-v3/client.sqlite.gz.base64",
+    );
+}
+
 fn produce_storage_corpus(server_file: &str, client_file: &str) {
     assert_eq!(
         std::env::var("JAZZ_WRITE_SQLITE_STORAGE_CORPUS").as_deref(),
@@ -548,6 +570,135 @@ fn produce_storage_corpus(server_file: &str, client_file: &str) {
 }
 
 // ---- reading it back -------------------------------------------------------
+
+mod format_three {
+    use super::*;
+
+    const SERVER: &str = "sqlite-storage-v3/server.sqlite.gz.base64";
+    const CLIENT: &str = "sqlite-storage-v3/client.sqlite.gz.base64";
+    const SERVER_HASH: &str = "93c5ffcaa43d6b0afc89009a918315c2951eba9f710bdcde35c0507fdd578446";
+    const CLIENT_HASH: &str = "4e2f587afb652dc0e1713845c49b3de153e15f9a93175530068683aa2b4f5c1b";
+
+    /// Alice reopens the format-3 authority with its history, schema lens and
+    /// large values. Bob's replica keeps its pending edits and settles them
+    /// through the authority before both stores close and reopen again.
+    #[test]
+    fn current_stores_reopen_settle_pending_writes_and_keep_new_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_path = install(SERVER, SERVER_HASH, dir.path());
+        let client_path = install(CLIENT, CLIENT_HASH, dir.path());
+        {
+            let server = open_server(&server_path).unwrap();
+            let client = open_client(&client_path);
+            assert_server_corpus(&server, false);
+            assert_eq!(
+                rows(&client, Query::from("projects"), local()).unwrap(),
+                expected_projects(true)
+            );
+            let (upstream, subscriber) = duplex();
+            let _link = block_on(client.connect_upstream(upstream));
+            server.accept_subscriber(subscriber, user(3));
+            drive(
+                &[&client, &server, &client],
+                client.wait_for_pending_writes(DurabilityTier::Global),
+            )
+            .unwrap();
+            assert_server_corpus(&server, true);
+            insert_as(
+                &client,
+                "projects",
+                project(6),
+                user(3),
+                22,
+                &[("name", string("Epsilon"))],
+            );
+            drive(
+                &[&client, &server, &client],
+                client.wait_for_pending_writes(DurabilityTier::Global),
+            )
+            .unwrap();
+        }
+        for db in [
+            open_server(&server_path).unwrap(),
+            open_client(&client_path),
+        ] {
+            let found = rows(
+                &db,
+                Query::from("projects").filter(eq(col("id"), lit(uuid(project(6))))),
+                local(),
+            )
+            .unwrap();
+            assert_eq!(
+                found,
+                vec![expect(project(6), &[("name", string("Epsilon"))])]
+            );
+        }
+    }
+
+    /// Alice's recorded rejection preserves its stable reason across reopen.
+    /// Direct SQL is deliberate: this fixture pins the durable raw fate bytes,
+    /// which a successful row query would not exercise.
+    #[test]
+    fn authority_rejection_has_a_pinned_reason_in_a_format_three_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = install(SERVER, SERVER_HASH, dir.path());
+        drop(open_server(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT version FROM _jazz_format", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        let mut query = conn
+            .prepare("SELECT node, result FROM _jazz_applied ORDER BY node, tx")
+            .unwrap();
+        let mut rejections = Vec::new();
+        for row in query
+            .query_map([], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .unwrap()
+        {
+            let (node, bytes) = row.unwrap();
+            let result: Result<(), WireError> = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(postcard::to_allocvec(&result).unwrap(), bytes);
+            if let Err(WireError::Rejected { reason, message }) = result {
+                assert_eq!(node, CLIENT_NODE);
+                assert_eq!(
+                    reason.as_deref(),
+                    Some(Reason::ClientClockTooFarAhead.as_str())
+                );
+                assert!(message.starts_with(jazz::db::CLIENT_CLOCK_TOO_FAR_AHEAD));
+                rejections.push(message);
+            }
+        }
+        assert_eq!(rejections.len(), 1);
+    }
+
+    /// Alice's old authority and Bob's old replica are refused before writes.
+    /// A changed format must not reinterpret their fates or reset either file.
+    #[test]
+    fn format_two_stores_are_refused_without_creating_or_changing_files() {
+        for (file, hash) in [
+            (
+                "sqlite-storage-v2/server.sqlite.gz.base64",
+                "072244d4ee6a63d440a2797927b4373d261ee312be71bc2537d2bbe9741dd2fa",
+            ),
+            (
+                "sqlite-storage-v2/client.sqlite.gz.base64",
+                "994bdd01c34a0dfb8706fe6e47bdb9bc48cd8b93907276ea78d0233161243ec4",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = install(file, hash, dir.path());
+            let before = digest_tree(dir.path());
+            let error = open_error(&path);
+            assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs);
+            assert_eq!(digest_tree(dir.path()), before);
+        }
+    }
+}
 
 fn scratch(name: &str) -> PathBuf {
     let dir =

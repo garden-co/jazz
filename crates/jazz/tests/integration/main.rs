@@ -324,6 +324,8 @@ mod staged_streaming_sqlite;
 
 #[path = "../sqlite_sync_v2.rs"]
 mod sqlite_sync_v2;
+#[path = "../sqlite_sync_v3.rs"]
+mod sqlite_sync_v3;
 
 #[path = "../sqlite_upstream_read_wire.rs"]
 mod sqlite_upstream_read_wire;
