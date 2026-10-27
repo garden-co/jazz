@@ -19,6 +19,7 @@ import {
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
+import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
 // A core error crossing a native binding keeps its Rust display text as the
@@ -63,7 +64,7 @@ describe("native core error reasons", () => {
 
   it("knows exactly the reasons the engine has", async () => {
     // A test-only export (`skip_typescript`), absent from the declarations.
-    const napi = (await import("jazz-napi")) as unknown as {
+    const napi = (await loadNapiModule()) as unknown as {
       __testCoreErrorReasonNames(): string[];
     };
     expect([...NATIVE_CORE_ERROR_REASONS].sort()).toEqual(napi.__testCoreErrorReasonNames().sort());
