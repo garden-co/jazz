@@ -281,53 +281,70 @@ Epochs are never truncated, so no cell can name an edit that disappeared.
 
 A large-capable cell crosses the wire in one of three forms:
 
-| Form    | Contents                                                       |
-| ------- | -------------------------------------------------------------- |
-| inline  | the TEXT or BLOB                                               |
-| `Tree`  | the descriptor: root, its lengths and kind, then the edits     |
-| `Delta` | a root hash, how many edits it extends, then the further edits |
+| Form    | Contents                                                          |
+| ------- | ----------------------------------------------------------------- |
+| inline  | the TEXT or BLOB                                                  |
+| `Tree`  | the descriptor: root, its lengths and kind, then the edits        |
+| `Delta` | a base version's seq, its edit count, then the edits extending it |
 
-**Link tables.** Each direction of a connection keeps a small table, from
-root hash to the edits of the last value on that root that crossed in that
-direction. Sender and receiver update their copies identically, in message
-order, for every chunked value that crosses: the value's entry becomes its
-encoded edits, moved to the front, and entries past `LINK_TABLE_BYTES` (16
-KiB of edits, counting a fixed overhead per entry) are dropped from the back.
-A value whose edits alone exceed the budget drops its root's entry. A value
-whose encoded edits extend its root's entry travels as `Delta`: the extending
-bytes, which are a byte range of the sender's epoch. Anything else travels as
-`Tree`. The receiver rebuilds the descriptor from its entry and the extending
-bytes, and interns it (§19.3), which appends to its own epoch. A `Delta` that
-names no entry, or an entry of a different length, is a protocol error that
-ends the connection.
+A `Delta` names a version of the same row (table, id, branch) that the
+receiver holds: its value for the same column, extended by the edits, is the
+new value. The sender sends one only when the new value's tree is the base's
+and its encoded edits start with the base's. Neither end keeps state for this
+beyond what sync already keeps, because each direction knows a version the
+other holds.
 
-So for a reader that follows a document, each new version costs the bytes of
-its edits; a new connection starts with empty tables and its first value per
-root as `Tree`. Tables live only in memory and hold no row, version or
-permission state: a value still crosses only inside the row version or commit
-that carries it (§19.9).
+**Authority to client.** A session already watches every row it shipped,
+across all its subscriptions and support rows (§8). The watch also records
+the seq of the version last shipped, or held for an own commit (`Fate.held`),
+or declared on resume (`Hold`). A row version with chunked cells goes out as
+`Delta` against that seq where the stored base value allows, else as `Tree`.
+An `Evict` drops the recorded seq.
 
-**Client to authority.** A commit carries its chunked values as `Tree` or
-`Delta` beside its ops. A `Tree` whose nodes the authority may lack is
-preceded by the nodes, pushed under a receipt. The authority admits the
-rebuilt descriptor as any other (§19.4).
+**Self-healing.** A client may drop a row without telling the authority
+(INV-SYNC-14 evictions), so a `Delta` can name a version it no longer holds.
+A client that cannot place a `Delta` (no version at that seq, or an edit
+count that differs) skips that image and sends `Hold` for the row with seq 0,
+saying it holds no version. The authority then ships the row's current image
+whole, or an `Evict` if it is no longer readable, exactly as on resume. A
+`Delta` is never applied to any version but the one it names.
 
-**Receiving.** A `Tree` whose nodes the receiver lacks is demand: the nodes
-are pulled.
+**Client to authority.** A client's settled versions all came from the
+authority, so it bases a commit's chunked values on the newest settled
+version of the row it holds: a value extending that version's value travels
+as `Delta` beside the commit's ops, anything else as `Tree`. The authority
+keeps every version (§19.11), so it holds the base. It resolves the delta only when the writer may read that version
+(`readable_version`): otherwise naming a version would copy content the
+writer cannot read into its write. A delta it cannot resolve rejects the
+commit. The rebuilt descriptor is admitted as any other (§19.4). A `Tree`
+whose nodes the authority may lack is preceded by the nodes, pushed under a
+receipt.
 
-**Node pulls.** A pull names the row version it reads through (table, row,
-branch, version, column) and the node hash. The authority answers only when
-the requester may read that version and the node is reachable from that
-version's root; otherwise it answers as for an absent node. A relay answers
-from its own store when it holds the node and forwards upstream otherwise.
+**Relays.** A relay resolves its sessions' deltas against its own store and
+re-encodes against what its upstream link knows, per direction, as above. A
+worker is its tabs' authority for pulls.
 
-**Relays.** A worker is its tabs' authority for pulls; each of its links has
-its own tables.
+**Lazy, range-shaped pulls.** Receiving a descriptor never pulls nodes by
+itself: a node is pulled when a read needs it. A partial read (§19.5) maps its
+range through the edits and needs only the nodes on the paths covering it, so
+reading one page of a large document pulls the root, one path of branches and
+the leaves of that page.
+
+A pull names the row version it reads through (table, row, branch, version,
+column) and either a node hash or a range in the column's coordinates (bytes,
+or UTF-16 code units for strings), with the hashes of nodes the requester
+already holds. A range pull is answered with every node on the paths from the
+version's root to the leaves covering the range, minus those held, in one
+round trip. The authority answers only when the requester may read that
+version; a node pull also needs the node to be reachable from that version's
+root, which a range pull satisfies by construction. Anything else is answered
+as for an absent node. A relay answers from its own store when it holds the
+nodes and forwards upstream otherwise.
 
 `INV-CONTENT-7`: epoch ids, cells and materializations never cross the wire;
 a value crosses as inline bytes, as a tree reference whose nodes are pulled
-through a readable version, or as edits extending a value that crossed the
-same link direction before.
+through a readable version, or as edits extending a version of the same row
+that the receiver holds, named by its seq.
 
 ## 19.9 Authorization
 

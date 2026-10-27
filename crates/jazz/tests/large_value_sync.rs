@@ -1,5 +1,5 @@
 //! Chunked large values over sync: row images carry descriptors, replicas
-//! pull chunks by locator (prefetching indexed columns before the row is
+//! pull chunks (prefetching indexed columns before the row is
 //! installed), and clients push the nodes of their new values ahead of the
 //! commit that references them (`SPEC/19_large_values.md`).
 
@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
-    SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, block_on, encode_frames,
+    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
+    SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireDelta, WireError,
+    WireKind, WireOp, WireTarget, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -52,6 +53,10 @@ fn open(node: u8, author: AuthorSubject) -> Db {
     let links = TableSchemaBuilder::new("links")
         .fk_column("doc", "docs")
         .policies(allow_all_policies());
+    // Writable by anyone, readable by no session.
+    let drafts = TableSchemaBuilder::new("drafts")
+        .column("body", ColumnType::Text)
+        .policies(allow_all_policies().with_select(PolicyExpr::False));
     let config = DbConfig::new(
         compile_schema(
             &SchemaBuilder::new()
@@ -60,6 +65,7 @@ fn open(node: u8, author: AuthorSubject) -> Db {
                 .table(notes)
                 .table(comments)
                 .table(links)
+                .table(drafts)
                 .build(),
         ),
         DbIdentity {
@@ -455,6 +461,213 @@ fn edits_cross_the_wire_as_their_own_bytes() {
             Some(Value::String(expected.clone()))
         );
     }
+}
+
+#[test]
+fn writers_get_each_others_edits_as_deltas_over_their_own() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let bob = open(2, user(2));
+    let (_, alice_down) = connect_spied(&server, &alice, user(1));
+    let (_, bob_down) = connect_spied(&server, &bob, user(2));
+    let _alice_stream = subscribe(&alice, Query::from("docs"));
+    let _bob_stream = subscribe(&bob, Query::from("docs"));
+    let mut expected = text(5, LARGE);
+    insert(
+        &alice,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(expected.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice, &bob]);
+    // Each writer's own versions settle by its fate, unshipped; the
+    // other's arrive as deltas over them.
+    for n in 0..60 {
+        let (writer, mark) = if n % 2 == 0 {
+            (&alice, "a")
+        } else {
+            (&bob, "b")
+        };
+        let suffix = format!("<{mark}{n}>");
+        block_on(writer.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+        expected.push_str(&suffix);
+        pump(&server, &[&alice, &bob]);
+    }
+    for wire in [&alice_down, &bob_down] {
+        let wire = wire.borrow();
+        let later: Vec<_> = wire.iter().filter(|(k, ..)| *k == "rows").skip(2).collect();
+        assert!(later.len() >= 25, "{wire:?}");
+        let deltas = later.iter().filter(|(_, _, delta)| *delta).count();
+        assert!(deltas * 10 >= later.len() * 9, "mostly deltas: {wire:?}");
+    }
+    for db in [&server, &alice, &bob] {
+        assert_eq!(
+            local_cell(db, "docs", 1, "body").unwrap(),
+            Some(Value::String(expected.clone()))
+        );
+    }
+}
+
+/// A server-side duplex that names, in its first delta, a version the
+/// replica does not hold (as after it evicted the row unannounced,
+/// INV-SYNC-14), and logs the `Hold`s it receives.
+struct Spoil {
+    out: Wire,
+    inbound: Wire,
+    spoiled: Rc<RefCell<bool>>,
+    holds: Rc<RefCell<Vec<Vec<u64>>>>,
+}
+
+impl Transport for Spoil {
+    fn send(&mut self, mut message: SyncMessage) -> Result<(), TransportError> {
+        if let SyncMessage::Rows { images } = &mut message
+            && !*self.spoiled.borrow()
+        {
+            for (_, cell) in images.iter_mut().flat_map(|image| image.cells.iter_mut()) {
+                if let SyncCell::Delta(delta) = cell {
+                    delta.seq += 1 << 40;
+                    *self.spoiled.borrow_mut() = true;
+                }
+            }
+        }
+        self.out.borrow_mut().push_back(message);
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        let message = self.inbound.borrow_mut().pop_front()?;
+        if let SyncMessage::Hold { rows } = &message {
+            self.holds
+                .borrow_mut()
+                .push(rows.iter().map(|row| row.3).collect());
+        }
+        Some(message)
+    }
+}
+
+#[test]
+fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let bob = open(2, user(2));
+    connect(&server, &alice, user(1));
+    let (up, down) = (Wire::default(), Wire::default());
+    let spoiled = Rc::new(RefCell::new(false));
+    let holds = Rc::new(RefCell::new(Vec::new()));
+    let _ = block_on(bob.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+        log: Log::default(),
+    })));
+    server.accept_subscriber(
+        Box::new(Spoil {
+            out: down,
+            inbound: up,
+            spoiled: spoiled.clone(),
+            holds: holds.clone(),
+        }),
+        user(2),
+    );
+    let _bob_stream = subscribe(&bob, Query::from("docs"));
+    let mut expected = text(6, LARGE);
+    insert(
+        &alice,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(expected.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice, &bob]);
+    for n in 0..6 {
+        let suffix = format!("<{n}>");
+        block_on(alice.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+        expected.push_str(&suffix);
+        pump(&server, &[&alice, &bob]);
+    }
+    assert!(*spoiled.borrow(), "a delta crossed");
+    assert!(
+        holds.borrow().iter().any(|seqs| seqs == &[0]),
+        "bob asked for the row whole: {:?}",
+        holds.borrow()
+    );
+    assert_eq!(
+        local_cell(&bob, "docs", 1, "body").unwrap(),
+        Some(Value::String(expected))
+    );
+}
+
+#[test]
+fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "drafts",
+        1,
+        vec![("body", Value::String(text(7, LARGE)))],
+    );
+    pump(&server, &[&mallory]);
+    let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
+        node: [9; 16],
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp::Update {
+            table: "drafts".to_owned(),
+            row: *row(1).0.as_bytes(),
+            cells: [("body".to_owned(), body)].into(),
+            target: WireTarget::Root,
+            at: None,
+        }],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        deltas,
+        bases: Vec::new(),
+        origin: None,
+    };
+    // Each version the server could have written the draft at, named as a
+    // base: rebuilt, the write would carry the draft's hidden body.
+    for seq in 1..=4u64 {
+        up.borrow_mut().push_back(update(
+            seq,
+            Value::Nullable(None),
+            vec![CellDelta {
+                op: 0,
+                column: "body".to_owned(),
+                depth: 0,
+                key: Vec::new(),
+                delta: WireDelta {
+                    seq,
+                    base: 0,
+                    edits: Vec::new(),
+                },
+            }],
+        ));
+    }
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    // Refused for the base, before the update's own policies are checked.
+    let fates: Vec<(u64, bool)> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                tx,
+                result: Err(WireError::Rejected { message, .. }),
+                ..
+            } => Some((*tx, message.contains("large-value delta"))),
+            SyncMessage::Fate { tx, .. } => Some((*tx, false)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates, vec![(1, true), (2, true), (3, true), (4, true)]);
 }
 
 #[test]

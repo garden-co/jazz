@@ -54,15 +54,15 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-#[path = "large_link.rs"]
-mod large_link;
+#[path = "large_delta.rs"]
+mod large_delta;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 
 #[path = "sync_conflicts.rs"]
 mod conflicts;
 pub use crate::wire::TransportError;
 pub use conflicts::WriteConflict;
-pub use large_link::{CellDelta, WireDelta};
+pub use large_delta::{CellDelta, WireDelta};
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
@@ -348,9 +348,9 @@ pub enum Cell {
     /// descriptor and is interned again where it lands (never as chunk
     /// bytes).
     Large(#[serde(with = "serde_bytes")] Vec<u8>),
-    /// A chunked large value as the edits extending one that crossed the
-    /// link before: only on the wire, where the link makes it
-    /// [`Cell::Large`] again (SPEC 19.8).
+    /// A chunked large value as the edits extending the same column's
+    /// value in a version of the row the receiver holds: only on the
+    /// wire, where the receiver makes it [`Cell::Large`] again (SPEC 19.8).
     Delta(WireDelta),
 }
 
@@ -745,8 +745,8 @@ pub enum SyncMessage {
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
         expect: Vec<Expect>,
-        /// The ops' chunked cells that travel as edits extending a value
-        /// that crossed the link before; only on the wire (SPEC 19.8).
+        /// The ops' chunked cells that travel as edits extending the
+        /// writer's newest settled version of their row (SPEC 19.8).
         deltas: Vec<CellDelta>,
         /// The base of each row the commit writes over an image its
         /// writer held (SPEC 4 §4.6); a row it inserted, or wrote without
@@ -1363,6 +1363,11 @@ pub(crate) struct Session {
     /// row shipped (`id`), include target and array correlation. A commit
     /// that writes a matching row ships its image (or an eviction).
     watch: HashSet<u64>,
+    /// The newest version of each row with chunked cells the replica was
+    /// shipped, held for an own commit or declared holding, by (table,
+    /// id, branch key): later versions' chunked cells go as deltas over it
+    /// (SPEC 19.8). An eviction drops it.
+    shipped: HashMap<(String, [u8; 16], Vec<u8>), u64>,
     /// Resumed subscriptions whose opening is still to send: `since` seq.
     resume: BTreeMap<u64, u64>,
     /// Supporting rows shipped to the replica, and rows of fetches and
@@ -1417,7 +1422,7 @@ struct FirstLoadWait {
 impl Session {
     fn new(transport: Box<dyn Transport>, identity: AuthorSubject) -> Self {
         Self {
-            transport: large_link::LargeLink::wrap(transport),
+            transport,
             identity,
             claims: None,
             subs: BTreeMap::new(),
@@ -1428,6 +1433,7 @@ impl Session {
             echoes: Vec::new(),
             support: BTreeMap::new(),
             watch: HashSet::new(),
+            shipped: HashMap::new(),
             resume: BTreeMap::new(),
             held: BTreeMap::new(),
             open: true,
@@ -2604,6 +2610,97 @@ impl Inner {
         Ok(())
     }
 
+    /// `image`'s chunked cells as deltas over the version of the row
+    /// `shipped` says the replica holds, and `shipped` updated for it
+    /// (SPEC 19.8).
+    fn ship_deltas(
+        &self,
+        shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), u64>,
+        image: &mut Image,
+    ) -> Result<(), Error> {
+        let held = shipped
+            .get(&(image.table.clone(), image.id, image.key.clone()))
+            .copied();
+        hold_shipped(shipped, image);
+        let Some(seq) = held.filter(|_| !image.deleted) else {
+            return Ok(());
+        };
+        let row = RowUuid::from_bytes(image.id);
+        let Some(base) = self.version_image(&image.table, row, &image.key, seq)? else {
+            return Ok(());
+        };
+        for (name, cell) in &mut image.cells {
+            let Cell::Large(descriptor) = cell else {
+                continue;
+            };
+            let Some((_, old)) = base.cells.iter().find(|(n, _)| n == name) else {
+                continue;
+            };
+            let (Some(old), Ok(new)) = (
+                self.large_of(&image.table, name, old)?,
+                jazz_types::large_values::decode_large_value_ref(descriptor),
+            ) else {
+                continue;
+            };
+            if let Some(delta) = large_delta::extend(seq, &old, &new) {
+                *cell = Cell::Delta(delta);
+            }
+        }
+        Ok(())
+    }
+
+    /// The version of a row at `seq`, current or in history.
+    fn version_image(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<Option<Image>, Error> {
+        let id = row.0.as_bytes().to_vec();
+        let seq = seq as i64;
+        for history in [false, true] {
+            let found = self
+                .images_where(
+                    table,
+                    history,
+                    "id = ?1 AND _b = ?2 AND _seq = ?3",
+                    &[&id, &key, &seq],
+                )?
+                .pop();
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The chunked value a cell of stored `table`'s `column` holds, as an
+    /// image carries it (a descriptor) or as stored (an epoch cell).
+    fn large_of(
+        &self,
+        table: &str,
+        column: &str,
+        cell: &Cell,
+    ) -> Result<Option<jazz_types::large_values::LargeValueRef>, Error> {
+        match cell {
+            Cell::Large(descriptor) => {
+                Ok(jazz_types::large_values::decode_large_value_ref(descriptor).ok())
+            }
+            Cell::Int(chunked)
+                if self
+                    .physical
+                    .tables
+                    .get(table)
+                    .and_then(|table| table.by_stored_column(column))
+                    .is_some_and(crate::large::large_capable) =>
+            {
+                self.chunks.descriptor(*chunked).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Images carry authors by their identity parts: codes are local to
     /// one database, so they never leave it.
     /// An update stamp stored as NULL is sent as the create stamp it
@@ -3557,7 +3654,7 @@ impl Db {
         self.become_replica();
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
-        client.transport = Some(large_link::LargeLink::wrap(transport));
+        client.transport = Some(transport);
         let mut link = client.hint.get();
         link.detached = false;
         if !link.reported {
@@ -3822,19 +3919,25 @@ impl Db {
         // newest pending commit to the row, else the settled image under
         // its pending writes.
         let mut bases = Vec::new();
+        // The settled image of each written row, which its chunked values
+        // go as deltas over (SPEC 19.8).
+        let mut settled_images = HashMap::new();
         let by_row = inner.row_ops(&ops);
         for (table, row, key) in &rows {
             let row_key = (table.clone(), *row, key.clone());
             let client = inner.client.as_ref().expect("client");
-            let settled = match client.shadow.get(&row_key) {
-                Some(image) => image.as_ref().map(|image| image.seq),
+            let image = match client.shadow.get(&row_key) {
+                Some(image) => image.clone(),
                 None => {
                     let image = inner.settled_before(table, *row, key)?;
-                    let seq = image.as_ref().map(|image| image.seq);
-                    shadows.push((row_key.clone(), image));
-                    seq
+                    shadows.push((row_key.clone(), image.clone()));
+                    image
                 }
             };
+            let settled = image.as_ref().map(|image| image.seq);
+            if let Some(image) = image.filter(|image| !image.deleted) {
+                settled_images.insert(row_key.clone(), image);
+            }
             // This replica sends the commit: its predecessor goes by how
             // far back it is.
             let on = match client.pending.newest(&row_key) {
@@ -3858,7 +3961,11 @@ impl Db {
             Some(relayed) => (relayed.bases, Some(relayed.origin)),
             None => (bases, None),
         };
-        let wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
+        let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
+        let mut deltas = Vec::new();
+        if let Ok(wire) = &mut wire {
+            deltas = inner.commit_deltas(wire, &rows, &settled_images)?;
+        }
         // Each written row as this replica now holds it, so the authority
         // can skip echoing a version that is exactly this.
         let mut expected = Vec::new();
@@ -3903,7 +4010,7 @@ impl Db {
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
                     expect,
-                    deltas: Vec::new(),
+                    deltas,
                     bases,
                     origin,
                 };
@@ -4563,9 +4670,14 @@ impl Db {
                     SyncMessage::Rows { images } => {
                         let names = inner.owner.clone();
                         for image in images {
-                            let Some(image) = image_in(&names, image) else {
+                            let named = (image.table.clone(), image.id, image.key.clone());
+                            let Some(mut image) = image_in(&names, image) else {
                                 continue;
                             };
+                            if !inner.receive_deltas(&mut image)? {
+                                inner.ask_whole(named);
+                                continue;
+                            }
                             let shadowed = inner.receive_image(image)?;
                             rebase |= shadowed;
                             shadow_changed |= shadowed;
@@ -5088,6 +5200,132 @@ impl Inner {
 
     /// Apply one server image; returns whether a rebase is needed (the row
     /// is shadowed by a pending write).
+    /// `image`'s deltas made whole over the versions they name (SPEC
+    /// 19.8). False when this replica holds no such version (it evicted
+    /// the row, INV-SYNC-14) or not the value a delta was made over.
+    fn receive_deltas(&self, image: &mut Image) -> Result<bool, Error> {
+        let row = RowUuid::from_bytes(image.id);
+        for (name, cell) in &mut image.cells {
+            let Cell::Delta(delta) = cell else {
+                continue;
+            };
+            let Some(base) = self.held_version(&image.table, row, &image.key, delta.seq)? else {
+                return Ok(false);
+            };
+            let Some((_, old)) = base.cells.iter().find(|(n, _)| n == name) else {
+                return Ok(false);
+            };
+            let Some(old) = self.large_of(&image.table, name, old)? else {
+                return Ok(false);
+            };
+            let Some(value) = large_delta::apply(&old, delta) else {
+                return Ok(false);
+            };
+            *cell = Cell::Large(
+                jazz_types::large_values::encode_large_value_ref(&value)
+                    .map_err(|e| Error::new(ErrorCode::Storage, format!("large value: {e}")))?,
+            );
+        }
+        Ok(true)
+    }
+
+    /// The version of a row at `seq` this replica holds settled: the image
+    /// under its pending writes, or a stored one.
+    fn held_version(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<Option<Image>, Error> {
+        let client = self.client.as_ref().expect("client");
+        if let Some(Some(image)) = client.shadow.get(&(table.to_owned(), row, key.to_vec()))
+            && image.seq == seq
+        {
+            return Ok(Some(image.clone()));
+        }
+        self.version_image(table, row, key, seq)
+    }
+
+    /// A commit's chunked values that extend the same column's value in
+    /// their row's settled image, as deltas over it: each op's cell holds
+    /// NULL in its place (SPEC 19.8). The upstream holds every settled
+    /// version, as it shipped them.
+    fn commit_deltas(
+        &self,
+        ops: &mut [WireOp],
+        rows: &[RowKey],
+        settled: &HashMap<RowKey, Image>,
+    ) -> Result<Vec<CellDelta>, Error> {
+        let mut deltas = Vec::new();
+        for (index, op) in ops.iter_mut().enumerate() {
+            let Ok(table) = self.schema.table(op.table()) else {
+                continue;
+            };
+            let (row, cells) = match op {
+                WireOp::Insert { row, cells, .. }
+                | WireOp::Update { row, cells, .. }
+                | WireOp::Upsert { row, cells, .. }
+                | WireOp::Restore {
+                    row,
+                    cells: Some(cells),
+                    ..
+                } => (RowUuid::from_bytes(*row), cells),
+                _ => continue,
+            };
+            // An op over several branches (a view's) has no one base.
+            let mut keys = rows
+                .iter()
+                .filter(|(stored, written, _)| *stored == table.stored && *written == row);
+            let (Some(row_key), None) = (keys.next(), keys.next()) else {
+                continue;
+            };
+            let Some(base) = settled.get(row_key) else {
+                continue;
+            };
+            for (column, cell) in cells.iter_mut() {
+                let (value, depth) = large_delta::unwrap(cell);
+                let Value::Large(large) = value else {
+                    continue;
+                };
+                let stored = table.stored_name(column);
+                let Some((_, old)) = base.cells.iter().find(|(name, _)| name == stored) else {
+                    continue;
+                };
+                let Some(old) = self.large_of(&table.stored, stored, old)? else {
+                    continue;
+                };
+                if let Some(delta) = large_delta::extend(base.seq, &old, large) {
+                    *value = Value::Nullable(None);
+                    deltas.push(CellDelta {
+                        op: index as u32,
+                        column: column.clone(),
+                        depth,
+                        key: row_key.2.clone(),
+                        delta,
+                    });
+                }
+            }
+        }
+        Ok(deltas)
+    }
+
+    /// Ask the upstream for a row whole: a `Hold` of no version of it,
+    /// which it answers as on a resume (SPEC 19.8).
+    fn ask_whole(&mut self, (table, id, key): (String, [u8; 16], Vec<u8>)) {
+        let client = self.client.as_mut().expect("client");
+        let asked = client.outbox.iter().any(|message| {
+            matches!(message, SyncMessage::Hold { rows } if rows.iter().any(|held| {
+                held.0 == table && held.1 == id && held.2 == key && held.3 == 0
+            }))
+        });
+        if !asked {
+            client.outbox.push(SyncMessage::Hold {
+                rows: vec![(table, id, key, 0)],
+            });
+        }
+    }
+
     fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
         // Two tiers number local seqs: relays from `LOCAL_BASE`, the
         // non-durable foregrounds behind them from `NON_DURABLE_BASE`. An
@@ -5911,6 +6149,7 @@ impl Db {
                         held.entry(echo.tx)
                             .or_default()
                             .push(Held::of(echo.index, image));
+                        hold_shipped(&mut session.shipped, image);
                     }
                     !same
                 });
@@ -5996,7 +6235,24 @@ impl Db {
                     |message| !matches!(message, SyncMessage::Rows { images } if images.is_empty()),
                 );
             }
+            // Chunked cells go as deltas over the version of their row the
+            // replica holds (SPEC 19.8).
+            let mut shipped = std::mem::take(&mut inner.sessions[index].shipped);
+            for message in &mut out {
+                match message {
+                    SyncMessage::Rows { images } => {
+                        for image in images.iter_mut() {
+                            inner.ship_deltas(&mut shipped, image)?;
+                        }
+                    }
+                    SyncMessage::Evict { table, id, key } => {
+                        shipped.remove(&(table.clone(), *id, key.clone()));
+                    }
+                    _ => {}
+                }
+            }
             let session = &mut inner.sessions[index];
+            session.shipped = shipped;
             for message in out {
                 let Some(message) = message_out(&names, message) else {
                     continue;
@@ -6256,6 +6512,7 @@ impl Db {
                 let mut watch = std::mem::take(&mut inner.sessions[index].watch);
                 let mut touched = Vec::new();
                 let mut evict = Vec::new();
+                let mut declared_held = Vec::new();
                 let mut by_table: BTreeMap<String, HashMap<([u8; 16], Vec<u8>), u64>> =
                     BTreeMap::new();
                 for (table, id, key, seq) in rows {
@@ -6294,19 +6551,31 @@ impl Db {
                                     watch_key(&Sql::Blob(id.to_vec())),
                                 )));
                                 watch.insert(held_key(&stored, &id));
+                                // Seq 0 asks for the row whole (SPEC 19.8).
+                                declared_held.push(((stored.clone(), id, key.clone()), seq));
                                 if now != seq || !can {
                                     touched.push((stored.clone(), RowUuid::from_bytes(id), key));
                                 }
                             }
-                            _ => evict.push(SyncMessage::Evict {
-                                table: stored.clone(),
-                                id,
-                                key,
-                            }),
+                            _ => {
+                                declared_held.push(((stored.clone(), id, key.clone()), 0));
+                                evict.push(SyncMessage::Evict {
+                                    table: stored.clone(),
+                                    id,
+                                    key,
+                                })
+                            }
                         }
                     }
                 }
                 let session = &mut inner.sessions[index];
+                for (row, seq) in declared_held {
+                    if seq == 0 {
+                        session.shipped.remove(&row);
+                    } else {
+                        session.shipped.insert(row, seq);
+                    }
+                }
                 session.watch = watch;
                 session.touched.extend(touched);
                 session.stale.extend(evict);
@@ -6618,7 +6887,7 @@ impl Db {
                 author,
                 session,
                 expect,
-                deltas: _,
+                deltas,
                 bases,
                 origin,
             } => {
@@ -6658,6 +6927,9 @@ impl Db {
                     None => match commit_who(policy, author.as_deref(), session.is_some())
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
+                            let ops = db
+                                .resolve_deltas(policy, ops, deltas)
+                                .map_err(|error| (error, Vec::new()))?;
                             let vouched = vouched(policy, who, session);
                             self.with_claims(vouched, || {
                                 db.authorize_commit(
@@ -6833,6 +7105,59 @@ impl Db {
     /// Returns the rows the client must hear about either way: the rows it
     /// wrote, so a rejected client rebases onto the authority's versions.
     #[allow(clippy::type_complexity)]
+    /// A commit's deltas made whole over the versions they name (SPEC
+    /// 19.8), each only where `identity` may read that version: naming a
+    /// version must not copy what the writer cannot read into its write.
+    fn resolve_deltas(
+        &self,
+        identity: Option<AuthorSubject>,
+        mut ops: Vec<WireOp>,
+        deltas: Vec<CellDelta>,
+    ) -> Result<Vec<WireOp>, Error> {
+        let unresolved = || {
+            Error::new(
+                ErrorCode::WriteRejected,
+                "a large-value delta names no version of its row the writer may read",
+            )
+        };
+        let inner = self.inner();
+        for delta in deltas {
+            let op = ops.get_mut(delta.op as usize).ok_or_else(unresolved)?;
+            let table = inner.schema.table(op.table())?;
+            let stored = table.stored_name(&delta.column).to_owned();
+            let (row, cells) = match op {
+                WireOp::Insert { row, cells, .. }
+                | WireOp::Update { row, cells, .. }
+                | WireOp::Upsert { row, cells, .. }
+                | WireOp::Restore {
+                    row,
+                    cells: Some(cells),
+                    ..
+                } => (RowUuid::from_bytes(*row), cells),
+                _ => return Err(unresolved()),
+            };
+            let seq = delta.delta.seq;
+            if !readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
+                return Err(unresolved());
+            }
+            let base = inner
+                .version_image(&table.stored, row, &delta.key, seq)?
+                .ok_or_else(unresolved)?;
+            let (_, old) = base
+                .cells
+                .iter()
+                .find(|(name, _)| *name == stored)
+                .ok_or_else(unresolved)?;
+            let old = inner
+                .large_of(&table.stored, &stored, old)?
+                .ok_or_else(unresolved)?;
+            let value = large_delta::apply(&old, &delta.delta).ok_or_else(unresolved)?;
+            let cell = cells.get_mut(&delta.column).ok_or_else(unresolved)?;
+            *cell = large_delta::wrap(Value::Large(Box::new(value)), delta.depth);
+        }
+        Ok(ops)
+    }
+
     fn authorize_commit(
         &self,
         who: Who,
@@ -7207,6 +7532,23 @@ fn image_out(schema: &Schema, mut image: Image) -> Option<Image> {
         })
         .collect();
     Some(image)
+}
+
+/// Record that the replica holds `image`, when it has chunked cells: its
+/// later versions' go as deltas over it (SPEC 19.8).
+fn hold_shipped(shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), u64>, image: &Image) {
+    if image.deleted
+        || !image
+            .cells
+            .iter()
+            .any(|(_, cell)| matches!(cell, Cell::Large(_)))
+    {
+        return;
+    }
+    let seq = shipped
+        .entry((image.table.clone(), image.id, image.key.clone()))
+        .or_insert(image.seq);
+    *seq = (*seq).max(image.seq);
 }
 
 /// An image named by `schema`, by this store's stored names instead.
