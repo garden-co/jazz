@@ -421,3 +421,309 @@ fn explicit_timestamps_reach_the_authority_per_write() {
     assert_eq!(created, [true, true], "{:?}", snapshot(&server));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
+
+/// Hold actual authority receipts while delivering one other message per turn.
+/// This transport control is needed because application APIs cannot split a
+/// server tick between its row evidence and receipt. The E2EE stack carries
+/// the original writer in its global OriginFateV2 authority receipt.
+struct Fragmented {
+    wire: Pipe,
+    hold_writes: Rc<std::cell::Cell<bool>>,
+    allow: Rc<std::cell::Cell<bool>>,
+    hold: Rc<std::cell::Cell<bool>>,
+    receipts: Rc<RefCell<VecDeque<SyncMessage>>>,
+}
+
+impl Transport for Fragmented {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        if self.hold_writes.get() && matches!(message, SyncMessage::Commit { .. }) {
+            return Err(TransportError::Backpressure);
+        }
+        self.wire.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        if !self.allow.replace(false) {
+            return None;
+        }
+        if !self.hold.get()
+            && let Some(receipt) = self.receipts.borrow_mut().pop_front()
+        {
+            return Some(receipt);
+        }
+        while let Some(message) = self.wire.try_recv() {
+            if self.hold.get() && matches!(message, SyncMessage::OriginFateV2 { global: true, .. })
+            {
+                self.receipts.borrow_mut().push_back(message);
+            } else {
+                return Some(message);
+            }
+        }
+        None
+    }
+}
+
+fn fragmented_write(action: &str, later_pending: bool) {
+    use jazz::db::ReadTier;
+    use jazz::tx::DurabilityTier;
+    use std::cell::Cell;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let server = open(0, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let alice = open(1, user(1));
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let allow = Rc::new(Cell::new(false));
+    let hold = Rc::new(Cell::new(false));
+    let hold_writes = Rc::new(Cell::new(false));
+    let receipts = Rc::new(RefCell::new(VecDeque::new()));
+    let _upstream = block_on(alice.connect_upstream(Box::new(Fragmented {
+        wire: Pipe {
+            out: up.clone(),
+            inbound: down.clone(),
+            log: None,
+        },
+        allow: allow.clone(),
+        hold_writes: hold_writes.clone(),
+        hold: hold.clone(),
+        receipts: receipts.clone(),
+    })));
+    // Alice's authenticated identity replaces her local stamp, requiring
+    // a row image rather than the identical-row optimisation in Fate.
+    server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+            log: None,
+        }),
+        user(9),
+    );
+    let _live = subscribe(&alice);
+    let pump = || {
+        for _ in 0..40 {
+            allow.set(true);
+            block_on(alice.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+    };
+    pump();
+    let insert = || {
+        block_on(alice.insert(
+            "docs",
+            cells(&[("title", "Doc"), ("body", "original")]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .mergeable_tx_id()
+    };
+    if action != "insert" {
+        insert();
+        pump();
+    }
+    hold.set(true);
+    let tx = match action {
+        "insert" => insert(),
+        "update" => block_on(alice.update(
+            "docs",
+            row(1),
+            cells(&[("body", "updated")]),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id(),
+        "delete" => block_on(alice.delete("docs", row(1), Default::default()))
+            .unwrap()
+            .mergeable_tx_id(),
+        _ => unreachable!(),
+    };
+    pump();
+    assert_eq!(
+        receipts.borrow().len(),
+        1,
+        "held the real receipt for {action}"
+    );
+    let mut wait = std::pin::pin!(alice.wait_for_transaction(tx, DurabilityTier::Global));
+    assert!(matches!(
+        wait.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Pending
+    ));
+    let accepted = |db: &Db| {
+        let query = db
+            .prepare_query(&Query::from("docs").select(COLUMNS))
+            .unwrap();
+        block_on(db.all(
+            &query,
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                read_view: jazz::protocol::ReadViewSpec {
+                    include_deleted: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .into_iter()
+        .map(|r| {
+            (
+                r.row_uuid(),
+                r.seq(),
+                r.cells()
+                    .map(|(k, v)| (k.to_owned(), v.cloned()))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        accepted(&alice),
+        accepted(&server),
+        "{action} must not overlay an accepted image again"
+    );
+    assert_eq!(snapshot(&alice).is_empty(), action == "delete");
+    if later_pending {
+        hold_writes.set(true);
+        let later = block_on(alice.update(
+            "docs",
+            row(1),
+            cells(&[("body", "later")]),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id();
+        block_on(server.update(
+            "docs",
+            row(1),
+            cells(&[("body", "another writer")]),
+            Default::default(),
+        ))
+        .unwrap();
+        pump();
+        assert!(
+            snapshot(&alice)[0].contains("\"later\""),
+            "the later pending write stays visible"
+        );
+        assert!(snapshot(&server)[0].contains("another writer"));
+        let mut later_wait =
+            std::pin::pin!(alice.wait_for_transaction(later, DurabilityTier::Global));
+        assert!(matches!(
+            later_wait
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        hold_writes.set(false);
+    }
+    hold.set(false);
+    pump();
+    assert!(matches!(
+        wait.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Ok(_))
+    ));
+    assert_eq!(accepted(&alice), accepted(&server));
+}
+
+/// Alice receives her accepted insert before its receipt: its authority
+/// stamp is visible, but Global durability still waits for that receipt.
+#[test]
+fn fragmented_insert_keeps_the_accepted_image_and_waits_for_receipt() {
+    fragmented_write("insert", false);
+}
+
+/// Alice receives her accepted update before its receipt. Replaying it would
+/// replace the authority's version and writer stamp with an optimistic one.
+#[test]
+fn fragmented_update_keeps_the_accepted_image_and_waits_for_receipt() {
+    fragmented_write("update", false);
+}
+
+/// Alice receives her accepted deletion before its receipt. The tombstone
+/// retains its authority version while Global durability remains pending.
+#[test]
+fn fragmented_delete_keeps_the_accepted_image_and_waits_for_receipt() {
+    fragmented_write("delete", false);
+}
+
+/// Alice's next pending edit remains visible when a newer authority image
+/// arrives while her earlier accepted edit still awaits its receipt.
+#[test]
+fn fragmented_receipts_do_not_hide_a_later_pending_write() {
+    fragmented_write("update", true);
+}
+
+/// Alice deletes a document; Bob fetches its history through a fresh replica.
+/// Both the earlier content's origin and the current deletion's origin travel
+/// with that answer. History omits tombstones, so the transport log is needed
+/// to check the deletion's transaction identity as well as the public result.
+#[test]
+fn history_fetch_carries_the_current_deletions_origin() {
+    use jazz::query::{col, eq, lit};
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let server = open(0, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let alice = open(1, user(1));
+    let (_alice_up, _) = connect(&server, &alice, user(1));
+    let created = block_on(alice.insert(
+        "docs",
+        cells(&[("title", "Doc"), ("body", "content")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    pump(&server, &[&alice]);
+    let deleted = block_on(alice.delete("docs", row(1), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    pump(&server, &[&alice]);
+    let bob = open(2, user(2));
+    let (_bob_up, down) = connect(&server, &bob, user(2));
+    let query = postcard::to_allocvec(
+        &Query::from("history.docs").filter(eq(col("id"), lit(Value::Uuid(row(1).0)))),
+    )
+    .unwrap();
+    let mut read = std::pin::pin!(bob.all_serialized_query(
+        &query,
+        ReadOpts {
+            tier: jazz::db::ReadTier::Remote,
+            read_view: jazz::protocol::ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        None,
+        None,
+        None,
+    ));
+    let mut answer = None;
+    for _ in 0..40 {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            answer = Some(result.unwrap());
+            break;
+        }
+        pump(&server, &[&bob]);
+    }
+    let jazz::db::SerializedReadResult::Rows(answer) = answer.expect("history fetch must finish")
+    else {
+        panic!("rows");
+    };
+    assert_eq!(answer.len(), 1);
+    assert_eq!(answer[0].row_uuid(), row(1));
+    assert!(
+        snapshot(&bob).is_empty(),
+        "the history answer keeps the current deletion"
+    );
+    for tx in [created, deleted] {
+        assert!(down.borrow().iter().any(|message| matches!(message, SyncMessage::Origins { commits } if commits.iter().any(|&(_, node, origin_tx)| node == [1; 16] && origin_tx == tx))), "missing origin for {tx}");
+    }
+}
