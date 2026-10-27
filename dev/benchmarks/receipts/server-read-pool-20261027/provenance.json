@@ -1,0 +1,920 @@
+{
+  "runtime_base": "5b2fc14d17a226c00a88c7824f04466d6eedf160",
+  "recorded_at_utc": "2026-10-27T20:32:56.398246+00:00",
+  "machine": {
+    "cpu": "Apple M1 Max",
+    "logical_cpus": 10,
+    "architecture": "arm64",
+    "macos": "27.0.1"
+  },
+  "toolchain": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+  "profile": "release",
+  "allocator": "system",
+  "benchmark_source_sha256": "9526e892f1d216eb478d6bc01fcbb7c90b5dcae0c05bae48fe3ea6867e942794",
+  "binaries": {
+    "control": {
+      "sha256": "66d06f713d73b9d1b1b4534f012bbfcf6ac836394018bef3de1cc6c5deb247dc",
+      "runtime_source_revision": "afb7e3d3a471c831d989a91364fe164af6407c56",
+      "harness_source_revision": "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca"
+    },
+    "candidate": {
+      "source_revision": "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+      "sha256": "327fab03f93377c5e9efde0a04ea15ada4bba58a20522b252b82e99898608ab0"
+    }
+  },
+  "run_order": [
+    {
+      "receipt": "readers-1-1-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "1",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 12.686254542000825,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-1-2-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "1",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 1.598401333001675,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-1-3-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "1",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 1.1601482090045465,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-1-4-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "1",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 11.995764125000278,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-4-1-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 12.010295790998498,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-4-2-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 1.2060366670048097,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-4-3-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 1.2188192079993314,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-4-4-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 12.062603124999441,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-8-1-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "8",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 12.202625625002838,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-8-2-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "8",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 1.3143009579944192,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-8-3-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "8",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 1.3302752499948838,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "readers-8-4-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "8",
+        "--requests",
+        "40",
+        "--background",
+        "1",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 12.201516083005117,
+      "verified_writes": 160
+    },
+    {
+      "receipt": "background-2-readers-4-1-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "12",
+        "--background",
+        "2",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 7.160870791994967,
+      "verified_writes": 48
+    },
+    {
+      "receipt": "background-2-readers-4-2-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "12",
+        "--background",
+        "2",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 3.352983459000825,
+      "verified_writes": 48
+    },
+    {
+      "receipt": "background-2-readers-4-3-candidate.jsonl",
+      "implementation": "candidate",
+      "command": [
+        "/private/tmp/jazz-sqlite-contention-target/release/examples/server_read_contention",
+        "--revision",
+        "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "12",
+        "--background",
+        "2",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 3.3419501669995952,
+      "verified_writes": 48
+    },
+    {
+      "receipt": "background-2-readers-4-4-control.jsonl",
+      "implementation": "control",
+      "command": [
+        "/private/tmp/jazz-read-pool-fresh-control",
+        "--revision",
+        "afb7e3d3a471c831d989a91364fe164af6407c56",
+        "--rows",
+        "16000",
+        "--payload-bytes",
+        "2048",
+        "--readers",
+        "4",
+        "--requests",
+        "12",
+        "--background",
+        "2",
+        "--rounds",
+        "4"
+      ],
+      "elapsed_seconds": 7.19424541600165,
+      "verified_writes": 48
+    }
+  ],
+  "receipts": {
+    "readers-1-1-control.jsonl": "e5a998aa2626648762b96289faf2cddb32ff618ddbe63d118b1e4e7d53f3a719",
+    "readers-1-2-candidate.jsonl": "b1f202a9ddffe6059f1f7e7b865c16483307bfa7c2f475edc3e8a07620cdb278",
+    "readers-1-3-candidate.jsonl": "fefe37f329de56e907827d6e5b8c5157a9c7db78f5207c40dca771bae6ef9267",
+    "readers-1-4-control.jsonl": "1c1d7c45480940aa3980dcb129f453f6606338acf86557f64a3d704e2375ffa7",
+    "readers-4-1-control.jsonl": "f7e2381e95f608f3c889fc25a2e0698eab3d559bb77f0221fefa799811e2b591",
+    "readers-4-2-candidate.jsonl": "8615772f005a90caa6b0abe21627b055f97979c7182c23c1ebf421074214fa31",
+    "readers-4-3-candidate.jsonl": "a1a0209f3a0fd34c2709374a20fc4fa6205a11f6e66d7991b2d90d3fcc2e6cc6",
+    "readers-4-4-control.jsonl": "37472145dd4cd5f539c548ef8da65b290a6bfd726b0a42fca5700d78b3bc18c9",
+    "readers-8-1-control.jsonl": "8db5b11ca532b99e2ad61c0050435098f959198a4c4eb5aeb4271176c4a37411",
+    "readers-8-2-candidate.jsonl": "dae36c2606a32db8392932f245567b3c23001406b129772ced98eaeda7778f73",
+    "readers-8-3-candidate.jsonl": "8fdbf2d00b1276f45ee52a620ea9d17beacfa04ee64541ffa3fd01ea26938a4e",
+    "readers-8-4-control.jsonl": "81cf9bc01b54b1e613206a4b852e1d2e8d6b27ae0debfd7268124b627c52e542",
+    "background-2-readers-4-1-control.jsonl": "9136ed98737c04cb862ea31d44b233905987cdb2544400dc49e2e04c5dbd51bf",
+    "background-2-readers-4-2-candidate.jsonl": "8d18cd5ec27d48a6fd625b22d3f6213a7aed2df72d0d94fac76d4901d2bc887a",
+    "background-2-readers-4-3-candidate.jsonl": "fdffe40fbd858c61ef5b3412d3c277449e25969d233d5834f1657cb795e9790d",
+    "background-2-readers-4-4-control.jsonl": "8c7312112478edca93c0bf7ce42412cc1ff86811e783a8f7a105616a897de225"
+  },
+  "control_source_note": "Runtime exported from afb7e3d3a471c831d989a91364fe164af6407c56 via git archive; only server_read_contention.rs replaced by the identical fresh-query harness from candidate 4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+  "limitations": [
+    "Local developer machine with other desktop applications active; paired process order limits but does not eliminate noise",
+    "Closed-loop fixed-concurrency workload; candidate foreground may finish before the first expensive background request completes",
+    "Request latency includes transport and queueing; no isolated SQL attribution",
+    "No hosted same-base CodSpeed performance-win claim"
+  ],
+  "summary": [
+    {
+      "readers": 1,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "candidate",
+      "mode": "contended",
+      "remote_read": {
+        "count": 160,
+        "p50_ms": 1.382625,
+        "p95_ms": 1.684667,
+        "p99_ms": 4.127790999999999,
+        "max_ms": 4.931958
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 1.385583,
+        "p95_ms": 1.730416,
+        "p99_ms": 3.5270829999999997,
+        "max_ms": 4.100958
+      },
+      "background_query": {
+        "count": 4,
+        "p50_ms": 145.58395800000002,
+        "p95_ms": 152.344125,
+        "p99_ms": 152.344125,
+        "max_ms": 152.344125
+      },
+      "background_isolated": {
+        "count": 4,
+        "p50_ms": 142.92866700000002,
+        "p95_ms": 153.609417,
+        "p99_ms": 153.609417,
+        "max_ms": 153.609417
+      },
+      "foreground_ops_per_second": 1346.6169124260766
+    },
+    {
+      "readers": 1,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "candidate",
+      "mode": "idle",
+      "remote_read": {
+        "count": 160,
+        "p50_ms": 1.311334,
+        "p95_ms": 1.531334,
+        "p99_ms": 2.2555829999999997,
+        "max_ms": 2.5597499999999997
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 1.314333,
+        "p95_ms": 1.681875,
+        "p99_ms": 2.304042,
+        "max_ms": 2.368666
+      },
+      "foreground_ops_per_second": 1466.9570783257666
+    },
+    {
+      "readers": 1,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "control",
+      "mode": "contended",
+      "remote_read": {
+        "count": 160,
+        "p50_ms": 138.82475,
+        "p95_ms": 141.021917,
+        "p99_ms": 148.267917,
+        "max_ms": 150.617958
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 138.812667,
+        "p95_ms": 140.847209,
+        "p99_ms": 148.268084,
+        "max_ms": 150.622292
+      },
+      "background_query": {
+        "count": 160,
+        "p50_ms": 138.86154200000001,
+        "p95_ms": 141.034708,
+        "p99_ms": 148.311709,
+        "max_ms": 150.10325
+      },
+      "background_isolated": {
+        "count": 4,
+        "p50_ms": 138.635209,
+        "p95_ms": 144.658875,
+        "p99_ms": 144.658875,
+        "max_ms": 144.658875
+      },
+      "foreground_ops_per_second": 14.720390805296281
+    },
+    {
+      "readers": 1,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "control",
+      "mode": "idle",
+      "remote_read": {
+        "count": 160,
+        "p50_ms": 1.140625,
+        "p95_ms": 1.2935830000000001,
+        "p99_ms": 1.8745829999999999,
+        "max_ms": 1.899833
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 1.1479579999999998,
+        "p95_ms": 1.362833,
+        "p99_ms": 2.0877920000000003,
+        "max_ms": 2.298458
+      },
+      "foreground_ops_per_second": 1669.5376279190602
+    },
+    {
+      "readers": 4,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "candidate",
+      "mode": "contended",
+      "remote_read": {
+        "count": 640,
+        "p50_ms": 1.9463329999999999,
+        "p95_ms": 2.391167,
+        "p99_ms": 3.433375,
+        "max_ms": 7.097167
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 1.924833,
+        "p95_ms": 2.2520420000000003,
+        "p99_ms": 3.05825,
+        "max_ms": 6.702875
+      },
+      "background_query": {
+        "count": 4,
+        "p50_ms": 145.572333,
+        "p95_ms": 146.293083,
+        "p99_ms": 146.293083,
+        "max_ms": 146.293083
+      },
+      "background_isolated": {
+        "count": 4,
+        "p50_ms": 140.244166,
+        "p95_ms": 142.657625,
+        "p99_ms": 142.657625,
+        "max_ms": 142.657625
+      },
+      "foreground_ops_per_second": 2428.076150465427
+    },
+    {
+      "readers": 4,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "candidate",
+      "mode": "idle",
+      "remote_read": {
+        "count": 640,
+        "p50_ms": 1.827375,
+        "p95_ms": 2.253667,
+        "p99_ms": 3.303791,
+        "max_ms": 3.990916
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 1.8497080000000001,
+        "p95_ms": 2.177292,
+        "p99_ms": 2.652667,
+        "max_ms": 2.9724999999999997
+      },
+      "foreground_ops_per_second": 2606.1857819534666
+    },
+    {
+      "readers": 4,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "control",
+      "mode": "contended",
+      "remote_read": {
+        "count": 640,
+        "p50_ms": 138.94925,
+        "p95_ms": 141.493292,
+        "p99_ms": 146.713667,
+        "max_ms": 152.256042
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 138.92295900000002,
+        "p95_ms": 141.497291,
+        "p99_ms": 146.519416,
+        "max_ms": 152.052667
+      },
+      "background_query": {
+        "count": 160,
+        "p50_ms": 138.963625,
+        "p95_ms": 141.750875,
+        "p99_ms": 147.091208,
+        "max_ms": 151.941334
+      },
+      "background_isolated": {
+        "count": 4,
+        "p50_ms": 138.983417,
+        "p95_ms": 146.544375,
+        "p99_ms": 146.544375,
+        "max_ms": 146.544375
+      },
+      "foreground_ops_per_second": 36.77727567743649
+    },
+    {
+      "readers": 4,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "control",
+      "mode": "idle",
+      "remote_read": {
+        "count": 640,
+        "p50_ms": 1.681708,
+        "p95_ms": 1.954917,
+        "p99_ms": 2.483959,
+        "max_ms": 2.659875
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 1.717,
+        "p95_ms": 2.0088749999999997,
+        "p99_ms": 2.1288750000000003,
+        "max_ms": 2.427375
+      },
+      "foreground_ops_per_second": 2925.6224418997344
+    },
+    {
+      "readers": 8,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "candidate",
+      "mode": "contended",
+      "remote_read": {
+        "count": 1280,
+        "p50_ms": 2.738041,
+        "p95_ms": 3.458917,
+        "p99_ms": 4.59175,
+        "max_ms": 5.472625
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 2.6515000000000004,
+        "p95_ms": 3.3415,
+        "p99_ms": 3.7174579999999997,
+        "max_ms": 4.707833
+      },
+      "background_query": {
+        "count": 4,
+        "p50_ms": 147.350917,
+        "p95_ms": 148.06666600000003,
+        "p99_ms": 148.06666600000003,
+        "max_ms": 148.06666600000003
+      },
+      "background_isolated": {
+        "count": 4,
+        "p50_ms": 140.666416,
+        "p95_ms": 141.795875,
+        "p99_ms": 141.795875,
+        "max_ms": 141.795875
+      },
+      "foreground_ops_per_second": 3157.1591118454508
+    },
+    {
+      "readers": 8,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "candidate",
+      "mode": "idle",
+      "remote_read": {
+        "count": 1280,
+        "p50_ms": 2.663875,
+        "p95_ms": 3.545375,
+        "p99_ms": 5.359542,
+        "max_ms": 7.933249999999999
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 2.550959,
+        "p95_ms": 3.3532919999999997,
+        "p99_ms": 5.074917,
+        "max_ms": 7.338540999999999
+      },
+      "foreground_ops_per_second": 3187.1166687126924
+    },
+    {
+      "readers": 8,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "control",
+      "mode": "contended",
+      "remote_read": {
+        "count": 1280,
+        "p50_ms": 139.502958,
+        "p95_ms": 143.991875,
+        "p99_ms": 151.359209,
+        "max_ms": 152.201708
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 139.553958,
+        "p95_ms": 143.90575,
+        "p99_ms": 151.17320800000002,
+        "max_ms": 151.88225
+      },
+      "background_query": {
+        "count": 160,
+        "p50_ms": 139.574708,
+        "p95_ms": 143.95695899999998,
+        "p99_ms": 151.26483299999998,
+        "max_ms": 151.51320900000002
+      },
+      "background_isolated": {
+        "count": 4,
+        "p50_ms": 139.696792,
+        "p95_ms": 155.901041,
+        "p99_ms": 155.901041,
+        "max_ms": 155.901041
+      },
+      "foreground_ops_per_second": 65.78335671563917
+    },
+    {
+      "readers": 8,
+      "background_clients": 1,
+      "requests_per_client": 40,
+      "implementation": "control",
+      "mode": "idle",
+      "remote_read": {
+        "count": 1280,
+        "p50_ms": 2.300959,
+        "p95_ms": 2.6962919999999997,
+        "p99_ms": 3.492083,
+        "max_ms": 3.919083
+      },
+      "global_write": {
+        "count": 160,
+        "p50_ms": 2.313958,
+        "p95_ms": 2.710625,
+        "p99_ms": 2.9764169999999996,
+        "max_ms": 2.993542
+      },
+      "foreground_ops_per_second": 3845.01903150913
+    },
+    {
+      "readers": 4,
+      "background_clients": 2,
+      "requests_per_client": 12,
+      "implementation": "candidate",
+      "mode": "contended",
+      "remote_read": {
+        "count": 192,
+        "p50_ms": 146.490875,
+        "p95_ms": 151.197666,
+        "p99_ms": 153.077833,
+        "max_ms": 153.39575
+      },
+      "global_write": {
+        "count": 48,
+        "p50_ms": 1.3315,
+        "p95_ms": 3.32375,
+        "p99_ms": 3.699334,
+        "max_ms": 3.699334
+      },
+      "background_query": {
+        "count": 60,
+        "p50_ms": 150.56625000000003,
+        "p95_ms": 154.421208,
+        "p99_ms": 154.51620799999998,
+        "max_ms": 154.51620799999998
+      },
+      "background_isolated": {
+        "count": 8,
+        "p50_ms": 140.03125,
+        "p95_ms": 140.445375,
+        "p99_ms": 140.445375,
+        "max_ms": 140.445375
+      },
+      "foreground_ops_per_second": 60.85823035655234
+    },
+    {
+      "readers": 4,
+      "background_clients": 2,
+      "requests_per_client": 12,
+      "implementation": "candidate",
+      "mode": "idle",
+      "remote_read": {
+        "count": 192,
+        "p50_ms": 1.878542,
+        "p95_ms": 3.411084,
+        "p99_ms": 3.8643330000000002,
+        "max_ms": 3.9625
+      },
+      "global_write": {
+        "count": 48,
+        "p50_ms": 1.916333,
+        "p95_ms": 2.5205840000000004,
+        "p99_ms": 2.919792,
+        "max_ms": 2.919792
+      },
+      "foreground_ops_per_second": 2438.916993624661
+    },
+    {
+      "readers": 4,
+      "background_clients": 2,
+      "requests_per_client": 12,
+      "implementation": "control",
+      "mode": "contended",
+      "remote_read": {
+        "count": 192,
+        "p50_ms": 276.079583,
+        "p95_ms": 278.95604099999997,
+        "p99_ms": 286.076292,
+        "max_ms": 286.119166
+      },
+      "global_write": {
+        "count": 48,
+        "p50_ms": 275.95687499999997,
+        "p95_ms": 278.657583,
+        "p99_ms": 286.011,
+        "max_ms": 286.011
+      },
+      "background_query": {
+        "count": 88,
+        "p50_ms": 276.311792,
+        "p95_ms": 282.850834,
+        "p99_ms": 285.80224999999996,
+        "max_ms": 285.80224999999996
+      },
+      "background_isolated": {
+        "count": 8,
+        "p50_ms": 139.22187499999998,
+        "p95_ms": 140.323875,
+        "p99_ms": 140.323875,
+        "max_ms": 140.323875
+      },
+      "foreground_ops_per_second": 21.632366184041818
+    },
+    {
+      "readers": 4,
+      "background_clients": 2,
+      "requests_per_client": 12,
+      "implementation": "control",
+      "mode": "idle",
+      "remote_read": {
+        "count": 192,
+        "p50_ms": 1.737792,
+        "p95_ms": 2.5959160000000003,
+        "p99_ms": 3.346208,
+        "max_ms": 3.353167
+      },
+      "global_write": {
+        "count": 48,
+        "p50_ms": 1.777417,
+        "p95_ms": 2.321958,
+        "p99_ms": 2.670416,
+        "max_ms": 2.670416
+      },
+      "foreground_ops_per_second": 2688.8835671401625
+    }
+  ],
+  "percentile_method": "Nearest rank over combined raw samples from both process runs and both phases per mode; per-phase percentiles are not averaged.",
+  "total_verified_writes": 2112,
+  "builds": {
+    "control": {
+      "source_export": "git archive afb7e3d3a471c831d989a91364fe164af6407c56",
+      "only_source_change": "server_read_contention.rs replaced with candidate harness at the recorded SHA-256",
+      "cargo": [
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "jazz-native-transport",
+        "--example",
+        "server_read_contention"
+      ],
+      "executable_preserved_as": "/private/tmp/jazz-read-pool-fresh-control"
+    },
+    "candidate": {
+      "source_revision": "4e045b4186fc95f6e42539e9ef3cd2409fe2c5ca",
+      "cleaned_release_packages": ["jazz-db", "jazz-server", "jazz-native-transport"],
+      "cargo": [
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "jazz-native-transport",
+        "--example",
+        "server_read_contention"
+      ]
+    },
+    "cargo_home": "/private/tmp/jazz-sqlite-audit-cargo",
+    "cargo_target_dir": "/private/tmp/jazz-sqlite-contention-target",
+    "execution": "Each binary invoked directly after all builds/tests stopped; no compiler or profiling alongside timing."
+  }
+}

@@ -85,3 +85,7 @@ benchmark-only commit. Receipts identify each executable and source tree and use
 the same fixture and request parameters. Developer-machine measurements do not
 replace the repository's same-base CodSpeed comparison for a performance-win
 claim.
+
+The [local comparison](../benchmarks/server-read-pool.md) retains positive and
+negative results: short-request isolation under one expensive query, queueing
+when both readers are occupied, and overhead in the idle arm.
