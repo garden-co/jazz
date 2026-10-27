@@ -45,6 +45,8 @@ mod flat_joins;
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
 mod history_reads;
+#[path = "../host_tables.rs"]
+mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
 #[path = "../large_value_append.rs"]

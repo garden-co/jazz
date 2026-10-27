@@ -145,7 +145,7 @@ pub(crate) async fn deploy(
     if state.shutdown.is_shutting_down() {
         return Err(DeployError::unavailable("server is shutting down"));
     }
-    if state.runtime().is_none() && state.core_server_shell_storage_config.is_none() {
+    if state.runtime().is_none() && state.store.is_none() {
         return Err(DeployError::unavailable(
             "server runtime storage is not configured",
         ));

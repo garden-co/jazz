@@ -949,58 +949,28 @@ impl Db {
         path: &std::path::Path,
         options: FileOptions,
     ) -> Result<Self, Error> {
-        // SQLite cannot open a directory; one the Groove engine wrote gets
-        // the typed refusal.
-        if path.is_dir() {
-            crate::format::refuse_groove_store(path)?;
-        }
-        let flags = rusqlite::OpenFlags::default();
-        let conn = match options.vfs {
-            None => Connection::open_with_flags(path, flags),
-            Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
-        }
-        .map_err(storage)?;
-        let synchronous = match (options.journal, options.synchronous_full) {
-            (Journal::Memory, _) => "OFF",
-            (_, true) => "FULL",
-            (_, false) => "NORMAL",
-        };
-        let journal = match options.journal {
-            Journal::Wal => "WAL",
-            Journal::Rollback => "TRUNCATE",
-            Journal::Memory => "MEMORY",
-        };
-        let cache_spill = if options.journal == Journal::Wal {
-            ""
-        } else {
-            " PRAGMA cache_spill = OFF;"
-        };
-        // Before anything writes: a new file takes it on creation.
-        if let Some(page_size) = options.page_size {
-            conn.execute_batch(&format!("PRAGMA page_size = {page_size}"))
-                .map_err(storage)?;
-        }
-        // Before the journal mode, which rewrites the header: a refused file
-        // is left as it was.
-        crate::format::admit(&conn)?;
-        // `journal_mode` answers with a row, so it is queried, not batched.
-        let mode: String = conn
-            .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
-                r.get(0)
-            })
-            .map_err(storage)?;
-        if !mode.eq_ignore_ascii_case(journal) {
-            return Err(Error::new(
-                ErrorCode::Storage,
-                format!("journal_mode {journal} is not supported on this VFS yet (got {mode})"),
-            ));
-        }
-        conn.execute_batch(&format!(
-            "PRAGMA synchronous = {synchronous}; PRAGMA cache_size = -{};{cache_spill}",
-            options.cache_kib
-        ))
-        .map_err(storage)?;
-        Self::open_on(config, conn, Some((path, options.vfs)))
+        Self::open_file(config, crate::host::StoreFile::open(path, options)?).await
+    }
+
+    /// Open on a file [`crate::host::StoreFile::open`] admitted, whose host
+    /// tables may already have been read or written.
+    pub async fn open_file(config: DbConfig, file: crate::host::StoreFile) -> Result<Self, Error> {
+        let crate::host::StoreFile { conn, path } = file;
+        Self::open_on(
+            config,
+            conn,
+            path.as_ref().map(|(path, vfs)| (path.as_path(), *vfs)),
+        )
+    }
+
+    /// Run `f` on the store's connection, outside any transaction handle's
+    /// overlay (see [`crate::host`]).
+    pub(crate) fn with_host_connection<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let inner = self.inner.borrow_mut();
+        f(&inner.conn)
     }
 
     fn open_on(

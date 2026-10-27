@@ -6,6 +6,11 @@
 //! WebSocket session is one subscriber of the engine; its inbound frames are
 //! queued for the owner and its outbound messages stream back in order.
 //! Shutdown joins the owner, so the store is closed when it returns.
+//!
+//! One app's state is one SQLite file: the owner thread is also the only
+//! connection to it. It starts before the runtime does (an [`AppStore`]),
+//! serving the server's host tables (catalogue, account journal), and the
+//! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
 
@@ -18,11 +23,12 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::Duration;
 
-use crate::kv::SqliteKv;
+use crate::kv::HostKv;
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
     TransportError, WireError, block_on,
 };
+use jazz::host::{HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::{
     CatalogueSnapshot, CurrentWriteSchema, MigrationLens, PhysicalIdentityManifest,
@@ -42,7 +48,7 @@ pub type AbiBytes = Vec<u8>;
 pub enum StorageConfig {
     /// A store that lives as long as the runtime (tests, dry runs, probes).
     InMemory,
-    /// One SQLite file (WAL).
+    /// One SQLite file (WAL), holding the server's host tables too.
     SQLite {
         /// The database file.
         path: PathBuf,
@@ -127,10 +133,291 @@ const IDLE_TICK: Duration = Duration::from_secs(1);
 /// Inbound messages one session may have applied per engine tick.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
 
-/// The runtime catalogue's key in its sidecar store.
+/// The runtime catalogue's host table, and its one key.
+const RUNTIME_CATALOGUE: HostTable = HostTable::new("runtime_catalogue");
 const CATALOGUE_KEY: &[u8] = b"runtime-catalogue:v1";
 
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
+/// Work on the store's host tables, before or after the runtime opened.
+pub(crate) type HostJob = Box<dyn FnOnce(&dyn HostTables) + Send>;
+
+/// What the store thread is asked to do.
+enum Work {
+    Host(HostJob),
+    Owner(Job),
+    Start(Start),
+    Close,
+}
+
+/// Open the runtime on the store.
+struct Start {
+    schema: JazzSchema,
+    any_stored_catalogue: bool,
+    awaiting_permissions: bool,
+    reply: std_mpsc::Sender<Result<(), String>>,
+}
+
+/// Sendable handle for the thread that owns one app's store file: its host
+/// tables from the start, and the runtime once [`AppStore::start_runtime`]
+/// opened it.
+#[derive(Clone)]
+pub struct AppStore {
+    inner: Arc<StoreThread>,
+}
+
+struct StoreThread {
+    work: Mutex<Option<std_mpsc::Sender<Work>>>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+    tick_queued: Arc<AtomicBool>,
+}
+
+impl AppStore {
+    /// Open the store `storage` names on its own thread.
+    pub fn open(storage: &StorageConfig) -> Result<Self, String> {
+        let storage = storage.clone();
+        let (work, receiver) = std_mpsc::channel::<Work>();
+        let (opened_tx, opened_rx) = std_mpsc::channel();
+        let tick_queued = Arc::new(AtomicBool::new(false));
+        let owner_ticks = Arc::clone(&tick_queued);
+        let join = thread::Builder::new()
+            .name("jazz-server-store".to_owned())
+            .spawn(move || {
+                let file = match open_file(&storage) {
+                    Ok(file) => {
+                        let _ = opened_tx.send(Ok(()));
+                        file
+                    }
+                    Err(error) => {
+                        let _ = opened_tx.send(Err(error));
+                        return;
+                    }
+                };
+                serve(file, &storage, receiver, &owner_ticks);
+            })
+            .map_err(|error| format!("failed to spawn server store thread: {error}"))?;
+        opened_rx
+            .recv()
+            .map_err(|_| "server store thread exited before opening".to_owned())??;
+        Ok(Self {
+            inner: Arc::new(StoreThread {
+                work: Mutex::new(Some(work)),
+                join: Mutex::new(Some(join)),
+                tick_queued,
+            }),
+        })
+    }
+
+    /// A store that lives as long as its handles.
+    pub fn memory() -> Result<Self, String> {
+        Self::open(&StorageConfig::InMemory)
+    }
+
+    /// Key-value access to one host table.
+    pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
+        Ok(HostKv::new(table, HostSender(self.sender()?)))
+    }
+
+    fn sender(&self) -> Result<std_mpsc::Sender<Work>, String> {
+        self.inner
+            .work
+            .lock()
+            .map_err(|_| "server store lock poisoned".to_owned())?
+            .clone()
+            .ok_or_else(|| "server store is closed".to_owned())
+    }
+
+    fn send(&self, work: Work) -> Result<(), String> {
+        self.sender()?
+            .send(work)
+            .map_err(|_| "server store thread is not running".to_owned())
+    }
+
+    /// Open the runtime on this store, once. `any_stored_catalogue`: reopen
+    /// with whatever catalogue the store holds (a catalogue-driven server),
+    /// not only one that admits `schema`. `awaiting_permissions`: until the
+    /// first schema activation, session reads wait and session writes are
+    /// rejected.
+    pub fn start_runtime(
+        &self,
+        schema: JazzSchema,
+        role: NodeRole,
+        any_stored_catalogue: bool,
+        awaiting_permissions: bool,
+    ) -> Result<ServerRuntimeHandle, String> {
+        if role == NodeRole::Relay {
+            return Err("relay nodes are not supported yet on SQLite".to_owned());
+        }
+        let (reply, started) = std_mpsc::channel();
+        self.send(Work::Start(Start {
+            schema,
+            any_stored_catalogue,
+            awaiting_permissions,
+            reply,
+        }))?;
+        started
+            .recv()
+            .map_err(|_| "server store thread exited before the runtime started".to_owned())??;
+        let (activity, _) = watch::channel(0_u64);
+        Ok(ServerRuntimeHandle {
+            inner: Arc::new(Inner {
+                store: self.clone(),
+                activity,
+                next_session: AtomicU64::new(1),
+                edges: Mutex::new(HashMap::new()),
+            }),
+        })
+    }
+
+    /// Stop and join the store thread (and the runtime on it); the file is
+    /// closed when this returns. Host tables are unavailable afterwards.
+    /// Safe to call more than once.
+    pub fn close(&self) -> Result<(), String> {
+        let work = self
+            .inner
+            .work
+            .lock()
+            .map_err(|_| "server store lock poisoned".to_owned())?
+            .take();
+        if let Some(work) = work {
+            let _ = work.send(Work::Close);
+        }
+        let join = self
+            .inner
+            .join
+            .lock()
+            .map_err(|_| "server store join lock poisoned".to_owned())?
+            .take();
+        if let Some(join) = join {
+            join.join()
+                .map_err(|_| "server store thread panicked".to_owned())?;
+        }
+        Ok(())
+    }
+}
+
+/// Sends host-table work to a store's thread; it keeps the thread running.
+pub(crate) struct HostSender(std_mpsc::Sender<Work>);
+
+impl HostSender {
+    pub(crate) fn send(&self, job: HostJob) -> Result<(), String> {
+        self.0
+            .send(Work::Host(job))
+            .map_err(|_| "server store is closed".to_owned())
+    }
+}
+
+fn open_file(storage: &StorageConfig) -> Result<StoreFile, String> {
+    match storage {
+        StorageConfig::InMemory => StoreFile::memory(),
+        StorageConfig::SQLite { path } => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("create {}: {error}", parent.display()))?;
+            }
+            // Every commit (rows, catalogue, account journal) is durable
+            // when it returns.
+            StoreFile::open(
+                path,
+                FileOptions {
+                    synchronous_full: true,
+                    ..FileOptions::default()
+                },
+            )
+        }
+    }
+    .map_err(|error| format!("open server store: {error}"))
+}
+
+/// Host tables of a store that could not be reopened after the runtime
+/// failed to open on it.
+struct Unavailable(String);
+
+impl HostTables for Unavailable {
+    fn host_get(&self, _: HostTable, _: &[u8]) -> Result<Option<Vec<u8>>, jazz::db::Error> {
+        Err(self.error())
+    }
+    fn host_prefix(
+        &self,
+        _: HostTable,
+        _: &[u8],
+    ) -> Result<Vec<jazz::host::HostPair>, jazz::db::Error> {
+        Err(self.error())
+    }
+    fn host_put_many(
+        &self,
+        _: HostTable,
+        _: &[jazz::host::HostPair],
+    ) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
+    fn host_put_if_absent(
+        &self,
+        _: HostTable,
+        _: &[u8],
+        _: &[u8],
+    ) -> Result<Option<Vec<u8>>, jazz::db::Error> {
+        Err(self.error())
+    }
+    fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
+}
+
+impl Unavailable {
+    fn error(&self) -> jazz::db::Error {
+        jazz::db::Error::new(jazz::db::ErrorCode::Storage, self.0.clone())
+    }
+}
+
+/// The store thread before the runtime opens: host-table work only.
+fn serve(
+    file: StoreFile,
+    storage: &StorageConfig,
+    work: std_mpsc::Receiver<Work>,
+    tick_queued: &AtomicBool,
+) {
+    let mut file: Result<StoreFile, Unavailable> = Ok(file);
+    while let Ok(next) = work.recv() {
+        match next {
+            Work::Host(job) => match &file {
+                Ok(file) => job(file),
+                Err(unavailable) => job(unavailable),
+            },
+            // No runtime handle exists before the runtime starts.
+            Work::Owner(_) => {}
+            Work::Start(start) => {
+                let current = std::mem::replace(
+                    &mut file,
+                    Err(Unavailable("server store is being opened".to_owned())),
+                );
+                let opened = current
+                    .map_err(|unavailable| unavailable.0)
+                    .and_then(|current| {
+                        Owner::open(
+                            start.schema,
+                            current,
+                            start.any_stored_catalogue,
+                            start.awaiting_permissions,
+                        )
+                    });
+                match opened {
+                    Ok(owner) => {
+                        let _ = start.reply.send(Ok(()));
+                        owner.run(work, tick_queued);
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = start.reply.send(Err(error));
+                        // The failed open consumed the connection; the host
+                        // tables stay reachable on a new one.
+                        file = open_file(storage).map_err(Unavailable);
+                    }
+                }
+            }
+            Work::Close => return,
+        }
+    }
+}
 /// One activation: a schema and the migration lenses into it (its new
 /// columns' defaults, and the tables and columns it renames).
 type Step = (JazzSchema, Vec<MigrationLens>);
@@ -142,12 +429,10 @@ pub struct ServerRuntimeHandle {
 }
 
 struct Inner {
-    jobs: Mutex<Option<std_mpsc::Sender<Job>>>,
-    join: Mutex<Option<thread::JoinHandle<()>>>,
+    store: AppStore,
     activity: watch::Sender<u64>,
     next_session: AtomicU64,
     edges: Mutex<HashMap<ServerSession, Edge>>,
-    tick_queued: Arc<AtomicBool>,
 }
 
 /// The socket side of one session.
@@ -233,42 +518,12 @@ impl ServerRuntimeHandle {
         if role == NodeRole::Relay {
             return Err("relay nodes are not supported yet on SQLite".to_owned());
         }
-        let (jobs, receiver) = std_mpsc::channel::<Job>();
-        let (started_tx, started_rx) = std_mpsc::channel();
-        let (activity, _) = watch::channel(0_u64);
-        let tick_queued = Arc::new(AtomicBool::new(false));
-        let owner_ticks = Arc::clone(&tick_queued);
-        let join = thread::Builder::new()
-            .name("jazz-server-runtime".to_owned())
-            .spawn(move || {
-                let owner =
-                    match Owner::open(schema, &storage, any_stored_catalogue, awaiting_permissions)
-                    {
-                        Ok(owner) => {
-                            let _ = started_tx.send(Ok(()));
-                            owner
-                        }
-                        Err(error) => {
-                            let _ = started_tx.send(Err(error));
-                            return;
-                        }
-                    };
-                owner.run(receiver, &owner_ticks);
-            })
-            .map_err(|error| format!("failed to spawn server runtime thread: {error}"))?;
-        started_rx
-            .recv()
-            .map_err(|_| "server runtime thread exited before startup".to_owned())??;
-        Ok(Self {
-            inner: Arc::new(Inner {
-                jobs: Mutex::new(Some(jobs)),
-                join: Mutex::new(Some(join)),
-                activity,
-                next_session: AtomicU64::new(1),
-                edges: Mutex::new(HashMap::new()),
-                tick_queued,
-            }),
-        })
+        AppStore::open(&storage)?.start_runtime(
+            schema,
+            role,
+            any_stored_catalogue,
+            awaiting_permissions,
+        )
     }
 
     /// Start a runtime whose schema comes from the administrative catalogue.
@@ -400,7 +655,13 @@ impl ServerRuntimeHandle {
     }
 
     fn queue_tick(&self) -> Result<(), String> {
-        if self.inner.tick_queued.swap(true, Ordering::AcqRel) {
+        if self
+            .inner
+            .store
+            .inner
+            .tick_queued
+            .swap(true, Ordering::AcqRel)
+        {
             return Ok(());
         }
         self.send(Box::new(|_| {}))
@@ -417,26 +678,10 @@ impl ServerRuntimeHandle {
     /// Stop and join the owner thread; the store is closed when this returns.
     /// Safe to call more than once.
     pub async fn shutdown(&self) -> Result<(), String> {
-        let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
-            inner
-                .jobs
-                .lock()
-                .map_err(|_| "server runtime jobs lock poisoned".to_owned())?
-                .take();
-            let join = inner
-                .join
-                .lock()
-                .map_err(|_| "server runtime join lock poisoned".to_owned())?
-                .take();
-            if let Some(join) = join {
-                join.join()
-                    .map_err(|_| "server runtime thread panicked".to_owned())?;
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|error| format!("server runtime shutdown task failed: {error}"))?
+        let store = self.inner.store.clone();
+        tokio::task::spawn_blocking(move || store.close())
+            .await
+            .map_err(|error| format!("server runtime shutdown task failed: {error}"))?
     }
 
     // ---- catalogue ---------------------------------------------------------
@@ -461,7 +706,7 @@ impl ServerRuntimeHandle {
                     .admit_schema_with_lenses(schema, &owner.catalogue.lenses_for(id)),
             )
             .map_err(|error| error.to_string())?;
-            owner.catalogue.persist()?;
+            owner.catalogue.persist(&owner.db)?;
             Ok(id)
         })
         .await
@@ -577,14 +822,7 @@ impl ServerRuntimeHandle {
     }
 
     fn send(&self, job: Job) -> Result<(), String> {
-        self.inner
-            .jobs
-            .lock()
-            .map_err(|_| "server runtime jobs lock poisoned".to_owned())?
-            .as_ref()
-            .ok_or_else(|| "server runtime is shut down".to_owned())?
-            .send(job)
-            .map_err(|_| "server runtime thread is not running".to_owned())
+        self.inner.store.send(Work::Owner(job))
     }
 
     async fn run<T: Send + 'static>(
@@ -693,8 +931,6 @@ struct Catalogue {
     incoming: BTreeMap<SchemaVersionId, Vec<MigrationLens>>,
     activated: Vec<JazzSchema>,
     snapshot: CatalogueSnapshot,
-    /// Where `snapshot` is kept between runs, beside a file store.
-    store: Option<SqliteKv>,
 }
 
 impl Catalogue {
@@ -705,7 +941,6 @@ impl Catalogue {
             lenses: BTreeSet::new(),
             incoming: BTreeMap::new(),
             activated: vec![genesis.clone()],
-            store: None,
             snapshot: CatalogueSnapshot {
                 genesis_physical_identities: PhysicalIdentityManifest::allocate(genesis),
                 schemas: vec![version.clone()],
@@ -787,14 +1022,12 @@ impl Catalogue {
             .collect()
     }
 
-    /// Keep the snapshot for the next run of a file store.
-    fn persist(&self) -> Result<(), String> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
+    /// Keep the snapshot in the store's file for the next run.
+    fn persist(&self, db: &Db) -> Result<(), String> {
         let bytes = postcard::to_allocvec(&self.snapshot)
             .map_err(|error| format!("encode runtime catalogue: {error}"))?;
-        store.write_many(&[(CATALOGUE_KEY.to_vec(), bytes)])
+        db.host_put_many(RUNTIME_CATALOGUE, &[(CATALOGUE_KEY.to_vec(), bytes)])
+            .map_err(|error| format!("persist runtime catalogue: {error}"))
     }
 
     fn admit_lens(&mut self, target: SchemaVersionId, lens: MigrationLens) {
@@ -857,56 +1090,41 @@ fn with_permissions(
 }
 
 impl Owner {
-    /// Open the store. A file store also reopens the catalogue it admitted
-    /// before: its genesis schema opens the store and every later schema is
-    /// activated again (each a no-op on the stored tables), so the catalogue
-    /// and its lineage survive restarts. `schema` starts a fresh catalogue
-    /// only when the store has none, or (unless `any_stored_catalogue`) none
-    /// that admits it.
+    /// Open the runtime on `file`. A reopened store also reopens the
+    /// catalogue it admitted before: its genesis schema opens the store and
+    /// every later schema is activated again (each a no-op on the stored
+    /// tables), so the catalogue and its lineage survive restarts. `schema`
+    /// starts a fresh catalogue only when the store has none, or (unless
+    /// `any_stored_catalogue`) none that admits it.
     fn open(
         schema: JazzSchema,
-        storage: &StorageConfig,
+        file: StoreFile,
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
     ) -> Result<Self, String> {
-        let (db, store, stored) = match storage {
-            StorageConfig::InMemory => (block_on(Db::open(config(schema.clone()))), None, None),
-            StorageConfig::SQLite { path } => {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|error| format!("create {}: {error}", parent.display()))?;
-                }
-                let store = SqliteKv::open(&path.with_extension("catalogue.sqlite"))?;
-                let stored = match store.get(CATALOGUE_KEY)? {
-                    Some(bytes) => Some(
-                        postcard::from_bytes::<CatalogueSnapshot>(&bytes)
-                            .map_err(|error| format!("decode runtime catalogue: {error}"))?,
-                    ),
-                    None => None,
-                }
-                .filter(|snapshot| {
-                    any_stored_catalogue
-                        || snapshot
-                            .schemas
-                            .iter()
-                            .any(|version| version.id == schema.version_id())
-                });
-                let genesis = match &stored {
-                    Some(snapshot) => deployment_steps(snapshot)?.remove(0).0,
-                    None => schema.clone(),
-                };
-                let db = block_on(Db::open_at(
-                    config(genesis),
-                    path,
-                    FileOptions {
-                        synchronous_full: true,
-                        ..FileOptions::default()
-                    },
-                ));
-                (db, Some(store), stored)
-            }
+        let stored = match file
+            .host_get(RUNTIME_CATALOGUE, CATALOGUE_KEY)
+            .map_err(|error| format!("read runtime catalogue: {error}"))?
+        {
+            Some(bytes) => Some(
+                postcard::from_bytes::<CatalogueSnapshot>(&bytes)
+                    .map_err(|error| format!("decode runtime catalogue: {error}"))?,
+            ),
+            None => None,
+        }
+        .filter(|snapshot| {
+            any_stored_catalogue
+                || snapshot
+                    .schemas
+                    .iter()
+                    .any(|version| version.id == schema.version_id())
+        });
+        let genesis = match &stored {
+            Some(snapshot) => deployment_steps(snapshot)?.remove(0).0,
+            None => schema.clone(),
         };
-        let db = db.map_err(|error| format!("open server store: {error}"))?;
+        let db = block_on(Db::open_file(config(genesis), file))
+            .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
         let mut owner = Self {
             db,
@@ -918,12 +1136,11 @@ impl Owner {
             owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
             owner.apply_snapshot(snapshot)?;
         }
-        owner.catalogue.store = store;
-        owner.catalogue.persist()?;
+        owner.catalogue.persist(&owner.db)?;
         Ok(owner)
     }
 
-    fn run(mut self, jobs: std_mpsc::Receiver<Job>, tick_queued: &AtomicBool) {
+    fn run(mut self, work: std_mpsc::Receiver<Work>, tick_queued: &AtomicBool) {
         loop {
             // Inbound work left over from a budgeted tick runs next, after
             // any jobs that arrived meanwhile.
@@ -932,11 +1149,20 @@ impl Owner {
             } else {
                 IDLE_TICK
             };
-            match jobs.recv_timeout(wait) {
-                Ok(job) => {
-                    job(&mut self);
-                    while let Ok(job) = jobs.try_recv() {
-                        job(&mut self);
+            match work.recv_timeout(wait) {
+                Ok(next) => {
+                    if !self.handle(next) {
+                        break;
+                    }
+                    let mut open = true;
+                    while let Ok(next) = work.try_recv() {
+                        if !self.handle(next) {
+                            open = false;
+                            break;
+                        }
+                    }
+                    if !open {
+                        break;
                     }
                 }
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {}
@@ -948,6 +1174,21 @@ impl Owner {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
+    }
+
+    /// Do `work`; false once the store is to close.
+    fn handle(&mut self, work: Work) -> bool {
+        match work {
+            Work::Owner(job) => job(self),
+            Work::Host(job) => job(&self.db),
+            Work::Start(start) => {
+                let _ = start
+                    .reply
+                    .send(Err("the server runtime is already running".to_owned()));
+            }
+            Work::Close => return false,
+        }
+        true
     }
 
     fn open_session(
@@ -1150,7 +1391,7 @@ impl Owner {
             revision,
             schema: id,
         };
-        self.catalogue.persist()?;
+        self.catalogue.persist(&self.db)?;
         self.release_held_reads();
         Ok(id)
     }
@@ -1191,6 +1432,6 @@ impl Owner {
             self.catalogue.schemas.insert(id, schema);
         }
         self.catalogue.snapshot = snapshot;
-        self.catalogue.persist()
+        self.catalogue.persist(&self.db)
     }
 }

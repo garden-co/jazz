@@ -5,7 +5,6 @@ use std::thread;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
-use crate::runtime::StorageConfig;
 use jazz::tools::AppId;
 
 mod account_store;
@@ -108,7 +107,9 @@ pub struct ServerState {
     /// Live WebSocket connections this process admits before refusing
     /// upgrades with `503`.
     pub(crate) max_websocket_connections: usize,
-    pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
+    /// The app's store: the one file (and thread) the catalogue, the account
+    /// journal and, once started, the runtime share.
+    pub(crate) store: Option<crate::runtime::AppStore>,
     /// Serializes durable-catalogue reconciliation into the local runtime shell.
     ///
     /// Catalogue storage can advance while a previous bridge is in flight, but
@@ -213,15 +214,15 @@ impl ServerState {
             return Ok(core_server_shell);
         }
 
-        let storage_config = self
-            .core_server_shell_storage_config
-            .clone()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| "server shell storage is not configured".to_owned())?;
         let mut core_server_shell = self.core_server_shell.write().unwrap();
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = ServerRuntimeHandle::start_awaiting_permissions(schema, storage_config)?;
+        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false, true)?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -304,6 +305,20 @@ impl ServerState {
         if let Err(error) = self.catalogue.close(&self.catalogue_store) {
             tracing::error!(%error, "shutdown catalogue storage close failed");
             failed = true;
+        }
+        // The store outlives the shell's sessions but not the server: join
+        // its thread (already joined if the shell started) so the file is
+        // closed before the data dir can be reopened.
+        if let Some(store) = &self.store {
+            let store = store.clone();
+            let closed = tokio::task::spawn_blocking(move || store.close())
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|closed| closed);
+            if let Err(error) = closed {
+                tracing::error!(%error, "shutdown store close failed");
+                failed = true;
+            }
         }
 
         if failed {
@@ -459,9 +474,7 @@ mod tests {
                 std::collections::HashSet::new(),
             )
             .expect("build shutdown test catalogue"),
-            accounts: Some(
-                accounts::AccountRegistryOwner::open(None).expect("account test registry"),
-            ),
+            accounts: Some(accounts::AccountRegistryOwner::in_memory_for_test()),
             catalogue: ServerCatalogue,
             app_id,
             auth_config: AuthConfig::default(),
@@ -469,7 +482,7 @@ mod tests {
             core_server_shell: StdRwLock::new(None),
             websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
             max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
-            core_server_shell_storage_config: None,
+            store: None,
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             runtime_catalogue_before_publication_hook: StdMutex::new(None),
             runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),
