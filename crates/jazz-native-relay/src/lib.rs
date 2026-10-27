@@ -512,8 +512,26 @@ pub struct NativeAuthRejection {
     pub reason: String,
 }
 
-/// Source of [`NativeAuthRejection::sequence`]; zero is never issued.
-static AUTH_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+/// A failure of a scope's upstream connection other than a refused
+/// credential: a refused connection (TLS, a proxy refusing the upgrade, a
+/// rejected session) or a lost link the worker gave up on. It is connection
+/// state, not a failed tick: local work keeps running, as on the web and Node
+/// transports (#4337). `retrying` is whether the worker is still trying to
+/// connect. Every failure gets a new `sequence`, as a refusal does.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct NativeUpstreamFailure {
+    pub sequence: u64,
+    pub reason: String,
+    pub retrying: bool,
+}
+
+/// Source of [`NativeAuthRejection::sequence`] and
+/// [`NativeUpstreamFailure::sequence`]; zero is never issued.
+static UPSTREAM_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+fn next_upstream_event() -> u64 {
+    UPSTREAM_EVENTS.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 /// Append-only V1 advice grammar: Insert=0, Read=1, Update=2, Delete=3.
 /// Identity comes exclusively from the admitted foreground, never this payload.
@@ -669,6 +687,7 @@ pub enum ForegroundDbCommandResponse {
     TickEvents {
         events_json: String,
         auth_rejection: Option<NativeAuthRejection>,
+        upstream_failure: Option<NativeUpstreamFailure>,
     },
 }
 
@@ -780,16 +799,16 @@ struct PrivateScopeSocketWorker {
     admitted_scope: AdmissionCapability,
     _worker: NativeRelaySocketWorker,
     connected: Arc<AtomicBool>,
-    /// The upstream rejected this session before it connected, or the
-    /// worker gave up after a failure. It is observable to foreground ticks
-    /// until a new authenticated connection succeeds, so an upstream failure
-    /// never silently becomes an indefinite query timeout.
+    /// The upstream refused this session's connection, or the worker gave
+    /// up after a failure, with the failure's sequence. It is held until a
+    /// new connection succeeds and reported to the host as connection state
+    /// (`TickEvents`), so an upstream failure never silently becomes an
+    /// indefinite query timeout, and never fails local ticks (#4337).
     ///
-    /// Losing an already-authenticated link is not latched here while the
-    /// worker retries it: that is connection state (a failed remote link),
-    /// and must not poison a valid foreground (#3630). A reconnect that the
-    /// upstream then rejects latches as usual.
-    terminal_error: Arc<Mutex<Option<String>>>,
+    /// Losing an already-authenticated link is not held here while the
+    /// worker retries it: that is a plain reconnect (#3630). A reconnect that
+    /// the upstream then refuses is held as usual.
+    terminal_error: Arc<Mutex<Option<(u64, String)>>>,
     /// The upstream refused this worker's credential. The worker stops on
     /// it, so only a replacement built with a refreshed credential (or an
     /// explicit reconnect) can connect again. This is auth state, not a
@@ -1093,10 +1112,11 @@ impl NativeRelayHost {
                 },
                 reconnect_delay: std::time::Duration::from_secs(1),
                 on_event: Arc::new(move |event| {
-                    let set_terminal = |error| {
+                    let set_terminal = |error: Option<String>| {
                         *terminal_for_event
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            error.map(|error| (next_upstream_event(), error));
                     };
                     let mut link_failure = link_failure
                         .lock()
@@ -1119,7 +1139,7 @@ impl NativeRelayHost {
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                                 Some(NativeAuthRejection {
-                                    sequence: AUTH_REJECTIONS.fetch_add(1, Ordering::Relaxed) + 1,
+                                    sequence: next_upstream_event(),
                                     reason: error,
                                 });
                         }
@@ -1240,12 +1260,21 @@ impl NativeRelayHost {
     }
 
     fn private_scope_terminal_error(&self, scope: &RelayScope) -> Option<String> {
-        self.private_scope_workers.get(scope).and_then(|worker| {
-            worker
-                .terminal_error
-                .lock()
-                .ok()
-                .and_then(|error| error.clone())
+        self.private_scope_upstream_failure(scope)
+            .map(|failure| failure.reason)
+    }
+
+    fn private_scope_upstream_failure(&self, scope: &RelayScope) -> Option<NativeUpstreamFailure> {
+        let worker = self.private_scope_workers.get(scope)?;
+        let (sequence, reason) = worker
+            .terminal_error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        Some(NativeUpstreamFailure {
+            sequence,
+            reason,
+            retrying: !worker.stopped.load(Ordering::Acquire),
         })
     }
 
@@ -1632,15 +1661,11 @@ impl NativeRelayHost {
             .foregrounds
             .get(&foreground)
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-        let (relay, scope) = (opened.relay, opened.scope.clone());
-        // A rejected session or a stopped upstream fails the tick. A lost
-        // established link that the worker is retrying, or a refused
-        // credential the host is renewing, is not latched: it is reported
-        // through the remote-link hint and `NativeConnectionStatus` while
-        // local work continues.
-        if self.private_scope_terminal_error(&scope).is_some() {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
-        }
+        let relay = opened.relay;
+        // Upstream failures, a refused credential included, are connection
+        // state: the remote-link hint and `TickEvents` report them while
+        // local work continues, as on the web and Node transports (#4296,
+        // #4337). Only a failure of the foreground itself fails the tick.
         self.relays
             .get(&relay)
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
@@ -2918,6 +2943,7 @@ impl NativeRelayHost {
                 Response::TickEvents {
                     events_json,
                     auth_rejection: self.private_scope_auth_rejection(&scope),
+                    upstream_failure: self.private_scope_upstream_failure(&scope),
                 }
             }
             command => self

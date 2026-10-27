@@ -216,7 +216,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
         case 22:
           return encodeNativeSession("reader");
         case 35:
-          return Uint8Array.of(26, 2, 91, 93, 0); // tickEvents: "[]", no refusal
+          return Uint8Array.of(26, 2, 91, 93, 0, 0); // tickEvents: "[]", no failures
         case 17:
           return Uint8Array.from([15, ...command.subarray(1, 17)]);
         default:
@@ -293,7 +293,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       if (command[0] === 2) return encodeBytesResponse(2, rows);
       if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1, 0);
       if (command[0] === 22) return encodeNativeSession("old-reader");
-      if (command[0] === 35) return Uint8Array.of(26, 2, 91, 93, 0);
+      if (command[0] === 35) return Uint8Array.of(26, 2, 91, 93, 0, 0);
       if (command[0] === 6) return Uint8Array.of(6, 1);
       if (command[0] === 7) return Uint8Array.of(7, 1);
       throw new Error(`unexpected foreground command ${command[0]}`);
