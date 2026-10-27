@@ -366,6 +366,9 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// Errors the next ticks fail with, for tests of a tick driver.
+    #[cfg(any(test, feature = "testing"))]
+    failing_ticks: VecDeque<ErrorCode>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -1081,6 +1084,8 @@ impl Db {
             view: None,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                #[cfg(any(test, feature = "testing"))]
+                failing_ticks: VecDeque::new(),
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1205,11 +1210,24 @@ impl Db {
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(code) = self.inner().failing_ticks.pop_front() {
+            return Err(Error::new(code, "a tick failure injected by a test"));
+        }
         self.sync_tick()?;
         let mut inner = self.inner();
         inner.fan.collect();
         inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
         Ok(())
+    }
+
+    /// Make the next ticks fail with `codes`, in order, before doing any
+    /// work: a tick driver's failure handling is exercised without
+    /// breaking the store.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = ErrorCode>) {
+        self.inner().failing_ticks.extend(codes);
     }
 
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
