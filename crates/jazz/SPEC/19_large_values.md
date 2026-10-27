@@ -213,7 +213,17 @@ offsets on code-point boundaries and inserted bytes valid UTF-8 for strings,
 and UTF-16 coordinates consistent with the byte coordinates (found through
 the tree's UTF-16 metrics and one leaf, not by scanning). A tree reference is
 admitted only when its root and every node beneath it are present and
-verified, and its lengths match.
+verified, its lengths match, and the writer **possesses** it.
+
+A node held by the store proves nothing about the writer, since hashes are
+not secret: a writer possesses a tree when each node is either under the tree
+of a row version it may read that its commit names (the version a delta
+extends, or the settled version its pushes assumed, §19.8), or pushed by the
+writer itself under its own receipt with its children possessed in turn. A
+tree the writer does not possess is refused exactly as one with absent nodes,
+so a write never tells whether the store holds a tree, and never copies
+content the writer cannot read. A trusted link's writes are not checked.
+Relays check their sessions' writes the same way.
 
 JSON validity is a writer's responsibility: anyone allowed to write a value is
 trusted not to produce malformed JSON, and Jazz's JSON mutation APIs and JSON
@@ -222,7 +232,8 @@ Readers treat malformed JSON as a typed error, never a panic.
 
 `INV-CONTENT-5`: an epoch grows, and a root is published, only inside an
 ordinarily authorized write of the owning row, after admission validated the
-edits or the tree. A caller cannot hand in a cell, epoch or root.
+edits or the tree and that the writer possesses the tree. A caller cannot hand
+in a cell, epoch or root.
 
 ## 19.5 Reads and queries
 
@@ -317,8 +328,11 @@ keeps every version (§19.11), so it holds the base. It resolves the delta only 
 (`readable_version`): otherwise naming a version would copy content the
 writer cannot read into its write. A delta it cannot resolve rejects the
 commit. The rebuilt descriptor is admitted as any other (§19.4). A `Tree`
-whose nodes the authority may lack is preceded by the nodes, pushed under a
-receipt.
+travels with the settled version of its row as its source, and is preceded
+by every node of its tree not under that version's trees, pushed under the
+writer's receipt (§19.4). Nodes the authority holds for others are pushed
+anyway: deduplication is silent. A node the client lacks (a value copied
+from a row it holds only partly) is fetched first, and the commit waits.
 
 **Relays.** A relay resolves its sessions' deltas against its own store and
 re-encodes against what its upstream link knows, per direction, as above. A

@@ -746,6 +746,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
         session: None,
         expect: Vec::new(),
         deltas: Vec::new(),
+        sources: Vec::new(),
         bases: vec![WireBase {
             op: 0,
             key: Vec::new(),

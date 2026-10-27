@@ -86,8 +86,9 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// [`epoch`] does); `refs` counts the cells naming it. Edits are only ever
 /// appended, so a cell's value never changes. An epoch no cell names is
 /// deleted, releasing its root.
-/// `_jazz_lv_receipt` holds nodes a client pushed ahead of the commit that
-/// references them, until that commit lands or `expires` (ms); `_jazz_lv_unpushed` holds nodes
+/// `_jazz_lv_receipt` holds nodes a session (`author`, its identity) pushed
+/// ahead of the commit that references them, until that commit lands or
+/// `expires` (ms); a receipt is the pusher's proof that it holds the node; `_jazz_lv_unpushed` holds nodes
 /// this replica wrote that its upstream may not have yet; `_jazz_lv_upload`
 /// leases a local streaming upload's nodes (`_jazz_lv_upload_node`) until
 /// its row commits, it is aborted, or it goes untouched past the staging
@@ -104,8 +105,8 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_epoch (id INTEGER PRIMARY KEY, root BLOB NOT
  base BLOB NOT NULL, edits BLOB NOT NULL, count INTEGER NOT NULL, \
  refs INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS _jazz_lv_epoch_root ON _jazz_lv_epoch (root);
-CREATE TABLE IF NOT EXISTS _jazz_lv_receipt (hash BLOB PRIMARY KEY, \
- expires INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_receipt (hash BLOB NOT NULL, author BLOB NOT NULL, \
+ expires INTEGER NOT NULL, PRIMARY KEY (hash, author)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_receipt_expires ON _jazz_lv_receipt (expires);
 CREATE TABLE IF NOT EXISTS _jazz_lv_unpushed (hash BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_upload (id BLOB PRIMARY KEY, touched INTEGER NOT NULL) \
@@ -1675,32 +1676,38 @@ pub(crate) fn stored_bytes(
     }
 }
 
-/// The nodes of `value` this replica wrote and has not pushed upstream.
-/// A node the upstream holds was validated there with its whole subtree,
-/// so the walk stops at the first pushed node on each path.
-pub(crate) fn unpushed(
+/// The nodes of `value` to push for a commit: all but those under the
+/// trees of `named` (roots of the settled version the commit names as its
+/// source), which the upstream counts as the writer's (SPEC 19.4). A
+/// node held by the upstream for others proves nothing, so nothing else
+/// is skipped. `Err` lists the nodes this replica must fetch first.
+pub(crate) fn to_push(
     conn: &Connection,
     chunks: &Chunks,
     value: &LargeValueRef,
-) -> Result<Vec<(ChunkRequest, Vec<u8>)>, Error> {
+    named: &BTreeSet<[u8; 32]>,
+) -> Result<Result<Vec<(ChunkRequest, Vec<u8>)>, Vec<ChunkRequest>>, Error> {
+    let covered = named_nodes(conn, named)?;
     let mut out = Vec::new();
+    let mut absent = Vec::new();
     let mut stack = vec![request_of(&value.root)];
     let mut seen = BTreeSet::new();
     while let Some(request) = stack.pop() {
-        if !seen.insert(request.object_hash) {
+        if covered.contains(&request.object_hash) || !seen.insert(request.object_hash) {
             continue;
         }
-        let pending: bool = conn
-            .prepare_cached("SELECT EXISTS (SELECT 1 FROM _jazz_lv_unpushed WHERE hash = ?1)")
-            .and_then(|mut statement| {
-                statement.query_row([request.object_hash.as_slice()], |r| r.get(0))
-            })
-            .map_err(storage)?;
-        if !pending {
-            continue;
-        }
-        let Some(bytes) = stored_bytes(conn, chunks, &request)? else {
-            continue;
+        let bytes = match stored_bytes(conn, chunks, &request) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                absent.push(request);
+                continue;
+            }
+            // In the chunk store: a fetch is under way.
+            Err(error) if is_missing(&error) => {
+                absent.push(request);
+                continue;
+            }
+            Err(error) => return Err(error),
         };
         // Stored nodes were verified on the way in.
         if let ChunkNode::Branch { children, .. } =
@@ -1710,7 +1717,11 @@ pub(crate) fn unpushed(
         }
         out.push((request, bytes));
     }
-    Ok(out)
+    Ok(if absent.is_empty() {
+        Ok(out)
+    } else {
+        Err(absent)
+    })
 }
 
 /// The upstream accepted (or finally refused) the commit these nodes were
@@ -1749,39 +1760,51 @@ pub(crate) fn install_fetched(
     )
 }
 
-/// Store a node a client pushed ahead of its commit, held by a receipt
-/// until `expires`.
+/// Store a node a session (`author`) pushed ahead of its commit, held by
+/// the session's receipt until `expires`.
 pub(crate) fn receive_pushed(
     conn: &Connection,
     chunks: &Chunks,
     request: &ChunkRequest,
     bytes: Vec<u8>,
     expires: i64,
+    author: &[u8],
 ) -> Result<(), Error> {
     install_fetched(conn, chunks, request, bytes)?;
     conn.prepare_cached(
-        "INSERT INTO _jazz_lv_receipt (hash, expires) VALUES (?1, ?2) \
-         ON CONFLICT (hash) DO UPDATE SET expires = MAX(expires, excluded.expires)",
+        "INSERT INTO _jazz_lv_receipt (hash, author, expires) VALUES (?1, ?2, ?3) \
+         ON CONFLICT (hash, author) DO UPDATE SET expires = MAX(expires, excluded.expires)",
     )
     .and_then(|mut statement| {
-        statement.execute(rusqlite::params![request.object_hash.as_slice(), expires])
+        statement.execute(rusqlite::params![
+            request.object_hash.as_slice(),
+            author,
+            expires
+        ])
     })
     .map_err(storage)?;
     Ok(())
 }
 
-/// Drop the receipts of the pushed nodes under `root`, which a commit now
-/// references: the cell holds the tree from here on. Walks only nodes that
-/// still hold a receipt, so an append settles just the nodes it pushed.
-pub(crate) fn settle_receipts(conn: &Connection, root: &lv::ContentHash) -> Result<(), Error> {
+/// Drop `author`'s receipts of the pushed nodes under `root`, which its
+/// commit now references: the cell holds the tree from here on. Walks only
+/// nodes that still hold its receipt, so an append settles just the nodes
+/// it pushed.
+pub(crate) fn settle_receipts(
+    conn: &Connection,
+    root: &lv::ContentHash,
+    author: &[u8],
+) -> Result<(), Error> {
     conn.prepare_cached(
         "WITH RECURSIVE pushed (hash) AS ( \
-           SELECT hash FROM _jazz_lv_receipt WHERE hash = ?1 \
+           SELECT hash FROM _jazz_lv_receipt WHERE hash = ?1 AND author = ?2 \
            UNION SELECT e.child FROM _jazz_lv_edge e JOIN pushed p ON e.parent = p.hash \
-           WHERE EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = e.child)) \
-         DELETE FROM _jazz_lv_receipt WHERE hash IN (SELECT hash FROM pushed)",
+           WHERE EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = e.child AND author = ?2)) \
+         DELETE FROM _jazz_lv_receipt WHERE author = ?2 AND hash IN (SELECT hash FROM pushed)",
     )
-    .and_then(|mut statement| statement.execute([root.as_bytes().as_slice()]))
+    .and_then(|mut statement| {
+        statement.execute(rusqlite::params![root.as_bytes().as_slice(), author])
+    })
     .map_err(storage)?;
     Ok(())
 }
@@ -1901,6 +1924,98 @@ pub(crate) fn root_is_local(conn: &Connection, value: &LargeValueRef) -> Result<
         |r| r.get(0),
     )
     .map_err(storage)
+}
+
+/// What a session writing through sync proves it holds (SPEC 19.4): the
+/// nodes it pushed under its receipts, and the trees of row versions it
+/// may read that its commit names (the version its deltas extend, the
+/// settled version its pushes assumed).
+pub(crate) struct Possession {
+    /// The session's receipt author.
+    pub(crate) author: Vec<u8>,
+    /// Whether the session is checked: a trusted link is not.
+    pub(crate) checked: bool,
+    /// The roots of those readable versions' chunked values.
+    pub(crate) roots: BTreeSet<[u8; 32]>,
+}
+
+/// Whether `possession` covers `value`'s tree: every node is in a named
+/// readable version's tree, or pushed under the session's receipt with
+/// its children covered in turn. A node held here for anyone else proves
+/// nothing, so naming a hash never reads another row's content.
+pub(crate) fn possessed(
+    conn: &Connection,
+    chunks: &Chunks,
+    value: &LargeValueRef,
+    possession: &Possession,
+) -> Result<bool, Error> {
+    let root = *value.root.object_hash.as_bytes();
+    if !possession.checked || possession.roots.contains(&root) {
+        return Ok(true);
+    }
+    // The named trees' nodes, walked down their stored edges once needed.
+    let mut named: Option<std::collections::HashSet<[u8; 32]>> = None;
+    let mut stack = vec![root];
+    let mut seen = BTreeSet::new();
+    while let Some(hash) = stack.pop() {
+        if !seen.insert(hash) {
+            continue;
+        }
+        let named = match &mut named {
+            Some(named) => named,
+            None => named.insert(named_nodes(conn, &possession.roots)?),
+        };
+        if named.contains(&hash) {
+            continue;
+        }
+        let receipt: bool = conn
+            .cached_row(
+                "SELECT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = ?1 AND author = ?2)",
+                rusqlite::params![hash.as_slice(), possession.author],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if !receipt {
+            return Ok(false);
+        }
+        let request = ChunkRequest { object_hash: hash };
+        let Some(bytes) = stored_bytes(conn, chunks, &request)? else {
+            return Ok(false);
+        };
+        if let ChunkNode::Branch { children, .. } =
+            lv::decode_node_untyped_verified(&bytes).map_err(corrupt)?
+        {
+            stack.extend(children.iter().map(|child| child.node_ref.object_hash.0));
+        }
+    }
+    Ok(true)
+}
+
+/// Every node under `roots` this store knows of, through its edges.
+fn named_nodes(
+    conn: &Connection,
+    roots: &BTreeSet<[u8; 32]>,
+) -> Result<std::collections::HashSet<[u8; 32]>, Error> {
+    let mut out = std::collections::HashSet::new();
+    let mut stack: Vec<[u8; 32]> = roots.iter().copied().collect();
+    let mut children = conn
+        .prepare_cached("SELECT child FROM _jazz_lv_edge WHERE parent = ?1")
+        .map_err(storage)?;
+    while let Some(hash) = stack.pop() {
+        if !out.insert(hash) {
+            continue;
+        }
+        let found: Vec<Vec<u8>> = children
+            .query_map([hash.as_slice()], |r| r.get(0))
+            .and_then(|rows| rows.collect())
+            .map_err(storage)?;
+        for child in found {
+            if let Ok(child) = <[u8; 32]>::try_from(child.as_slice()) {
+                stack.push(child);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Delete up to `budget` unreferenced nodes. A root is reclaimed once no
@@ -2378,6 +2493,7 @@ mod tests {
                 &request_of(&chunk.node_ref),
                 chunk.encoded.clone(),
                 0,
+                b"",
             )
             .unwrap();
         }
@@ -2402,6 +2518,7 @@ mod tests {
                 &request_of(&chunk.node_ref),
                 chunk.encoded.clone(),
                 0,
+                b"",
             )
             .unwrap();
         }
@@ -2419,6 +2536,7 @@ mod tests {
                 &request_of(&chunk.node_ref),
                 chunk.encoded.clone(),
                 1_000,
+                b"",
             )
             .unwrap();
         }
@@ -2455,6 +2573,7 @@ mod tests {
                     &request_of(&chunk.node_ref),
                     chunk.encoded.clone(),
                     1_000,
+                    b"",
                 )
                 .unwrap();
             }
@@ -2465,7 +2584,7 @@ mod tests {
         push(&pending);
         let pending_nodes = pending.staged_chunks.len() as i64;
         assert!(receipts() > pending_nodes);
-        settle_receipts(&conn, &referenced.value_ref.root.object_hash).unwrap();
+        settle_receipts(&conn, &referenced.value_ref.root.object_hash, b"").unwrap();
         // Only the other push, still ahead of its commit, keeps receipts,
         // so expiring them later touches nothing the commit holds.
         assert_eq!(receipts(), pending_nodes);

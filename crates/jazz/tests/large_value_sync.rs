@@ -366,6 +366,7 @@ impl Transport for Spy {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let entry = match &message {
             SyncMessage::Commit { deltas, .. } => Some(("commit", !deltas.is_empty())),
+            SyncMessage::PushChunks { .. } => Some(("push", false)),
             SyncMessage::Rows { images } => {
                 let mut cells = images.iter().flat_map(|image| image.cells.iter());
                 let large = cells
@@ -628,6 +629,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         session: None,
         expect: Vec::new(),
         deltas,
+        sources: Vec::new(),
         bases: Vec::new(),
         origin: None,
     };
@@ -668,6 +670,125 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         })
         .collect();
     assert_eq!(fates, vec![(1, true), (2, true), (3, true), (4, true)]);
+}
+
+#[test]
+fn naming_a_hidden_trees_hash_reads_nothing() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "drafts",
+        1,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    let hidden = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    let unknown = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(9, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    pump(&server, &[&mallory]);
+    // Mallory names the draft's tree (its hashes are no secret) in a doc
+    // she may write and read, pushing nothing; and a tree nobody stored.
+    let insert = |tx: u64, n: u8, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
+        node: [9; 16],
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp::Insert {
+            table: "docs".to_owned(),
+            row: *row(n).0.as_bytes(),
+            cells: [
+                ("body".to_owned(), Value::Large(Box::new(value.clone()))),
+                ("blob".to_owned(), Value::Bytes(Vec::new())),
+            ]
+            .into(),
+            target: WireTarget::Root,
+            at: None,
+        }],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        deltas: Vec::new(),
+        sources: Vec::new(),
+        bases: Vec::new(),
+        origin: None,
+    };
+    up.borrow_mut().push_back(insert(1, 1, &hidden));
+    up.borrow_mut().push_back(insert(2, 2, &unknown));
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<(u64, String)> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                tx,
+                result: Err(WireError::Rejected { message, .. }),
+                ..
+            } => Some((*tx, message.clone())),
+            SyncMessage::Fate { tx, .. } => Some((*tx, "accepted".to_owned())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 2, "{fates:?}");
+    // Refused alike: the answer does not tell what the server holds.
+    assert_eq!(fates[0].1, fates[1].1, "{fates:?}");
+    assert!(fates[0].1.contains("does not hold"), "{fates:?}");
+    assert_eq!(local_cell(&server, "docs", 1, "body").unwrap(), None);
+}
+
+#[test]
+fn rebuilt_trees_push_only_their_new_nodes_even_while_commits_are_in_flight() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let bob = open(2, user(2));
+    let (alice_up, _) = connect_spied(&server, &alice, user(1));
+    connect(&server, &bob, user(2));
+    let _bob_stream = subscribe(&bob, Query::from("docs"));
+    let mut expected = text(10, LARGE);
+    insert(
+        &alice,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(expected.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice, &bob]);
+    alice_up.borrow_mut().clear();
+    // Each append is too large for an epoch: it rebuilds the tree, reusing
+    // all but its last leaves. The appends go up before any settles.
+    for n in 0..8 {
+        let suffix = format!("<{n}>{}", "y".repeat(400));
+        block_on(alice.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+        expected.push_str(&suffix);
+        block_on(alice.tick()).unwrap();
+    }
+    pump(&server, &[&alice, &bob]);
+    let pushed: usize = alice_up
+        .borrow()
+        .iter()
+        .filter(|(kind, ..)| *kind == "push")
+        .map(|(_, size, _)| size)
+        .sum();
+    assert!(pushed > 0);
+    assert!(pushed < 8 * LARGE / 2, "pushed {pushed} bytes");
+    for db in [&server, &alice, &bob] {
+        assert_eq!(
+            local_cell(db, "docs", 1, "body").unwrap(),
+            Some(Value::String(expected.clone()))
+        );
+    }
 }
 
 #[test]

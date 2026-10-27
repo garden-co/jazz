@@ -385,6 +385,9 @@ struct Inner {
     /// Descriptors this store's own edit derived for the write in flight:
     /// trusted as built, so binding them re-validates nothing.
     derived: Vec<jazz_types::large_values::LargeValueRef>,
+    /// What the session whose commit is being applied holds (SPEC 19.4):
+    /// set while a synced commit applies, `None` for local writes.
+    pub(crate) possession: Option<crate::large::Possession>,
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
@@ -1102,6 +1105,7 @@ impl Db {
                 merging: false,
                 overlay: None,
                 derived: Vec::new(),
+                possession: None,
                 staging: LargeValueStagingPolicy::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
@@ -3517,6 +3521,15 @@ impl Inner {
         } else if self.derived.contains(large) {
             // Derived here from a stored tree by an append or splice.
             complete = self.client.is_none();
+        } else if let Some(possession) = &self.possession
+            && !crate::large::possessed(&self.conn, &self.chunks, large, possession)?
+        {
+            // Answered as for absent nodes: no oracle for what this store
+            // holds for others (SPEC 19.9).
+            return Err(rejected(format!(
+                "`{}`: the large-value descriptor names chunks this store does not hold",
+                column.name
+            )));
         } else if self.client.is_some() {
             // A replica's tree may be only partly fetched: the authority
             // checks the value when it admits the write.
@@ -3546,7 +3559,9 @@ impl Inner {
             })?;
             json.check_text(text, &column.name).map_err(rejected)?;
         }
-        crate::large::settle_receipts(&self.conn, &large.root.object_hash)?;
+        if let Some(possession) = &self.possession {
+            crate::large::settle_receipts(&self.conn, &large.root.object_hash, &possession.author)?;
+        }
         self.large_cell(large)
     }
 
