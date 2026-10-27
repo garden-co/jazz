@@ -5,7 +5,6 @@ import { PersistedWriteRejectedError } from "jazz-tools";
  * again and retry". These are the codes the Better Auth adapter retries.
  */
 export const RETRYABLE_CONFLICT_CODES: ReadonlySet<string> = new Set([
-  "cascade_rejected",
   "serialization_conflict",
   "transaction_conflict",
 ]);

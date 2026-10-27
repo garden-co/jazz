@@ -310,6 +310,12 @@ fn a_session_write_timestamped_too_far_ahead_is_rejected() {
     ))
     .err()
     .expect("too far ahead");
+    assert_eq!(
+        refused.reason,
+        Some(jazz::db::Reason::ClientClockTooFarAhead),
+        "{}",
+        refused.message
+    );
     assert!(
         refused
             .message

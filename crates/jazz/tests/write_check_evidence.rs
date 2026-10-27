@@ -304,3 +304,44 @@ fn a_unit_s_earlier_inserts_are_evidence_and_its_deletes_are_not() {
     .expect("a deleted committed band is evidence as committed");
     assert_eq!(count(&server, "tasks"), 3);
 }
+
+/// A write check reads its policy's rows as of the unit's cut: committed
+/// rows, overlaid with the unit's grounded ones, plus the newest history
+/// image of rows changed since. Every arm of that read must let SQLite
+/// search by the policy's correlated keys; a scan reads every row in the
+/// table, other tenants' included, on every check (#4298).
+#[test]
+fn write_checks_search_the_policy_table_through_the_cut() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = authority();
+    let band = RowUuid::from_bytes([0x10; 16]);
+    block_on(server.insert(
+        "bands",
+        BTreeMap::from([("founder".to_owned(), subject(alice))]),
+        options(band),
+    ))
+    .unwrap();
+    let owner = RowUuid::from_bytes([0x20; 16]);
+    block_on(server.insert(
+        "members",
+        BTreeMap::from([
+            ("band".to_owned(), Value::Uuid(band.0)),
+            ("account".to_owned(), subject(alice)),
+            ("role".to_owned(), Value::String("owner".into())),
+        ]),
+        options(owner),
+    ))
+    .unwrap();
+    let joining = RowUuid::from_bytes([0x21; 16]);
+
+    // The first round overlays nothing; later rounds overlay grounded rows.
+    for grounded in [vec![], vec![owner]] {
+        let plan = server
+            .explain_write_check_plan("members", joining, alice, &grounded)
+            .unwrap();
+        assert!(
+            !plan.contains("SCAN") && !plan.contains("CO-ROUTINE"),
+            "grounded {grounded:?}: {plan}"
+        );
+    }
+}
