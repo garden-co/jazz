@@ -617,18 +617,15 @@ pub enum WireError {
     Other(String),
 }
 
-/// A large-value node named by its locator and the object hash it must
-/// match.
+/// A large-value node named by its object hash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireChunkRef {
-    pub locator: jazz_types::large_values::Locator,
     pub hash: [u8; 32],
 }
 
 /// A large-value node's encoded bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireChunk {
-    pub locator: jazz_types::large_values::Locator,
     pub hash: [u8; 32],
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
@@ -637,7 +634,6 @@ pub struct WireChunk {
 impl WireChunkRef {
     fn of(request: &ChunkRequest) -> Self {
         Self {
-            locator: request.locator,
             hash: request.object_hash,
         }
     }
@@ -645,7 +641,6 @@ impl WireChunkRef {
     fn request(&self) -> ChunkRequest {
         ChunkRequest {
             object_hash: self.hash,
-            locator: self.locator,
         }
     }
 }
@@ -654,7 +649,6 @@ impl WireChunk {
     fn request(&self) -> ChunkRequest {
         ChunkRequest {
             object_hash: self.hash,
-            locator: self.locator,
         }
     }
 }
@@ -759,7 +753,7 @@ pub enum SyncMessage {
         origin: Option<([u8; 16], u64)>,
     },
     /// Large-value nodes the client's descriptors name and it lacks
-    /// (pull by locator; holding the locator is the read capability).
+    /// (pulled by hash).
     ChunkRequests {
         requests: Vec<WireChunkRef>,
     },
@@ -1092,7 +1086,7 @@ pub(crate) struct Client {
     /// Nodes to ask for on the next send.
     wanted: BTreeSet<ChunkRequest>,
     /// Nodes pushed for each unsettled commit.
-    pushed: HashMap<u64, Vec<jazz_types::large_values::Locator>>,
+    pushed: HashMap<u64, Vec<jazz_types::large_values::ContentHash>>,
     /// Requests the server could not answer; never asked again.
     unavailable: BTreeSet<ChunkRequest>,
     /// Chunks arrived this tick: results waiting for them run again.
@@ -3093,11 +3087,11 @@ impl Inner {
     }
 
     /// The nodes a commit's large values need pushed first: (their
-    /// locators, the batches carrying them).
+    /// hashes, the batches carrying them).
     fn pushes_for(
         &self,
         commit: &SyncMessage,
-    ) -> Result<(Vec<jazz_types::large_values::Locator>, Vec<SyncMessage>), Error> {
+    ) -> Result<(Vec<jazz_types::large_values::ContentHash>, Vec<SyncMessage>), Error> {
         let SyncMessage::Commit { ops, .. } = commit else {
             return Ok((Vec::new(), Vec::new()));
         };
@@ -3121,16 +3115,15 @@ impl Inner {
                 large(value, &mut values);
             }
         }
-        let mut locators = Vec::new();
+        let mut hashes = Vec::new();
         let mut batches = Vec::new();
         let mut batch = Vec::new();
         let mut size = 0;
         for value in &values {
             for (request, bytes) in crate::large::unpushed(&self.conn, &self.chunks, value)? {
-                locators.push(request.locator);
+                hashes.push(jazz_types::large_values::ContentHash(request.object_hash));
                 size += bytes.len();
                 batch.push(WireChunk {
-                    locator: request.locator,
                     hash: request.object_hash,
                     bytes,
                 });
@@ -3145,7 +3138,7 @@ impl Inner {
         if !batch.is_empty() {
             batches.push(SyncMessage::PushChunks { nodes: batch });
         }
-        Ok((locators, batches))
+        Ok((hashes, batches))
     }
 
     fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
@@ -4818,8 +4811,8 @@ impl Db {
                         }
                         client.fates.insert(tx, result);
                         let node = client.node;
-                        if let Some(locators) = client.pushed.remove(&tx) {
-                            crate::large::mark_pushed(&inner.conn, &locators)?;
+                        if let Some(hashes) = client.pushed.remove(&tx) {
+                            crate::large::mark_pushed(&inner.conn, &hashes)?;
                         }
                         inner.record_settled(node, tx, accepted.then_some(through))?;
                         inner.forget_pending(tx)?;
@@ -4942,11 +4935,11 @@ impl Db {
                 client.sent.push(commit.clone());
             }
         }
-        for (commit, (locators, batches)) in commits.into_iter().zip(pushes) {
+        for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
             if let SyncMessage::Commit { tx, .. } = &commit
-                && !locators.is_empty()
+                && !hashes.is_empty()
             {
-                client.pushed.insert(*tx, locators);
+                client.pushed.insert(*tx, hashes);
             }
             out.extend(batches);
             out.push(commit);
@@ -7048,7 +7041,6 @@ impl Db {
                         Ok(Some(bytes)) => {
                             size += bytes.len();
                             nodes.push(WireChunk {
-                                locator: request.locator,
                                 hash: request.hash,
                                 bytes,
                             });
@@ -7090,7 +7082,10 @@ impl Db {
                             expires,
                         );
                         if relay && received.is_ok() {
-                            crate::large::mark_unpushed(&inner.conn, &request.locator)?;
+                            crate::large::mark_unpushed(
+                                &inner.conn,
+                                &jazz_types::large_values::ContentHash(request.object_hash),
+                            )?;
                         }
                     }
                     Ok(())

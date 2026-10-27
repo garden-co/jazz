@@ -71,8 +71,8 @@ const WINDOW: u64 = 64 * 1024;
 /// the open transaction.
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 
-/// The chunk tables. Nodes are keyed by their random locator and verified
-/// against the object hash a parent or descriptor commits to. A branch's
+/// The chunk tables. Nodes are keyed by their object hash, and each read
+/// verifies a node against the hash its parent or descriptor names. A branch's
 /// edges to its children are kept apart from the children themselves, so
 /// nodes may arrive in any order (a replica fetches parents first, an
 /// upload may send leaves first) and a node is held while any stored
@@ -93,8 +93,8 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// its row commits, it is aborted, or it goes untouched past the staging
 /// policy's maximum age.
 pub(crate) const DDL: &str = "\
-CREATE TABLE IF NOT EXISTS _jazz_lv_node (locator BLOB PRIMARY KEY, hash BLOB NOT NULL, \
- bytes BLOB NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_node (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL) \
+ WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_edge (child BLOB NOT NULL, parent BLOB NOT NULL, \
  PRIMARY KEY (child, parent)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_edge_parent ON _jazz_lv_edge (parent);
@@ -104,15 +104,15 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_epoch (id INTEGER PRIMARY KEY, root BLOB NOT
  base BLOB NOT NULL, edits BLOB NOT NULL, count INTEGER NOT NULL, \
  refs INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS _jazz_lv_epoch_root ON _jazz_lv_epoch (root);
-CREATE TABLE IF NOT EXISTS _jazz_lv_receipt (locator BLOB PRIMARY KEY, \
+CREATE TABLE IF NOT EXISTS _jazz_lv_receipt (hash BLOB PRIMARY KEY, \
  expires INTEGER NOT NULL) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_receipt_expires ON _jazz_lv_receipt (expires);
-CREATE TABLE IF NOT EXISTS _jazz_lv_unpushed (locator BLOB PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_unpushed (hash BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_upload (id BLOB PRIMARY KEY, touched INTEGER NOT NULL) \
  WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS _jazz_lv_upload_node (id BLOB NOT NULL, locator BLOB NOT NULL, \
- PRIMARY KEY (id, locator)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_locator ON _jazz_lv_upload_node (locator);
+CREATE TABLE IF NOT EXISTS _jazz_lv_upload_node (id BLOB NOT NULL, hash BLOB NOT NULL, \
+ PRIMARY KEY (id, hash)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_hash ON _jazz_lv_upload_node (hash);
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_scratch (slot INTEGER NOT NULL, cell INTEGER NOT NULL, \
  v BLOB, k, PRIMARY KEY (slot, cell)) WITHOUT ROWID;
@@ -140,10 +140,9 @@ CREATE TRIGGER IF NOT EXISTS _jazz_lv_epoch_free AFTER UPDATE OF refs ON _jazz_l
 /// the queue row goes. `_jazz_lv_offload_delete` holds reclaimed leaves to
 /// delete from the chunk store, after the reclamation committed.
 const OFFLOAD_DDL: &str = "\
-CREATE TABLE IF NOT EXISTS _jazz_lv_offload (locator BLOB PRIMARY KEY, state INTEGER NOT NULL) \
+CREATE TABLE IF NOT EXISTS _jazz_lv_offload (hash BLOB PRIMARY KEY, state INTEGER NOT NULL) \
  WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS _jazz_lv_offload_delete (locator BLOB PRIMARY KEY, \
- hash BLOB NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_offload_delete (hash BLOB PRIMARY KEY) WITHOUT ROWID;
 ";
 
 /// Prepare a store for its chunk store, or refuse to open a store that
@@ -164,9 +163,9 @@ pub(crate) fn open_offload(conn: &Connection, chunks: &Chunks) -> Result<(), Err
         (false, true) => crate::values::in_savepoint(conn, "jazz_lv_offload", || {
             crate::db::execute_script(conn, OFFLOAD_DDL)?;
             conn.execute(
-                "INSERT INTO _jazz_lv_offload (locator, state) SELECT n.locator, 0 \
+                "INSERT INTO _jazz_lv_offload (hash, state) SELECT n.hash, 0 \
                  FROM _jazz_lv_node n WHERE NOT EXISTS \
-                 (SELECT 1 FROM _jazz_lv_edge e WHERE e.parent = n.locator)",
+                 (SELECT 1 FROM _jazz_lv_edge e WHERE e.parent = n.hash)",
                 [],
             )
             .map_err(storage)?;
@@ -183,28 +182,28 @@ pub(crate) fn begin_offload(
     limit: usize,
 ) -> Result<Vec<(NodeKey, Vec<u8>)>, Error> {
     crate::values::in_savepoint(conn, "jazz_lv_offload", || {
-        let picked: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = conn
+        let picked: Vec<(Vec<u8>, Vec<u8>)> = conn
             .prepare_cached(
-                "SELECT o.locator, n.hash, n.bytes FROM _jazz_lv_offload o \
-                 JOIN _jazz_lv_node n ON n.locator = o.locator \
-                 WHERE NOT EXISTS (SELECT 1 FROM _jazz_lv_unpushed WHERE locator = o.locator) \
-                 AND NOT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = o.locator) \
-                 AND NOT EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE locator = o.locator) \
+                "SELECT o.hash, n.bytes FROM _jazz_lv_offload o \
+                 JOIN _jazz_lv_node n ON n.hash = o.hash \
+                 WHERE NOT EXISTS (SELECT 1 FROM _jazz_lv_unpushed WHERE hash = o.hash) \
+                 AND NOT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = o.hash) \
+                 AND NOT EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE hash = o.hash) \
                  LIMIT ?1",
             )
             .and_then(|mut statement| {
                 statement
-                    .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<Result<_, _>>()
             })
             .map_err(storage)?;
         let mut mark = conn
-            .prepare_cached("UPDATE _jazz_lv_offload SET state = 1 WHERE locator = ?1")
+            .prepare_cached("UPDATE _jazz_lv_offload SET state = 1 WHERE hash = ?1")
             .map_err(storage)?;
         let mut out = Vec::with_capacity(picked.len());
-        for (locator, hash, bytes) in picked {
-            mark.execute([&locator]).map_err(storage)?;
-            out.push((key(&locator, &hash)?, bytes));
+        for (hash, bytes) in picked {
+            mark.execute([&hash]).map_err(storage)?;
+            out.push((key(&hash)?, bytes));
         }
         Ok(out)
     })
@@ -213,48 +212,44 @@ pub(crate) fn begin_offload(
 /// A leaf's bytes reached the chunk store: drop them here, unless it was
 /// reclaimed (and perhaps stored again) while the put ran.
 pub(crate) fn offloaded(conn: &Connection, node: &NodeKey) -> Result<(), Error> {
-    let locator = node.locator.as_slice();
+    let hash = node.hash.as_slice();
     conn.prepare_cached(
-        "UPDATE _jazz_lv_node SET bytes = X'' WHERE locator = ?1 AND EXISTS \
-         (SELECT 1 FROM _jazz_lv_offload WHERE locator = ?1 AND state = 1)",
+        "UPDATE _jazz_lv_node SET bytes = X'' WHERE hash = ?1 AND EXISTS \
+         (SELECT 1 FROM _jazz_lv_offload WHERE hash = ?1 AND state = 1)",
     )
-    .and_then(|mut statement| statement.execute([locator]))
-    .and_then(|_| {
-        conn.prepare_cached("DELETE FROM _jazz_lv_offload WHERE locator = ?1 AND state = 1")
-    })
-    .and_then(|mut statement| statement.execute([locator]))
+    .and_then(|mut statement| statement.execute([hash]))
+    .and_then(|_| conn.prepare_cached("DELETE FROM _jazz_lv_offload WHERE hash = ?1 AND state = 1"))
+    .and_then(|mut statement| statement.execute([hash]))
     .map_err(storage)?;
     Ok(())
 }
 
 /// Up to `limit` reclaimed leaves to delete from the chunk store.
 pub(crate) fn pending_deletes(conn: &Connection, limit: usize) -> Result<Vec<NodeKey>, Error> {
-    let rows: Vec<(Vec<u8>, Vec<u8>)> = conn
-        .prepare_cached("SELECT locator, hash FROM _jazz_lv_offload_delete LIMIT ?1")
+    let rows: Vec<Vec<u8>> = conn
+        .prepare_cached("SELECT hash FROM _jazz_lv_offload_delete LIMIT ?1")
         .and_then(|mut statement| {
             statement
-                .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map([limit as i64], |r| r.get(0))?
                 .collect::<Result<_, _>>()
         })
         .map_err(storage)?;
-    rows.iter()
-        .map(|(locator, hash)| key(locator, hash))
-        .collect()
+    rows.iter().map(|hash| key(hash)).collect()
 }
 
 /// A reclaimed leaf is gone from the chunk store.
 pub(crate) fn deleted(conn: &Connection, node: &NodeKey) -> Result<(), Error> {
-    conn.prepare_cached("DELETE FROM _jazz_lv_offload_delete WHERE locator = ?1")
-        .and_then(|mut statement| statement.execute([node.locator.as_slice()]))
+    conn.prepare_cached("DELETE FROM _jazz_lv_offload_delete WHERE hash = ?1")
+        .and_then(|mut statement| statement.execute([node.hash.as_slice()]))
         .map_err(storage)?;
     Ok(())
 }
 
-fn key(locator: &[u8], hash: &[u8]) -> Result<NodeKey, Error> {
-    let malformed = || corrupt(lv::Error::MalformedNode);
+fn key(hash: &[u8]) -> Result<NodeKey, Error> {
     Ok(NodeKey {
-        locator: locator.try_into().map_err(|_| malformed())?,
-        hash: hash.try_into().map_err(|_| malformed())?,
+        hash: hash
+            .try_into()
+            .map_err(|_| corrupt(lv::Error::MalformedNode))?,
     })
 }
 
@@ -600,7 +595,7 @@ impl Chunks {
         state.clock += 1;
         let used = state.clock;
         let old = state.nodes.insert(
-            *request.locator.as_bytes(),
+            request.object_hash,
             Cached {
                 hash: request.object_hash,
                 bytes,
@@ -680,7 +675,7 @@ impl Chunks {
         let used = state.clock;
         state.bytes += bytes.len();
         let old = state.nodes.insert(
-            *request.locator.as_bytes(),
+            request.object_hash,
             Cached {
                 hash: request.object_hash,
                 bytes,
@@ -703,7 +698,6 @@ impl Chunks {
             self.put(
                 &ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator,
                 },
                 Bytes::from(chunk.encoded.clone()),
             );
@@ -712,14 +706,14 @@ impl Chunks {
 
     /// Forget a reclaimed node, and the epochs over it (which were
     /// deleted before it could be).
-    pub(crate) fn forget(&self, locator: &[u8; 32]) {
+    pub(crate) fn forget(&self, hash: &[u8; 32]) {
         let mut state = self.state.lock().expect("chunk cache");
-        if let Some(old) = state.nodes.remove(locator)
+        if let Some(old) = state.nodes.remove(hash)
             && !old.pinned
         {
             state.bytes -= old.bytes.len();
         }
-        state.epochs.retain(|_, epoch| epoch.root != *locator);
+        state.epochs.retain(|_, epoch| epoch.root != *hash);
     }
 
     /// Cache an epoch the open transaction wrote.
@@ -730,7 +724,7 @@ impl Chunks {
         state.epochs.insert(
             id,
             CachedEpoch {
-                root: *base.root.locator.as_bytes(),
+                root: *base.root.object_hash.as_bytes(),
                 base: Arc::new(base.clone()),
                 edits: Bytes::copy_from_slice(edits),
                 count,
@@ -764,7 +758,7 @@ impl Chunks {
         let (base, edits, count) = found.ok_or_else(gone)?;
         let base = lv::decode_large_value_ref(&base).map_err(corrupt)?;
         let epoch = CachedEpoch {
-            root: *base.root.locator.as_bytes(),
+            root: *base.root.object_hash.as_bytes(),
             base: Arc::new(base),
             edits: Bytes::from(edits),
             count: usize::try_from(count).map_err(|_| gone())?,
@@ -857,7 +851,7 @@ impl Chunks {
         let mut state = self.state.lock().expect("chunk cache");
         state.clock += 1;
         let used = state.clock;
-        if let Some(node) = state.nodes.get_mut(request.locator.as_bytes()) {
+        if let Some(node) = state.nodes.get_mut(&request.object_hash) {
             if node.hash != request.object_hash {
                 return Err(corrupt(lv::Error::ObjectHashMismatch));
             }
@@ -868,10 +862,10 @@ impl Chunks {
             return Ok(Local::Absent);
         };
         let found: Option<(Vec<u8>, Vec<u8>)> = reader
-            .prepare_cached("SELECT hash, bytes FROM _jazz_lv_node WHERE locator = ?1")
+            .prepare_cached("SELECT hash, bytes FROM _jazz_lv_node WHERE hash = ?1")
             .and_then(|mut statement| {
                 statement
-                    .query_row([request.locator.as_bytes().as_slice()], |r| {
+                    .query_row([&request.object_hash.as_slice()], |r| {
                         Ok((r.get(0)?, r.get(1)?))
                     })
                     .optional()
@@ -908,7 +902,7 @@ impl Chunks {
         }
         state.bytes += bytes.len();
         state.nodes.insert(
-            *request.locator.as_bytes(),
+            request.object_hash,
             Cached {
                 hash: request.object_hash,
                 bytes: bytes.clone(),
@@ -1102,14 +1096,14 @@ impl State {
             .nodes
             .iter()
             .filter(|(_, node)| !node.pinned && !node.held)
-            .map(|(locator, node)| (*locator, node.used, node.bytes.len()))
+            .map(|(hash, node)| (*hash, node.used, node.bytes.len()))
             .collect();
         victims.sort_by_key(|(_, used, _)| *used);
-        for (locator, _, len) in victims {
+        for (hash, _, len) in victims {
             if self.bytes <= budget * 3 / 4 {
                 break;
             }
-            self.nodes.remove(&locator);
+            self.nodes.remove(&hash);
             self.bytes -= len;
         }
     }
@@ -1379,7 +1373,7 @@ pub(crate) fn store(
     for chunk in &prepared.staged_chunks {
         store_chunk(conn, chunks, true, chunk)?;
         if replica {
-            mark_unpushed(conn, &chunk.node_ref.locator)?;
+            mark_unpushed(conn, &chunk.node_ref.object_hash)?;
         }
     }
     record_base(conn, &prepared.value_ref)
@@ -1395,7 +1389,7 @@ fn record_base(conn: &Connection, value: &LargeValueRef) -> Result<(), Error> {
     )
     .and_then(|mut statement| {
         statement.execute(rusqlite::params![
-            value.root.locator.as_bytes().as_slice(),
+            value.root.object_hash.as_bytes().as_slice(),
             encoded
         ])
     })
@@ -1428,7 +1422,7 @@ pub(crate) fn intern(
             "large value: an edit tail outgrew its epoch without consolidating",
         ));
     }
-    let root = value.root.locator.as_bytes().as_slice();
+    let root = value.root.object_hash.as_bytes().as_slice();
     let candidates: Vec<(i64, Vec<u8>, i64)> = conn
         .prepare_cached("SELECT id, edits, count FROM _jazz_lv_epoch WHERE root = ?1 AND base = ?2")
         .and_then(|mut statement| {
@@ -1472,9 +1466,9 @@ pub(crate) fn intern(
     Ok(id * SPAN + n as i64)
 }
 
-pub(crate) fn mark_unpushed(conn: &Connection, locator: &lv::Locator) -> Result<(), Error> {
-    conn.prepare_cached("INSERT OR IGNORE INTO _jazz_lv_unpushed (locator) VALUES (?1)")
-        .and_then(|mut statement| statement.execute([locator.as_bytes().as_slice()]))
+pub(crate) fn mark_unpushed(conn: &Connection, hash: &lv::ContentHash) -> Result<(), Error> {
+    conn.prepare_cached("INSERT OR IGNORE INTO _jazz_lv_unpushed (hash) VALUES (?1)")
+        .and_then(|mut statement| statement.execute([hash.as_bytes().as_slice()]))
         .map_err(storage)?;
     Ok(())
 }
@@ -1489,27 +1483,17 @@ fn store_chunk(
     cache: bool,
     chunk: &lv::StagedChunk,
 ) -> Result<(), Error> {
-    let locator = chunk.node_ref.locator.as_bytes();
     let hash = chunk.node_ref.object_hash.0;
     let inserted = conn
         .prepare_cached(
-            "INSERT INTO _jazz_lv_node (locator, hash, bytes) VALUES (?1, ?2, ?3) \
-             ON CONFLICT (locator) DO NOTHING",
+            "INSERT INTO _jazz_lv_node (hash, bytes) VALUES (?1, ?2) \
+             ON CONFLICT (hash) DO NOTHING",
         )
-        .and_then(|mut insert| {
-            insert.execute(rusqlite::params![
-                locator.as_slice(),
-                hash.as_slice(),
-                chunk.encoded
-            ])
-        })
+        .and_then(|mut insert| insert.execute(rusqlite::params![hash.as_slice(), chunk.encoded]))
         .map_err(storage)?;
     if cache {
         chunks.put(
-            &ChunkRequest {
-                object_hash: hash,
-                locator: chunk.node_ref.locator,
-            },
+            &ChunkRequest { object_hash: hash },
             Bytes::from(chunk.encoded.clone()),
         );
     }
@@ -1523,21 +1507,21 @@ fn store_chunk(
             .map_err(storage)?;
         for child in children {
             edge.execute([
-                child.node_ref.locator.as_bytes().as_slice(),
-                locator.as_slice(),
+                child.node_ref.object_hash.as_bytes().as_slice(),
+                hash.as_slice(),
             ])
             .map_err(storage)?;
         }
     } else if chunks.offload_store().is_some() {
         // Stored again after it was reclaimed: the chunk store keeps it.
-        conn.prepare_cached("DELETE FROM _jazz_lv_offload_delete WHERE locator = ?1")
-            .and_then(|mut statement| statement.execute([locator.as_slice()]))
+        conn.prepare_cached("DELETE FROM _jazz_lv_offload_delete WHERE hash = ?1")
+            .and_then(|mut statement| statement.execute([hash.as_slice()]))
             .and_then(|_| {
                 conn.prepare_cached(
-                    "INSERT OR IGNORE INTO _jazz_lv_offload (locator, state) VALUES (?1, 0)",
+                    "INSERT OR IGNORE INTO _jazz_lv_offload (hash, state) VALUES (?1, 0)",
                 )
             })
-            .and_then(|mut statement| statement.execute([locator.as_slice()]))
+            .and_then(|mut statement| statement.execute([hash.as_slice()]))
             .map_err(storage)?;
     }
     Ok(())
@@ -1581,13 +1565,16 @@ pub(crate) fn stage_upload(
         staged.iter().try_for_each(|chunk| {
             store_chunk(conn, chunks, cache, chunk)?;
             if replica {
-                mark_unpushed(conn, &chunk.node_ref.locator)?;
+                mark_unpushed(conn, &chunk.node_ref.object_hash)?;
             }
             conn.prepare_cached(
-                "INSERT OR IGNORE INTO _jazz_lv_upload_node (id, locator) VALUES (?1, ?2)",
+                "INSERT OR IGNORE INTO _jazz_lv_upload_node (id, hash) VALUES (?1, ?2)",
             )
             .and_then(|mut statement| {
-                statement.execute([id.as_slice(), chunk.node_ref.locator.as_bytes().as_slice()])
+                statement.execute([
+                    id.as_slice(),
+                    chunk.node_ref.object_hash.as_bytes().as_slice(),
+                ])
             })
             .map_err(storage)?;
             Ok(())
@@ -1605,7 +1592,7 @@ pub(crate) fn finish_upload(conn: &Connection, value: &LargeValueRef) -> Result<
 pub(crate) fn end_upload(conn: &Connection, id: &[u8; 32]) -> Result<(), Error> {
     conn.execute(
         "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
-         SELECT locator FROM _jazz_lv_upload_node WHERE id = ?1",
+         SELECT hash FROM _jazz_lv_upload_node WHERE id = ?1",
         [id.as_slice()],
     )
     .and_then(|_| {
@@ -1639,17 +1626,13 @@ pub(crate) fn expire_uploads(conn: &Connection, before: i64) -> Result<usize, Er
     Ok(ids.len())
 }
 
-/// One stored node: (object hash, encoded bytes).
-pub(crate) fn node(
-    conn: &Connection,
-    locator: &lv::Locator,
-) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
-    conn.prepare_cached("SELECT hash, bytes FROM _jazz_lv_node WHERE locator = ?1")
+/// One stored node's encoded bytes (empty once they moved to the chunk
+/// store).
+pub(crate) fn node(conn: &Connection, hash: &[u8; 32]) -> Result<Option<Vec<u8>>, Error> {
+    conn.prepare_cached("SELECT bytes FROM _jazz_lv_node WHERE hash = ?1")
         .and_then(|mut statement| {
             statement
-                .query_row([locator.as_bytes().as_slice()], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })
+                .query_row([hash.as_slice()], |r| r.get(0))
                 .optional()
         })
         .map_err(storage)
@@ -1658,7 +1641,6 @@ pub(crate) fn node(
 fn request_of(node_ref: &lv::NodeRef) -> ChunkRequest {
     ChunkRequest {
         object_hash: node_ref.object_hash.0,
-        locator: node_ref.locator,
     }
 }
 
@@ -1677,12 +1659,9 @@ pub(crate) fn stored_bytes(
     chunks: &Chunks,
     request: &ChunkRequest,
 ) -> Result<Option<Vec<u8>>, Error> {
-    let Some((hash, bytes)) = node(conn, &request.locator)? else {
+    let Some(bytes) = node(conn, &request.object_hash)? else {
         return Ok(None);
     };
-    if hash.as_slice() != request.object_hash {
-        return Ok(None);
-    }
     if !bytes.is_empty() {
         return Ok(Some(bytes));
     }
@@ -1708,13 +1687,13 @@ pub(crate) fn unpushed(
     let mut stack = vec![request_of(&value.root)];
     let mut seen = BTreeSet::new();
     while let Some(request) = stack.pop() {
-        if !seen.insert(request.locator) {
+        if !seen.insert(request.object_hash) {
             continue;
         }
         let pending: bool = conn
-            .prepare_cached("SELECT EXISTS (SELECT 1 FROM _jazz_lv_unpushed WHERE locator = ?1)")
+            .prepare_cached("SELECT EXISTS (SELECT 1 FROM _jazz_lv_unpushed WHERE hash = ?1)")
             .and_then(|mut statement| {
-                statement.query_row([request.locator.as_bytes().as_slice()], |r| r.get(0))
+                statement.query_row([request.object_hash.as_slice()], |r| r.get(0))
             })
             .map_err(storage)?;
         if !pending {
@@ -1736,13 +1715,13 @@ pub(crate) fn unpushed(
 
 /// The upstream accepted (or finally refused) the commit these nodes were
 /// pushed for.
-pub(crate) fn mark_pushed(conn: &Connection, locators: &[lv::Locator]) -> Result<(), Error> {
+pub(crate) fn mark_pushed(conn: &Connection, hashes: &[lv::ContentHash]) -> Result<(), Error> {
     let mut statement = conn
-        .prepare_cached("DELETE FROM _jazz_lv_unpushed WHERE locator = ?1")
+        .prepare_cached("DELETE FROM _jazz_lv_unpushed WHERE hash = ?1")
         .map_err(storage)?;
-    for locator in locators {
+    for hash in hashes {
         statement
-            .execute([locator.as_bytes().as_slice()])
+            .execute([hash.as_bytes().as_slice()])
             .map_err(storage)?;
     }
     Ok(())
@@ -1764,7 +1743,6 @@ pub(crate) fn install_fetched(
         &lv::StagedChunk {
             node_ref: lv::NodeRef {
                 object_hash: lv::ContentHash(request.object_hash),
-                locator: request.locator,
             },
             encoded: bytes,
         },
@@ -1780,24 +1758,13 @@ pub(crate) fn receive_pushed(
     bytes: Vec<u8>,
     expires: i64,
 ) -> Result<(), Error> {
-    if let Some((hash, _)) = node(conn, &request.locator)?
-        && hash.as_slice() != request.object_hash
-    {
-        return Err(Error::new(
-            ErrorCode::WriteRejected,
-            "opaque locator already names different content",
-        ));
-    }
     install_fetched(conn, chunks, request, bytes)?;
     conn.prepare_cached(
-        "INSERT INTO _jazz_lv_receipt (locator, expires) VALUES (?1, ?2) \
-         ON CONFLICT (locator) DO UPDATE SET expires = MAX(expires, excluded.expires)",
+        "INSERT INTO _jazz_lv_receipt (hash, expires) VALUES (?1, ?2) \
+         ON CONFLICT (hash) DO UPDATE SET expires = MAX(expires, excluded.expires)",
     )
     .and_then(|mut statement| {
-        statement.execute(rusqlite::params![
-            request.locator.as_bytes().as_slice(),
-            expires
-        ])
+        statement.execute(rusqlite::params![request.object_hash.as_slice(), expires])
     })
     .map_err(storage)?;
     Ok(())
@@ -1806,13 +1773,13 @@ pub(crate) fn receive_pushed(
 /// Drop the receipts of the pushed nodes under `root`, which a commit now
 /// references: the cell holds the tree from here on. Walks only nodes that
 /// still hold a receipt, so an append settles just the nodes it pushed.
-pub(crate) fn settle_receipts(conn: &Connection, root: &lv::Locator) -> Result<(), Error> {
+pub(crate) fn settle_receipts(conn: &Connection, root: &lv::ContentHash) -> Result<(), Error> {
     conn.prepare_cached(
-        "WITH RECURSIVE pushed (locator) AS ( \
-           SELECT locator FROM _jazz_lv_receipt WHERE locator = ?1 \
-           UNION SELECT e.child FROM _jazz_lv_edge e JOIN pushed p ON e.parent = p.locator \
-           WHERE EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = e.child)) \
-         DELETE FROM _jazz_lv_receipt WHERE locator IN (SELECT locator FROM pushed)",
+        "WITH RECURSIVE pushed (hash) AS ( \
+           SELECT hash FROM _jazz_lv_receipt WHERE hash = ?1 \
+           UNION SELECT e.child FROM _jazz_lv_edge e JOIN pushed p ON e.parent = p.hash \
+           WHERE EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = e.child)) \
+         DELETE FROM _jazz_lv_receipt WHERE hash IN (SELECT hash FROM pushed)",
     )
     .and_then(|mut statement| statement.execute([root.as_bytes().as_slice()]))
     .map_err(storage)?;
@@ -1824,7 +1791,7 @@ pub(crate) fn settle_receipts(conn: &Connection, root: &lv::Locator) -> Result<(
 pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
     conn.execute_batch(&format!(
         "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
-         SELECT locator FROM _jazz_lv_receipt WHERE expires <= {now}; \
+         SELECT hash FROM _jazz_lv_receipt WHERE expires <= {now}; \
          DELETE FROM _jazz_lv_receipt WHERE expires <= {now};"
     ))
     .map_err(storage)
@@ -1874,7 +1841,7 @@ pub(crate) fn admit(
         .prepare_cached("SELECT base FROM _jazz_lv_root WHERE root = ?1")
         .and_then(|mut statement| {
             statement
-                .query_row([value.root.locator.as_bytes().as_slice()], |r| r.get(0))
+                .query_row([value.root.object_hash.as_bytes().as_slice()], |r| r.get(0))
                 .optional()
         })
         .map_err(storage)?;
@@ -1929,8 +1896,8 @@ pub(crate) fn admit(
 /// Whether the root `value` names is stored here.
 pub(crate) fn root_is_local(conn: &Connection, value: &LargeValueRef) -> Result<bool, Error> {
     conn.cached_row(
-        "SELECT EXISTS (SELECT 1 FROM _jazz_lv_node WHERE locator = ?1)",
-        [value.root.locator.as_bytes().as_slice()],
+        "SELECT EXISTS (SELECT 1 FROM _jazz_lv_node WHERE hash = ?1)",
+        [value.root.object_hash.as_bytes().as_slice()],
         |r| r.get(0),
     )
     .map_err(storage)
@@ -1959,12 +1926,12 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
         conn.execute("DELETE FROM _jazz_lv_reclaim WHERE root = ?1", [root])
             .map_err(storage)?;
     }
-    while let Some(locator) = queue.pop() {
+    while let Some(hash) = queue.pop() {
         if deleted >= budget {
             // Leave the rest for the next pass.
             conn.execute(
                 "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) VALUES (?1)",
-                [&locator],
+                [&hash],
             )
             .map_err(storage)?;
             continue;
@@ -1974,72 +1941,61 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_root WHERE root = ?1 \
                  AND durable > 0) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
-                 OR EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE locator = ?1) \
-                 OR EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE locator = ?1)",
-                [&locator],
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = ?1) \
+                 OR EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE hash = ?1)",
+                [&hash],
                 |r| r.get(0),
             )
             .map_err(storage)?;
         if referenced {
             continue;
         }
-        let node: Option<(Vec<u8>, Vec<u8>)> = conn
-            .cached_row(
-                "SELECT hash, bytes FROM _jazz_lv_node WHERE locator = ?1",
-                [&locator],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
+        let key: [u8; 32] = hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| corrupt(lv::Error::MalformedNode))?;
+        let bytes = node(conn, &key)?;
+        conn.execute("DELETE FROM _jazz_lv_root WHERE root = ?1", [&hash])
             .map_err(storage)?;
-        conn.execute("DELETE FROM _jazz_lv_root WHERE root = ?1", [&locator])
-            .map_err(storage)?;
-        let Some((hash, bytes)) = node else {
+        let Some(bytes) = bytes else {
             continue;
         };
-        conn.execute("DELETE FROM _jazz_lv_node WHERE locator = ?1", [&locator])
+        conn.execute("DELETE FROM _jazz_lv_node WHERE hash = ?1", [&hash])
             .map_err(storage)?;
-        if let Ok(key) = <[u8; 32]>::try_from(locator.as_slice()) {
-            chunks.forget(&key);
-        }
+        chunks.forget(&key);
         deleted += 1;
         if chunks.offload_store().is_some() {
             // A leaf whose bytes are in the chunk store, or may be (a put
             // in flight), is deleted there once this deletion commits.
             let put: bool = conn
                 .cached_row(
-                    "SELECT EXISTS (SELECT 1 FROM _jazz_lv_offload WHERE locator = ?1 \
+                    "SELECT EXISTS (SELECT 1 FROM _jazz_lv_offload WHERE hash = ?1 \
                      AND state = 1)",
-                    [&locator],
+                    [&hash],
                     |r| r.get(0),
                 )
                 .map_err(storage)?;
             if bytes.is_empty() || put {
                 conn.execute(
-                    "INSERT OR REPLACE INTO _jazz_lv_offload_delete (locator, hash) \
-                     VALUES (?1, ?2)",
-                    [&locator, &hash],
+                    "INSERT OR REPLACE INTO _jazz_lv_offload_delete (hash) VALUES (?1)",
+                    [&hash],
                 )
                 .map_err(storage)?;
             }
-            conn.execute(
-                "DELETE FROM _jazz_lv_offload WHERE locator = ?1",
-                [&locator],
-            )
-            .map_err(storage)?;
+            conn.execute("DELETE FROM _jazz_lv_offload WHERE hash = ?1", [&hash])
+                .map_err(storage)?;
             if bytes.is_empty() {
                 // Only leaves are offloaded: no children to release.
                 continue;
             }
         }
-        let hash =
-            <[u8; 32]>::try_from(hash.as_slice()).map_err(|_| corrupt(lv::Error::MalformedNode))?;
-        let node = lv::decode_node_untyped_authenticated(lv::ContentHash(hash), &bytes)
-            .map_err(corrupt)?;
+        let node =
+            lv::decode_node_untyped_authenticated(lv::ContentHash(key), &bytes).map_err(corrupt)?;
         if let ChunkNode::Branch { children, .. } = node {
-            conn.execute("DELETE FROM _jazz_lv_edge WHERE parent = ?1", [&locator])
+            conn.execute("DELETE FROM _jazz_lv_edge WHERE parent = ?1", [&hash])
                 .map_err(storage)?;
             for child in children {
-                queue.push(child.node_ref.locator.as_bytes().to_vec());
+                queue.push(child.node_ref.object_hash.as_bytes().to_vec());
             }
         }
     }
@@ -2358,14 +2314,14 @@ mod tests {
             let refs: i64 = conn
                 .query_row(
                     "SELECT coalesce(sum(refs), 0) FROM _jazz_lv_epoch WHERE root = ?1",
-                    [values[i].value_ref.root.locator.as_bytes().as_slice()],
+                    [values[i].value_ref.root.object_hash.as_bytes().as_slice()],
                     |r| r.get(0),
                 )
                 .unwrap();
             let roots: i64 = conn
                 .query_row(
                     "SELECT coalesce(sum(durable), 0) FROM _jazz_lv_root WHERE root = ?1",
-                    [values[i].value_ref.root.locator.as_bytes().as_slice()],
+                    [values[i].value_ref.root.object_hash.as_bytes().as_slice()],
                     |r| r.get(0),
                 )
                 .unwrap();
@@ -2509,7 +2465,7 @@ mod tests {
         push(&pending);
         let pending_nodes = pending.staged_chunks.len() as i64;
         assert!(receipts() > pending_nodes);
-        settle_receipts(&conn, &referenced.value_ref.root.locator).unwrap();
+        settle_receipts(&conn, &referenced.value_ref.root.object_hash).unwrap();
         // Only the other push, still ahead of its commit, keeps receipts,
         // so expiring them later touches nothing the commit holds.
         assert_eq!(receipts(), pending_nodes);
@@ -2538,7 +2494,7 @@ mod tests {
         // The first upload's row commits; the second is abandoned.
         conn.execute(
             "INSERT INTO _jazz_lv_root (root, durable) VALUES (?1, 1)",
-            [kept.value_ref.root.locator.as_bytes().as_slice()],
+            [kept.value_ref.root.object_hash.as_bytes().as_slice()],
         )
         .unwrap();
         end_upload(&conn, &[1; 32]).unwrap();
@@ -2686,7 +2642,7 @@ mod tests {
         let batch = begin_offload(&o.conn, 1_000).unwrap();
         let leaves = o.count(
             "SELECT count(*) FROM _jazz_lv_node n WHERE NOT EXISTS \
-             (SELECT 1 FROM _jazz_lv_edge WHERE parent = n.locator)",
+             (SELECT 1 FROM _jazz_lv_edge WHERE parent = n.hash)",
         );
         assert_eq!(batch.len() as i64, leaves, "every leaf, no branch");
         assert!(leaves > 4);
@@ -2793,12 +2749,12 @@ mod tests {
             begin_offload(&o.conn, 1_000).unwrap().is_empty(),
             "unpushed"
         );
-        let locators: Vec<lv::Locator> = prepared
+        let hashes: Vec<lv::ContentHash> = prepared
             .staged_chunks
             .iter()
-            .map(|chunk| chunk.node_ref.locator)
+            .map(|chunk| chunk.node_ref.object_hash)
             .collect();
-        mark_pushed(&o.conn, &locators).unwrap();
+        mark_pushed(&o.conn, &hashes).unwrap();
         assert!(!begin_offload(&o.conn, 1_000).unwrap().is_empty());
     }
 }

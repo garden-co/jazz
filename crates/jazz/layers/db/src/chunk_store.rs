@@ -14,8 +14,8 @@
 //! or uploaded, stay in the file. A leaf that is reclaimed is deleted from
 //! the chunk store after the deletion commits.
 //!
-//! The store is a plain immutable byte KV, keyed by the node's opaque
-//! locator. It sees no schema, row or policy; every byte it returns is
+//! The store is a plain immutable byte KV, keyed by the node's hash: one
+//! store per database, since a reclaimed node is deleted from it. It sees no schema, row or policy; every byte it returns is
 //! verified against the hash the caller expects before Jazz uses it. Its
 //! operations are asynchronous, so object stores reached over the network
 //! (S3, R2 from a Durable Object) fit. A store that can also answer a read
@@ -36,19 +36,18 @@ use crate::options::Error;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::options::ErrorCode;
 
-/// A node's key in a chunk store: its opaque locator, and the object hash
-/// its bytes must have (which the store may keep, but need not check).
+/// A node's key in a chunk store: the object hash its bytes have, which
+/// the store may check but need not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeKey {
-    pub locator: [u8; 32],
     pub hash: [u8; 32],
 }
 
 impl NodeKey {
-    /// The name the node is stored under: its locator in lowercase hex.
+    /// The name the node is stored under: its hash in lowercase hex.
     pub fn object_name(&self) -> String {
         let mut name = String::with_capacity(64);
-        for byte in self.locator {
+        for byte in self.hash {
             name.push_str(&format!("{byte:02x}"));
         }
         name
@@ -58,7 +57,6 @@ impl NodeKey {
 impl From<&ChunkRequest> for NodeKey {
     fn from(request: &ChunkRequest) -> Self {
         Self {
-            locator: *request.locator.as_bytes(),
             hash: request.object_hash,
         }
     }
@@ -68,9 +66,9 @@ impl From<&ChunkRequest> for NodeKey {
 /// is thread-affine, and so are the futures it awaits.
 pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 
-/// An immutable byte KV for large-value nodes, keyed by locator.
+/// An immutable byte KV for large-value nodes, keyed by node hash.
 ///
-/// - `put` stores `bytes` under `node.locator`. A node's bytes never
+/// - `put` stores `bytes` under `node.hash`. A node's bytes never
 ///   change, so putting a key again (after a crash, or a retry) puts the
 ///   same bytes; it must succeed.
 /// - `get` returns what `put` stored, or `None` if nothing is stored.

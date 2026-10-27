@@ -691,7 +691,7 @@ impl Db {
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let stage = Rc::clone(&emitted);
         Ok(StreamingValueUpload {
-            id: *lv::Locator::random().as_bytes(),
+            id: upload_id(),
             kind,
             initialized: false,
             preparation: Some(lv::PushStreamingPreparation::new(
@@ -933,13 +933,21 @@ impl Default for LargeValueStagingPolicy {
 
 type Stage = Box<dyn FnMut(lv::StagedChunk) -> Result<(), lv::Error>>;
 
+/// A fresh upload lease id: random, so leases never collide.
+fn upload_id() -> [u8; 32] {
+    let mut id = [0; 32];
+    id[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    id[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    id
+}
+
 /// A resumable upload of one large value: the tree under construction and
 /// the lease that holds its stored nodes.
 pub struct StreamingValueUpload {
     id: [u8; 32],
     kind: lv::LargeValueKind,
     initialized: bool,
-    preparation: Option<lv::PushStreamingPreparation<fn(lv::ContentHash) -> lv::Locator, Stage>>,
+    preparation: Option<lv::PushStreamingPreparation<Stage>>,
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
 }
 

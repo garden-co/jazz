@@ -3546,7 +3546,7 @@ impl Inner {
             })?;
             json.check_text(text, &column.name).map_err(rejected)?;
         }
-        crate::large::settle_receipts(&self.conn, &large.root.locator)?;
+        crate::large::settle_receipts(&self.conn, &large.root.object_hash)?;
         self.large_cell(large)
     }
 
