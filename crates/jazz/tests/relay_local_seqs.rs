@@ -329,3 +329,40 @@ fn a_tabs_high_water_moves_only_when_it_writes() {
     assert_eq!(tx, NON_DURABLE_BASE + 1);
     assert_eq!(tab.seq_high_water(), tx);
 }
+
+/// A tab's row stays readable through every order its worker and the
+/// authority can take the tab's insert and update in: when the worker's
+/// newest version of the row is the tab's own pending update, it ships the
+/// tab the version that update sits on (here the settled insert), not
+/// nothing.
+#[test]
+fn a_tabs_row_stays_while_its_worker_settles_the_insert_under_its_update() {
+    for seed in 0u64..200 {
+        let net = Net::new(1);
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % 3
+        };
+        let row = net.insert(net.tab(0), "orig");
+        let mut order = String::new();
+        for step in 0..40 {
+            if step == 6 {
+                net.update(net.tab(0), row, "upd");
+                order.push('U');
+            }
+            match next() {
+                0 => block_on(net.tab(0).tick()).map(|_| order.push('t')),
+                1 => block_on(net.worker.tick()).map(|_| order.push('w')),
+                _ => block_on(net.core.tick()).map(|_| order.push('c')),
+            }
+            .unwrap();
+            let bodies = net.bodies(net.tab(0));
+            assert_eq!(bodies.len(), 1, "seed {seed}, ticks {order}: {bodies:?}");
+        }
+        net.pump();
+        assert_eq!(net.bodies(net.tab(0)), ["upd"], "seed {seed}");
+    }
+}

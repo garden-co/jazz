@@ -5435,23 +5435,58 @@ impl Db {
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
             // it wrote them: shipped at the relay's seqs, they would stand
-            // in for them as another writer's.
-            if let Some(client) = &inner.client {
-                let own: HashSet<u64> = client
+            // in for them as another writer's. The session gets the version
+            // they sit on instead, the base its pending writes replay over.
+            let own: HashSet<u64> = inner.client.as_ref().map_or_else(HashSet::new, |client| {
+                client
                     .relayed_fates
                     .iter()
                     .filter(|(_, sessions)| sessions.iter().any(|(s, _, _)| *s == index))
                     .map(|(seq, _)| *seq)
-                    .collect();
-                if !own.is_empty() {
-                    out.retain_mut(|message| match message {
-                        SyncMessage::Rows { images } => {
-                            images.retain(|image| !own.contains(&image.seq));
-                            !images.is_empty()
+                    .collect()
+            });
+            if !own.is_empty() {
+                let mut shipped = HashSet::new();
+                for message in &mut out {
+                    let SyncMessage::Rows { images } = message else {
+                        continue;
+                    };
+                    let mut bases = Vec::new();
+                    for image in images.iter().filter(|image| own.contains(&image.seq)) {
+                        let row = RowUuid::from_bytes(image.id);
+                        if !shipped.insert((image.table.clone(), image.id, image.key.clone()))
+                            || !readable(&inner, &image.table, row, &image.key, policy)?
+                        {
+                            continue;
                         }
-                        _ => true,
-                    });
+                        let id = image.id.to_vec();
+                        bases.extend(
+                            inner
+                                .images_where(
+                                    &image.table,
+                                    true,
+                                    "id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC",
+                                    &[&id, &image.key, &(image.seq as i64)],
+                                )?
+                                .into_iter()
+                                .find(|base| !own.contains(&base.seq)),
+                        );
+                    }
+                    images.retain(|image| !own.contains(&image.seq));
+                    for base in bases {
+                        if !images.iter().any(|image| {
+                            image.table == base.table
+                                && image.id == base.id
+                                && image.key == base.key
+                                && image.seq == base.seq
+                        }) {
+                            images.push(base);
+                        }
+                    }
                 }
+                out.retain(
+                    |message| !matches!(message, SyncMessage::Rows { images } if images.is_empty()),
+                );
             }
             let session = &mut inner.sessions[index];
             for message in out {
