@@ -1,3 +1,4 @@
+import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
@@ -5999,29 +6000,6 @@ function encodeCellsForStreamingPatch(
     (column) => column.name !== streamedColumn && Object.hasOwn(row, column.name),
   );
   return encodeCells(columns, (column) => row[column.name], false);
-}
-
-async function* streamingChunks(source: StreamingValueSource): AsyncGenerator<Uint8Array | string> {
-  const readable = source as ReadableStream<Uint8Array | string>;
-  if (typeof readable.getReader !== "function") {
-    yield* source as AsyncIterable<Uint8Array | string>;
-    return;
-  }
-  const reader = readable.getReader();
-  let completed = false;
-  try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) {
-        completed = true;
-        return;
-      }
-      yield result.value;
-    }
-  } finally {
-    if (!completed) await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
 }
 
 export function encodeCellsForPatch(
