@@ -34,6 +34,9 @@ mod fanout;
 pub use fanout::FanoutStats;
 #[path = "large_ops.rs"]
 mod large_ops;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "read_pool.rs"]
+mod read_pool;
 pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
     LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
@@ -425,6 +428,11 @@ struct Inner {
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
+    #[cfg(not(target_arch = "wasm32"))]
+    read_pool: Option<RefCell<read_pool::Pool>>,
+    /// Only the platform filesystem VFS can open native worker connections.
+    #[cfg(not(target_arch = "wasm32"))]
+    read_path: Option<std::path::PathBuf>,
     /// Rows written since the last dispatch: (table, id, branch key).
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
     /// The write checks of the unit being applied, run at its end.
@@ -1086,6 +1094,12 @@ impl Db {
                 base_jump: None,
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
+                #[cfg(not(target_arch = "wasm32"))]
+                read_pool: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                read_path: path
+                    .filter(|(_, vfs)| vfs.is_none())
+                    .map(|(path, _)| path.to_owned()),
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
                 tx: None,
@@ -1194,6 +1208,8 @@ impl Db {
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.inner().poll_read_openings();
         self.sync_tick()?;
         let mut inner = self.inner();
         inner.fan.collect();
@@ -2062,6 +2078,9 @@ impl Drop for Inner {
     fn drop(&mut self) {
         // An abandoned handle's overlay never reaches the file.
         self.settle_overlay();
+        // Stop workers and close their snapshots before the writer closes.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.read_pool.take();
         // Before `conn` closes, so it closes last and checkpoints the WAL.
         self.chunks.close_reader();
     }
@@ -2291,12 +2310,21 @@ impl Inner {
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
-        self.with_preps(&compiled.preps, |ties| {
+        Self::execute_on(&self.conn, &self.chunks, compiled, table)
+    }
+
+    fn execute_on(
+        conn: &Connection,
+        chunks: &Arc<crate::large::Chunks>,
+        compiled: &Compiled,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        Self::with_preps_on(conn, chunks, &compiled.preps, |ties| {
             let sql = match &compiled.ranked_sql {
                 Some(ranked) if ties => ranked,
                 _ => &compiled.sql,
             };
-            self.execute_sql(sql, compiled, table)
+            Self::execute_sql_on(conn, chunks, sql, compiled, table)
         })
     }
 
@@ -2308,29 +2336,39 @@ impl Inner {
         preps: &[crate::compile::Prep],
         body: impl FnOnce(bool) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        Self::with_preps_on(&self.conn, &self.chunks, preps, body)
+    }
+
+    fn with_preps_on<T>(
+        conn: &Connection,
+        chunks: &Arc<crate::large::Chunks>,
+        preps: &[crate::compile::Prep],
+        body: impl FnOnce(bool) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         if preps.is_empty() {
             return body(false);
         }
         // The answers are scratch rows: undone with the savepoint either way.
-        begin_savepoint(&self.conn, "jazz_scratch")?;
+        begin_savepoint(conn, "jazz_scratch")?;
         let result = (|| {
             let mut ties = false;
             for prep in preps {
-                ties |= crate::large::answer(&self.conn, &self.chunks, prep)?;
+                ties |= crate::large::answer(conn, chunks, prep)?;
             }
             body(ties)
         })();
-        end_savepoint(&self.conn, "jazz_scratch", false)?;
+        end_savepoint(conn, "jazz_scratch", false)?;
         result
     }
 
-    fn execute_sql(
-        &self,
+    fn execute_sql_on(
+        conn: &Connection,
+        chunks: &Arc<crate::large::Chunks>,
         sql: &str,
         compiled: &Compiled,
         table: &str,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
+        let mut statement = conn.prepare_cached(sql).map_err(storage)?;
         let names: Arc<str> = Arc::from(table);
         let types: Arc<[ValueType]> = compiled
             .projection
@@ -2349,7 +2387,7 @@ impl Inner {
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
                 let key = match row.get_ref(0).map_err(storage)? {
-                    ValueRef::Text(cell) => format!("{:?}", self.chunks.materialize(cell)?),
+                    ValueRef::Text(cell) => format!("{:?}", chunks.materialize(cell)?),
                     cell => format!("{:?}", Sql::from(cell)),
                 };
                 blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
@@ -2412,7 +2450,7 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
-                    match from_sql(ty, cell, &self.chunks) {
+                    match from_sql(ty, cell, chunks) {
                         Err(error) if crate::large::is_missing(&error) => {
                             blocked = true;
                             Ok((name.clone(), None))

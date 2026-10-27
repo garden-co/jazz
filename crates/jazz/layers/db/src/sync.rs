@@ -5203,6 +5203,8 @@ impl Db {
         }
         self.notify();
         let mut inner = self.inner.borrow_mut();
+        #[cfg(not(target_arch = "wasm32"))]
+        inner.poll_read_openings();
         let through = inner.served_through();
         let mut cache: HashMap<(String, RowUuid, u64), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.

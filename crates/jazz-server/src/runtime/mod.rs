@@ -1,14 +1,15 @@
 //! The server's semantic runtime: one SQLite [`Db`] owned by a dedicated
 //! thread, driven by commands from request and WebSocket tasks.
 //!
-//! The engine is single-threaded (`Rc`/`RefCell`), so every engine call runs
-//! on the owner thread. Handles are `Send` and cheap to clone. Each
+//! The engine's mutable state is owned by one thread. File-backed stores
+//! use bounded WAL readers for subscription openings; writes and publication
+//! stay on the owner. Handles are `Send` and cheap to clone. Each
 //! WebSocket session is one subscriber of the engine; its inbound frames are
 //! queued for the owner and its outbound messages stream back in order.
 //! Shutdown joins the owner, so the store is closed when it returns.
 //!
 //! One app's state is one SQLite file: the owner thread is also the only
-//! connection to it. It starts before the runtime does (an [`AppStore`]),
+//! writer connection to it. It starts before the runtime does (an [`AppStore`]),
 //! serving the server's host tables (catalogue, account journal), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
@@ -130,6 +131,9 @@ const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
 const IDLE_TICK: Duration = Duration::from_secs(1);
+/// One expensive opening can run while another reader serves short queries.
+/// Bound threads, pinned snapshots and per-connection caches per app.
+const READ_WORKERS: usize = 2;
 
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
@@ -270,6 +274,10 @@ impl AppStore {
         let fault = Arc::new(Mutex::new(None));
         let (thread_source, thread_ticks, thread_fault) =
             (source.clone(), Arc::clone(&tick_queued), Arc::clone(&fault));
+        let reader_work = work.clone();
+        let reader_wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _ = reader_work.send(Work::Owner(Box::new(|_| {})));
+        });
         #[cfg(test)]
         let ticks = Arc::new(AtomicU64::new(0));
         #[cfg(test)]
@@ -288,6 +296,7 @@ impl AppStore {
                     }
                 };
                 StoreLoop {
+                    reader_wake,
                     source: thread_source,
                     work: receiver,
                     host: host_jobs,
@@ -522,6 +531,7 @@ impl Unavailable {
 
 /// The store thread.
 struct StoreLoop {
+    reader_wake: Arc<dyn Fn() + Send + Sync>,
     source: Source,
     work: std_mpsc::Receiver<Work>,
     host: std_mpsc::Receiver<HostJob>,
@@ -680,6 +690,7 @@ impl StoreLoop {
                     file,
                     runtime.any_stored_catalogue,
                     runtime.awaiting_permissions,
+                    Arc::clone(&self.reader_wake),
                 )
             }))
             .unwrap_or_else(|panic| {
@@ -1570,6 +1581,7 @@ impl Owner {
         file: StoreFile,
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
+        reader_wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, String> {
         let stored = match file
             .host_get(RUNTIME_CATALOGUE, CATALOGUE_KEY)
@@ -1607,6 +1619,12 @@ impl Owner {
             owner.apply_snapshot(snapshot)?;
         }
         owner.catalogue.persist(&owner.db)?;
+        if owner.db.supports_concurrent_reads() {
+            owner
+                .db
+                .enable_concurrent_reads(READ_WORKERS, reader_wake)
+                .map_err(|error| format!("open server read workers: {error}"))?;
+        }
         Ok(owner)
     }
 
