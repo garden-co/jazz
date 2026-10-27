@@ -50,8 +50,8 @@ export class NativeForegroundDb {
   private closed = false;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
   private authRejectedCallback: ((reason: string) => void) | undefined;
-  /** The refusal last reported, so each refused credential is reported once. */
-  private reportedAuthRejection: string | null = null;
+  /** The sequence of the refusal last reported, so each is reported once. */
+  private reportedAuthRejection = 0;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
 
   constructor(
@@ -81,8 +81,9 @@ export class NativeForegroundDb {
 
   /**
    * Observe the upstream refusing the scope's credential. The refusal is auth
-   * state, not a failed tick: local ticks keep running, and each tick reports
-   * a new refusal once, so the app can renew the credential (#4248, #4296).
+   * state, not a failed tick: local ticks keep running, and the tick that
+   * first sees a refusal reports it once, so the app can renew the
+   * credential (#4248, #4296).
    */
   onAuthRejected(callback: (reason: string) => void): void {
     this.assertOpen();
@@ -151,25 +152,25 @@ export class NativeForegroundDb {
   tick(): void {
     this.assertOpen();
     this.runtime.tick();
-    if (this.authRejectedCallback) {
-      const rejected = this.nativeConnectionStatus().authRejected ?? null;
-      if (rejected && rejected !== this.reportedAuthRejection)
-        queueMicrotask(() => {
-          if (!this.closed) this.authRejectedCallback?.(rejected);
-        });
-      this.reportedAuthRejection = rejected;
+    if (!this.mutationErrorCallback && !this.authRejectedCallback) return;
+    // One call drains everything a tick reports.
+    const response = this.execute({ type: "drainTickEvents" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "tickEvents") return unexpected("drainTickEvents", response.type);
+    const rejection = response.authRejection;
+    if (rejection && rejection.sequence !== this.reportedAuthRejection) {
+      this.reportedAuthRejection = rejection.sequence;
+      queueMicrotask(() => {
+        if (!this.closed) this.authRejectedCallback?.(rejection.reason);
+      });
     }
-    if (this.mutationErrorCallback) {
-      const response = this.execute({ type: "drainMutationErrors" });
-      if (response.type === "operationError") throw foregroundOperationError(response);
-      if (response.type !== "mutationErrors")
-        return unexpected("drainMutationErrors", response.type);
-      const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
-      for (const event of events)
-        queueMicrotask(() => {
-          if (!this.closed) this.mutationErrorCallback?.(event);
-        });
-    }
+    // The drain claims mutation errors; with no observer they are dropped.
+    if (!this.mutationErrorCallback) return;
+    const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
+    for (const event of events)
+      queueMicrotask(() => {
+        if (!this.closed) this.mutationErrorCallback?.(event);
+      });
   }
 
   close(): boolean {

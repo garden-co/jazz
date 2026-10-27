@@ -358,3 +358,109 @@ fn an_expired_bearer_stops_the_worker_and_a_renewed_one_recovers() {
     assert_eq!(status(&mut host, alice), (true, None));
     assert_eq!(host.tick_foreground(alice), Ok(()));
 }
+
+/// alice's drained tick events as the host reports them after a tick.
+fn tick_auth_rejection(host: &mut NativeRelayHost, foreground: u64) -> Option<NativeAuthRejection> {
+    match host
+        .execute_foreground_command(foreground, ForegroundDbCommandRequest::DrainTickEvents)
+        .unwrap()
+    {
+        ForegroundDbCommandResponse::TickEvents {
+            events_json,
+            auth_rejection,
+        } => {
+            assert_eq!(events_json, "[]");
+            auth_rejection
+        }
+        other => panic!("unexpected tick events: {other:?}"),
+    }
+}
+
+/// #4296: the host reports each refusal once. A renewed bearer that is
+/// refused for the same reason is a new refusal, so the tick events give it
+/// a new sequence and the host renews again instead of waiting forever.
+///
+/// ```text
+/// alice ─open─► relay ══socket(bearer 1)══► edge   (connected)
+///                 │     ✗ link lost
+///                 │ ══socket(bearer 1)══✗ edge     refusal #n
+/// alice ─renew(bearer 2)─► relay ══socket(bearer 2)══✗ edge   refusal #m > n
+/// ```
+#[test]
+fn a_renewed_bearer_refused_for_the_same_reason_is_a_new_refusal() {
+    let root = tempfile::tempdir().unwrap();
+    let (drop_link, link_dropped) = tokio::sync::oneshot::channel();
+    let connector = ScriptedConnector::new([
+        Step::ConnectThenTerminal(link_dropped),
+        Step::RejectAuth,
+        Step::RejectAuth,
+    ]);
+    let (mut host, admitted, alice) =
+        scripted_foreground(root.path(), "refused-twice", connector.clone());
+    let scope = host.foregrounds[&alice].scope.clone();
+    wait_for(&host, "first connection", |host| connected(host, &scope));
+    assert_eq!(tick_auth_rejection(&mut host, alice), None);
+
+    drop_link.send(()).unwrap();
+    wait_for(&host, "the refused worker stops", |host| {
+        host.private_scope_workers[&scope].terminally_stopped()
+    });
+    let first = tick_auth_rejection(&mut host, alice).expect("the first refusal");
+    assert!(first.reason.contains("token expired"), "{first:?}");
+    assert_eq!(
+        tick_auth_rejection(&mut host, alice),
+        Some(first.clone()),
+        "a refusal keeps its sequence until it clears"
+    );
+
+    host.account_session_owners.insert(
+        admitted,
+        account_session::AccountSessionOwner {
+            runtime_token: DIRECT_FOREGROUND_RUNTIME_TOKEN,
+            app_id: "refused-twice".to_owned(),
+        },
+    );
+    host.promote_account_scope_snapshot(admitted, &bearer(2), BTreeMap::new())
+        .unwrap();
+    wait_for(&host, "the renewed worker is refused", |host| {
+        host.private_scope_auth_rejection(&scope)
+            .is_some_and(|rejection| rejection.sequence != first.sequence)
+    });
+    let second = tick_auth_rejection(&mut host, alice).expect("the second refusal");
+    assert_eq!(second.reason, first.reason);
+    assert!(
+        second.sequence > first.sequence,
+        "{first:?} then {second:?}"
+    );
+    assert_eq!(connector.bearers(), [bearer(1), bearer(1), bearer(2)]);
+    assert_eq!(host.tick_foreground(alice), Ok(()));
+}
+
+/// No actors: pin the additive tick-events command and its response bytes
+/// independently of the TypeScript decoder. Existing ordinals stay fixed.
+#[test]
+fn tick_events_command_and_response_have_pinned_bytes() {
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::DrainTickEvents).unwrap(),
+        vec![35]
+    );
+    let response = ForegroundDbCommandResponse::TickEvents {
+        events_json: "[]".to_owned(),
+        auth_rejection: Some(NativeAuthRejection {
+            sequence: 300,
+            reason: "no".to_owned(),
+        }),
+    };
+    assert_eq!(
+        postcard::to_allocvec(&response).unwrap(),
+        vec![26, 2, b'[', b']', 1, 0xac, 0x02, 2, b'n', b'o']
+    );
+    let response = ForegroundDbCommandResponse::TickEvents {
+        events_json: "[]".to_owned(),
+        auth_rejection: None,
+    };
+    assert_eq!(
+        postcard::to_allocvec(&response).unwrap(),
+        vec![26, 2, b'[', b']', 0]
+    );
+}

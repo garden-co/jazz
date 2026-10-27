@@ -292,6 +292,9 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   expect(relay.encodeNativeForegroundCommand({ type: "captureSnapshot" })).toEqual(
     Uint8Array.of(34),
   );
+  expect(relay.encodeNativeForegroundCommand({ type: "drainTickEvents" })).toEqual(
+    Uint8Array.of(35),
+  );
   expect(
     relay.encodeNativeForegroundCommand({
       type: "all",
@@ -451,6 +454,31 @@ it("decodes the native connection status with a refused credential's reason", ()
   expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 0, 0, 7))).toThrow(
     "unknown or malformed command response",
   );
+});
+
+it("decodes tick events with the current credential refusal and its sequence", () => {
+  const relay = loadRelay(null);
+  // The bytes the Rust relay pins in tick_events_command_and_response_have_pinned_bytes.
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 1, 0xac, 0x02, 2, 110, 111)),
+  ).toEqual({
+    type: "tickEvents",
+    eventsJson: "[]",
+    authRejection: { sequence: 300, reason: "no" },
+  });
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0))).toEqual({
+    type: "tickEvents",
+    eventsJson: "[]",
+    authRejection: null,
+  });
+  for (const malformed of [
+    Uint8Array.of(26, 2, 91, 93),
+    Uint8Array.of(26, 2, 91, 93, 0, 0),
+    Uint8Array.of(26, 2, 91, 93, 2),
+    Uint8Array.of(26, 2, 91, 93, 1, 7),
+    Uint8Array.of(26, 2, 91, 93, 1, 7, 2, 110, 111, 0),
+  ])
+    expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow();
 });
 
 it("decodes a core operation error with its stable code and reason name beside the unchanged reason", () => {
