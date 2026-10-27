@@ -30,3 +30,10 @@ WASM API and an IndexedDB implementation with injected request/commit faults.
 It covers Local refusal, repeated barriers, unchanged previously persisted blocks,
 unrelated files, failed close, cached reopen refusal, failed deletion and explicit
 successful reset.
+
+The WASM host also holds each durable worker's downstream frame batch behind
+this per-file barrier before exposing it to a tab. This includes both `Stored`
+and `Fate` acknowledgements. A failed barrier reports a terminal peer error;
+the follower rejects its Local waits without manufacturing an authority
+rejection. Upstream traffic stays independent so it can continue supplying
+chunks to a pending core read. Wire bytes and message order are unchanged.
