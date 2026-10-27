@@ -42,9 +42,10 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
-/// refuse to open rather than misread a failure. Append-only commands use
-/// optional native capabilities while existing command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 2;
+/// refuse to open rather than misread a failure; 3 added its `reason_name`.
+/// Append-only commands use optional native capabilities while existing
+/// command layouts remain stable.
+pub const NATIVE_RELAY_ABI_V1: u16 = 3;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -642,8 +643,10 @@ pub enum ForegroundDbCommandResponse {
     /// An `OperationError` caused by a core `jazz::db::Error`, carrying its
     /// stable `ErrorCode::as_str` code beside the unchanged reason text.
     /// Introduced by ABI 2: every other failure still uses `OperationError`.
+    /// `reason_name` (ABI 3) is the error's `Reason::as_str`, when it has one.
     CodedOperationError {
         code: String,
+        reason_name: Option<String>,
         reason: String,
     },
 }
@@ -2184,7 +2187,7 @@ pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
 }
 
 /// Optional foreground capture support in the linked native artifact.
-/// Existing ABI 2 builds remain compatible without advertising this feature.
+/// A feature query outside the command layout, so it does not change the ABI.
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_supports_snapshot_capture() -> bool {
     true
@@ -2971,4 +2974,13 @@ mod tests {
     mod host;
     mod snapshot_capture_codec;
     mod socket_worker;
+
+    /// The C header's ABI define, which the C and C++ probes compare the
+    /// artifact against, is the ABI this crate speaks.
+    #[test]
+    fn c_header_names_the_relay_abi() {
+        let header = include_str!("../include/jazz_native_relay.h");
+        let define = format!("#define JAZZ_NATIVE_RELAY_ABI_VERSION {NATIVE_RELAY_ABI_V1}\n");
+        assert!(header.contains(&define), "header must contain {define:?}");
+    }
 }
