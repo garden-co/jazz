@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
-import { nativeCoreErrorCode, nativeErrorCode } from "./native-runtime/native-error-code.js";
+import {
+  nativeCoreErrorCode,
+  nativeCoreErrorReason,
+  nativeErrorCode,
+} from "./native-runtime/native-error-code.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/schema-codec.js";
 import {
@@ -43,6 +47,19 @@ async function missingTableReadError(read: (query: Uint8Array) => unknown): Prom
   }
   throw new Error("reading an undeclared table unexpectedly succeeded");
 }
+
+describe("native core error reasons", () => {
+  it("reads a core reason name and ignores anything else", () => {
+    const denied = Object.assign(new Error("WriteRejected: authorization_denied: x"), {
+      code: "write_rejected",
+      reason: "authorization_denied",
+    });
+    expect(nativeCoreErrorReason(denied)).toBe("authorization_denied");
+    expect(nativeCoreErrorReason(new Error("no reason"))).toBeUndefined();
+    expect(nativeCoreErrorReason({ reason: "a_reason_from_a_newer_engine" })).toBeUndefined();
+    expect(nativeCoreErrorReason("authorization_denied")).toBeUndefined();
+  });
+});
 
 describe("native core error codes", () => {
   it("NAPI throws a core error as an Error with its message and stable code", async () => {

@@ -76,7 +76,11 @@ import {
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey } from "./native-row-descriptor-key.js";
-import { nativeCoreErrorCode } from "./native-error-code.js";
+import {
+  nativeCoreErrorCode,
+  nativeCoreErrorReason,
+  type NativeCoreErrorReason,
+} from "./native-error-code.js";
 import { asUnsupportedStorageCodecsError } from "../unsupported-storage-codecs-error.js";
 import {
   WebSocketCarrier,
@@ -5021,8 +5025,8 @@ function queuedWriteRejection(
   } = {
     kind: "rejected",
     transactionId,
-    code: rejectionCode(message),
-    reason: rejectionReason(message),
+    code: rejectionCode(message, nativeCoreErrorReason(error)),
+    reason: rejectionReason(message, nativeCoreErrorReason(error)),
     message,
   };
   // Worker transport intentionally carries only the enumerable structured
@@ -5082,14 +5086,19 @@ function contextualError(context: string, error: unknown): Error {
   return new Error(`${context}: ${cause.message}`, { cause });
 }
 
-function rejectionCode(message: string): string {
+/** The rejection code a core error's reason names. */
+const REJECTION_CODES_BY_REASON: Partial<Record<NativeCoreErrorReason, string>> = {
+  authorization_denied: "permission_denied",
+  serialization_conflict: "serialization_conflict",
+  client_clock_too_far_ahead: "client_clock_too_far_ahead",
+};
+
+function rejectionCode(message: string, reason?: NativeCoreErrorReason): string {
+  // Every binding carries the core reason on a rejected wait.
+  if (reason !== undefined) return REJECTION_CODES_BY_REASON[reason] ?? "write_rejected";
+  // Diagnostics without one: the spellings of the earlier engine.
   if (message.includes("AuthorizationDenied")) return "permission_denied";
   if (message.includes("SerializationConflict")) return "serialization_conflict";
-  // The engine's stable prefixes for a policy denial and a clock-skew refusal.
-  if (/^(?:WriteRejected:\s*)?authorization_denied(?::|$)/.test(message))
-    return "permission_denied";
-  if (/^(?:WriteRejected:\s*)?client_clock_too_far_ahead(?::|$)/.test(message))
-    return "client_clock_too_far_ahead";
   if (message.includes("CausalityViolation")) return "causality_violation";
   if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
   if (message.includes("Cascade")) return "cascade_rejected";
@@ -5110,12 +5119,12 @@ const READABLE_REJECTION_REASONS: Readonly<Record<string, string>> = {
   cascade_rejected: "Transaction was rejected because an ancestor transaction was rejected",
 };
 
-function rejectionReason(message: string): string {
+function rejectionReason(message: string, coreReason?: NativeCoreErrorReason): string {
   const reason = extractWriteRejectedReason(message);
   if (reason === null) return message;
   const readable = /^transaction .* was rejected: .* \(reason: (.*)\)$/s.exec(reason)?.[1];
   if (readable) return readable;
-  const fallback = READABLE_REJECTION_REASONS[rejectionCode(reason)];
+  const fallback = READABLE_REJECTION_REASONS[rejectionCode(reason, coreReason)];
   if (fallback) return fallback;
   return reason || "Write rejected";
 }

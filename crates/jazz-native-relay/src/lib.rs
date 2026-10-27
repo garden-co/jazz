@@ -42,9 +42,10 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
-/// refuse to open rather than misread a failure. Append-only commands use
-/// optional native capabilities while existing command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 2;
+/// refuse to open rather than misread a failure; 3 added its `reason_name`.
+/// Append-only commands use optional native capabilities while existing
+/// command layouts remain stable.
+pub const NATIVE_RELAY_ABI_V1: u16 = 3;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -637,8 +638,10 @@ pub enum ForegroundDbCommandResponse {
     /// An `OperationError` caused by a core `jazz::db::Error`, carrying its
     /// stable `ErrorCode::as_str` code beside the unchanged reason text.
     /// Introduced by ABI 2: every other failure still uses `OperationError`.
+    /// `reason_name` (ABI 3) is the error's `Reason::as_str`, when it has one.
     CodedOperationError {
         code: String,
+        reason_name: Option<String>,
         reason: String,
     },
 }
