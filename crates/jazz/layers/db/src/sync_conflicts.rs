@@ -500,16 +500,22 @@ impl Inner {
     /// landing after `before` was built on, when merging the write needs it
     /// (SPEC 4 §4.6): a version before `before` the writer never saw
     /// authored the column. `None` takes the fast path: nothing to merge
-    /// with, so the write's value stands as sent. A base on an unsettled
-    /// commit gives that commit's version as accepted.
-    #[cfg_attr(not(feature = "testing"), allow(dead_code))] // Text merging reads it.
+    /// with, so the write's value stands as sent. Only `_base` and `_cols`
+    /// are read to decide; the value is read only when a merge is needed.
+    ///
+    /// The value is the newest one the writer's chain gave the column: an
+    /// unsettled link that authored it (its version as accepted, with the
+    /// link's seq, so the caller can take it back to the value as sent),
+    /// or else the version the chain's floor names. A link that left the
+    /// column alone holds whatever the authority held, which its writer
+    /// never saw, so the walk passes it by.
     pub(crate) fn merge_base(
         &self,
         (table, row, key): (&str, RowUuid, &[u8]),
         built: Built,
         before: u64,
         column: &str,
-    ) -> Result<Option<Sql>, Error> {
+    ) -> Result<Option<(Sql, Option<u64>)>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let knew = Knowledge::of(built, &history);
         let code = self.column_code(table, column)?;
@@ -520,9 +526,29 @@ impl Inner {
         if !missed {
             return Ok(None);
         }
-        let at = match built {
-            Built::Seq(seq) => history.iter().rev().find(|v| v.seq <= seq).map(|v| v.seq),
-            Built::On(seq) => Some(seq),
+        let mut link = built;
+        let (at, sent) = loop {
+            match link {
+                Built::Seq(floor) => {
+                    break (
+                        history.iter().rev().find(|v| v.seq <= floor).map(|v| v.seq),
+                        None,
+                    );
+                }
+                Built::On(on) => {
+                    let version = history.iter().find(|v| v.seq == on);
+                    if version.is_none_or(|v| authors(v.cols.as_deref(), code)) {
+                        break (Some(on), Some(on));
+                    }
+                    // As in [`Knowledge::of`], a chain only runs back. A
+                    // link with no base (a blind write) saw nothing before
+                    // it: no base, so the write's value stands as sent.
+                    match version.and_then(|v| v.built) {
+                        Some(next @ (Built::Seq(seq) | Built::On(seq))) if seq < on => link = next,
+                        _ => break (None, None),
+                    }
+                }
+            }
         };
         let Some(at) = at else {
             return Ok(None);
@@ -534,14 +560,16 @@ impl Inner {
             quote(&format!("{table}__h")),
             column = quote(column),
         );
-        self.conn
+        let cell = self
+            .conn
             .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key, at as i64],
                 |r| r.get::<_, Sql>(0),
             )
             .optional()
-            .map_err(storage)
+            .map_err(storage)?;
+        Ok(cell.map(|cell| (cell, sent)))
     }
 }
 
@@ -587,7 +615,8 @@ impl Db {
         let Some(built) = built else {
             return Ok(None);
         };
-        let Some(cell) = inner.merge_base((&stored, row, &[]), built, seq, &stored_column)? else {
+        let Some((cell, _)) = inner.merge_base((&stored, row, &[]), built, seq, &stored_column)?
+        else {
             return Ok(None);
         };
         let ty = &schema_table
@@ -595,5 +624,37 @@ impl Db {
             .ok_or_else(|| unknown_base("a column"))?
             .ty;
         crate::values::from_sql(ty, cell.as_ref(), &inner.chunks)
+    }
+
+    /// How many `_jazz_text_in` entries this store keeps.
+    #[cfg(feature = "testing")]
+    pub fn text_in_entries_for_test(&self) -> Result<u64, Error> {
+        self.inner().text_in_entries()
+    }
+
+    /// How many bytes column `column` of `table`'s unbranched row `row`
+    /// stores inline now: a chunked value keeps only its descriptor.
+    #[cfg(feature = "testing")]
+    pub fn stored_bytes_for_test(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+    ) -> Result<u64, Error> {
+        let inner = self.inner();
+        let schema_table = inner.schema.table(table)?;
+        let sql = format!(
+            "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _b = ?2",
+            quote(schema_table.stored_name(column)),
+            quote(&schema_table.stored),
+        );
+        inner
+            .conn
+            .cached_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
+                |r| r.get::<_, i64>(0).map(|n| n as u64),
+            )
+            .map_err(storage)
     }
 }

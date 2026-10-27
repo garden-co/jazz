@@ -289,6 +289,12 @@ function columnMergeStrategyToAst(
       return "counter";
     case "GSet":
       return "g-set";
+    case "Text":
+      return "text";
+    case "Markdown":
+      return "markdown";
+    case "Html":
+      return "html";
   }
 }
 
