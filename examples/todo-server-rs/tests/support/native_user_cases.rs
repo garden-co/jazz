@@ -35,7 +35,6 @@ async fn ordinary_user_enrols_retries_and_syncs_without_privileged_credentials()
         server_url: server.base_url(),
         data_dir: std::env::temp_dir(),
         storage: ClientStorage::Memory,
-        storage_factory: None,
         account_id: None,
         jwt_token: Some(TestJwtIssuer::jwt_for_user("alice")),
         backend_secret: None,

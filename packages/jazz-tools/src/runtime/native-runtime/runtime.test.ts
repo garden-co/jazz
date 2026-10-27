@@ -2762,7 +2762,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("encodes integer query literals with the Groove I32 tag", () => {
+  it("encodes integer query literals with the I32 tag", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {

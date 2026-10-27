@@ -9,7 +9,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::middleware::AuthConfig;
-use jazz::tools::AppContext;
 use jazz::tools::AppId;
 use jazz::tools::public_schema::Schema;
 
@@ -33,7 +32,6 @@ pub struct JazzServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
-    storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
@@ -77,16 +75,6 @@ impl JazzServerBuilder {
     }
 
     pub fn with_persistent_storage(mut self) -> Self {
-        self.persistent_storage = true;
-        self
-    }
-
-    /// Supply the target-owned adapter used by persistent test storage.
-    pub fn with_storage_factory(
-        mut self,
-        factory: Arc<dyn jazz::groove::storage::StorageFactory>,
-    ) -> Self {
-        self.storage_factory = Some(factory);
         self.persistent_storage = true;
         self
     }
@@ -250,7 +238,6 @@ impl JazzServer {
             data_dir,
             schema,
             persistent_storage,
-            storage_factory,
             admin_secret,
             backend_secret,
             jwks_url,
@@ -288,10 +275,7 @@ impl JazzServer {
             ..Default::default()
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        if let Some(factory) = storage_factory {
-            server_builder = server_builder.with_storage_factory(factory);
-        }
+        let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         let mut server_builder =
             apply_storage_mode(server_builder, storage_data_dir, persistent_storage);
 
@@ -416,52 +400,53 @@ impl JazzServer {
         self.state.clone()
     }
 
-    fn require_built_in_jwt_helpers(&self) {
-        if self.embedded_jwks_server.is_none() {
-            panic!(
-                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
-            );
-        }
+    /// A JWT for `user_id` from the embedded test issuer, at the server's
+    /// auth clock. Subjects are opaque strings, kept intact so callers
+    /// exercise the same issuer-scoped identity boundary as production.
+    pub fn jwt_for_user(&self, user_id: impl AsRef<str>) -> String {
+        self.require_built_in_jwt_helpers();
+        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
+        TestJwtIssuer::jwt_for_user_with_options_at(
+            user_id.as_ref(),
+            json!({"role": "user"}),
+            TestJwtOptions::default(),
+            now,
+        )
     }
 
+    /// A client context for `user_id` with a JWT from the embedded issuer,
+    /// in-memory storage and a fresh data directory kept until the server
+    /// drops.
     pub fn make_client_context_for_user(
         &self,
         schema: Schema,
         user_id: impl AsRef<str>,
-    ) -> AppContext {
-        self.require_built_in_jwt_helpers();
-        let user_id = user_id.as_ref();
-        // Subjects are opaque strings. Keep the test caller's subject intact
-        // so this helper exercises the same issuer-scoped identity boundary as
-        // production external sessions.
-        let user_id = user_id.to_owned();
-
+    ) -> jazz::tools::AppContext {
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();
         self.client_data_dirs
             .lock()
             .expect("lock test client data dirs")
             .push(client_data_dir);
-
-        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
-        let jwt_token = TestJwtIssuer::jwt_for_user_with_options_at(
-            &user_id,
-            json!({"role": "user"}),
-            TestJwtOptions::default(),
-            now,
-        );
-        AppContext {
+        jazz::tools::AppContext {
             app_id: self.app_id,
             client_id: None,
             schema,
             server_url: self.base_url(),
             data_dir,
             storage: jazz::tools::ClientStorage::Memory,
-            storage_factory: None,
             account_id: None,
-            jwt_token: Some(jwt_token),
+            jwt_token: Some(self.jwt_for_user(user_id)),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
+        }
+    }
+
+    fn require_built_in_jwt_helpers(&self) {
+        if self.embedded_jwks_server.is_none() {
+            panic!(
+                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+            );
         }
     }
 
@@ -712,10 +697,7 @@ mod tests {
     #[tokio::test]
     async fn default_jazz_server_keeps_built_in_jwt_helpers_enabled() {
         let server = JazzServer::start().await.expect("start test server");
-        let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
-
-        assert!(context.jwt_token.is_some());
-        assert!(context.admin_secret.is_none());
+        assert!(!server.jwt_for_user("default-helper-user").is_empty());
 
         assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
     }
@@ -737,7 +719,7 @@ mod tests {
         assert_eq!(health.status(), StatusCode::OK);
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            server.make_client_context_for_user(Schema::new(), "external-helper-user")
+            server.jwt_for_user("external-helper-user")
         }))
         .expect_err("external JWKS mode should reject built-in JWT helpers");
         let message = if let Some(message) = panic.downcast_ref::<String>() {

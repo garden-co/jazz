@@ -63,7 +63,7 @@ export const wequencerBenchmarks: BenchmarkMetadata[] = [
       description:
         "Read the current value of one pad that was toggled over and over while offline: a chain of locally settled edits, each built on the last, all still retained.",
       fixture: `One pad edited ${depth.toLocaleString("en-US")} times; every candidate is retained.`,
-      storage: "RocksDB; WAL without fsync",
+      storage: "SQLite file, WAL with synchronous=NORMAL",
       includes: ["One current-row read that scans the retained edit history"],
       excludes: [
         "Writing and settling the edit history",

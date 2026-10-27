@@ -1,19 +1,17 @@
 //! Simulation-first wire vocabulary for sync messages, commit payloads, view
 //! updates, catalogue messages, and migration lens publication. This module owns
-//! serializable shapes that cross node or facade boundaries; storage encoders
-//! live in `jazz::node::codec`, transaction semantics in [`crate::tx`], and
-//! query AST semantics in [`crate::query`]. It connects the node layer to peers,
-//! tests, and the `Db` facade without owning validation or persistence.
+//! serializable shapes that cross replica or facade boundaries; transaction
+//! semantics are in [`crate::tx`] and query AST semantics in [`crate::query`].
+//! Storage and sync live in `jazz-db`.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(any(test, feature = "testing"))]
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use groove::large_values::Locator;
 #[cfg(test)]
-use groove::records::ValueType;
-use groove::records::{OwnedRecord, RecordDescriptor, Value};
+use jazz_types::records::ValueType;
+use jazz_types::records::{OwnedRecord, RecordDescriptor, Value};
 
 use crate::ids::{
     AuthorSubject, MigrationLensId, NodeUuid, RowAuthor, RowUuid, SchemaLineagePublicationId,
@@ -34,12 +32,6 @@ pub enum ReservedWireMessage {}
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
-    /// Auxiliary, non-canonical requests for immutable Groove chunks that are
-    /// absent from the receiver's local chunk storage.
-    ChunkRequestBatch(ChunkRequestBatch),
-    /// Auxiliary responses to a chunk request batch. These carry storage
-    /// objects, never row facts or authorization grants.
-    ChunkResponseBatch(ChunkResponseBatch),
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
@@ -180,12 +172,6 @@ pub enum SyncMessage {
         /// Final authority result for the zero-support action.
         advice: PermissionAdvice,
     },
-    /// Begin a root-first push upload with its complete immutable descriptor.
-    ChunkUploadStart(ChunkUploadStart),
-    /// Supply one bounded set of nodes requested by the receiver.
-    ChunkUploadNodes(ChunkUploadNodes),
-    /// Receiver acknowledgement for a pushed upload.
-    ChunkUploadResult(ChunkUploadResult),
     /// Bounded known-row revalidation in the current default view.
     CurrentRowsRequest(CurrentRowsRequest),
     /// Core-backed current-row evidence, scoped to one admitted request.
@@ -418,146 +404,6 @@ impl ViewUpdatePayload {
 }
 
 /// Bounded batch of exact immutable-chunk requests on one peer link.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkRequestBatch {
-    /// Exact requests coalesced for one transport frame.
-    #[serde(deserialize_with = "deserialize_chunk_requests")]
-    pub requests: Vec<ChunkRequestEntry>,
-}
-
-fn deserialize_chunk_requests<'de, D>(deserializer: D) -> Result<Vec<ChunkRequestEntry>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct ChunkRequestsVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for ChunkRequestsVisitor {
-        type Value = Vec<ChunkRequestEntry>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                formatter,
-                "at most {} chunk requests",
-                crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
-            )
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: serde::de::SeqAccess<'de>,
-        {
-            let declared = sequence.size_hint();
-            if declared.is_some_and(|count| {
-                count > crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
-            }) {
-                return Err(<A::Error as serde::de::Error>::custom(
-                    "chunk request batch exceeds cardinality limit",
-                ));
-            }
-            let mut requests = Vec::with_capacity(
-                declared
-                    .unwrap_or_default()
-                    .min(crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES),
-            );
-            while let Some(request) = sequence.next_element()? {
-                if requests.len() >= crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES {
-                    return Err(<A::Error as serde::de::Error>::custom(
-                        "chunk request batch exceeds cardinality limit",
-                    ));
-                }
-                requests.push(request);
-            }
-            Ok(requests)
-        }
-    }
-
-    deserializer.deserialize_seq(ChunkRequestsVisitor)
-}
-
-/// One hop-local request. `remaining_hops` is decremented before forwarding.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkRequestEntry {
-    /// Identifier meaningful only on this peer hop.
-    pub request_id: u64,
-    /// Exact random 256-bit retrieval capability. Storage adapters derive
-    /// their private key layout from this value internally.
-    pub locator: Locator,
-    /// Hash Groove must verify before accepting returned bytes.
-    pub expected_hash: [u8; 32],
-    /// Maximum remaining forwarding edges.
-    pub remaining_hops: u8,
-}
-
-/// Bounded batch of replies addressed by the request id allocated on this hop.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkResponseBatch {
-    /// Replies coalesced for one transport frame.
-    pub responses: Vec<ChunkResponseEntry>,
-}
-
-/// One hop-local immutable-chunk reply.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkResponseEntry {
-    /// Request identifier allocated by the receiver of this response.
-    pub request_id: u64,
-    /// Storage result for the exact requested locator and hash.
-    pub result: ChunkResponse,
-}
-
-/// Result of one auxiliary immutable-chunk request.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum ChunkResponse {
-    /// Exact stored bytes; Groove still verifies the expected hash.
-    Found(Vec<u8>),
-    /// This route cannot supply the requested object.
-    Unavailable,
-    /// The route may become available after the suggested delay.
-    Retryable {
-        /// Minimum suggested retry delay.
-        retry_after_ms: u32,
-    },
-}
-
-/// Root-first upload announcement. The descriptor, already carried by the
-/// later transaction, is the protocol identity.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkUploadStart {
-    /// Exact immutable value whose root the receiver checks first.
-    pub value_ref: groove::large_values::LargeValueRef,
-}
-
-/// A bounded collection of receiver-requested immutable Groove nodes.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkUploadNodes {
-    /// Descriptor whose current missing frontier requested these nodes.
-    pub value_ref: groove::large_values::LargeValueRef,
-    /// Authenticated immutable nodes, bounded by the semantic frame limit.
-    pub chunks: Vec<groove::large_values::StagedChunk>,
-}
-
-/// Hop-local upload outcome. A rejected upload must be retried from its first
-/// batch; no referencing row may be sent before `Staged`.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkUploadResult {
-    /// Descriptor whose derived receiver state changed.
-    pub value_ref: groove::large_values::LargeValueRef,
-    /// Current receiver outcome.
-    pub status: ChunkUploadStatus,
-}
-
-/// Receiver outcome for one push-upload step.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum ChunkUploadStatus {
-    /// Authenticated nodes still absent from local Groove storage.
-    Need(Vec<groove::large_values::NodeRef>),
-    /// Groove derived graph closure and created a persisted retainer claim.
-    Staged,
-    /// Jazz rejected incoming bytes under its deployment policy.
-    RateLimited,
-    /// The descriptor or a supplied node was invalid.
-    Rejected,
-}
-
 /// Opaque identity for one permission-advice exchange.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
@@ -713,11 +559,6 @@ impl SyncMessage {
             | Self::AuthorizationScopeDecision { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
-            Self::ChunkRequestBatch(_)
-            | Self::ChunkResponseBatch(_)
-            | Self::ChunkUploadStart(_)
-            | Self::ChunkUploadNodes(_)
-            | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
             _ => crate::wire::FEATURE_NONE,
         }
     }
@@ -850,7 +691,7 @@ pub fn validate_version_records(versions: &[VersionRecord]) -> Result<(), Versio
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct RowVersionRef {
     /// Table containing the row.
-    pub table: groove::Intern<String>,
+    pub table: jazz_types::Intern<String>,
     /// Stable row id.
     pub row_uuid: RowUuid,
     /// Transaction HLC time.
@@ -863,7 +704,7 @@ impl RowVersionRef {
     /// Construct an exact row-version reference.
     pub fn new(table: impl Into<String>, row_uuid: RowUuid, tx_id: TxId) -> Self {
         Self {
-            table: groove::Intern::new(table.into()),
+            table: jazz_types::Intern::new(table.into()),
             row_uuid,
             tx_time: tx_id.time,
             tx_node_id: tx_id.node,
@@ -910,7 +751,7 @@ pub struct PeerPayloadInventory {
 /// columns into its node-local physical catalogue.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct VersionRecord {
-    table: groove::Intern<String>,
+    table: jazz_types::Intern<String>,
     schema_version: SchemaVersionId,
     /// Exact branch coordinate of this version's branch-local row.
     #[serde(default)]
@@ -956,7 +797,7 @@ struct WireRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnionExtraCells {
     schema_version: SchemaVersionId,
-    table: groove::Intern<String>,
+    table: jazz_types::Intern<String>,
     record: OwnedRecord,
 }
 
@@ -969,7 +810,7 @@ impl UnionExtraCells {
     ) -> Self {
         Self {
             schema_version,
-            table: groove::Intern::new(table.into()),
+            table: jazz_types::Intern::new(table.into()),
             record,
         }
     }
@@ -1158,19 +999,19 @@ mod version_record_wire_row {
     /// the wire: egress resolves it first (`Dictionaries::resolve_record`).
     fn refuse_dictionary_codes(
         descriptor: &RecordDescriptor,
-    ) -> Result<(), groove::records::Error> {
+    ) -> Result<(), jazz_types::records::Error> {
         for field in descriptor.fields() {
             // Codes nested in arrays, records or enums are refused too.
             if field.value_type.contains_interned() {
                 let dictionary = match &field.value_type {
-                    groove::records::ValueType::Nullable(inner) => inner.as_interned(),
+                    jazz_types::records::ValueType::Nullable(inner) => inner.as_interned(),
                     other => other.as_interned(),
                 }
                 .map_or_else(
                     || format!("nested in {}", field.name.as_deref().unwrap_or("field")),
                     |(name, _)| name.to_owned(),
                 );
-                return Err(groove::records::Error::InternedTypeNotEncodable { dictionary });
+                return Err(jazz_types::records::Error::InternedTypeNotEncodable { dictionary });
             }
         }
         Ok(())
@@ -1178,13 +1019,13 @@ mod version_record_wire_row {
 
     fn descriptor_for_encode(
         descriptor: &RecordDescriptor,
-    ) -> Result<DescriptorProof, groove::records::Error> {
+    ) -> Result<DescriptorProof, jazz_types::records::Error> {
         if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_source(descriptor)) {
             return Ok(proof);
         }
         refuse_dictionary_codes(descriptor)?;
-        let encoded = groove::records::encode_persisted_record_descriptor(descriptor)?;
-        let canonical = groove::records::decode_persisted_record_descriptor(&encoded)?;
+        let encoded = jazz_types::records::encode_persisted_record_descriptor(descriptor)?;
+        let canonical = jazz_types::records::decode_persisted_record_descriptor(&encoded)?;
         let proof = DescriptorProof {
             source: *descriptor,
             canonical,
@@ -1194,11 +1035,13 @@ mod version_record_wire_row {
         Ok(proof)
     }
 
-    fn descriptor_for_decode(encoded: &[u8]) -> Result<DescriptorProof, groove::records::Error> {
+    fn descriptor_for_decode(
+        encoded: &[u8],
+    ) -> Result<DescriptorProof, jazz_types::records::Error> {
         if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_encoded(encoded)) {
             return Ok(proof);
         }
-        let canonical = groove::records::decode_persisted_record_descriptor(encoded)?;
+        let canonical = jazz_types::records::decode_persisted_record_descriptor(encoded)?;
         let proof = DescriptorProof {
             source: canonical,
             canonical,
@@ -1291,7 +1134,7 @@ mod version_record_wire_row {
         bytes: &mut Vec<u8>,
         descriptor: &RecordDescriptor,
         union: bool,
-    ) -> Result<(), groove::records::Error> {
+    ) -> Result<(), jazz_types::records::Error> {
         let proof = descriptor_for_encode(descriptor)?;
         let encoded = &proof.encoded;
         let reference = ENCODE_TABLE.with(|table| {
@@ -1314,8 +1157,10 @@ mod version_record_wire_row {
     }
 
     /// Read one `use`: its descriptor, its union bit, and the bytes after it.
-    fn take_use(body: &[u8]) -> Result<(RecordDescriptor, bool, &[u8]), groove::records::Error> {
-        let invalid = || groove::records::Error::NonCanonicalRecord;
+    fn take_use(
+        body: &[u8],
+    ) -> Result<(RecordDescriptor, bool, &[u8]), jazz_types::records::Error> {
+        let invalid = || jazz_types::records::Error::NonCanonicalRecord;
         let (head, body) = take_leb128(body, MAX_HEAD).ok_or_else(invalid)?;
         let (reference, union) = (head >> 1, head & 1 == 1);
         if reference > 0 {
@@ -1345,28 +1190,29 @@ mod version_record_wire_row {
         Ok((proof.canonical, union, &body[length..]))
     }
 
-    fn put_len(bytes: &mut Vec<u8>, length: usize) -> Result<(), groove::records::Error> {
-        let length = u32::try_from(length).map_err(|_| groove::records::Error::LengthOverflow)?;
+    fn put_len(bytes: &mut Vec<u8>, length: usize) -> Result<(), jazz_types::records::Error> {
+        let length =
+            u32::try_from(length).map_err(|_| jazz_types::records::Error::LengthOverflow)?;
         bytes.extend_from_slice(&length.to_le_bytes());
         Ok(())
     }
 
-    fn take_len(body: &[u8]) -> Result<(usize, &[u8]), groove::records::Error> {
+    fn take_len(body: &[u8]) -> Result<(usize, &[u8]), jazz_types::records::Error> {
         let (length, body) = body
             .split_first_chunk::<4>()
-            .ok_or(groove::records::Error::NonCanonicalRecord)?;
+            .ok_or(jazz_types::records::Error::NonCanonicalRecord)?;
         Ok((u32::from_le_bytes(*length) as usize, body))
     }
 
-    fn take(body: &[u8], length: usize) -> Result<(&[u8], &[u8]), groove::records::Error> {
+    fn take(body: &[u8], length: usize) -> Result<(&[u8], &[u8]), jazz_types::records::Error> {
         body.split_at_checked(length)
-            .ok_or(groove::records::Error::NonCanonicalRecord)
+            .ok_or(jazz_types::records::Error::NonCanonicalRecord)
     }
 
     fn encode_parts(
         record: &OwnedRecord,
         extras: &[UnionExtraCells],
-    ) -> Result<Vec<u8>, groove::records::Error> {
+    ) -> Result<Vec<u8>, jazz_types::records::Error> {
         let mut bytes = Vec::with_capacity(MAGIC.len() + 5 + 4 + record.raw().len());
         bytes.extend_from_slice(MAGIC);
         put_use(&mut bytes, record.descriptor(), !extras.is_empty())?;
@@ -1386,12 +1232,12 @@ mod version_record_wire_row {
     }
 
     /// A row and its union cells, if any, in one blob.
-    pub(super) fn encode_row(row: &WireRow) -> Result<Vec<u8>, groove::records::Error> {
+    pub(super) fn encode_row(row: &WireRow) -> Result<Vec<u8>, jazz_types::records::Error> {
         encode_parts(&row.record, &row.extras)
     }
 
-    pub(super) fn decode_row(bytes: &[u8]) -> Result<WireRow, groove::records::Error> {
-        let invalid = || groove::records::Error::NonCanonicalRecord;
+    pub(super) fn decode_row(bytes: &[u8]) -> Result<WireRow, jazz_types::records::Error> {
+        let invalid = || jazz_types::records::Error::NonCanonicalRecord;
         let body = bytes.strip_prefix(MAGIC).ok_or_else(invalid)?;
         let (descriptor, union, mut body) = take_use(body)?;
         let mut extras = Vec::new();
@@ -1481,18 +1327,18 @@ mod version_record_wire_row {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use groove::records::{DescriptorField, FieldIdentity};
+        use jazz_types::records::{DescriptorField, FieldIdentity};
 
         /// A row without union cells.
-        fn encode(record: &OwnedRecord) -> Result<Vec<u8>, groove::records::Error> {
+        fn encode(record: &OwnedRecord) -> Result<Vec<u8>, jazz_types::records::Error> {
             encode_parts(record, &[])
         }
 
         /// A row that must carry no union cells.
-        fn decode(bytes: &[u8]) -> Result<OwnedRecord, groove::records::Error> {
+        fn decode(bytes: &[u8]) -> Result<OwnedRecord, jazz_types::records::Error> {
             let row = decode_row(bytes)?;
             if !row.extras.is_empty() {
-                return Err(groove::records::Error::NonCanonicalRecord);
+                return Err(jazz_types::records::Error::NonCanonicalRecord);
             }
             Ok(row.record)
         }
@@ -1706,7 +1552,7 @@ mod version_record_wire_row {
             let stored_row = OwnedRecord::new(Vec::new(), stored);
             assert!(matches!(
                 encode(&stored_row),
-                Err(groove::records::Error::InternedTypeNotEncodable { dictionary })
+                Err(jazz_types::records::Error::InternedTypeNotEncodable { dictionary })
                     if dictionary == crate::schema::AUTHORS_DICTIONARY
             ));
 
@@ -1789,7 +1635,7 @@ mod version_record_wire_row {
 
         #[test]
         fn descriptor_proof_cache_keys_include_inline_enum_identity() {
-            use groove::records::{EnumCase, EnumSchema};
+            use jazz_types::records::{EnumCase, EnumSchema};
             let payload = RecordDescriptor::new([("value", ValueType::U64)]);
             let first = EnumSchema::new("choice", [EnumCase::new("one", payload)])
                 .unwrap()
@@ -1805,7 +1651,7 @@ mod version_record_wire_row {
                 let proof = descriptor_for_encode(&descriptor).unwrap();
                 assert_eq!(
                     proof.encoded.as_ref(),
-                    groove::records::encode_persisted_record_descriptor(&descriptor).unwrap()
+                    jazz_types::records::encode_persisted_record_descriptor(&descriptor).unwrap()
                 );
                 encoded.push(proof.encoded);
             }
@@ -1929,7 +1775,8 @@ mod version_record_wire_row {
             let second = u64_record("value", 8);
             let other = u64_record("other", 9);
             let descriptor_bytes =
-                groove::records::encode_persisted_record_descriptor(first.descriptor()).unwrap();
+                jazz_types::records::encode_persisted_record_descriptor(first.descriptor())
+                    .unwrap();
             let define = |record: &OwnedRecord, descriptor: &[u8]| {
                 [
                     b"JVRR\x03\x00".as_slice(),
@@ -1943,7 +1790,8 @@ mod version_record_wire_row {
                 [b"JVRR\x03".as_slice(), &[index << 1], record.raw()].concat()
             };
             let other_bytes =
-                groove::records::encode_persisted_record_descriptor(other.descriptor()).unwrap();
+                jazz_types::records::encode_persisted_record_descriptor(other.descriptor())
+                    .unwrap();
 
             let rows = with_message_descriptor_table(|| {
                 [&first, &second, &other, &first, &other].map(|record| encode(record).unwrap())
@@ -2126,7 +1974,7 @@ impl VersionRecord {
         let malformed = || VersionBundleRunError::MalformedVersionRecord {
             table: self.table().to_owned(),
         };
-        let is_user_cell_field = |field: &groove::records::DescriptorField| {
+        let is_user_cell_field = |field: &jazz_types::records::DescriptorField| {
             field
                 .name
                 .as_deref()
@@ -2184,7 +2032,7 @@ impl VersionRecord {
 
         // Decode every descriptor field, then reproduce the record. Besides
         // validating user cells, equality proves that no trailing or alternate
-        // Groove spelling survived deferred `OwnedRecord` construction.
+        // spelling survived deferred `OwnedRecord` construction.
         let values = (0..fields.len())
             .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
             .collect::<Result<Vec<_>, _>>()?;
@@ -2207,7 +2055,10 @@ impl VersionRecord {
             if fields.is_empty()
                 || fields.iter().any(|field| {
                     !is_user_cell_field(field)
-                        || !matches!(field.value_type, groove::records::ValueType::Nullable(_))
+                        || !matches!(
+                            field.value_type,
+                            jazz_types::records::ValueType::Nullable(_)
+                        )
                 })
             {
                 return Err(malformed());
@@ -2236,7 +2087,7 @@ impl VersionRecord {
         record: OwnedRecord,
     ) -> Self {
         Self {
-            table: groove::Intern::new(table.into()),
+            table: jazz_types::Intern::new(table.into()),
             schema_version,
             branch_key: BranchKey::default(),
             row: WireRow {
@@ -2318,17 +2169,17 @@ impl VersionRecord {
         updated_at_ms: u64,
         cells_by_position: &[Option<Value>],
         deletion: Option<DeletionEvent>,
-    ) -> Result<Self, groove::records::Error> {
+    ) -> Result<Self, jazz_types::records::Error> {
         // This path is for data birth only; stored rows project to wire bytes without decoding.
         let descriptor = table.wire_record_descriptor();
         let values = [
             Value::Uuid(row_uuid.0),
             RowAuthor::from_persisted_subject(created_by)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .map_err(|_| jazz_types::records::Error::NonCanonicalRecord)?
                 .to_value(),
             Value::U64(created_at_ms),
             RowAuthor::from_persisted_subject(updated_by)
-                .map_err(|_| groove::records::Error::NonCanonicalRecord)?
+                .map_err(|_| jazz_types::records::Error::NonCanonicalRecord)?
                 .to_value(),
             Value::U64(updated_at_ms),
             Value::Nullable(deletion.map(|deletion| {
@@ -2367,7 +2218,7 @@ impl VersionRecord {
         updated_at_ms: u64,
         cells: &BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
-    ) -> Result<Self, groove::records::Error> {
+    ) -> Result<Self, jazz_types::records::Error> {
         let positional = table
             .columns
             .iter()
@@ -2567,7 +2418,7 @@ impl Ord for VersionRecord {
     }
 }
 
-groove::define_record! {
+jazz_types::define_record! {
     struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => created_by: RowAuthor,
@@ -2881,7 +2732,7 @@ impl VersionBundleRun {
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct VersionBundleRunHeader {
     /// Shared table context when every carried row-version belongs to one table.
-    pub table: Option<groove::Intern<String>>,
+    pub table: Option<jazz_types::Intern<String>>,
     /// Default transaction payload for each body.
     pub tx: Transaction,
     /// Default payload scope for each body.
@@ -2933,7 +2784,7 @@ impl VersionBundleRunOverride {
 /// Validation failures for malformed packed version-bundle runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VersionBundleRunError {
-    /// A deferred Groove record failed structural or canonical validation.
+    /// A deferred record failed structural or canonical validation.
     MalformedVersionRecord {
         /// Table declared by the enclosing version.
         table: String,
@@ -3049,7 +2900,7 @@ pub fn expand_version_carriers(
     Ok(bundles)
 }
 
-fn common_run_table(bundles: &[VersionBundle]) -> Option<groove::Intern<String>> {
+fn common_run_table(bundles: &[VersionBundle]) -> Option<jazz_types::Intern<String>> {
     let mut table = None::<&str>;
     for version in bundles.iter().flat_map(|bundle| &bundle.versions) {
         match table {
@@ -3058,7 +2909,7 @@ fn common_run_table(bundles: &[VersionBundle]) -> Option<groove::Intern<String>>
             Some(_) => return None,
         }
     }
-    table.map(|table| groove::Intern::new(table.to_owned()))
+    table.map(|table| jazz_types::Intern::new(table.to_owned()))
 }
 
 /// Wire handle for one usage-site subscription.
@@ -3178,7 +3029,7 @@ pub struct CoverageKey {
 pub struct PolicyBindingKey {
     /// Logical session subject selected at subscription admission.
     pub identity: AuthorSubject,
-    /// Canonical named Groove values retained rather than hashed so distinct
+    /// Canonical named values retained rather than hashed so distinct
     /// snapshots can never share coverage on a hash collision.
     pub canonical_claims: CanonicalPolicyClaims,
 }
@@ -3186,7 +3037,7 @@ pub struct PolicyBindingKey {
 /// Exact ordered policy claims with a private canonical comparison key.
 ///
 /// The comparison bytes are process-local bookkeeping only. Serde persists or
-/// transports the ordinary named Groove values and reconstructs them on read.
+/// transports the ordinary named values and reconstructs them on read.
 #[derive(Clone, Debug)]
 pub struct CanonicalPolicyClaims {
     claims: BTreeMap<String, Value>,
@@ -3803,7 +3654,7 @@ pub enum SubscribeServerFailureCode {
 
 /// Legacy-compatible table-qualified current content row entry:
 /// `(table, row_uuid, content_tx_id)`.
-pub type ResultRowEntry = (groove::Intern<String>, RowUuid, TxId);
+pub type ResultRowEntry = (jazz_types::Intern<String>, RowUuid, TxId);
 
 /// Opaque replacement discriminator for a synthetic result member.
 ///
@@ -3868,11 +3719,11 @@ pub enum ResultMemberEntry {
         /// Path identity.
         path: String,
         /// Source row table.
-        source_table: groove::Intern<String>,
+        source_table: jazz_types::Intern<String>,
         /// Source row.
         source_row: RowUuid,
         /// Target table.
-        target_table: groove::Intern<String>,
+        target_table: jazz_types::Intern<String>,
         /// Target row.
         target_row: RowUuid,
         /// Optional edge/correlation identity for multipath relations.
@@ -3888,7 +3739,7 @@ pub enum ResultMemberEntry {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct RealRowMemberEntry {
     /// Logical table.
-    pub table: groove::Intern<String>,
+    pub table: jazz_types::Intern<String>,
     /// Row identity.
     pub row_uuid: RowUuid,
     /// Stable identity of the rendered output occurrence. This is the root
@@ -4141,7 +3992,7 @@ pub struct SupportingRow {
     /// Authored native-record table name used by the existing exact version repair API.
     /// This is lookup metadata, not a query-source label; physical identity is authoritative.
     #[serde(deserialize_with = "supporting_table_name::deserialize")]
-    pub version_table: groove::Intern<String>,
+    pub version_table: jazz_types::Intern<String>,
     /// Physical row identity.
     pub row: RowUuid,
     /// Exact content or deletion-register version.
@@ -4161,7 +4012,7 @@ impl SupportingRow {
 mod supporting_table_name {
     use std::{borrow::Cow, cell::Cell, fmt};
 
-    use groove::Intern;
+    use jazz_types::Intern;
     use serde::de::{Error, Unexpected, Visitor};
 
     thread_local! {
@@ -4259,6 +4110,7 @@ pub enum ProgramFactEntry {
     /// Complete transaction payload coverage fact.
     CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry),
     /// View-complete serializable transaction coverage fact.
+    #[serde(rename = "ViewCompleteExclusiveCoverage")]
     ViewCompleteSerializableCoverage(ViewCompleteSerializableCoverageEntry),
     /// Policy decision fact.
     PolicyDecision(PolicyDecisionEntry),
@@ -4316,11 +4168,11 @@ pub struct RelationEdgeEntry {
     /// Logical path or relation name.
     pub path: String,
     /// Source row table.
-    pub source_table: groove::Intern<String>,
+    pub source_table: jazz_types::Intern<String>,
     /// Source row id.
     pub source_row: RowUuid,
     /// Target row table.
-    pub target_table: groove::Intern<String>,
+    pub target_table: jazz_types::Intern<String>,
     /// Target row id.
     pub target_row: RowUuid,
     /// Edge kind, when this is more specific than a plain include/join edge.
@@ -4398,7 +4250,7 @@ pub struct CoveredInputEntry {
     ///
     /// This remains explicit because a source may be reached through a lens
     /// whose source-role table and authored version-table label differ.
-    pub version_table: groove::Intern<String>,
+    pub version_table: jazz_types::Intern<String>,
     /// Source row occurrence within that table.
     pub source_row: RowUuid,
     /// Exact source version admitted in the covered input closure.
@@ -4424,7 +4276,7 @@ impl CoveredInputEntry {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
 pub struct ProgramSourceId {
     /// Logical table emitted by this source occurrence.
-    pub table: groove::Intern<String>,
+    pub table: jazz_types::Intern<String>,
     /// Ordered normalized-role path from the query root to this occurrence.
     pub path: Vec<ProgramSourceRole>,
 }
@@ -4520,7 +4372,7 @@ pub struct PointReadEntry {
     /// Whether the row was present in this read.
     pub present: bool,
     /// Logical table.
-    pub table: groove::Intern<String>,
+    pub table: jazz_types::Intern<String>,
     /// Row identity.
     pub row: RowUuid,
     /// Concrete version read, when present.
@@ -4578,7 +4430,7 @@ pub struct PathCorrelationCoverageEntry {
     /// Logical path or relation name.
     pub path: String,
     /// Source row table.
-    pub source_table: groove::Intern<String>,
+    pub source_table: jazz_types::Intern<String>,
     /// Source row id.
     pub source_row: RowUuid,
     /// Canonical encoded correlation key for the path expansion.
@@ -4678,7 +4530,7 @@ pub struct PredicateOutputSetEntry {
     /// Validation side: base or now.
     pub role: PredicateOutputSetRoleEntry,
     /// Logical table.
-    pub table: groove::Intern<String>,
+    pub table: jazz_types::Intern<String>,
     /// Row identity.
     pub row: RowUuid,
     /// Version identity compared by validation.
@@ -5427,7 +5279,7 @@ fn allocate_column_identity(column: &crate::schema::ColumnSchema) -> PhysicalCol
 
 fn reconcile_enum_variant_identities(
     column: &mut PhysicalColumnIdentity,
-    target: &groove::records::ValueType,
+    target: &jazz_types::records::ValueType,
 ) {
     let mut counts = BTreeMap::new();
     collect_enum_variant_counts(target, "root", &mut counts);
@@ -5445,11 +5297,11 @@ fn reconcile_enum_variant_identities(
 }
 
 fn collect_enum_variant_ids(
-    value_type: &groove::records::ValueType,
+    value_type: &jazz_types::records::ValueType,
     path: &str,
     output: &mut BTreeMap<String, Vec<crate::ids::GlobalPhysicalEnumVariantId>>,
 ) {
-    use groove::records::ValueType;
+    use jazz_types::records::ValueType;
     match value_type {
         ValueType::EnumTag(schema) => {
             output.insert(
@@ -5505,11 +5357,11 @@ fn collect_enum_variant_ids(
 }
 
 fn collect_enum_variant_counts(
-    value_type: &groove::records::ValueType,
+    value_type: &jazz_types::records::ValueType,
     path: &str,
     output: &mut BTreeMap<String, usize>,
 ) {
-    use groove::records::ValueType;
+    use jazz_types::records::ValueType;
     match value_type {
         ValueType::EnumTag(schema) => {
             output.insert(path.to_owned(), schema.variants.len());
@@ -5553,7 +5405,7 @@ fn collect_enum_variant_counts(
 // Publication validation runs before a node has installed any local physical
 // aliases, so the authority-side permanence rule lives with the wire manifest
 // rather than the local descriptor lowering.  Keep this definition aligned
-// with `node::physical::physical_column_epoch_is_compatible`.
+// with `crate::schema::physical_column_epoch_is_compatible`.
 impl SchemaLineagePublication {
     /// Author one schema from all its predecessors. Only coordinates actually
     /// preserved by an incoming lens may inherit identities from that source.
@@ -6278,14 +6130,14 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(16);
             put_bytes(
                 bytes,
-                &groove::records::encode_record_descriptor(record.descriptor())
+                &jazz_types::records::encode_record_descriptor(record.descriptor())
                     .expect("admitted policy record descriptor has canonical encoding"),
             );
             put_bytes(bytes, record.raw());
         }
         Value::Enum(_) => {
             panic!(
-                "union-valued values are an internal Groove representation, not a Jazz protocol value"
+                "union-valued values are an internal storage representation, not a Jazz protocol value"
             )
         }
         Value::U48(_) => {
@@ -6293,9 +6145,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::Large(value) => {
             bytes.push(15);
-            let encoded = groove::large_values::encode_stored_scalar(
+            let encoded = jazz_types::large_values::encode_stored_scalar(
                 value.kind,
-                &groove::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+                &jazz_types::large_values::StoredScalar::Chunked(value.as_ref().clone()),
             )
             .expect("admitted large descriptor has canonical encoding");
             put_bytes(bytes, &encoded);
@@ -6417,19 +6269,19 @@ pub enum LocalEvent {
         /// Mutated table.
         table: String,
     },
-    /// Open a serializable transaction.
+    /// Open an serializable transaction.
     OpenTx,
-    /// Write inside a serializable transaction.
+    /// Write inside an serializable transaction.
     WriteInTx {
         /// Transaction id.
         tx: TxId,
     },
-    /// Commit a serializable transaction.
+    /// Commit an serializable transaction.
     CommitTx {
         /// Transaction id.
         tx: TxId,
     },
-    /// Abandon a serializable transaction.
+    /// Abandon an serializable transaction.
     AbandonTx {
         /// Transaction id.
         tx: TxId,
@@ -6493,8 +6345,8 @@ mod tests {
         ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
         TableSchemaBuilder,
     };
-    use groove::records::ValueType;
-    use groove::schema::{ColumnSchema, ColumnType};
+    use jazz_types::column_schema::{ColumnSchema, ColumnType};
+    use jazz_types::records::ValueType;
 
     // Internal wire corpus: byte compatibility and interning work cannot be
     // observed through row queries. Public sync suites still gate visible behavior.
@@ -6503,7 +6355,7 @@ mod tests {
         #[derive(serde::Serialize, serde::Deserialize)]
         struct PreviousSupportingRow {
             physical_table: crate::ids::GlobalPhysicalTableId,
-            version_table: groove::Intern<String>,
+            version_table: jazz_types::Intern<String>,
             row: RowUuid,
             version: RowVersionRefEntry,
             is_current: bool,
@@ -6515,7 +6367,7 @@ mod tests {
                     physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
                         [3; 16],
                     )),
-                    version_table: groove::Intern::from_ref(name),
+                    version_table: jazz_types::Intern::from_ref(name),
                     row: RowUuid::from_bytes([4; 16]),
                     version: RowVersionRefEntry {
                         tx: TxId::new(TxTime(987654), NodeUuid::from_bytes([5; 16])),
@@ -6562,7 +6414,7 @@ mod tests {
         #[derive(serde::Deserialize, serde::Serialize)]
         struct Name(
             #[serde(deserialize_with = "supporting_table_name::deserialize")]
-            groove::Intern<String>,
+            jazz_types::Intern<String>,
         );
         // Existing postcard string grammar: unsigned length varint, then UTF-8.
         const GOLDEN: &[u8] = &[5, b't', b'o', b'd', b'o', b's'];
@@ -6576,7 +6428,7 @@ mod tests {
         );
         for invalid in [&[1, 255][..], &[2, 0xc0, 0x80], &[2, b'x']] {
             assert!(postcard::from_bytes::<Name>(invalid).is_err());
-            assert!(postcard::from_bytes::<groove::Intern<String>>(invalid).is_err());
+            assert!(postcard::from_bytes::<jazz_types::Intern<String>>(invalid).is_err());
         }
         use serde::de::value::{BytesDeserializer, Error, StringDeserializer};
         assert!(
@@ -6601,10 +6453,10 @@ mod tests {
         #[derive(serde::Deserialize)]
         struct Name(
             #[serde(deserialize_with = "supporting_table_name::deserialize")]
-            groove::Intern<String>,
+            jazz_types::Intern<String>,
         );
-        let first = groove::Intern::<String>::from_ref("table_name_cache_first");
-        let second = groove::Intern::<String>::from_ref("table_name_cache_second");
+        let first = jazz_types::Intern::<String>::from_ref("table_name_cache_first");
+        let second = jazz_types::Intern::<String>::from_ref("table_name_cache_second");
         let bytes = postcard::to_allocvec(&first).unwrap();
         supporting_table_name::reset();
         for _ in 0..1000 {
@@ -6851,7 +6703,7 @@ mod tests {
     #[test]
     fn policy_binding_directory_uses_typed_claim_nodes_without_an_opaque_blob() {
         // A relay durable directory must preserve the exact session snapshot,
-        // including nested claim arrays, in normal Groove fields. The test
+        // including nested claim arrays, in normal record fields. The test
         // intentionally checks the carrier shape as well as round-tripping:
         // replacing it with postcard-in-Bytes would make the first assertion
         // fail even if the logical values still happened to decode.
@@ -7138,46 +6990,6 @@ mod tests {
         assert!(decoded.unwrap().is_err(), "oversized blob must be rejected");
     }
 
-    #[test]
-    fn postcard_rejects_descriptor_less_default_values_before_lens_exists() {
-        let descriptor = RecordDescriptor::new(std::iter::empty::<(String, ValueType)>());
-        let record = OwnedRecord::new(descriptor.create(&[]).unwrap(), descriptor.clone());
-        let enum_value = groove::records::EnumValue::create(0, descriptor, &[]).unwrap();
-        let large = groove::large_values::LargeValueRef {
-            kind: groove::large_values::LargeValueKind::Bytes,
-            format_version: 1,
-            logical_hash: groove::large_values::ContentHash([1; 32]),
-            root: groove::large_values::NodeRef {
-                object_hash: groove::large_values::ContentHash([2; 32]),
-                locator: groove::large_values::Locator::random(),
-            },
-            byte_length: 0,
-            utf16_length: None,
-            edit_tail: Vec::new(),
-        };
-        for value in [
-            Value::Record(record),
-            Value::Enum(enum_value),
-            Value::Large(Box::new(large)),
-        ] {
-            assert!(
-                MigrationLens::new(
-                    schema_id(1),
-                    schema_id(2),
-                    vec![TableLens {
-                        source_table: "a".into(),
-                        target_table: "b".into(),
-                        ops: vec![LensOp::AddColumn {
-                            column: "x".into(),
-                            default: value
-                        }]
-                    }]
-                )
-                .is_err()
-            );
-        }
-    }
-
     // This is intentionally an internal byte-level test: the durable physical
     // identity is not observable through the public row API, and a behavioral
     // round trip alone would not freeze the assigned version, tags, or widths.
@@ -7192,7 +7004,7 @@ mod tests {
         assert_eq!(string.0, [1, 6, 0, b'h', b'i']);
 
         let stable_enum = ValueType::EnumTag(
-            groove::records::ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap(),
+            jazz_types::records::ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap(),
         );
         let enum_value =
             BranchColumnValue::encode_typed(&Value::String("ready".to_owned()), &stable_enum)
@@ -7838,7 +7650,7 @@ mod tests {
             OutputOccurrenceId::history(root, TxTime(42), NodeUuid::from_bytes([3; 16])),
         ] {
             let member: ResultMemberEntry = RealRowMemberEntry::current_content((
-                groove::Intern::new("todos".to_owned()),
+                jazz_types::Intern::new("todos".to_owned()),
                 RowUuid(*root.uuid()),
                 TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
             ))
@@ -7849,6 +7661,26 @@ mod tests {
             let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
             assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
         }
+    }
+
+    #[test]
+    fn row_member_postcard_golden_decodes() {
+        // The occurrence crosses as its ResultKey (main's encoding since the
+        // unified occurrence serialization).
+        const GOLDEN: &[u8] = &[
+            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 26, 2, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
+        ];
+        let member = ResultMemberEntry::Row(RealRowMemberEntry::current_content((
+            jazz_types::Intern::new("t".to_owned()),
+            RowUuid::from_bytes([1; 16]),
+            TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
+        )));
+        assert_eq!(postcard::to_allocvec(&member).unwrap(), GOLDEN);
+        let decoded: ResultMemberEntry = postcard::from_bytes(GOLDEN).unwrap();
+        assert_eq!(decoded, member);
     }
 
     #[test]
@@ -8172,7 +8004,7 @@ pub mod supporting_set_test_oracle;
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
-groove::impl_record_field_enum!(ResultRowLayer {
+jazz_types::impl_record_field_enum!(ResultRowLayer {
     ResultRowLayer::Content = 0,
     ResultRowLayer::Deletion = 1,
     ResultRowLayer::ContentOrDeletion = 2,

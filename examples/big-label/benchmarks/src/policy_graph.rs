@@ -1,28 +1,23 @@
 //! A team's first edit of a release plan under a many-branch sign-off policy:
-//! the authority compiles the update authorization-support view and hydrates
-//! every one of its subscriptions.
+//! the authority compiles the update policy and evaluates it for the edit.
 //!
-//! Moved from `crates/jazz/benches/authorization_support_branches.rs`
-//! (`update_support_branches`), reframed in BigLabel terms: the base table is
-//! a release plan, each policy factor is a sign-off desk, and each desk grants
+//! In BigLabel terms: the base table is a release plan, each policy factor is a sign-off desk, and each desk grants
 //! the edit to either its leads or its deputies. The update policy is an AND of
 //! `desks` ORs, each OR choosing between two correlated `exists` grants, so it
-//! normalizes to `2^desks` branches of `desks` joins each. Schema, policy,
-//! timed work and node identities are unchanged; the grant tables stay empty,
-//! as before, so the measurement is compilation plus empty hydration.
+//! normalizes to `2^desks` branches of `desks` joins each. The grant tables
+//! stay empty, so the measurement is policy compilation plus an evaluation over empty grants,
+//! which denies the edit. The policy runs as one statement of correlated
+//! `EXISTS` branches.
 //!
-//! Each sample opens a fresh node, so no compiled program or Groove graph is
-//! reused between samples. Compare the 16- and 64-branch rungs: linear scaling
+//! Each sample opens a fresh database, so no compiled statement is reused
+//! between samples. Compare the 16- and 64-branch rungs: linear scaling
 //! is a 4x (plus the per-branch join count) step, not 16x.
 
 use std::collections::BTreeMap;
 
-use jazz::db::block_on;
-use jazz::groove::storage::MemoryStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, UpdateOptions, WriteIdentity, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::NodeState;
-use jazz::peer::PeerState;
-use jazz::protocol::{PermissionAdviceAction, SubscriptionKey};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{CmpOp, PolicyExpr, PolicyValue};
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
@@ -43,53 +38,51 @@ impl PolicyGraphFixture {
         }
     }
 
-    /// Untimed per-sample input: a fresh node with nothing compiled yet.
-    pub fn open_node(&self) -> NodeState {
-        let families = self.schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        block_on(NodeState::new_with_shared_test_catalogue(
-            NodeUuid::from_bytes([0xd1; 16]),
+    /// Untimed per-sample input: a fresh authority holding one release plan,
+    /// with nothing compiled for the editor yet.
+    pub fn open_node(&self) -> Db {
+        let db = block_on(Db::open(DbConfig::new(
             self.schema.clone(),
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0xd1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .expect("open sign-off policy database");
+        block_on(db.insert(
+            PLANS,
+            BTreeMap::from([("title".to_owned(), Value::String("Spring release".into()))]),
+            InsertOptions {
+                row_id: Some(plan()),
+                ..Default::default()
+            },
         ))
-        .expect("open sign-off policy node")
+        .expect("seed release plan");
+        db
     }
 }
 
-/// The timed operation: compile the release plan's update support scope and
-/// hydrate each of its subscriptions, as an authority does for a session's
-/// first update of the table. Returns the number of hydrated subscriptions.
-pub fn open_update_support(node: &mut NodeState) -> usize {
-    let editor = editor();
-    let scope = node
-        .authorization_support_scope(
-            editor,
-            &PermissionAdviceAction::Update {
-                table: PLANS.to_owned(),
-                row: RowUuid::from_bytes([1; 16]),
-                patch: BTreeMap::new(),
-            },
-        )
-        .expect("release plan update support scope compiles");
-    let mut peer = PeerState::client_link(editor);
-    for (shape, binding) in &scope.subscriptions {
-        let subscription = SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: scope.options.read_view_key(),
-        };
-        block_on(peer.rehydrate_authorization_support_query_for_identity(
-            node,
-            editor,
-            BTreeMap::new(),
-            subscription,
-            shape,
-            binding,
-            scope.options.clone(),
-        ))
-        .expect("release plan update support hydrates");
-    }
-    scope.subscriptions.len()
+/// The timed operation: the editor's first update of the release plan, which
+/// the authority checks against the `2^desks`-branch update policy. Returns
+/// whether the edit was denied (no desk has granted anything).
+pub fn open_update_support(db: &mut Db) -> bool {
+    block_on(db.update(
+        PLANS,
+        plan(),
+        BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("Spring release (v2)".into()),
+        )]),
+        UpdateOptions {
+            identity: WriteIdentity::Session(editor()),
+            ..Default::default()
+        },
+    ))
+    .is_err()
+}
+
+fn plan() -> RowUuid {
+    RowUuid::from_bytes([1; 16])
 }
 
 fn editor() -> AuthorSubject {

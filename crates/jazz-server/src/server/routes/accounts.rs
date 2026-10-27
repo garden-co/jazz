@@ -1,11 +1,11 @@
 //! Account control endpoints: JWTs authenticate requests, not custom intent claims.
 use crate::server::ServerState;
+use crate::server::account_store::RegistryError;
 use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use jazz::account_registry::storage::RegistryError;
 use jazz::account_registry::{
     AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
 };

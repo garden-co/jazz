@@ -456,7 +456,7 @@ const terminalRowKeyColumn: ColumnDescriptor = {
   nullable: false,
 };
 
-/** Decode a Groove terminal record, whose first physical field is its row key. */
+/** Decode a terminal record, whose first physical field is its row key. */
 export function decodeNativeTerminalRow(
   id: string,
   columns: readonly ColumnDescriptor[],
@@ -475,7 +475,7 @@ export function decodeNativeTerminalRow(
 }
 
 /**
- * Groove terminal payloads retain `Record` values for nested relation rows.
+ * Terminal payloads retain `Record` values for nested relation rows.
  * Ordinary packed transport deliberately represents those rows as byte arrays
  * with an id/length envelope instead. Both outer records have the same layout,
  * but decoding a terminal tree through the ordinary path makes the first UUID

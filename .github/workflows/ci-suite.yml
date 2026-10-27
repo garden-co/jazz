@@ -35,7 +35,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -85,7 +85,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -129,11 +129,11 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # This is deliberately an exact, named historical-storage partition rather
-  # than an incidental member of the broad nextest shard. A green Rust suite
-  # must mean current code opened the pinned native corpus. The pinned
-  # real-browser corpus is the same kind of exact receipt in test-ts, which
-  # already seals the NAPI/WASM pair it needs.
+  # This is deliberately an exact, named storage partition rather than an
+  # incidental member of the broad nextest shard. A green Rust suite must mean
+  # current code opened the pinned SQLite corpus and refused older stores. The
+  # pinned real-browser corpus is the same kind of exact receipt in test-ts,
+  # which already seals the NAPI/WASM pair it needs.
   test-storage-compat:
     if: inputs.scope == 'full'
     # The corpus tests take seconds; the job is compile-bound, so it gets the same
@@ -142,7 +142,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -175,22 +175,28 @@ jobs:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Run CI-equivalent native storage compatibility partition
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition storage-compat
-      # The bounded real M3 oracle smoke (canonical seed 11) shares this job
-      # because its libtest is the exact `jazz` lib-test unit the native corpus
-      # just built, so it costs one run instead of a second cold compile on its
+      # The bounded maintained-vs-one-shot oracle (canonical seed 11) shares
+      # this job because it links the exact `jazz` build the native corpus
+      # just made, so it costs one run instead of a second cold compile on its
       # own runner. The Rust test remains #[ignore]: its full randomized matrix
       # is the nightly/manual soak. It still runs when the corpus step fails so
       # both results are always reported.
-      - name: Run CI-equivalent M3 differential partition
+      - name: Run CI-equivalent differential oracle partition
         if: ${{ !cancelled() }}
         run: node dev/gates/local-ci-equivalent.mjs --ci-partition rust-differential
+      # jazz-db's SQL must also run on Durable Object SQLite; this runs the
+      # suite under its limits. Like the oracle, it reports even when an
+      # earlier step fails.
+      - name: Run CI-equivalent Durable Object SQLite limits partition
+        if: ${{ !cancelled() }}
+        run: node dev/gates/local-ci-equivalent.mjs --ci-partition durable-object-limits
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
 
   # Branch protection requires this stable check name. It aggregates the Rust
   # correctness jobs and stays red whenever any dependency fails or is cancelled.
-  # test-storage-compat also runs the bounded M3 differential partition.
+  # test-storage-compat also runs the bounded differential oracle partition.
   test-rust:
     if: always() && inputs.scope == 'full'
     needs: [test-rust-workspace, test-storage-compat]
@@ -216,7 +222,7 @@ jobs:
     # (root cause TBD; see dev/CI_NOTES.md). Release builds load fine.
 
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -289,7 +295,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

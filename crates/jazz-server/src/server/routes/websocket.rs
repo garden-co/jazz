@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::runtime::ServerLinkAdmission;
+use crate::runtime::{CommitUnitTrust, ConnectionSessionContext};
 use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
@@ -16,11 +18,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures::{SinkExt as _, StreamExt as _};
-use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
-use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
-use jazz::serving::ServerLinkAdmission;
+use jazz::records::Value as CoreValue;
 use jazz::tools::Session;
 use jazz::wire::{
     WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
@@ -488,9 +488,9 @@ fn session_claims(
         _ => BTreeMap::new(),
     };
     let provider_claims =
-        jazz::serving::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
+        crate::runtime::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
             .map_err(|error| error.to_string())?;
-    Ok(jazz::serving::auth_admission::admitted_session_claims(
+    Ok(crate::runtime::auth_admission::admitted_session_claims(
         &session.issuer,
         &session.user_id,
         author,
@@ -1094,11 +1094,6 @@ async fn send_ws_encoded_frames(
     frames: &[Vec<u8>],
 ) -> Result<(), axum::Error> {
     for batch in encode_ws_frame_batches(frames).map_err(axum::Error::new)? {
-        #[cfg(feature = "sync-autopsy")]
-        jazz::db::sync_autopsy::record(format!(
-            "server websocket send batch bytes={}",
-            batch.len()
-        ));
         socket.send(Message::Binary(batch.into())).await?;
     }
     Ok(())
@@ -1162,17 +1157,16 @@ mod tests {
 
     use futures::stream::FuturesUnordered;
     use jazz::db::{
-        Db, DbConfig, DbIdentity, PreparedQuery, QueryAttachment, ReadOpts, RowCells,
-        SeededRowIdSource, Transport, WireTransportAdapter, WriteHandle, WriteState,
+        Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+        SubscriptionStream, SyncMessage, Transport, WireTransport, WireTransportAdapter,
+        WriteHandle,
     };
-    use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{NodeUuid, RowAuthor};
-    use jazz::protocol::SyncMessage;
     use jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES;
-    use jazz::schema::{JazzSchema, TableSchema};
-    use jazz::tx::{Fate, TxId};
+    use jazz::schema::JazzSchema;
+    use jazz::tx::DurabilityTier;
     use jazz::wire::decode_frame;
-    use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION, WireTransport};
+    use jazz::wire::{TransportError, WIRE_PROTOCOL_VERSION};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
     use crate::middleware::AuthConfig;
@@ -1564,19 +1558,6 @@ mod tests {
         jazz::schema::JazzSchema::new(&source).expect("websocket public schema compiles")
     }
 
-    fn compiled_table(schema: &JazzSchema, table: &str) -> TableSchema {
-        schema
-            .tables
-            .iter()
-            .find(|candidate| candidate.name == table)
-            .unwrap_or_else(|| panic!("compiled websocket schema contains {table}"))
-            .clone()
-    }
-
-    fn ws_todos_table_schema() -> TableSchema {
-        compiled_table(&ws_public_schema_convert(), "todos")
-    }
-
     fn ws_private_docs_schema_convert() -> JazzSchema {
         let source = SchemaBuilder::new()
             .table(
@@ -1595,10 +1576,6 @@ mod tests {
             .build();
         jazz::schema::JazzSchema::new(&source)
             .expect("websocket private docs public schema compiles")
-    }
-
-    fn ws_private_docs_table_schema() -> TableSchema {
-        compiled_table(&ws_private_docs_schema_convert(), "docs")
     }
 
     async fn make_ws_convergence_test_state() -> Arc<ServerState> {
@@ -1892,198 +1869,6 @@ mod tests {
         assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
 
-    // Internal route-boundary test: this proves the reusable core
-    // websocket client helper negotiates the real /apps/<APP_ID>/ws route
-    // without reintroducing the legacy SyncPayload websocket handler.
-    #[cfg(any())]
-    #[tokio::test]
-    async fn core_websocket_transport_helper_negotiates_route_hello() {
-        let state = make_ws_test_state().await;
-        let addr = start_ws_test_server(state.clone()).await;
-
-        let transport = WebSocketTransport::connect(
-            format!("http://{addr}"),
-            state.app_id,
-            AuthorSubject::for_test_bytes([0x41; 16]),
-            jazz::tools::websocket_prelude_auth::AuthConfig {
-                admin_secret: Some("admin-secret".to_owned()),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("websocket helper should negotiate server hello");
-        let (protocol_version, features, session_context) =
-            transport.negotiated_transport_metadata();
-        let context = session_context.expect("receipt-capable route admission context");
-        assert_eq!(
-            context.link_identity,
-            AuthorSubject::for_test_bytes([0x41; 16])
-        );
-        assert_eq!(context.local.node, NodeUuid::from_bytes([0x41; 16]));
-        assert_eq!(
-            context.remote.unwrap().node,
-            NodeUuid::from_bytes([0x5e; 16])
-        );
-        assert_ne!(context.local.epoch, 0);
-        assert_ne!(context.remote.unwrap().epoch, 0);
-
-        let schema = ws_public_schema_convert();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let db = Db::open(
-            DbConfig::new(
-                schema,
-                CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
-                DbIdentity {
-                    node: NodeUuid::from_bytes([0x41; 16]),
-                    author: AuthorSubject::for_test_bytes([0x41; 16]),
-                },
-            )
-            .with_id_source(SeededRowIdSource::new(0x4100)),
-        )
-        .await
-        .expect("open client helper client db");
-        db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
-            transport,
-            protocol_version,
-            features,
-            None,
-            Some(context),
-        )))
-        .await;
-        db.tick()
-            .expect("client helper transport should accept db upstream frames");
-    }
-
-    // Route-level regression for the shell wake boundary.  A client DB tick
-    // commonly queues outbound work; that is not new work for the shell that
-    // is already executing the tick, so it must not schedule another one.
-    // Conversely a real server reply must wake the owner so the queued frame
-    // is consumed and its query coverage becomes observable.
-    #[cfg(any())]
-    #[tokio::test(flavor = "current_thread")]
-    async fn websocket_transport_wakes_only_for_inbound_db_work() {
-        let state = make_ws_convergence_test_state().await;
-        let addr = start_ws_test_server(state.clone()).await;
-        let base_url = format!("http://{addr}");
-        let auth = jazz::tools::websocket_prelude_auth::AuthConfig {
-            admin_secret: Some("admin-secret".to_owned()),
-            ..Default::default()
-        };
-
-        // Settle a real handshake before exercising the raw outbound hook.
-        // The assertion immediately after `send_frame` is deliberate: the old
-        // implementation invoked this callback synchronously from that method.
-        let outbound_wakes = Arc::new(AtomicUsize::new(0));
-        let outbound_wake = {
-            let wakes = Arc::clone(&outbound_wakes);
-            Arc::new(move || {
-                wakes.fetch_add(1, AtomicOrdering::SeqCst);
-            }) as Arc<dyn Fn() + Send + Sync>
-        };
-        let mut outbound_probe = WebSocketTransport::connect_with_wake(
-            &base_url,
-            state.app_id,
-            AuthorSubject::for_test_bytes([0x71; 16]),
-            auth.clone(),
-            outbound_wake,
-        )
-        .await
-        .expect("negotiate outbound wake probe");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert_eq!(outbound_wakes.load(AtomicOrdering::SeqCst), 0);
-        outbound_probe
-            .send_frame(Vec::new())
-            .expect("queue outbound probe frame");
-        assert_eq!(
-            outbound_wakes.load(AtomicOrdering::SeqCst),
-            0,
-            "outbound send_frame must not wake the already-active shell"
-        );
-        drop(outbound_probe);
-
-        let inbound_wakes = Arc::new(AtomicUsize::new(0));
-        let inbound_wake = {
-            let wakes = Arc::clone(&inbound_wakes);
-            Arc::new(move || {
-                wakes.fetch_add(1, AtomicOrdering::SeqCst);
-            }) as Arc<dyn Fn() + Send + Sync>
-        };
-        let transport = WebSocketTransport::connect_with_wake(
-            &base_url,
-            state.app_id,
-            AuthorSubject::for_test_bytes([0x72; 16]),
-            auth,
-            inbound_wake,
-        )
-        .await
-        .expect("negotiate inbound DB-work client");
-        let (protocol_version, features, session_context) =
-            transport.negotiated_transport_metadata();
-        let schema = ws_public_schema_convert();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let db = Db::open(
-            DbConfig::new(
-                schema,
-                CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
-                DbIdentity {
-                    node: NodeUuid::from_bytes([0x72; 16]),
-                    author: AuthorSubject::for_test_bytes([0x72; 16]),
-                },
-            )
-            .with_id_source(SeededRowIdSource::new(0x7200)),
-        )
-        .await
-        .expect("open client DB");
-        db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
-            transport,
-            protocol_version,
-            features,
-            None,
-            session_context,
-        )))
-        .await;
-        let query = db
-            .prepare_query(&db.table("todos"))
-            .expect("prepare client query");
-        let attachment = db
-            .attach_query_with_opts(
-                &query,
-                ReadOpts {
-                    tier: jazz::db::ReadTier::Remote,
-                    ..Default::default()
-                },
-            )
-            .expect("attach client query");
-        db.tick().expect("send valid client DB work");
-
-        tokio::time::timeout(WS_SETTLE_DEADLINE, async {
-            while inbound_wakes.load(AtomicOrdering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("server reply enqueues and wakes client DB work");
-
-        let deadline = tokio::time::Instant::now() + WS_SETTLE_DEADLINE;
-        while !db.query_attachment_is_covered(&attachment) && tokio::time::Instant::now() < deadline
-        {
-            db.tick().expect("deliver queued inbound DB work");
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            db.query_attachment_is_covered(&attachment),
-            "the woken client DB must deliver the server's query coverage"
-        );
-    }
-
     async fn start_ws_test_server(state: Arc<ServerState>) -> std::net::SocketAddr {
         let app = super::super::create_router(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -2254,9 +2039,9 @@ mod tests {
         let frames: Vec<Vec<u8>> =
             postcard::from_bytes(&response).expect("decode server hello batch");
         assert_eq!(frames.len(), 1);
-        let WireFrame::Hello(server_hello) = decode_frame(&frames[0]).expect("decode server hello")
-        else {
-            panic!("expected server WireFrame::Hello");
+        let server_hello = match decode_frame(&frames[0]).expect("decode server hello") {
+            WireFrame::Hello(hello) => hello,
+            other => panic!("expected server WireFrame::Hello, got {other:?}"),
         };
         assert_eq!(
             server_hello.features, features,
@@ -2775,9 +2560,8 @@ mod tests {
         }
     }
 
-    // Observe semantic messages after the real persistent adapter has decoded
-    // channel envelopes and applied credits; never infer message boundaries
-    // from a WebSocket batch.
+    // Observe semantic messages after the real wire adapter has decoded
+    // them; never infer message boundaries from a WebSocket batch.
     struct ObservedTransport {
         adapter: WireTransportAdapter<TestWireTransport>,
         received: Rc<RefCell<Vec<SyncMessage>>>,
@@ -2788,54 +2572,25 @@ mod tests {
             self.adapter.send(message)
         }
         fn try_recv(&mut self) -> Option<SyncMessage> {
-            self.try_recv_result().expect("valid test wire")
+            let message = self.adapter.try_recv()?;
+            self.received.borrow_mut().push(message.clone());
+            Some(message)
         }
-        fn try_recv_result(&mut self) -> Result<Option<SyncMessage>, TransportError> {
-            let message = self.adapter.try_recv_result()?;
-            if let Some(message) = &message {
-                self.received.borrow_mut().push(message.clone());
-            }
-            Ok(message)
+        fn take_failure(&mut self) -> Option<TransportError> {
+            self.adapter.take_failure()
         }
-        fn try_recv_owned_result(
-            &mut self,
-        ) -> Result<Option<jazz::db::ReceivedSyncMessage>, TransportError> {
-            let message = self.adapter.try_recv_owned_result()?;
-            if let Some(message) = &message {
-                self.received.borrow_mut().push(message.message.clone());
-            }
-            Ok(message)
-        }
-        fn poll_flush(&mut self) -> Result<jazz::db::WireFlushStatus, TransportError> {
-            self.adapter.poll_flush()
-        }
-        fn has_terminal_failure(&self) -> bool {
-            self.adapter.has_terminal_failure()
-        }
-        fn incomplete_receive_timeout_ms(&self) -> Option<u64> {
-            self.adapter.incomplete_receive_timeout_ms()
-        }
-        fn shared_auxiliary_endpoint(&self) -> Option<jazz::db::SharedAuxiliaryEndpoint> {
-            self.adapter.shared_auxiliary_endpoint()
-        }
-        fn set_trusted_encoder(&mut self, trusted: bool) {
-            self.adapter.set_trusted_encoder(trusted);
-        }
-        fn wire_inbound_context(&self) -> Option<jazz::wire::WireInboundContext> {
-            self.adapter.wire_inbound_context()
-        }
-        fn connection_session_context(&self) -> Option<jazz::db::ConnectionSessionContext> {
-            self.adapter.connection_session_context()
-        }
-        fn permits_delegated_sessions(&self) -> bool {
-            self.adapter.permits_delegated_sessions()
-        }
+    }
+
+    /// A remote subscription held open by a test; it is covered once the
+    /// server has settled its opening.
+    struct QueryAttachment {
+        stream: RefCell<SubscriptionStream>,
+        settled: std::cell::Cell<bool>,
     }
 
     struct TestClient {
         db: Db,
         transport: TestWireTransport,
-        todos_table: TableSchema,
         received: Rc<RefCell<Vec<SyncMessage>>>,
     }
 
@@ -2856,15 +2611,9 @@ mod tests {
             row_seed: u64,
             author: AuthorSubject,
         ) -> Self {
-            let column_families = schema.column_families();
-            let refs = column_families
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>();
             let db = Db::open(
                 DbConfig::new(
                     schema,
-                    CoreMemoryStorage::new(&refs).expect("valid memory storage families"),
                     DbIdentity {
                         node: NodeUuid::from_bytes([node_seed; 16]),
                         author,
@@ -2875,25 +2624,15 @@ mod tests {
             .await
             .expect("open client db");
             let transport = TestWireTransport::default();
-            // Match the authority-unbound test hello's negotiated features.
-            // Scoped semantics are not installed without an admitted remote
-            // endpoint, even though a browser may accept the server endpoint
-            // from its response Hello.
             let received = Rc::new(RefCell::new(Vec::new()));
             db.connect_upstream(Box::new(ObservedTransport {
                 received: Rc::clone(&received),
-                adapter: WireTransportAdapter::new(
-                    transport.clone(),
-                    WIRE_PROTOCOL_VERSION,
-                    0,
-                    None,
-                ),
+                adapter: WireTransportAdapter::current(transport.clone()),
             }))
             .await;
             Self {
                 db,
                 transport,
-                todos_table: ws_todos_table_schema(),
                 received,
             }
         }
@@ -2901,7 +2640,7 @@ mod tests {
         fn write_todo(&self, title: &str) -> WriteHandle {
             jazz::db::block_on(self.db.insert(
                 "todos",
-                RowCells::from([
+                BTreeMap::from([
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("done".to_owned(), CoreValue::Bool(false)),
                 ]),
@@ -2914,7 +2653,7 @@ mod tests {
             self.write_todo(title).row_uuid()
         }
 
-        fn write_todo_tx_id(&self, title: &str) -> TxId {
+        fn write_todo_tx_id(&self, title: &str) -> u64 {
             self.write_todo(title).mergeable_tx_id()
         }
 
@@ -2922,7 +2661,7 @@ mod tests {
             let (_, owner) = issuer_and_subject(owner);
             jazz::db::block_on(self.db.insert(
                 "docs",
-                RowCells::from([
+                BTreeMap::from([
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("owner".to_owned(), CoreValue::String(owner)),
                 ]),
@@ -2943,21 +2682,7 @@ mod tests {
         }
 
         fn attach_todos_query(&self) -> (PreparedQuery, QueryAttachment) {
-            let query = self
-                .db
-                .prepare_query(&self.db.table("todos"))
-                .expect("prepare todos query");
-            let attachment = self
-                .db
-                .attach_query_with_opts(
-                    &query,
-                    ReadOpts {
-                        tier: jazz::db::ReadTier::Remote,
-                        ..Default::default()
-                    },
-                )
-                .expect("default read view remote attachment should be supported");
-            (query, attachment)
+            self.attach_table_query("todos")
         }
 
         fn attach_table_query(&self, table: &str) -> (PreparedQuery, QueryAttachment) {
@@ -2965,60 +2690,59 @@ mod tests {
                 .db
                 .prepare_query(&self.db.table(table))
                 .expect("prepare table query");
-            let attachment = self
-                .db
-                .attach_query_with_opts(
-                    &query,
-                    ReadOpts {
-                        tier: jazz::db::ReadTier::Remote,
-                        ..Default::default()
-                    },
-                )
-                .expect("default read view remote attachment should be supported");
-            (query, attachment)
+            let stream = jazz::db::block_on(
+                self.db
+                    .subscribe(&query, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)),
+            )
+            .expect("remote subscription should be supported");
+            (
+                query,
+                QueryAttachment {
+                    stream: RefCell::new(stream),
+                    settled: std::cell::Cell::new(false),
+                },
+            )
         }
 
         fn remote_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
-            self.db.query_attachment_is_covered(attachment)
+            let mut stream = attachment.stream.borrow_mut();
+            while let Some(event) = stream.try_next_event() {
+                if let SubscriptionEvent::Delta { settled: true, .. } = event {
+                    attachment.settled.set(true);
+                }
+            }
+            attachment.settled.get()
         }
 
         fn detach_query(&self, attachment: QueryAttachment) {
-            self.db.detach_query(attachment);
+            drop(attachment);
+        }
+
+        /// Whether the transaction has a final fate from the server yet.
+        fn write_fate(&self, write: &WriteHandle) -> Option<Result<(), jazz::db::Error>> {
+            let wait = self
+                .db
+                .wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global);
+            let mut wait = std::pin::pin!(wait);
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            match wait.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(result) => Some(result.map(|_| ())),
+                std::task::Poll::Pending => None,
+            }
         }
 
         async fn remote_todo_titles(&self, query: &PreparedQuery) -> Vec<String> {
-            self.db
-                .all(
-                    query,
-                    ReadOpts {
-                        tier: jazz::db::ReadTier::Remote,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .expect("read remote todos")
-                .into_iter()
-                .filter_map(|row| match row.cell(&self.todos_table, "title") {
-                    Some(CoreValue::String(title)) => Some(title.clone()),
-                    _ => None,
-                })
-                .collect()
+            self.remote_titles(query).await
         }
 
-        async fn remote_titles(&self, query: &PreparedQuery, table: &TableSchema) -> Vec<String> {
+        async fn remote_titles(&self, query: &PreparedQuery) -> Vec<String> {
             self.db
-                .all(
-                    query,
-                    ReadOpts {
-                        tier: jazz::db::ReadTier::Remote,
-                        ..Default::default()
-                    },
-                )
+                .all(query, ReadOpts::default())
                 .await
-                .expect("read remote rows")
+                .expect("read synced rows")
                 .into_iter()
-                .filter_map(|row| match row.cell(table, "title") {
-                    Some(CoreValue::String(title)) => Some(title.clone()),
+                .filter_map(|row| match row.cell("title") {
+                    Some(CoreValue::String(title)) => Some(title),
                     _ => None,
                 })
                 .collect()
@@ -3043,10 +2767,8 @@ mod tests {
         postcard::from_bytes(&bytes).unwrap_or_default()
     }
 
-    /// Unlike the transport pump's optional poll, setup has an explicit
-    /// protocol obligation: a successfully admitted query session must first
-    /// receive the authority catalogue. Wait for that required reply using the
-    /// route test's normal bounded-settlement deadline.
+    /// Unlike the transport pump's optional poll, wait for a reply the server
+    /// owes, using the route test's normal bounded-settlement deadline.
     async fn receive_required_ws_encoded_frames(
         ws: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -3123,13 +2845,13 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
         write: &WriteHandle,
-    ) -> WriteState {
+    ) -> Option<Result<(), jazz::db::Error>> {
         let start = tokio::time::Instant::now();
         loop {
             let _ = pump_core_websocket_transport_once(client, ws).await;
-            let state = write.write_state().await.expect("websocket write state");
-            if !matches!(state.fate, Fate::Pending) || start.elapsed() >= WS_SETTLE_DEADLINE {
-                return state;
+            let fate = client.write_fate(write);
+            if fate.is_some() || start.elapsed() >= WS_SETTLE_DEADLINE {
+                return fate;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -3198,14 +2920,6 @@ mod tests {
         assert!(
             client.remote_attachment_is_covered(&attachment),
             "websocket setup must settle the initial query before testing a later operation"
-        );
-        assert!(
-            client
-                .received
-                .borrow()
-                .iter()
-                .any(|message| matches!(message, SyncMessage::CatalogueSnapshot(_))),
-            "query setup must receive the authority catalogue through the wire adapter"
         );
         (query, attachment)
     }
@@ -3476,132 +3190,6 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// Wraps only the account registry root and fails its next durable flush on
-    /// demand, reproducing an ambiguous storage error after the journal append.
-    #[cfg(feature = "embedded-server")]
-    #[derive(Debug)]
-    struct FailNextAccountFlushFactory {
-        inner: jazz_storage_rocksdb::RocksDbStorageFactory,
-        fail_next_account_flush: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    #[cfg(feature = "embedded-server")]
-    struct FailNextFlushStorage {
-        inner: jazz::groove::storage::BoxedStorage,
-        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    #[cfg(feature = "embedded-server")]
-    mod fail_next_flush_storage {
-        use super::FailNextFlushStorage;
-        use jazz::groove::storage::{
-            Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest,
-            StorageFuture, StorageScan, Value,
-        };
-        impl OrderedKvStorage for FailNextFlushStorage {
-            fn get(
-                &self,
-                cf: String,
-                key: Vec<u8>,
-            ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-                self.inner.get(cf, key)
-            }
-            fn put_if_absent(
-                &self,
-                cf: String,
-                key: Vec<u8>,
-                value: Vec<u8>,
-            ) -> StorageFuture<'_, Result<Option<Value>, Error>> {
-                self.inner.put_if_absent(cf, key, value)
-            }
-            fn compare_and_delete(
-                &self,
-                cf: String,
-                key: Vec<u8>,
-                expected: Vec<u8>,
-            ) -> StorageFuture<'_, Result<bool, Error>> {
-                self.inner.compare_and_delete(cf, key, expected)
-            }
-            fn set(
-                &self,
-                cf: String,
-                key: Vec<u8>,
-                value: Vec<u8>,
-            ) -> StorageFuture<'_, Result<(), Error>> {
-                self.inner.set(cf, key, value)
-            }
-            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
-                self.inner.delete(cf, key)
-            }
-            fn scan(
-                &self,
-                request: ScanRequest,
-            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-                self.inner.scan(request)
-            }
-            fn write_many(
-                &self,
-                operations: Vec<OwnedWriteOperation>,
-            ) -> StorageFuture<'_, Result<(), Error>> {
-                self.inner.write_many(operations)
-            }
-            fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
-                self.inner.close()
-            }
-            fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
-                if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                    Box::pin(async {
-                        Err(Error::InvalidStorageLayout(
-                            "test: injected account registry flush failure".into(),
-                        ))
-                    })
-                } else {
-                    self.inner.flush_write_boundary()
-                }
-            }
-        }
-        impl ReopenableStorage for FailNextFlushStorage {
-            fn reopen(
-                self,
-                column_families: Vec<String>,
-            ) -> StorageFuture<'static, Result<Self, Error>> {
-                Box::pin(async move {
-                    Ok(Self {
-                        inner: self.inner.reopen(column_families).await?,
-                        fail: self.fail,
-                    })
-                })
-            }
-        }
-    }
-
-    #[cfg(feature = "embedded-server")]
-    impl jazz::groove::storage::StorageFactory for FailNextAccountFlushFactory {
-        fn open(
-            &self,
-            path: std::path::PathBuf,
-            column_families: Vec<String>,
-            codec_profile: jazz::groove::storage::StorageCodecProfile,
-        ) -> jazz::groove::storage::StorageFuture<
-            '_,
-            Result<jazz::groove::storage::BoxedStorage, jazz::groove::storage::Error>,
-        > {
-            let is_accounts = path.ends_with("accounts.rocksdb");
-            let fail = self.fail_next_account_flush.clone();
-            Box::pin(async move {
-                let inner = self
-                    .inner
-                    .open(path, column_families, codec_profile)
-                    .await?;
-                Ok(if is_accounts {
-                    jazz::groove::storage::BoxedStorage::new(FailNextFlushStorage { inner, fail })
-                } else {
-                    inner
-                })
-            })
-        }
-    }
-
     /// A revoke whose journal append lands but whose durable flush fails
     /// returns an error and poisons the registry; a restart replays the
     /// revocation. The per-message gate must fail closed, exactly like a
@@ -3613,7 +3201,6 @@ mod tests {
     async fn failed_revoke_flush_still_closes_the_per_message_account_gate() {
         use crate::server::testing::{JazzServer, TEST_JWT_ISSUER, TestJwtIssuer};
 
-        let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let schema = SchemaBuilder::new()
             .table(
                 PublicTableSchema::builder("todos")
@@ -3623,10 +3210,7 @@ mod tests {
             .build();
         let core = JazzServer::builder()
             .with_schema(schema)
-            .with_storage_factory(std::sync::Arc::new(FailNextAccountFlushFactory {
-                inner: jazz_storage_rocksdb::RocksDbStorageFactory,
-                fail_next_account_flush: fail.clone(),
-            }))
+            .with_persistent_storage()
             .start()
             .await
             .expect("start test server");
@@ -3677,7 +3261,8 @@ mod tests {
 
         let state = core.server_state();
         let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
-        fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let registry = state.accounts.as_ref().expect("account registry");
+        registry.fail_next_append_for_test();
         let revoked = client
             .post(format!("{accounts}/revoke"))
             .bearer_auth(&alice)
@@ -3688,7 +3273,7 @@ mod tests {
             "the injected flush failure surfaces as a failed revoke"
         );
         assert!(
-            !fail.load(std::sync::atomic::Ordering::SeqCst),
+            !registry.append_failure_pending_for_test(),
             "the injected flush failure was consumed by the revoke"
         );
 
@@ -3805,9 +3390,6 @@ mod tests {
         const CHECKS_PER_SOCKET: usize = 2_000;
         let core = JazzServer::builder()
             .with_persistent_storage()
-            .with_storage_factory(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            ))
             .start()
             .await
             .expect("start test server");
@@ -3920,6 +3502,165 @@ mod tests {
         }
     }
 
+    /// Wait times of host-table work (account logins, catalogue writes) on
+    /// a durable store while sessions upload as fast as the server ingests.
+    /// Host work shares the store's thread with the runtime, so it must not
+    /// queue behind more than one tick of it.
+    #[test]
+    fn host_work_waits_at_most_one_tick_under_write_load() {
+        const WRITERS: u8 = 6;
+        const ROWS_PER_ROUND: usize = 64;
+        const LOAD: Duration = Duration::from_secs(4);
+        let server = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = server.block_on(async {
+            ServerBuilder::new(AppId::random())
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    backend_secret: Some("backend-secret".to_owned()),
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_schema(Schema::new())
+                .with_core_server_shell_schema(ws_public_schema_convert())
+                .build()
+                .await
+                .expect("build durable load test state")
+                .state
+        });
+        let addr = server.block_on(start_ws_test_server(state.clone()));
+        let accounts = state.accounts.as_ref().unwrap();
+        let catalogue = state
+            .store
+            .as_ref()
+            .unwrap()
+            .kv(crate::kv::CATALOGUE)
+            .unwrap();
+        let principal = jazz::account_registry::Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "load-probe".into(),
+        };
+        server
+            .block_on(accounts.login_or_register(principal.clone()))
+            .unwrap();
+        // This machine's cost of one durable host write (one fsync), before
+        // the writers connect: the bounds below are in units of it.
+        let mut idle = (0..20)
+            .map(|n: u32| {
+                let at = std::time::Instant::now();
+                catalogue
+                    .write_many(&[(b"idle-probe".to_vec(), n.to_le_bytes().to_vec())])
+                    .unwrap();
+                at.elapsed()
+            })
+            .collect::<Vec<_>>();
+        idle.sort();
+        let idle_write = idle[idle.len() / 2];
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let written = Arc::new(AtomicU64::new(0));
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|n| {
+                let (state, stop, written) = (state.clone(), stop.clone(), written.clone());
+                std::thread::spawn(move || {
+                    let client_runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    client_runtime.block_on(async move {
+                        let seed = 0xd0 + n;
+                        let client =
+                            TestClient::new(ws_public_schema_convert(), seed, u64::from(seed) << 8)
+                                .await;
+                        let mut ws = open_negotiated_ws(
+                            addr,
+                            &state,
+                            AuthorSubject::for_test_bytes([seed; 16]),
+                        )
+                        .await;
+                        let mut round = 0;
+                        while !stop.load(Ordering::Acquire) {
+                            for row in 0..ROWS_PER_ROUND {
+                                client.write_todo(&format!("load {n}/{round}/{row}"));
+                            }
+                            round += 1;
+                            pump_core_websocket_transport_once(&client, &mut ws).await;
+                            written.fetch_add(ROWS_PER_ROUND as u64, Ordering::Relaxed);
+                        }
+                    });
+                })
+            })
+            .collect();
+
+        // Let the writers reach steady state before measuring.
+        std::thread::sleep(Duration::from_millis(500));
+        let mut logins = Vec::new();
+        let mut writes = Vec::new();
+        let started = std::time::Instant::now();
+        while started.elapsed() < LOAD {
+            let at = std::time::Instant::now();
+            server.block_on(accounts.login(principal.clone())).unwrap();
+            logins.push(at.elapsed());
+            let at = std::time::Instant::now();
+            catalogue
+                .write_many(&[(
+                    b"probe".to_vec(),
+                    at.elapsed().as_nanos().to_le_bytes().to_vec(),
+                )])
+                .unwrap();
+            writes.push(at.elapsed());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Release);
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let rows = written.load(Ordering::Relaxed);
+        let summary = |name: &str, samples: &mut Vec<Duration>| {
+            samples.sort();
+            let at = |q: f64| samples[((samples.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "{name}: n={} p50={:?} p99={:?} max={:?}",
+                samples.len(),
+                at(0.5),
+                at(0.99),
+                samples[samples.len() - 1]
+            );
+            at(0.5)
+        };
+        eprintln!(
+            "rows uploaded under load: {rows} ({:.0}/s)",
+            rows as f64 / (LOAD.as_secs_f64() + 0.5)
+        );
+        let login = summary("login", &mut logins);
+        let write = summary("catalogue write", &mut writes);
+        assert!(rows > 0, "the writers must load the server");
+        server.block_on(async {
+            state.shutdown.request_shutdown();
+            state.run_shutdown_finalization().await;
+        });
+        // Measured (6 writers, durable store, one fsync per commit, release
+        // build): login p50 ~0.25ms (reads never queue behind the runtime),
+        // catalogue write p50 ~8ms: at most one tick slice (one session's
+        // commits, up to 16 fsyncs) ahead of it. Unsized ticks put every
+        // session's commits (6 x 16 fsyncs) ahead of it. The bound is in
+        // units of this machine's own fsync, with room for a slow CI disk
+        // and a busy scheduler, and still catches unsized ticks.
+        let bound = idle_write * 40 + Duration::from_millis(50);
+        eprintln!("idle catalogue write: {idle_write:?}; bound {bound:?}");
+        for (name, median) in [("login", login), ("catalogue write", write)] {
+            assert!(
+                median < bound,
+                "{name} waited {median:?} (median) behind the runtime; bound {bound:?}"
+            );
+        }
+    }
+
     // Internal route-boundary guard: WebSocket message boundaries are not
     // observable through the public JazzClient facade. Two real Db clients and
     // the public websocket route are therefore required to prove that a fate
@@ -3957,8 +3698,8 @@ mod tests {
                     .borrow_mut()
                     .drain(..)
                     .filter_map(|message| {
-                        if let SyncMessage::FateUpdate { tx_id, .. } = message {
-                            Some(tx_id)
+                        if let SyncMessage::Fate { tx, .. } = message {
+                            Some(tx)
                         } else {
                             None
                         }
@@ -4208,9 +3949,11 @@ mod tests {
         let (_, writer_attachment) = settle_ws_todos_query(&writer, &mut writer_ws).await;
         for title in [visible_title.as_str(), "hidden"] {
             let write = writer.write_todo(title);
-            assert_eq!(
-                settle_ws_write(&writer, &mut writer_ws, &write).await.fate,
-                Fate::Accepted,
+            assert!(
+                matches!(
+                    settle_ws_write(&writer, &mut writer_ws, &write).await,
+                    Some(Ok(()))
+                ),
                 "the authority must accept the fixture row before the reader queries"
             );
         }
@@ -4262,7 +4005,6 @@ mod tests {
             "Alice must upload the private row through the websocket route"
         );
 
-        let docs_table = ws_private_docs_table_schema();
         let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
         let mut ws_b = open_negotiated_ws_session(addr, &state, bob).await;
         let (client_b_docs, client_b_docs_attachment) = client_b.attach_table_query("docs");
@@ -4280,10 +4022,7 @@ mod tests {
             "Bob's docs query must be covered by the websocket route"
         );
         assert!(
-            client_b
-                .remote_titles(&client_b_docs, &docs_table)
-                .await
-                .is_empty(),
+            client_b.remote_titles(&client_b_docs).await.is_empty(),
             "Bob must receive empty remote rows for Alice's private row"
         );
     }
@@ -4460,17 +4199,13 @@ mod tests {
 
         let mut sockets_a = Vec::with_capacity(WS_PER_IDENTITY_CONNECTION_CAP);
         for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
-            let mut socket = open_negotiated_ws_session(addr_a, &state_a, identity).await;
-            let _ = receive_required_ws_encoded_frames(&mut socket).await;
-            sockets_a.push(socket);
+            sockets_a.push(open_negotiated_ws_session(addr_a, &state_a, identity).await);
         }
         let mut oldest_a = sockets_a.remove(0);
 
         // This admission must succeed without evicting the oldest socket on
         // the other ServerState.
-        let mut session_b = open_negotiated_ws_session(addr_b, &state_b, identity).await;
-        let _ = receive_required_ws_encoded_frames(&mut session_b).await;
-        let _session_b = session_b;
+        let _session_b = open_negotiated_ws_session(addr_b, &state_b, identity).await;
 
         let ping = vec![0x4a, 0x4b, 0x4c];
         oldest_a

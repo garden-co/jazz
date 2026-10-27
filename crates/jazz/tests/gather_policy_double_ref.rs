@@ -5,33 +5,23 @@
 //! "evaluates explicit gather seeds through a same-table double-ref edge":
 //! a backend Node runtime with `tier: "global"` writes the graph locally and
 //! then reads through `forSession`.
-//!
-//! The lowered read graph reaches one input node along two paths. Hydration
-//! used to clear its "visiting" mark inside `debug_assert!`, so release builds
-//! (NAPI/WASM) reported that shared input as "graph contains a dependency
-//! cycle". Debug test builds only catch that regression with groove's debug
-//! assertions disabled:
-//! `cargo test --config 'profile.dev.package.groove.debug-assertions=false' ...`.
 
-mod common;
+use crate::common;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
     RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
     RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
     RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
-use jazz::tools::{
-    ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchemaBuilder,
-};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 use common::compile_schema;
@@ -209,11 +199,8 @@ fn schema(bound: RecursionBound) -> JazzSchema {
 
 fn open_global_node(bound: RecursionBound) -> Db {
     let schema = schema(bound);
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
         schema,
-        TestStorage::new(&family_refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x82; 16]),
             author: AuthorSubject::SYSTEM,
@@ -353,7 +340,7 @@ fn assert_session_reads_only_the_reachable_grant(bound: RecursionBound) {
         .collect::<BTreeSet<_>>();
     assert_eq!(one_shot, BTreeSet::from([visible]));
 
-    let mut stream = block_on(db.subscribe_client_for_identity(&prepared, local_opts(), user()))
+    let mut stream = block_on(db.subscribe_for_identity(&prepared, local_opts(), user()))
         .expect("session subscription of dropdowns");
     let opened = match block_on(stream.next_event()).expect("subscription opening") {
         SubscriptionEvent::Delta {

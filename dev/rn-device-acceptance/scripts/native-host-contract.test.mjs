@@ -626,10 +626,12 @@ test("both platform session wrappers delegate one authenticated socket owner to 
     "utf8",
   );
   const ios = fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/ios/JazzRelay.mm"), "utf8");
-  const relay = fs.readFileSync(
-    path.resolve(root, "../../crates/jazz-native-relay/src/lib.rs"),
-    "utf8",
-  );
+  // The host lives in lib.rs and the SQLite engine and socket worker in relay.rs.
+  const relay = ["lib.rs", "relay.rs"]
+    .map((file) =>
+      fs.readFileSync(path.resolve(root, "../../crates/jazz-native-relay/src", file), "utf8"),
+    )
+    .join("\n");
   for (const wrapper of [android, ios]) {
     assert.match(wrapper, /shared Rust socket worker/);
     assert.doesNotMatch(wrapper, /WebSocketTransport|NativeWebSocketConnector/);

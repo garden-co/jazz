@@ -1,0 +1,3549 @@
+//! Jazz queries, predicates, policies and relation IR compiled to SQL.
+//!
+//! Every boolean this module emits is two-valued (0 or 1, never NULL), so
+//! `NOT` behaves like Jazz's `Not` and a missing session value can never
+//! match a NULL cell by accident.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::ids::{AuthorSubject, RowUuid};
+use crate::options::Error;
+use crate::query::{
+    ArraySubquery, ArraySubqueryRequirement, JoinTarget, Operand, OrderDirection, Predicate, Query,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationKeyRef,
+    RelationPredicate, RelationProjectExpr, RelationRowIdRef, RelationValueRef,
+};
+use crate::records::{Value, ValueType};
+use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
+
+use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
+
+mod history;
+
+/// Inherits chains with no explicit bound unroll this deep.
+pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
+/// Fixpoint gathers carry a depth column only as a runaway guard.
+const FIXPOINT_GUARD: usize = 1_000;
+
+/// The identity a read or write is authorized as.
+#[derive(Clone, Debug, Default)]
+pub struct Session {
+    /// The internal authority capability: no policies apply.
+    pub system: bool,
+    pub issuer: Option<String>,
+    pub subject: Option<String>,
+    pub account: Option<uuid::Uuid>,
+    /// Post-admission claims, keyed as `Db::set_identity_claims` receives them.
+    pub claims: BTreeMap<String, Value>,
+    /// Set when compilation read any session value: the SQL is then
+    /// specific to this identity and cannot be shared across identities.
+    pub used: std::cell::Cell<bool>,
+}
+
+impl Session {
+    pub fn system() -> Self {
+        Self {
+            system: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn for_author(author: AuthorSubject, claims: BTreeMap<String, Value>) -> Self {
+        if author == AuthorSubject::SYSTEM {
+            return Self {
+                claims,
+                ..Self::system()
+            };
+        }
+        let (issuer, subject) = author.principal_parts();
+        Self {
+            system: false,
+            issuer: Some(issuer),
+            subject: Some(subject),
+            account: author.account_id().map(|account| account.0),
+            claims,
+            used: Default::default(),
+        }
+    }
+
+    /// `session.<path>` as a value, or `None` when the session has none
+    /// (or holds an explicit null there).
+    pub fn resolve(&self, path: &[String]) -> Option<Value> {
+        self.resolve_raw(path).and_then(unwrap_nullable)
+    }
+
+    /// `session.<path>` as held: an explicit null claim is
+    /// `Some(Nullable(None))`, a missing path `None`. Claim paths walk
+    /// nested claim objects by literal segments.
+    fn resolve_raw(&self, path: &[String]) -> Option<Value> {
+        self.used.set(true);
+        let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+        Some(match parts.as_slice() {
+            ["user", "identity", "subject"] => Value::String(self.subject.clone()?),
+            ["user", "identity", "issuer"] => Value::String(self.issuer.clone()?),
+            ["user", "account"] => Value::Uuid(self.account?),
+            // How the identity signed in, from its issuer (as Jazz derives
+            // `session.authMode`).
+            ["authMode"] => Value::String(
+                match self.issuer.as_deref()? {
+                    AuthorSubject::LOCAL_FIRST_ISSUER => "local-first",
+                    AuthorSubject::ANONYMOUS_ISSUER => "anonymous",
+                    _ => "external",
+                }
+                .to_owned(),
+            ),
+            ["claims", _, ..] => {
+                jazz_model::model::policy_claims::policy_claim_at_path(&self.claims, path)?
+            }
+            _ => return None,
+        })
+    }
+
+    /// `session.<path> IS NULL`: an explicit null. A missing claim path is
+    /// not null (it is absent); a missing user part is.
+    pub fn is_null(&self, path: &[String]) -> bool {
+        match self.resolve_raw(path) {
+            Some(value) => unwrap_nullable(value).is_none(),
+            None => path.first().map(String::as_str) != Some("claims"),
+        }
+    }
+
+    pub fn claim(&self, key: &str) -> Option<Value> {
+        self.used.set(true);
+        unwrap_nullable(self.claims.get(key)?.clone())
+    }
+}
+
+fn unwrap_nullable(value: Value) -> Option<Value> {
+    match value {
+        Value::Nullable(None) => None,
+        Value::Nullable(Some(inner)) => unwrap_nullable(*inner),
+        value => Some(value),
+    }
+}
+
+/// An operand ready for SQL.
+enum Term {
+    Sql(String),
+    /// A large-capable column's cell: compared through its sort key, with
+    /// what the key cannot answer decided in Rust ([`Prep`]).
+    Large(LargeColumn),
+    /// A bound value (literal, parameter, session or claim value): its
+    /// placeholder and the value itself.
+    Bound(String, Sql),
+    /// A session or claim value the identity does not have.
+    Missing,
+    /// NaN: unordered against everything, SQLite cannot store it.
+    NaN,
+}
+
+impl Term {
+    /// The SQL of a present operand.
+    fn sql(&self) -> Option<&str> {
+        match self {
+            Term::Sql(sql) | Term::Bound(sql, _) => Some(sql),
+            Term::Large(column) => Some(&column.cell),
+            Term::Missing | Term::NaN => None,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LargeColumn {
+    cell: String,
+    table: String,
+    column: String,
+    kind: jazz_types::large_values::LargeValueKind,
+}
+
+/// A question about chunked cells that their sort key cannot answer,
+/// answered in Rust before the statement runs. Each writes its answers to
+/// `_jazz_lv_scratch` under its slot, which the statement reads. The slot
+/// is a hash of the question, so the same query compiles to the same SQL.
+#[derive(Clone, Debug)]
+pub enum Prep {
+    /// The chunked cells of `table.column` that pass `test`.
+    Match {
+        slot: i64,
+        table: String,
+        column: String,
+        test: MatchTest,
+    },
+    /// Ranks for the chunked cells of `table.column` that share a sort key
+    /// with another: their order by full logical value.
+    Rank {
+        slot: i64,
+        table: String,
+        column: String,
+    },
+    /// A content id for every chunked cell of these columns, so cells of
+    /// one logical value (built differently) compare equal.
+    Class {
+        slot: i64,
+        columns: Vec<(String, String)>,
+    },
+}
+
+/// What a chunked cell is matched against: an inline-form cell.
+#[derive(Clone, Debug)]
+pub enum MatchTest {
+    Contains(Vec<u8>),
+    Cmp(CmpOp, Vec<u8>),
+}
+
+impl MatchTest {
+    /// Names the test by its literal's hash, so a long literal costs one
+    /// hash, not a formatted dump.
+    fn question(&self) -> String {
+        match self {
+            MatchTest::Contains(literal) => format!("contains {}", blake3::hash(literal)),
+            MatchTest::Cmp(op, literal) => format!("{op:?} {}", blake3::hash(literal)),
+        }
+    }
+}
+
+impl Prep {
+    fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
+        let hash = blake3::hash(question.as_bytes());
+        // 52 bits: exact as a JS number (Durable Objects).
+        let slot =
+            i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) & ((1 << 52) - 1);
+        make(slot)
+    }
+
+    pub fn slot(&self) -> i64 {
+        match self {
+            Prep::Match { slot, .. } | Prep::Rank { slot, .. } | Prep::Class { slot, .. } => *slot,
+        }
+    }
+}
+
+/// SQL: whether `cell` is among a prep's answers.
+fn scratch_has(slot: i64, cell: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))"
+    )
+}
+
+/// SQL: a prep's answer value for `cell`.
+fn scratch_value(slot: i64, cell: &str) -> String {
+    format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))")
+}
+
+/// SQL text plus its positional parameters.
+pub struct Ctx<'a> {
+    pub schema: &'a Schema,
+    /// `Some` applies read policies as this session (unless it is system).
+    pub policy: Option<&'a Session>,
+    /// Supplies `Operand::Claim` values.
+    pub claims: &'a Session,
+    pub binding: &'a BTreeMap<String, Value>,
+    pub params: Vec<Sql>,
+    /// Every table the compiled SQL reads: the invalidation dependencies.
+    pub tables: BTreeSet<String>,
+    /// The branch view every branched table is read through.
+    pub view: Option<View>,
+    /// An as-of cut every table is read through.
+    pub cut: Option<Cut>,
+    /// The cut is a replica's last server seq: the read leaves out its
+    /// pending local versions (which history reads do anyway).
+    pub settled_only: bool,
+    /// Questions the statement needs answered first.
+    pub preps: Vec<Prep>,
+    /// The authority's node, whose own commits history reads name by their
+    /// seq; `None` on a replica, which lists only versions whose
+    /// transaction it knows.
+    pub history_origin: Option<[u8; 16]>,
+    next_alias: usize,
+}
+
+/// A frozen snapshot: the state as of commit `seq`, plus the open
+/// transaction's own staged writes (written at `own`), plus the versions
+/// written by the individual commits in `extra` (a replica's own writes
+/// that were not yet in `seq` when the snapshot was taken).
+#[derive(Clone, Debug, Default)]
+pub struct Cut {
+    pub seq: u64,
+    pub own: u64,
+    pub extra: Vec<u64>,
+    /// A write check's evidence (SPEC 7, WITH CHECK): of the versions at
+    /// `own`, only the live rows grounded so far (by stored table) are
+    /// overlaid; every other row the unit wrote reads as committed.
+    pub grounded: Option<std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>>,
+}
+
+impl Cut {
+    pub fn at(seq: u64) -> Self {
+        Self {
+            seq,
+            ..Self::default()
+        }
+    }
+
+    /// Whether a version written at `seq` is in the cut.
+    pub fn sees(&self, seq: u64) -> bool {
+        seq <= self.seq || seq == self.own || self.extra.contains(&seq)
+    }
+}
+
+/// A head branch, optionally composed over a base branch that is live or
+/// frozen at `base_cut`.
+#[derive(Clone, Debug)]
+pub struct View {
+    pub head: crate::protocol::BranchSelector,
+    pub base: Option<crate::protocol::BranchSelector>,
+    pub base_cut: Option<Cut>,
+}
+
+/// A compiled root query.
+#[derive(Clone)]
+pub struct Compiled {
+    pub sql: String,
+    pub params: Vec<Sql>,
+    pub projection: Vec<(String, ValueType)>,
+    pub tables: BTreeSet<String>,
+    /// Rows are aggregate groups: column 0 is the group key, hashed to an id.
+    pub aggregate: bool,
+    /// Joined source row ids each row carries after its root's id, seq and
+    /// deletion flag (a flat join's occurrence; 0 otherwise).
+    pub joined: usize,
+    /// Each row carries its root's version (a history read's
+    /// `$transactionId`) after its id, seq and deletion flag, as a flat
+    /// join does: a history row's occurrence is its version.
+    pub versioned: bool,
+    /// Rows are union rows: column 3 is the arm's label.
+    pub union: bool,
+    /// Run before the statement.
+    pub preps: Vec<Prep>,
+    /// The statement with prefix-tie ranks in its order, used instead when
+    /// a rank prep finds chunked values sharing a sort key.
+    pub ranked_sql: Option<String>,
+}
+
+impl<'a> Ctx<'a> {
+    pub fn new(
+        schema: &'a Schema,
+        policy: Option<&'a Session>,
+        claims: &'a Session,
+        binding: &'a BTreeMap<String, Value>,
+    ) -> Self {
+        Self {
+            schema,
+            policy: policy.filter(|session| !session.system),
+            claims,
+            binding,
+            params: Vec::new(),
+            tables: BTreeSet::new(),
+            view: None,
+            cut: None,
+            settled_only: false,
+            preps: Vec::new(),
+            history_origin: None,
+            next_alias: 0,
+        }
+    }
+
+    pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
+        self.history_origin = origin;
+        self
+    }
+
+    pub fn with_view(mut self, view: Option<View>) -> Self {
+        self.view = view;
+        self
+    }
+
+    /// Read as of `cut`. Without one, `settled_only` leaves out a replica's
+    /// pending local versions, reading as of its last server seq.
+    pub fn with_cut(mut self, cut: Option<Cut>, settled_only: bool) -> Self {
+        match cut {
+            Some(cut) => self.cut = Some(cut),
+            None if settled_only => {
+                self.cut = Some(Cut::at(crate::db::LOCAL_BASE - 1));
+                self.settled_only = true;
+            }
+            None => {}
+        }
+        self
+    }
+
+    /// A table's rows, as of the cut when there is one. Current rows written
+    /// at or before the cut (or by the transaction itself) are visible as
+    /// they are; for rows changed since, the newest superseded image at or
+    /// before the cut stands in. Rows created after the cut have neither.
+    fn rows(&mut self, table: &Table, columns: &str) -> String {
+        self.rows_at(table, columns, self.cut.clone())
+    }
+
+    fn rows_at(&mut self, table: &Table, columns: &str, cut: Option<Cut>) -> String {
+        let name = quote(&table.stored);
+        let Some(cut) = cut else {
+            return name;
+        };
+        let seq = self.bind(Sql::Integer(cut.seq as i64));
+        let own = self.bind(Sql::Integer(cut.own as i64));
+        // Seqs are integers, so the extra commits are inlined.
+        let extra = cut
+            .extra
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        // The versions at `own` that are overlaid: all of them, or for a
+        // write check the unit's grounded live rows.
+        let (overlaid_here, overlaid_c) = match &cut.grounded {
+            None => (format!("_seq = {own}"), format!("c._seq = {own}")),
+            Some(grounded) => match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
+                None => ("0".to_owned(), "0".to_owned()),
+                Some(ids) => {
+                    let ids = ids
+                        .iter()
+                        .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (
+                        format!("(_seq = {own} AND _del = 0 AND id IN ({ids}))"),
+                        format!("(c._seq = {own} AND c._del = 0 AND c.id IN ({ids}))"),
+                    )
+                }
+            },
+        };
+        let (visible, h_visible, newer) = if extra.is_empty() {
+            (
+                format!("_seq <= {seq} OR {overlaid_here}"),
+                format!("h2._seq <= {seq}"),
+                format!("c._seq > {seq} AND NOT {overlaid_c}"),
+            )
+        } else {
+            (
+                format!("_seq <= {seq} OR {overlaid_here} OR _seq IN ({extra})"),
+                format!("(h2._seq <= {seq} OR h2._seq IN ({extra}))"),
+                format!("c._seq > {seq} AND NOT {overlaid_c} AND c._seq NOT IN ({extra})"),
+            )
+        };
+        let history = quote(&format!("{}__h", table.stored));
+        // Both arms must let SQLite search by a correlated predicate (a
+        // policy EXISTS's `m.band = a.band`), or every read through a cut
+        // scans the whole table (#4298). History rows have no `rid`, and its
+        // stand-in needs `rid`'s INTEGER affinity: a bare NULL has none, and
+        // arms that differ in a column's affinity are not flattened, so the
+        // predicate stays outside them. The history arm starts from the
+        // current rows changed since the cut (`_seq` is indexed; CROSS JOIN
+        // keeps that order) rather than scanning every history row for a
+        // column the history table has no index on.
+        let h_columns = columns
+            .replace("rid, ", "")
+            .split(", ")
+            .map(|c| format!("h.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "(SELECT {columns} FROM {name} WHERE {visible} \
+             UNION ALL SELECT CAST(NULL AS INTEGER), {h_columns} FROM {name} AS c \
+             CROSS JOIN {history} AS h ON c.id = h.id AND c._b = h._b WHERE {newer} \
+             AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
+             WHERE h2.id = h.id AND h2._b = h._b AND {h_visible}))"
+        )
+    }
+
+    /// The SQL source a table is read from. Under a branch view a branched
+    /// table is its effective rows: head rows (tombstones included, so they
+    /// mask), then base rows the head does not override. Filters, policies,
+    /// ordering and windows all apply after this masking.
+    pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
+        // Explicit columns: a schema view reads its own columns of the
+        // physical (unioned) table.
+        let mut columns = "rid, id, _b, _seq, _del".to_owned();
+        for column in table.stored() {
+            columns.push_str(&format!(", {}", quote(&column.stored)));
+        }
+        let view = self.view.clone().filter(|_| !table.branch_by.is_empty());
+        let Some(view) = view else {
+            if self.cut.is_none() {
+                return Ok(quote(&table.stored));
+            }
+            return Ok(self.rows(table, &columns));
+        };
+        let head = self.bind(Sql::Blob(table.selector_key(&view.head)?));
+        let rows = self.rows(table, &columns);
+        Ok(match view.base {
+            None => format!("(SELECT {columns} FROM {rows} WHERE _b = {head})"),
+            Some(base) => {
+                // Inherited rows are read as head rows: their branch key and
+                // branch columns are the head's, so predicates, policies and
+                // projections see one effective branch.
+                let head_cells = table.selector_cells(&view.head)?;
+                let mut inherited = format!("m.rid, m.id, {head}, m._seq, m._del");
+                for column in table.stored() {
+                    match head_cells.get(&column.name) {
+                        Some(value) => {
+                            let term = match to_sql(value)? {
+                                Some(sql) => self.bind(sql),
+                                None => "NULL".to_owned(),
+                            };
+                            inherited.push_str(&format!(", {term}"));
+                        }
+                        None => inherited.push_str(&format!(", m.{}", quote(&column.stored))),
+                    }
+                }
+                let base = self.bind(Sql::Blob(table.selector_key(&base)?));
+                let base_cut = view.base_cut.clone().or_else(|| self.cut.clone());
+                let base_rows = self.rows_at(table, &columns, base_cut);
+                let head_rows = self.rows(table, &columns);
+                format!(
+                    "(SELECT {columns} FROM {rows} WHERE _b = {head} UNION ALL SELECT {inherited} \
+                     FROM {base_rows} AS m WHERE m._b = {base} AND NOT EXISTS (SELECT 1 FROM {head_rows} AS x \
+                     WHERE x.id = m.id AND x._b = {head}))"
+                )
+            }
+        })
+    }
+
+    fn alias(&mut self, prefix: &str) -> String {
+        self.next_alias += 1;
+        format!("{prefix}{}", self.next_alias)
+    }
+
+    fn bind(&mut self, value: Sql) -> String {
+        self.params.push(value);
+        format!("?{}", self.params.len())
+    }
+
+    fn value_term(&mut self, value: &Value) -> Result<Term, Error> {
+        Ok(match to_sql(value)? {
+            None => Term::NaN,
+            Some(sql) => Term::Bound(self.bind(sql.clone()), sql),
+        })
+    }
+
+    fn present(&mut self, value: Option<Value>) -> Result<Term, Error> {
+        match value {
+            None => Ok(Term::Missing),
+            Some(value) => self.value_term(&value),
+        }
+    }
+
+    /// A table by this schema's name for it; its stored name joins the
+    /// dependencies.
+    fn table(&mut self, name: &str) -> Result<&'a Table, Error> {
+        let table = self.schema.table(name)?;
+        self.tables.insert(table.stored.clone());
+        Ok(table)
+    }
+
+    // ---- root queries ---------------------------------------------------
+
+    /// `GROUP BY` over the effective, filtered, policy-checked rows. Each
+    /// group is a synthetic row whose id is a hash of its group key (column
+    /// 0 carries the raw key; the executor hashes it), so subscriptions diff
+    /// groups like rows. Output cells: the group column, then aggregates.
+    fn compile_aggregate(
+        mut self,
+        query: &Query,
+        aggregate: &crate::query::AggregateQuery,
+        table: &Table,
+        from: &str,
+        alias: &str,
+        wheres: &[String],
+    ) -> Result<Compiled, Error> {
+        use crate::query::AggregateFunction as F;
+        let mut projection = Vec::new();
+        let mut outputs = Vec::new();
+        // (the group's cell, what rows group by, what groups order by)
+        let group = match &aggregate.group_by {
+            Some(column) => {
+                let sql = column_sql(table, alias, column)?;
+                let ty = table.column(column).expect("checked").ty.clone();
+                projection.push((column.clone(), ty));
+                outputs.push(sql.clone());
+                Some(match self.column_term(table, alias, column)? {
+                    // Cells of one logical value group together even when
+                    // their chunk trees differ.
+                    Term::Large(large) => {
+                        let columns = vec![(large.table.clone(), large.column.clone())];
+                        let question = format!("class {columns:?}");
+                        let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
+                        let by = format!(
+                            "(CASE WHEN COALESCE({}, 0) THEN {} ELSE {sql} END)",
+                            crate::large::chunked_sql(&sql),
+                            scratch_value(slot, &sql)
+                        );
+                        (sql.clone(), by, crate::large::key_sql(&sql))
+                    }
+                    _ => (sql.clone(), sql.clone(), sql),
+                })
+            }
+            None => None,
+        };
+        for output in &aggregate.aggregates {
+            let input = |column: &Option<String>| -> Result<(String, ValueType), Error> {
+                let column = column
+                    .as_deref()
+                    .ok_or_else(|| query_error(format!("`{}` needs a column", output.alias)))?;
+                let ty = table
+                    .column(column)
+                    .ok_or_else(|| {
+                        query_error(format!("unknown column `{}.{column}`", table.name))
+                    })?
+                    .ty
+                    .clone();
+                let ty = match ty {
+                    ValueType::Nullable(inner) => *inner,
+                    ty => ty,
+                };
+                Ok((column_sql(table, alias, column)?, ty))
+            };
+            let (sql, ty) = match output.function {
+                F::Count => match &output.column {
+                    None => ("COUNT(*)".to_owned(), ValueType::U64),
+                    Some(_) => (
+                        format!("COUNT({})", input(&output.column)?.0),
+                        ValueType::U64,
+                    ),
+                },
+                F::Avg => {
+                    // SQLite's AVG divides a sum, which overflows to
+                    // infinity for large finite inputs; then the inputs,
+                    // scaled exactly by a power of two, average instead.
+                    let column = input(&output.column)?.0;
+                    (
+                        format!(
+                            "(CASE WHEN COUNT({column}) = 0 THEN NULL \
+                             WHEN abs(AVG({column})) <= {max:e} THEN AVG({column}) \
+                             ELSE AVG({column} * {down:e}) * {up:e} END)",
+                            max = f64::MAX,
+                            down = 2f64.powi(-128),
+                            up = 2f64.powi(128),
+                        ),
+                        ValueType::Nullable(Box::new(ValueType::F64)),
+                    )
+                }
+                F::Sum | F::Min | F::Max => {
+                    let (column, ty) = input(&output.column)?;
+                    let name = match output.function {
+                        F::Sum => "SUM",
+                        F::Min => "MIN",
+                        _ => "MAX",
+                    };
+                    (
+                        format!("{name}({column})"),
+                        ValueType::Nullable(Box::new(ty)),
+                    )
+                }
+            };
+            outputs.push(format!("{sql} AS {}", quote(&output.alias)));
+            projection.push((output.alias.clone(), ty));
+        }
+        let mut keys = Vec::new();
+        for key in &query.order_by {
+            let direction = match key.direction {
+                OrderDirection::Asc => "ASC",
+                OrderDirection::Desc => "DESC",
+            };
+            let term = if aggregate.group_by.as_deref() == Some(key.column.as_str()) {
+                group.clone().expect("grouped").2
+            } else if aggregate.aggregates.iter().any(|a| a.alias == key.column) {
+                quote(&key.column)
+            } else {
+                return Err(query_error(format!(
+                    "aggregate queries order by a group column or an aggregate alias, not `{}`",
+                    key.column
+                )));
+            };
+            keys.push(format!("{term} {direction}"));
+        }
+        let (key, group_by) = match &group {
+            Some((sql, by, order)) => {
+                keys.push(format!("{order} ASC"));
+                (sql.clone(), format!(" GROUP BY {by}"))
+            }
+            None => ("NULL".to_owned(), String::new()),
+        };
+        let order = if keys.is_empty() {
+            String::new()
+        } else {
+            format!(" ORDER BY {}", keys.join(", "))
+        };
+        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(query.offset as i64));
+        let sql = format!(
+            "SELECT {key}, 0, 0, {} FROM {from} AS {alias} WHERE {}{group_by}{order} \
+             LIMIT {limit} OFFSET {offset}",
+            outputs.join(", "),
+            and(wheres),
+        );
+        Ok(Compiled {
+            sql,
+            ranked_sql: None,
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: true,
+            joined: 0,
+            versioned: false,
+            union: false,
+            preps: self.preps,
+        })
+    }
+
+    pub fn compile_query(
+        mut self,
+        query: &Query,
+        include_deleted: bool,
+    ) -> Result<Compiled, Error> {
+        if let Some(column) = deletion_column(query) {
+            if !include_deleted {
+                return Err(query_error(format!(
+                    "Reading {column} requires includeDeleted"
+                )));
+            }
+            // includeDeleted widens only the root: joined rows are live.
+            if !query.joins.is_empty() || query.flat_join.is_some() {
+                return Err(unsupported(format!("reading {column} in joins")));
+            }
+        }
+        if query.flat_join.is_some() {
+            return self.compile_flat_join(query);
+        }
+        if let Some(source) = crate::schema::history::history_source_table(&query.table) {
+            if !query.policy_branches.is_empty()
+                || !query.inherits.is_empty()
+                || query.relation.is_some()
+            {
+                return Err(unsupported("joins or relationships in history queries"));
+            }
+            return self.compile_history(query, source, include_deleted);
+        }
+        if query.flat_join.is_some() {
+            return self.compile_flat_join(query);
+        }
+        if let Some(plan) = crate::db::union_plan(query, self.schema)? {
+            return self.compile_union(plan, include_deleted);
+        }
+        if !query.policy_branches.is_empty()
+            || !query.inherits.is_empty()
+            || query.relation.is_some()
+        {
+            return Err(unsupported(
+                "this query form (policy branches, inherits, relation)",
+            ));
+        }
+        let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
+        let alias = "t";
+        if let Some(aggregate) = &query.aggregate {
+            if !query.array_subqueries.is_empty() || query.select.is_some() {
+                return Err(unsupported(
+                    "aggregates with selections or array subqueries",
+                ));
+            }
+            let from = self.source(table)?;
+            return self.compile_aggregate(query, aggregate, table, &from, alias, &wheres);
+        }
+        let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
+        let columns = projection
+            .iter()
+            .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
+        let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(query.offset as i64));
+        let source = self.source(table)?;
+        let statement = |order: &str| {
+            format!(
+                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                and(&wheres),
+            )
+        };
+        Ok(Compiled {
+            sql: statement(&order),
+            ranked_sql: ranked_order.as_deref().map(statement),
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: 0,
+            versioned: false,
+            union: false,
+            preps: self.preps,
+        })
+    }
+
+    /// A plain query's root table (read as `t`), its projection, and the
+    /// conditions its rows meet: filters, traversals, required includes and
+    /// array requirements, the read policy, and liveness.
+    fn root_rows(
+        &mut self,
+        query: &Query,
+        include_deleted: bool,
+    ) -> Result<(&'a Table, Vec<(String, ValueType)>, Vec<String>), Error> {
+        let table = self.table(&query.table)?;
+        let projection = projection(table, query.select.as_deref())?;
+        let alias = "t";
+        let mut wheres = Vec::new();
+        if !include_deleted {
+            wheres.push(format!("{alias}._del = 0"));
+        }
+        for filter in &query.filters {
+            wheres.push(self.predicate(filter, table, alias)?);
+        }
+        for reachable in &query.reachable {
+            wheres.push(self.reachable(reachable, table, alias)?);
+        }
+        for join in &query.joins {
+            wheres.push(self.join_exists(join, table, alias)?);
+        }
+        for include in &query.includes {
+            let column = include.path.split('.').next().unwrap_or_default();
+            let target_name = table
+                .references
+                .get(column)
+                .ok_or_else(|| query_error(format!("`{}` is not a reference", include.path)))?;
+            let target = self.table(target_name)?;
+            if include.path.contains('.') {
+                return Err(unsupported("multi-hop include paths"));
+            }
+            if include.require {
+                let i = self.alias("i");
+                wheres.push(format!(
+                    "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND {i}._del = 0)",
+                    self.source(target)?,
+                    quote(table.stored_name(column))
+                ));
+            }
+        }
+        for array in &query.array_subqueries {
+            self.validate_array(array)?;
+        }
+        self.array_requirements(table, alias, &query.array_subqueries, &mut wheres)?;
+        if let Some(session) = self.policy {
+            wheres.push(self.read_policy(table, alias, session)?);
+        }
+        Ok((table, projection, wheres))
+    }
+
+    /// A union: each arm's rows under its own conditions and read policy,
+    /// labelled with the arm (column 3), `UNION ALL`, then ordered and
+    /// windowed as a whole. Ties break by row id, then by arm label, in
+    /// the last key's direction, so a row matched by several arms has a
+    /// stable place for each.
+    fn compile_union(
+        mut self,
+        plan: crate::db::UnionPlan,
+        include_deleted: bool,
+    ) -> Result<Compiled, Error> {
+        let alias = "t";
+        let mut projection = Vec::new();
+        // Each arm as (plain, ranked) statement text.
+        let mut arms = Vec::with_capacity(plan.arms.len());
+        let mut keys = Vec::new();
+        for (label, arm) in &plan.arms {
+            let unsupported_arm = [
+                (arm.flat_join.is_some(), "flat joins"),
+                (
+                    crate::schema::history::history_source_table(&arm.table).is_some(),
+                    "history reads",
+                ),
+                (!arm.policy_branches.is_empty(), "policy branches"),
+                (!arm.inherits.is_empty(), "inherited-policy traversals"),
+                (arm.aggregate.is_some(), "aggregates"),
+                (!arm.includes.is_empty(), "includes"),
+                (!arm.array_subqueries.is_empty(), "array subqueries"),
+                (arm.select.is_some(), "select projections"),
+            ];
+            if let Some((_, feature)) = unsupported_arm.iter().find(|(present, _)| *present) {
+                return Err(unsupported(format!("union arms with {feature}")));
+            }
+            if let Some(column) = deletion_column(arm) {
+                if !include_deleted {
+                    return Err(query_error(format!(
+                        "Reading {column} requires includeDeleted"
+                    )));
+                }
+                if !arm.joins.is_empty() {
+                    return Err(unsupported(format!("reading {column} in joins")));
+                }
+            }
+            let (table, arm_projection, wheres) = self.root_rows(arm, include_deleted)?;
+            let columns = arm_projection
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _))| Ok(format!(", {} AS c{i}", column_sql(table, alias, name)?)))
+                .collect::<Result<String, Error>>()?;
+            let label = self.bind(Sql::Text(label.as_bytes().to_vec()));
+            keys = self.order_terms(table, alias, &plan.order_by)?;
+            let mut plain_keys = String::new();
+            let mut ranked_keys = String::new();
+            for (i, key) in keys.iter().enumerate() {
+                plain_keys.push_str(&format!(", {} AS k{i}", key.sql));
+                ranked_keys.push_str(&format!(", {} AS k{i}", key.sql));
+                if let Some(rank) = &key.rank {
+                    ranked_keys.push_str(&format!(", {rank} AS r{i}"));
+                }
+            }
+            let source = self.source(table)?;
+            let body = |keys: &str| {
+                format!(
+                    "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._del AS _del, \
+                     {label} AS _arm{columns}{keys} FROM {source} AS {alias} WHERE {}",
+                    and(&wheres)
+                )
+            };
+            let (mut plain, mut ranked) = (body(&plain_keys), body(&ranked_keys));
+            // An arm's own window applies before the union.
+            if arm.limit.is_some() || arm.offset != 0 {
+                let (order, ranked_order) = self.order_sql(table, alias, &arm.order_by)?;
+                let ranked_order = ranked_order.unwrap_or_else(|| order.clone());
+                let limit = self.bind(Sql::Integer(arm.limit.map_or(-1, |l| l as i64)));
+                let offset = self.bind(Sql::Integer(arm.offset as i64));
+                let window = |body: &str, order: &str| {
+                    format!("SELECT * FROM ({body} ORDER BY {order} LIMIT {limit} OFFSET {offset})")
+                };
+                plain = window(&plain, &order);
+                ranked = window(&ranked, &ranked_order);
+            }
+            projection = arm_projection;
+            arms.push((plain, ranked));
+        }
+        let tie = match plan.order_by.last().map(|key| key.direction) {
+            Some(OrderDirection::Desc) => "DESC",
+            _ => "ASC",
+        };
+        let order = |ranked: bool| {
+            let mut order = Vec::new();
+            for (i, key) in keys.iter().enumerate() {
+                order.push(format!("k{i} {}", key.direction));
+                if ranked && key.rank.is_some() {
+                    order.push(format!("r{i} {}", key.direction));
+                }
+            }
+            order.push(format!("id {tie}"));
+            order.push(format!("_arm {tie}"));
+            order.join(", ")
+        };
+        let limit = self.bind(Sql::Integer(plan.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(plan.offset as i64));
+        let columns: String = (0..projection.len()).map(|i| format!(", c{i}")).collect();
+        let statement = |ranked: bool| {
+            let arms: Vec<&str> = arms
+                .iter()
+                .map(|(plain, with_ranks)| if ranked { with_ranks } else { plain }.as_str())
+                .collect();
+            format!(
+                "SELECT id, _seq, _del, _arm{columns} FROM ({}) ORDER BY {} \
+                 LIMIT {limit} OFFSET {offset}",
+                arms.join(" UNION ALL "),
+                order(ranked)
+            )
+        };
+        let ranked = keys.iter().any(|key| key.rank.is_some());
+        Ok(Compiled {
+            sql: statement(false),
+            ranked_sql: ranked.then(|| statement(true)),
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: 0,
+            versioned: false,
+            union: true,
+            preps: self.preps,
+        })
+    }
+
+    /// A flat join: one row per matching tuple of the root and each joined
+    /// source, every source live and read-policy filtered. Cells are each
+    /// source's columns qualified as `<source>.<column>`, root first; a
+    /// row's id is its root's, and its joined source ids follow it, so the
+    /// tuple is its occurrence. Filters name qualified columns, or
+    /// unqualified ones only one source has, and each conjunct reads one
+    /// source. Ordered by the occurrence.
+    ///
+    /// A `history.<table>` source lists its rows' versions (gated by the
+    /// current row, as a history read is), so each version is its own
+    /// occurrence. It must be bounded by row id: an id filter, or a join
+    /// key on its `id` whose other side reads a bounded source.
+    fn compile_flat_join(mut self, query: &Query) -> Result<Compiled, Error> {
+        let Some(flat_join) = &query.flat_join else {
+            unreachable!("compile_flat_join on a query without one")
+        };
+        let combined = [
+            (flat_join.sources.is_empty(), "zero joined sources"),
+            (!query.joins.is_empty(), "existential joins"),
+            (!query.policy_branches.is_empty(), "policy branches"),
+            (!query.reachable.is_empty(), "reachability"),
+            (!query.inherits.is_empty(), "inherited-policy traversals"),
+            (!query.includes.is_empty(), "includes"),
+            (!query.array_subqueries.is_empty(), "array subqueries"),
+            (query.relation.is_some(), "relations"),
+            (query.select.is_some(), "select projections"),
+            (!query.order_by.is_empty(), "ordering"),
+            (query.aggregate.is_some(), "aggregates"),
+            (query.limit.is_some(), "limits"),
+            (query.offset != 0, "offsets"),
+        ];
+        if let Some((_, feature)) = combined.iter().find(|(present, _)| *present) {
+            return Err(unsupported(format!("flat joins with {feature}")));
+        }
+        let mut declared = vec![(
+            flat_join
+                .root_alias
+                .clone()
+                .unwrap_or_else(|| query.table.clone()),
+            query.table.clone(),
+            "t".to_owned(),
+        )];
+        for source in &flat_join.sources {
+            let name = source.alias.clone().unwrap_or_else(|| source.table.clone());
+            if declared.iter().any(|(seen, ..)| *seen == name) {
+                return Err(query_error(format!("flat join duplicate source `{name}`")));
+            }
+            let alias = self.alias("f");
+            declared.push((name, source.table.clone(), alias));
+        }
+        // Each source as it reads: a history source as its versions (whose
+        // SQL waits for its bound), others as their table.
+        let mut sources: Vec<FlatSource<'a>> = Vec::with_capacity(declared.len());
+        for (name, table, alias) in declared {
+            let history = crate::schema::history::history_source_table(&table);
+            let base = self.table(history.unwrap_or(&table))?;
+            let (table, sql) = match history {
+                Some(_) => (history::versions_table(base), None),
+                None => (base.clone(), Some(self.source(base)?)),
+            };
+            sources.push(FlatSource {
+                name,
+                base,
+                table,
+                alias,
+                history: history.is_some(),
+                sql,
+            });
+        }
+        let resolve = |sources: &[FlatSource], column: &str| -> Result<(usize, String), Error> {
+            let (scope, field) = match column.find(".$") {
+                Some(at) => (&column[..at], &column[at + 1..]),
+                None => column.rsplit_once('.').unwrap_or(("", column)),
+            };
+            let has = |table: &Table, field: &str| {
+                field == "id" || field == "_id" || column_sql(table, "t", field).is_ok()
+            };
+            let public = |field: &str| if field == "_id" { "id" } else { field }.to_owned();
+            if let Some(at) = sources.iter().position(|source| source.name == scope) {
+                if !has(&sources[at].table, field) {
+                    return Err(query_error(format!("unknown flat join column `{column}`")));
+                }
+                return Ok((at, public(field)));
+            }
+            let mut found = (0..sources.len()).filter(|&at| has(&sources[at].table, column));
+            match (found.next(), found.next()) {
+                (Some(at), None) => Ok((at, public(column))),
+                (Some(_), Some(_)) => Err(query_error(format!(
+                    "ambiguous flat join column `{column}`; qualify its source"
+                ))),
+                (None, _) => Err(query_error(format!("unknown flat join column `{column}`"))),
+            }
+        };
+        let mut keys = Vec::with_capacity(flat_join.sources.len());
+        for (at, source) in flat_join.sources.iter().enumerate() {
+            let left = resolve(&sources[..=at], &source.on.left)?;
+            let right = resolve(&sources, &source.on.right)?;
+            if right.0 != at + 1 {
+                return Err(query_error(format!(
+                    "flat join condition `{}` must name the joined source `{}`",
+                    source.on.right,
+                    sources[at + 1].name
+                )));
+            }
+            keys.push((left, right));
+        }
+        // Filters, each conjunct routed to the one source it reads.
+        let mut routed: Vec<(usize, Predicate)> = Vec::new();
+        for filter in &query.filters {
+            let mut conjuncts = Vec::new();
+            flatten_all(filter, &mut conjuncts);
+            for conjunct in conjuncts {
+                if matches!(conjunct, Predicate::EnumMatch { .. }) {
+                    return Err(unsupported("enum-match filters in flat joins"));
+                }
+                let mut predicate = conjunct.clone();
+                let mut reads = BTreeSet::new();
+                let mut failed = None;
+                predicate.for_each_operand_mut(&mut |operand| {
+                    if let Operand::Column(column) = operand {
+                        match resolve(&sources, column) {
+                            Ok((at, field)) => {
+                                reads.insert(at);
+                                *column = field;
+                            }
+                            Err(error) => failed = failed.take().or(Some(error)),
+                        }
+                    }
+                });
+                if let Some(error) = failed {
+                    return Err(error);
+                }
+                if reads.len() > 1 {
+                    return Err(unsupported("flat join filters spanning multiple sources"));
+                }
+                routed.push((reads.first().copied().unwrap_or(0), predicate));
+            }
+        }
+        // Bound history sources until none is left: by an id filter, else
+        // by a key on their id whose other side is bound.
+        while let Some(at) = sources.iter().position(|source| source.sql.is_none()) {
+            let mut bound = routed
+                .iter()
+                .filter(|(source, _)| *source == at)
+                .find_map(|(_, predicate)| history::bounding_id(predicate))
+                .map(history::HistoryBound::Filter);
+            if bound.is_none() {
+                for ((left, left_column), (right, right_column)) in &keys {
+                    let other = match (*left == at, *right == at) {
+                        (true, false) if left_column == "id" => (*right, right_column),
+                        (false, true) if right_column == "id" => (*left, left_column),
+                        _ => continue,
+                    };
+                    let source = &sources[other.0];
+                    let Some(sql) = &source.sql else { continue };
+                    let b = self.alias("b");
+                    bound = Some(history::HistoryBound::Ids(format!(
+                        "SELECT {} FROM {sql} AS {b} WHERE {b}._del = 0",
+                        column_sql(&source.table, &b, other.1)?
+                    )));
+                    break;
+                }
+            }
+            let Some(bound) = bound else {
+                return Err(query_error(
+                    "unsupported relation query: Reading history without a bounded row access \
+                     path is not supported in history queries yet",
+                ));
+            };
+            let base = sources[at].base;
+            let (sql, _) = self.history_source(&base.name, bound, false)?;
+            sources[at].sql = Some(sql);
+        }
+        let sql_of = |source: &FlatSource| source.sql.clone().expect("every source is bound");
+        let mut joins = String::new();
+        for ((left, left_column), (right, right_column)) in &keys {
+            let (left, right) = (&sources[*left], &sources[*right]);
+            if (left.history || right.history)
+                && (is_array(&left.table, left_column) || is_array(&right.table, right_column))
+            {
+                return Err(unsupported("flat joins of history on array columns"));
+            }
+            let on = self.join_key(
+                (&left.table, &left.alias, left_column),
+                (&right.table, &right.alias, right_column),
+            )?;
+            joins.push_str(&format!(
+                " JOIN {} AS {alias} ON {alias}._del = 0 AND {on}",
+                sql_of(right),
+                alias = right.alias
+            ));
+        }
+        let mut wheres = vec!["t._del = 0".to_owned()];
+        for (at, predicate) in &routed {
+            let source = &sources[*at];
+            wheres.push(self.predicate(predicate, &source.table, &source.alias)?);
+        }
+        if let Some(session) = self.policy {
+            // History sources are gated by their current rows already.
+            for source in sources.iter().filter(|source| !source.history) {
+                wheres.push(self.read_policy(&source.table, &source.alias, session)?);
+            }
+        }
+        let version = |source: &FlatSource| match source.history {
+            true => format!(
+                "{}.{}",
+                source.alias,
+                quote(crate::schema::history::TRANSACTION_ID_COLUMN)
+            ),
+            false => "NULL".to_owned(),
+        };
+        let mut ids = format!(", {}", version(&sources[0]));
+        let mut order = vec!["t.id".to_owned()];
+        if sources[0].history {
+            order.push("t._seq".to_owned());
+        }
+        let mut projection = Vec::new();
+        let mut columns = String::new();
+        for (at, source) in sources.iter().enumerate() {
+            if at > 0 {
+                ids.push_str(&format!(", {}.id, {}", source.alias, version(source)));
+                order.push(format!("{}.id", source.alias));
+                if source.history {
+                    order.push(format!("{}._seq", source.alias));
+                }
+            }
+            for (column, ty) in crate::compile::projection(&source.table, None)? {
+                columns.push_str(&format!(
+                    ", {}",
+                    column_sql(&source.table, &source.alias, &column)?
+                ));
+                projection.push((format!("{}.{column}", source.name), ty));
+            }
+        }
+        let sql = format!(
+            "SELECT t.id, t._seq, t._del{ids}{columns} FROM {} AS t{joins} \
+             WHERE {} ORDER BY {}",
+            sql_of(&sources[0]),
+            and(&wheres),
+            order.join(", ")
+        );
+        Ok(Compiled {
+            sql,
+            ranked_sql: None,
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: sources.len() - 1,
+            versioned: true,
+            union: false,
+            preps: self.preps,
+        })
+    }
+
+    /// A flat join's key equality, `left = right`; when one side is an
+    /// array, any of its elements equal to the other side.
+    fn join_key(
+        &mut self,
+        left: (&Table, &str, &str),
+        right: (&Table, &str, &str),
+    ) -> Result<String, Error> {
+        let element = |table: &Table, column: &str| {
+            let ty = table.column(column).map(|column| match &column.ty {
+                ValueType::Nullable(inner) => inner.as_ref().clone(),
+                ty => ty.clone(),
+            });
+            match ty {
+                Some(ValueType::Array(element)) => Some(*element),
+                _ => None,
+            }
+        };
+        let side = |(table, alias, column): (&Table, &str, &str)| column_sql(table, alias, column);
+        let (array, scalar) = match (element(left.0, left.2), element(right.0, right.2)) {
+            (None, None) => return Ok(format!("{} = {}", side(left)?, side(right)?)),
+            (Some(element), None) => ((left, element), right),
+            (None, Some(element)) => ((right, element), left),
+            (Some(_), Some(_)) => return Err(unsupported("flat joins on two array columns")),
+        };
+        let ((array, element), scalar) = (array, scalar);
+        let r = self.alias("r");
+        let member = match element {
+            ValueType::Uuid => array_element_id(&r),
+            _ => format!("{r}.value"),
+        };
+        Ok(format!(
+            "EXISTS (SELECT 1 FROM json_each({}) AS {r} WHERE {member} = {})",
+            side(array)?,
+            side(scalar)?
+        ))
+    }
+
+    /// The conditions a row of `table` (as `alias`) meets for its required
+    /// array relations: a parent whose required relation is missing rows is
+    /// left out, at the root or nested.
+    fn array_requirements(
+        &mut self,
+        table: &'a Table,
+        alias: &str,
+        arrays: &[ArraySubquery],
+        wheres: &mut Vec<String>,
+    ) -> Result<(), Error> {
+        for array in arrays {
+            if array.requirement == ArraySubqueryRequirement::Optional {
+                continue;
+            }
+            let child = self.table(&array.table)?;
+            let c = self.alias("c");
+            let outer = column_sql(table, alias, &array.outer_column)?;
+            let mut conds = vec![format!("{c}._del = 0")];
+            for filter in &array.filters {
+                conds.push(self.predicate(filter, child, &c)?);
+            }
+            let source = self.source(child)?;
+            if is_array(table, &array.outer_column) {
+                // A forward array relation: one child per element, in the
+                // array's order and with its duplicates.
+                let r = self.alias("r");
+                conds.push(format!(
+                    "{} = {}",
+                    column_sql(child, &c, &array.inner_column)?,
+                    array_element_id(&r)
+                ));
+                let matched = format!(
+                    "SELECT 1 FROM json_each({outer}) AS {r} JOIN {source} AS {c} ON {}",
+                    conds.join(" AND ")
+                );
+                wheres.push(match array.requirement {
+                    ArraySubqueryRequirement::AtLeastOne => format!("EXISTS ({matched})"),
+                    _ => {
+                        format!("((SELECT count(*) FROM ({matched})) = json_array_length({outer}))")
+                    }
+                });
+                continue;
+            }
+            if array.requirement == ArraySubqueryRequirement::MatchCorrelationCardinality {
+                return Err(unsupported(
+                    "cardinality-matching requirements on scalar relations",
+                ));
+            }
+            conds.push(correlate(child, &c, &array.inner_column, &outer)?);
+            wheres.push(format!(
+                "EXISTS (SELECT 1 FROM {source} AS {c} WHERE {})",
+                conds.join(" AND ")
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_array(&mut self, array: &ArraySubquery) -> Result<(), Error> {
+        let child = self.table(&array.table)?;
+        column_sql(child, "c", &array.inner_column)?;
+        projection(child, array.select.as_deref())?;
+        for nested in &array.nested_arrays {
+            self.validate_array(nested)?;
+        }
+        Ok(())
+    }
+
+    /// One array relation for one parent row.
+    pub fn compile_children(
+        mut self,
+        array: &ArraySubquery,
+        parent: &Value,
+    ) -> Result<Compiled, Error> {
+        let child = self.table(&array.table)?;
+        let projection = projection(child, array.select.as_deref())?;
+        let alias = "t";
+        let elements = match parent {
+            Value::Nullable(Some(inner)) => matches!(**inner, Value::Array(_)),
+            value => matches!(value, Value::Array(_)),
+        };
+        let parent = match self.value_term(parent)? {
+            Term::Bound(sql, _) => sql,
+            _ => "NULL".to_owned(),
+        };
+        // A forward array relation reads one child per array element, in
+        // the array's order and with its duplicates.
+        let (from, correlated) = if elements {
+            ("JOIN", array_element_id("r"))
+        } else {
+            ("", parent.clone())
+        };
+        let mut wheres = vec![
+            format!("{alias}._del = 0"),
+            correlate(child, alias, &array.inner_column, &correlated)?,
+        ];
+        for filter in &array.filters {
+            wheres.push(self.predicate(filter, child, alias)?);
+        }
+        self.array_requirements(child, alias, &array.nested_arrays, &mut wheres)?;
+        if let Some(session) = self.policy {
+            wheres.push(self.read_policy(child, alias, session)?);
+        }
+        let (order, ranked_order) = self.order_sql(child, alias, &array.order_by)?;
+        let columns = projection
+            .iter()
+            .map(|(name, _)| Ok(format!(", {}", column_sql(child, alias, name)?)))
+            .collect::<Result<String, Error>>()?;
+        let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
+        let offset = self.bind(Sql::Integer(array.offset as i64));
+        let source = self.source(child)?;
+        let source = if elements {
+            format!("json_each({parent}) AS r {from} {source}")
+        } else {
+            source
+        };
+        let order = if elements && array.order_by.is_empty() {
+            "r.key".to_owned()
+        } else {
+            order
+        };
+        let statement = |order: &str| {
+            format!(
+                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                 WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
+                and(&wheres),
+            )
+        };
+        Ok(Compiled {
+            sql: statement(&order),
+            ranked_sql: ranked_order.as_deref().map(statement),
+            params: self.params,
+            projection,
+            tables: self.tables,
+            aggregate: false,
+            joined: 0,
+            versioned: false,
+            union: false,
+            preps: self.preps,
+        })
+    }
+
+    /// One cell of row `id` of `table`, read through the same view and cut
+    /// as the rows it came from: a relation's parent value. The SQL, its
+    /// params and the cell's type.
+    pub fn compile_cell(
+        mut self,
+        table: &str,
+        column: &str,
+        id: RowUuid,
+    ) -> Result<(String, Vec<Sql>, ValueType), Error> {
+        let table = self.table(table)?;
+        let column = table
+            .column(column)
+            .ok_or_else(|| unsupported("unknown correlation column"))?;
+        let source = self.source(table)?;
+        let id = self.bind(Sql::Blob(id.0.as_bytes().to_vec()));
+        let sql = format!(
+            "SELECT t.{} FROM {source} AS t WHERE t.id = {id}",
+            quote(&column.stored)
+        );
+        Ok((sql, self.params, column.ty.clone()))
+    }
+
+    /// A junction traversal from the row of `table` at `alias`: some live
+    /// row of the joined table matches its correlations and filters, is
+    /// readable by the session, and satisfies its nested joins in turn.
+    fn join_exists(
+        &mut self,
+        join: &crate::query::JoinVia,
+        table: &Table,
+        alias: &str,
+    ) -> Result<String, Error> {
+        let target = self.table(&join.table)?;
+        let j = self.alias("j");
+        let mut conds = vec![format!("{j}._del = 0")];
+        if let Some(session) = self.policy {
+            conds.push(self.read_policy(target, &j, session)?);
+        }
+        match join.target {
+            JoinTarget::Uncorrelated => {
+                if join.source_lookup.is_some() || !join.correlated_filters.is_empty() {
+                    return Err(query_error(
+                        "an uncorrelated join takes no source lookup or correlations",
+                    ));
+                }
+            }
+            JoinTarget::Column | JoinTarget::RowId => {
+                let source = match &join.source_lookup {
+                    // The value the join matches is a column of the row
+                    // the source row references.
+                    Some(lookup) => Some({
+                        let referenced = self.table(&lookup.table)?;
+                        let l = self.alias("l");
+                        let mut found = vec![
+                            format!("{l}._del = 0"),
+                            format!(
+                                "{l}.id = {}",
+                                column_sql(table, alias, &lookup.row_id_source_column)?
+                            ),
+                        ];
+                        if let Some(session) = self.policy {
+                            found.push(self.read_policy(referenced, &l, session)?);
+                        }
+                        format!(
+                            "(SELECT {} FROM {} AS {l} WHERE {})",
+                            column_sql(referenced, &l, &lookup.value_column)?,
+                            self.source(referenced)?,
+                            found.join(" AND ")
+                        )
+                    }),
+                    None => {
+                        let column = join.source_column.as_deref().unwrap_or("id");
+                        // A forward hop through an array of references: the
+                        // joined row is one the array holds.
+                        if is_array(table, column) {
+                            let id = column_sql(target, &j, &join.on_column)?;
+                            conds.push(correlate(table, alias, column, &id)?);
+                            None
+                        } else {
+                            Some(column_sql(table, alias, column)?)
+                        }
+                    }
+                };
+                // A reverse hop through an array of references: the joined
+                // row's array holds the source row.
+                if let Some(source) = source {
+                    conds.push(correlate(target, &j, &join.on_column, &source)?);
+                }
+            }
+        }
+        for correlation in &join.correlated_filters {
+            conds.push(format!(
+                "{} = {}",
+                column_sql(target, &j, &correlation.join_column)?,
+                column_sql(table, alias, &correlation.source_column)?
+            ));
+        }
+        for filter in &join.filters {
+            conds.push(self.predicate(filter, target, &j)?);
+        }
+        for nested in &join.nested_joins {
+            conds.push(self.join_exists(nested, target, &j)?);
+        }
+        Ok(semi_join(format!("{} AS {j}", self.source(target)?), conds))
+    }
+
+    /// Root rows an access edge grants to a team reachable from the seed.
+    /// The closure is `WITH RECURSIVE` over effective edge rows: `UNION`
+    /// dedupes, so a fixpoint terminates on cycles; a depth bound carries
+    /// the depth and stops expanding at it.
+    fn reachable(
+        &mut self,
+        via: &crate::query::ReachableVia,
+        table: &Table,
+        alias: &str,
+    ) -> Result<String, Error> {
+        if via.access_team_target == JoinTarget::Uncorrelated {
+            return Err(unsupported("uncorrelated reachability"));
+        }
+        let access = self.table(&via.access_table)?;
+        let edges = self.table(&via.edge_table)?;
+        let r = self.alias("reach");
+        // The initial frontier: the seed rows' team column, or one value.
+        let seed = match &via.seed {
+            Some(seed) => {
+                let seeds = self.table(&seed.table)?;
+                let s = self.alias("s");
+                let mut conds = vec![format!("{s}._del = 0")];
+                if let Some(session) = self.policy {
+                    conds.push(self.read_policy(seeds, &s, session)?);
+                }
+                match (&seed.user_column, &seed.user_claim) {
+                    (None, None) => {}
+                    (Some(column), Some(claim)) => {
+                        let value = self.claims.claim(claim);
+                        let Some(value) = self.present(value)?.sql().map(str::to_owned) else {
+                            return Ok("0".to_owned());
+                        };
+                        conds.push(format!("{} = {value}", column_sql(seeds, &s, column)?));
+                    }
+                    _ => {
+                        return Err(query_error(
+                            "a reachability seed names a user column without a claim",
+                        ));
+                    }
+                }
+                for filter in &seed.filters {
+                    conds.push(self.predicate(filter, seeds, &s)?);
+                }
+                format!(
+                    "SELECT {} AS team FROM {} AS {s} WHERE {}",
+                    column_sql(seeds, &s, &seed.team_column)?,
+                    self.source(seeds)?,
+                    conds.join(" AND ")
+                )
+            }
+            None => match self.operand(&via.from, table, alias)? {
+                Term::Missing | Term::NaN => return Ok("0".to_owned()),
+                term => format!("SELECT {} AS team", term.sql().expect("present")),
+            },
+        };
+        let e = self.alias("e");
+        let mut step = vec![format!("{e}._del = 0")];
+        if let Some(session) = self.policy {
+            step.push(self.read_policy(edges, &e, session)?);
+        }
+        for filter in &via.edge_filters {
+            step.push(self.predicate(filter, edges, &e)?);
+        }
+        let member = column_sql(edges, &e, &via.edge_member_column)?;
+        let parent = column_sql(edges, &e, &via.edge_parent_column)?;
+        let edge_source = self.source(edges)?;
+        let cte = match via.bound {
+            crate::query::RecursionBound::Fixpoint => format!(
+                "{r}(team) AS ({seed} UNION SELECT {parent} FROM {edge_source} AS {e} \
+                 JOIN {r} ON {member} = {r}.team WHERE {})",
+                and(&step)
+            ),
+            crate::query::RecursionBound::MaxDepth(depth) => {
+                step.push(format!("{r}.d < {depth}"));
+                format!(
+                    "{r}(team, d) AS (SELECT team, 0 FROM ({seed}) UNION \
+                     SELECT {parent}, {r}.d + 1 \
+                     FROM {edge_source} AS {e} JOIN {r} ON {member} = {r}.team WHERE {})",
+                    and(&step)
+                )
+            }
+        };
+        let a = self.alias("a");
+        let mut conds = vec![
+            format!("{a}._del = 0"),
+            format!(
+                "{} = {alias}.id",
+                column_sql(access, &a, &via.access_row_column)?
+            ),
+            format!(
+                "{} IN (SELECT team FROM {r})",
+                column_sql(access, &a, &via.access_team_column)?
+            ),
+        ];
+        if let Some(session) = self.policy {
+            conds.push(self.read_policy(access, &a, session)?);
+        }
+        for filter in &via.access_filters {
+            conds.push(self.predicate(filter, access, &a)?);
+        }
+        Ok(format!(
+            "EXISTS (WITH RECURSIVE {cte} SELECT 1 FROM {} AS {a} WHERE {})",
+            self.source(access)?,
+            conds.join(" AND ")
+        ))
+    }
+
+    // ---- query predicates ----------------------------------------------
+
+    fn operand(&mut self, operand: &Operand, table: &Table, alias: &str) -> Result<Term, Error> {
+        match operand {
+            Operand::Column(column) => self.column_term(table, alias, column),
+            Operand::Param(name) => {
+                let value = self
+                    .binding
+                    .get(name)
+                    .ok_or_else(|| query_error(format!("parameter `{name}` is not bound")))?
+                    .clone();
+                self.value_term(&value)
+            }
+            Operand::Claim(key) => {
+                let value = self.claims.claim(key);
+                self.present(value)
+            }
+            Operand::Literal(value) => self.value_term(value),
+        }
+    }
+
+    pub fn predicate(
+        &mut self,
+        predicate: &Predicate,
+        table: &Table,
+        alias: &str,
+    ) -> Result<String, Error> {
+        Ok(match predicate {
+            Predicate::All(children) => {
+                let parts = children
+                    .iter()
+                    .map(|child| self.predicate(child, table, alias))
+                    .collect::<Result<Vec<_>, _>>()?;
+                and(&parts)
+            }
+            Predicate::Any(children) => {
+                let parts = children
+                    .iter()
+                    .map(|child| self.predicate(child, table, alias))
+                    .collect::<Result<Vec<_>, _>>()?;
+                or(&parts)
+            }
+            Predicate::Not(child) => format!(
+                "(NOT COALESCE({}, 0))",
+                self.predicate(child, table, alias)?
+            ),
+            Predicate::Eq(l, r) => {
+                let sql = self.cmp2(CmpOp::Eq, l, r, table, alias)?;
+                if is_id(l) || is_id(r) {
+                    whole_key(table, alias, sql)
+                } else {
+                    sql
+                }
+            }
+            Predicate::Ne(l, r) => self.cmp2(CmpOp::Ne, l, r, table, alias)?,
+            Predicate::Lt(l, r) => self.cmp2(CmpOp::Lt, l, r, table, alias)?,
+            Predicate::Lte(l, r) => self.cmp2(CmpOp::Le, l, r, table, alias)?,
+            Predicate::Gt(l, r) => self.cmp2(CmpOp::Gt, l, r, table, alias)?,
+            Predicate::Gte(l, r) => self.cmp2(CmpOp::Ge, l, r, table, alias)?,
+            Predicate::In(left, options) => {
+                let id = is_id(left);
+                if let Operand::Column(column) = left {
+                    for option in options {
+                        check_candidate(table, column, option)?;
+                    }
+                }
+                let left = self.operand(left, table, alias)?;
+                let options = options
+                    .iter()
+                    .map(|option| self.operand(option, table, alias))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let sql = self.in_list(left, options)?;
+                if id {
+                    whole_key(table, alias, sql)
+                } else {
+                    sql
+                }
+            }
+            Predicate::Contains(l, r) => {
+                if let Operand::Column(column) = l {
+                    check_haystack(table, column)?;
+                }
+                let array = matches!(l, Operand::Column(column) if is_array(table, column));
+                let l = self.operand(l, table, alias)?;
+                let r = self.operand(r, table, alias)?;
+                if array {
+                    self.array_contains(l, r)
+                } else {
+                    self.contains(l, r)
+                }
+            }
+            Predicate::IsNull(operand) => match self.operand(operand, table, alias)? {
+                Term::Missing => "1".to_owned(),
+                Term::NaN => "0".to_owned(),
+                term => format!("({} IS NULL)", term.sql().expect("present")),
+            },
+            Predicate::EnumMatch { .. } => {
+                return Err(unsupported("enum payload predicates"));
+            }
+        })
+    }
+
+    fn cmp2(
+        &mut self,
+        op: CmpOp,
+        left: &Operand,
+        right: &Operand,
+        table: &Table,
+        alias: &str,
+    ) -> Result<String, Error> {
+        let left = self.operand(left, table, alias)?;
+        let right = self.operand(right, table, alias)?;
+        self.cmp(op, left, right)
+    }
+
+    // ---- policies -------------------------------------------------------
+
+    /// The SELECT policy of `table` at `alias`, as `session`.
+    pub fn read_policy(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        session: &Session,
+    ) -> Result<String, Error> {
+        self.operation_policy(table, Operation::Select, alias, session)
+    }
+
+    pub fn operation_policy(
+        &mut self,
+        table: &Table,
+        operation: Operation,
+        alias: &str,
+        session: &Session,
+    ) -> Result<String, Error> {
+        if session.system {
+            return Ok("1".to_owned());
+        }
+        self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
+            None => Ok("0".to_owned()),
+            Some(policy) => {
+                ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
+            }
+        })
+    }
+
+    /// Compile a policy of `table` under the schema whose names its policies
+    /// use (see [`Schema::policies_from`]); its SQL reads the same stored
+    /// rows either way.
+    fn under_policy_schema(
+        &mut self,
+        table: &Table,
+        body: impl FnOnce(&mut Self, &Table) -> Result<String, Error>,
+    ) -> Result<String, Error> {
+        let Some(current) = self.schema.policies_from.as_deref() else {
+            return body(self, table);
+        };
+        let Some(governing) = current.by_stored(&table.stored) else {
+            return Ok("0".to_owned());
+        };
+        let own = std::mem::replace(&mut self.schema, current);
+        let result = body(self, governing);
+        self.schema = own;
+        result
+    }
+
+    /// A specific policy clause (e.g. UPDATE's WITH CHECK) at `alias`.
+    pub fn policy_clause(
+        &mut self,
+        policy: Option<&PolicyExpr>,
+        table: &Table,
+        alias: &str,
+        session: &Session,
+    ) -> Result<String, Error> {
+        if session.system {
+            return Ok("1".to_owned());
+        }
+        self.under_policy_schema(table, |ctx, table| match policy {
+            None => Ok("0".to_owned()),
+            Some(policy) => {
+                ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
+            }
+        })
+    }
+
+    fn policy_value(
+        &mut self,
+        value: &PolicyValue,
+        outer: Option<(&Table, &str)>,
+        session: &Session,
+    ) -> Result<Term, Error> {
+        match value {
+            PolicyValue::Literal(value) => self.value_term(&public_value(value)?),
+            PolicyValue::SessionRef(path)
+                if path.first().map(String::as_str) == Some("__jazz_outer_row") =>
+            {
+                let (table, alias) =
+                    outer.ok_or_else(|| query_error("outer row reference outside EXISTS"))?;
+                let column = path
+                    .get(1)
+                    .ok_or_else(|| query_error("outer row reference without a column"))?;
+                self.column_term(table, alias, column)
+            }
+            PolicyValue::SessionRef(path) => {
+                let value = session.resolve(path);
+                self.present(value)
+            }
+        }
+    }
+
+    fn policy_expr(
+        &mut self,
+        policy: &PolicyExpr,
+        table: &Table,
+        alias: &str,
+        outer: Option<(&Table, &str)>,
+        session: &Session,
+        depth: usize,
+    ) -> Result<String, Error> {
+        let recurse = |ctx: &mut Self, policy: &PolicyExpr| {
+            ctx.policy_expr(policy, table, alias, outer, session, depth)
+        };
+        Ok(match policy {
+            PolicyExpr::True => "1".to_owned(),
+            PolicyExpr::False => "0".to_owned(),
+            PolicyExpr::And(parts) => {
+                let parts = parts
+                    .iter()
+                    .map(|p| recurse(self, p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                and(&parts)
+            }
+            PolicyExpr::Or(parts) => {
+                let parts = parts
+                    .iter()
+                    .map(|p| recurse(self, p))
+                    .collect::<Result<Vec<_>, _>>()?;
+                or(&parts)
+            }
+            PolicyExpr::Not(inner) => format!("(NOT COALESCE({}, 0))", recurse(self, inner)?),
+            PolicyExpr::Cmp {
+                column,
+                op,
+                value: PolicyValue::SessionRef(path),
+            } if crate::values::author_record(column).is_some()
+                && path.first().map(String::as_str) == Some("user") =>
+            {
+                self.author_cmp(table, alias, column, op, path, session)?
+            }
+            PolicyExpr::Cmp {
+                column,
+                op,
+                value: PolicyValue::SessionRef(path),
+            } if is_uuid(table, column)
+                && path.first().map(String::as_str) != Some("__jazz_outer_row") =>
+            {
+                // A claim is JSON, so a UUID claim arrives as its string:
+                // compare it with a UUID column as the UUID it spells.
+                let value = match session.resolve(path) {
+                    Some(Value::String(text)) => text.parse().map(Value::Uuid).ok(),
+                    value => value,
+                };
+                let left = self.column_term(table, alias, column)?;
+                let right = self.present(value)?;
+                self.cmp(op.clone(), left, right)?
+            }
+            PolicyExpr::Cmp { column, op, value } => {
+                let left = self.column_term(table, alias, column)?;
+                let right = self.policy_value(value, outer, session)?;
+                self.cmp(op.clone(), left, right)?
+            }
+            PolicyExpr::SessionCmp { path, op, value } => {
+                let left = session.resolve(path);
+                let left = self.present(left)?;
+                let right = self.value_term(&public_value(value)?)?;
+                self.cmp(op.clone(), left, right)?
+            }
+            PolicyExpr::IsNull { column } => {
+                format!("({} IS NULL)", column_sql(table, alias, column)?)
+            }
+            PolicyExpr::IsNotNull { column } => {
+                format!("({} IS NOT NULL)", column_sql(table, alias, column)?)
+            }
+            PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
+            PolicyExpr::SessionIsNotNull { path } => bool_sql(session.resolve(path).is_some()),
+            PolicyExpr::Contains { column, value } => {
+                let left = self.column_term(table, alias, column)?;
+                let right = self.policy_value(value, outer, session)?;
+                if is_array(table, column) {
+                    self.array_contains(left, right)
+                } else {
+                    self.contains(left, right)
+                }
+            }
+            PolicyExpr::In {
+                column,
+                session_path,
+            } => {
+                let left = self.column_term(table, alias, column)?;
+                let options = match session.resolve(session_path) {
+                    Some(Value::Array(values)) => values
+                        .iter()
+                        .map(|value| self.value_term(value))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Some(value) => vec![self.value_term(&value)?],
+                    None => Vec::new(),
+                };
+                self.in_list(left, options)?
+            }
+            PolicyExpr::InList { column, values } => {
+                let left = self.column_term(table, alias, column)?;
+                let options = values
+                    .iter()
+                    .map(|value| self.policy_value(value, outer, session))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.in_list(left, options)?
+            }
+            PolicyExpr::SessionInList { path, values } => {
+                let left = session.resolve(path);
+                let left = self.present(left)?;
+                let options = values
+                    .iter()
+                    .map(|value| self.value_term(&public_value(value)?))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.in_list(left, options)?
+            }
+            // Both sides are known at compile time: an array claim holds the
+            // value, or a text claim contains it.
+            PolicyExpr::SessionContains { path, value } => {
+                let needle = public_value(value)?;
+                let same = |a: &Value, b: &Value| match (a, b) {
+                    (Value::Uuid(u), Value::String(s)) | (Value::String(s), Value::Uuid(u)) => {
+                        u.to_string() == *s
+                    }
+                    (a, b) => a == b,
+                };
+                bool_sql(match session.resolve(path) {
+                    Some(Value::Array(items)) => items.iter().any(|item| {
+                        unwrap_nullable(item.clone()).is_some_and(|i| same(&i, &needle))
+                    }),
+                    Some(Value::String(text)) => match &needle {
+                        Value::String(part) => text.contains(part.as_str()),
+                        _ => false,
+                    },
+                    _ => false,
+                })
+            }
+            // Policy EXISTS reads its table as raw evidence: the dependency
+            // table's own policy is not composed in (INV-RLS-21).
+            PolicyExpr::Exists {
+                table: target,
+                condition,
+            } => {
+                let target = self.table(target)?;
+                let e = self.alias("e");
+                let inner =
+                    self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
+                semi_join(
+                    format!("{} AS {e}", self.source(target)?),
+                    vec![format!("{e}._del = 0"), inner],
+                )
+            }
+            // The relation's outer row is the row under check, also inside
+            // an EXISTS over another table (as `__jazz_outer_row` is).
+            PolicyExpr::ExistsRel { rel } => {
+                let (table, alias) = outer.unwrap_or((table, alias));
+                self.exists_rel(rel, table, alias, session)?
+            }
+            PolicyExpr::Inherits {
+                operation,
+                via_column,
+                max_depth,
+            } => {
+                let depth = max_depth.unwrap_or(depth).min(depth);
+                if depth == 0 {
+                    return Ok("0".to_owned());
+                }
+                let target_name = table.references.get(via_column).ok_or_else(|| {
+                    query_error(format!(
+                        "INHERITS via `{via_column}`, which is not a reference"
+                    ))
+                })?;
+                let target = self.table(target_name)?;
+                if let Some(chain) = recursive_base(table, target, *operation, via_column) {
+                    // Distance n is checked with depth - n left, so the
+                    // hop below the first stops at its own bound.
+                    let bound = depth.min(chain.depth.map_or(usize::MAX, |d| d.saturating_add(1)));
+                    return self
+                        .ancestor_closure(target, alias, via_column, &chain, bound, session);
+                }
+                let p = self.alias("p");
+                let inner = match target.policy(*operation) {
+                    None => "0".to_owned(),
+                    Some(policy) => {
+                        self.policy_expr(policy, target, &p, None, session, depth - 1)?
+                    }
+                };
+                // An array reference inherits from any row it names.
+                let on = self.join_key((target, &p, "id"), (table, alias, via_column))?;
+                semi_join(
+                    format!("{} AS {p}", self.source(target)?),
+                    vec![on, format!("{p}._del = 0"), inner],
+                )
+            }
+            PolicyExpr::InheritsReferencing {
+                operation,
+                source_table,
+                via_column,
+                max_depth,
+            } => {
+                let depth = max_depth.unwrap_or(depth).min(depth);
+                if depth == 0 {
+                    return Ok("0".to_owned());
+                }
+                let source = self.table(source_table)?;
+                let s = self.alias("s");
+                let inner = match source.policy(*operation) {
+                    None => "0".to_owned(),
+                    Some(policy) => {
+                        self.policy_expr(policy, source, &s, None, session, depth - 1)?
+                    }
+                };
+                // An array reference grants when it lists the row's id.
+                semi_join(
+                    format!("{} AS {s}", self.source(source)?),
+                    vec![
+                        correlate(source, &s, via_column, &format!("{alias}.id"))?,
+                        format!("{s}._del = 0"),
+                        inner,
+                    ],
+                )
+            }
+        })
+    }
+
+    /// A row's ancestors through its own reference `via`, up to `bound`
+    /// hops (each taken from an alive row meeting the chain's guards), any
+    /// of which (alive) meets one of its base disjuncts: a parent chain's
+    /// policy as one `WITH RECURSIVE` closure, not one nested EXISTS per
+    /// level (Durable Object SQLite caps expression depth at 100). The
+    /// caller checked the first hop's guards. `UNION` dedupes, so a cycle
+    /// terminates.
+    fn ancestor_closure(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        via: &str,
+        chain: &ParentChain<'_>,
+        bound: usize,
+        session: &Session,
+    ) -> Result<String, Error> {
+        let c = self.alias("anc");
+        let p = self.alias("p");
+        let a = self.alias("a");
+        let seed = column_sql(table, alias, via)?;
+        let parent = column_sql(table, &p, via)?;
+        let steps = self.source(table)?;
+        let mut step = vec![format!("{p}._del = 0"), format!("{c}.d < {bound}")];
+        for guard in &chain.guards {
+            step.push(self.policy_expr(guard, table, &p, None, session, 0)?);
+        }
+        let cte = format!(
+            "{c}(id, d) AS (SELECT {seed}, 1 UNION SELECT {parent}, {c}.d + 1 FROM {steps} AS {p} \
+             JOIN {c} ON {p}.id = {c}.id WHERE {})",
+            and(&step)
+        );
+        let base = chain
+            .base
+            .iter()
+            .map(|part| self.policy_expr(part, table, &a, None, session, 0))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!(
+            "EXISTS (WITH RECURSIVE {cte} SELECT 1 FROM {} AS {a} JOIN {c} ON {a}.id = {c}.id \
+             WHERE {a}._del = 0 AND {})",
+            self.source(table)?,
+            or(&base)
+        ))
+    }
+
+    // ---- relation IR ----------------------------------------------------
+
+    fn exists_rel(
+        &mut self,
+        rel: &RelationExpr,
+        outer: &Table,
+        outer_alias: &str,
+        session: &Session,
+    ) -> Result<String, Error> {
+        let scope = RelScope {
+            outer: Some((outer, outer_alias)),
+            frontier: None,
+            session,
+        };
+        let rel = self.relation(rel, &scope)?;
+        let with = if rel.ctes.is_empty() {
+            String::new()
+        } else {
+            format!("WITH RECURSIVE {} ", rel.ctes.join(", "))
+        };
+        Ok(format!(
+            "EXISTS ({with}SELECT 1 FROM {} WHERE {})",
+            rel.sql_from_clause(),
+            and(&rel.wheres)
+        ))
+    }
+
+    fn relation(&mut self, expr: &RelationExpr, scope: &RelScope<'_>) -> Result<Rel, Error> {
+        match expr {
+            RelationExpr::TableScan { table, alias } => {
+                let table = self.table(table)?;
+                let r = self.alias("r");
+                Ok(Rel {
+                    ctes: Vec::new(),
+                    wheres: vec![format!("{r}._del = 0")],
+                    from: vec![Src {
+                        sql: self.source(table)?,
+                        alias: r,
+                        scope: alias.clone().unwrap_or_else(|| table.name.clone()),
+                        table: Some(table.name.clone()),
+                    }],
+                    id: None,
+                })
+            }
+            RelationExpr::Filter { input, predicate } => {
+                let mut rel = self.relation(input, scope)?;
+                let condition = self.rel_predicate(predicate, &rel, scope)?;
+                rel.wheres.push(condition);
+                Ok(rel)
+            }
+            RelationExpr::Join {
+                left,
+                right,
+                on,
+                join_kind,
+            } => {
+                if *join_kind != crate::query::RelationJoinKind::Inner {
+                    return Err(unsupported("outer relation joins"));
+                }
+                let mut left = self.relation(left, scope)?;
+                let right = self.relation(right, scope)?;
+                let mut conditions = Vec::new();
+                for condition in on {
+                    conditions.push(format!(
+                        "{} = {}",
+                        self.resolve(&left, &condition.left)?,
+                        self.resolve(&right, &condition.right)?
+                    ));
+                }
+                left.ctes.extend(right.ctes);
+                left.from.extend(right.from);
+                left.wheres.extend(right.wheres);
+                left.wheres.extend(conditions);
+                left.id = None;
+                Ok(left)
+            }
+            RelationExpr::Project { input, columns } => {
+                let mut rel = self.relation(input, scope)?;
+                if let Some(column) = columns.iter().find(|column| column.alias == "id") {
+                    rel.id = Some(match &column.expr {
+                        RelationProjectExpr::Column(column) => self.resolve(&rel, column)?,
+                        RelationProjectExpr::RowId(row) => self.row_id(&rel, *row, scope)?,
+                    });
+                }
+                Ok(rel)
+            }
+            RelationExpr::Gather {
+                seed,
+                step,
+                frontier_key,
+                bound,
+                dedupe_key,
+            } => {
+                let current = RelationKeyRef::RowId(RelationRowIdRef::Current);
+                if *frontier_key != current || dedupe_key.iter().any(|key| *key != current) {
+                    return Err(unsupported("gather frontiers other than the row id"));
+                }
+                let g = self.alias("g");
+                let seed = self.relation(seed, scope)?;
+                let step_scope = RelScope {
+                    frontier: Some(format!("{g}.id")),
+                    ..*scope
+                };
+                let mut step = self.relation(step, &step_scope)?;
+                // A step reaches rows of the seed's table: when it projects
+                // no id, the reached row is the last such source (a hop
+                // joined after the edge it walks).
+                if step.id.is_none()
+                    && let Some(table) = seed.from.first().and_then(|src| src.table.as_ref())
+                    && let Some(reached) = step
+                        .from
+                        .iter()
+                        .rev()
+                        .find(|src| src.table.as_ref() == Some(table))
+                {
+                    step.id = Some(format!("{}.id", reached.alias));
+                }
+                let (max, guard) = match bound {
+                    RecursionBound::MaxDepth(depth) => (*depth, false),
+                    RecursionBound::Fixpoint => (FIXPOINT_GUARD, true),
+                };
+                let _ = guard;
+                let cte = format!(
+                    "{g}(id, d) AS (SELECT {}, 0 FROM {} WHERE {} \
+                     UNION SELECT {}, {g}.d + 1 FROM {g}, {} WHERE {g}.d < {max} AND {})",
+                    seed.output_id(),
+                    seed.sql_from_clause(),
+                    and(&seed.wheres),
+                    step.output_id(),
+                    step.sql_from_clause(),
+                    and(&step.wheres),
+                );
+                let mut ctes = seed.ctes;
+                ctes.extend(step.ctes);
+                ctes.push(cte);
+                let a = self.alias("ga");
+                Ok(Rel {
+                    ctes,
+                    wheres: Vec::new(),
+                    from: vec![Src {
+                        sql: g,
+                        alias: a,
+                        scope: String::new(),
+                        table: None,
+                    }],
+                    id: None,
+                })
+            }
+            other => Err(unsupported(format!(
+                "relation `{}`",
+                format!("{other:?}")
+                    .split([' ', '{', '('])
+                    .next()
+                    .unwrap_or("?")
+            ))),
+        }
+    }
+
+    fn resolve(&self, rel: &Rel, column: &RelationColumnRef) -> Result<String, Error> {
+        let has = |src: &Src| match &src.table {
+            Some(table) => self.schema.tables[table].has_column(&column.column),
+            None => column.column == "id",
+        };
+        let src = match &column.scope {
+            Some(scope) => rel
+                .from
+                .iter()
+                .find(|src| &src.scope == scope)
+                .or_else(|| rel.from.iter().find(|src| src.table.is_none() && has(src))),
+            None => rel.from.iter().find(|src| has(src)),
+        }
+        .ok_or_else(|| query_error(format!("relation column {column:?} does not resolve")))?;
+        if !has(src) {
+            return Err(query_error(format!(
+                "relation column {column:?} does not exist"
+            )));
+        }
+        Ok(match &src.table {
+            Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
+            None if column.column == "id" => format!("{}.id", src.alias),
+            None => format!("{}.{}", src.alias, quote(&column.column)),
+        })
+    }
+
+    /// [`Self::resolve`] as an operand.
+    fn resolve_term(&self, rel: &Rel, column: &RelationColumnRef) -> Result<Term, Error> {
+        let sql = self.resolve(rel, column)?;
+        let src = rel.from.iter().find(|src| {
+            src.table.as_ref().is_some_and(|table| {
+                sql.starts_with(&format!("{}.", src.alias))
+                    && self.schema.tables[table].has_column(&column.column)
+            })
+        });
+        Ok(match src.and_then(|src| src.table.as_ref()) {
+            Some(table) => self.large_term(&self.schema.tables[table], sql, &column.column),
+            None => Term::Sql(sql),
+        })
+    }
+
+    fn row_id(
+        &self,
+        rel: &Rel,
+        row: RelationRowIdRef,
+        scope: &RelScope<'_>,
+    ) -> Result<String, Error> {
+        Ok(match row {
+            RelationRowIdRef::Current => rel
+                .from
+                .first()
+                .map(|src| format!("{}.id", src.alias))
+                .ok_or_else(|| query_error("current row id of an empty relation"))?,
+            RelationRowIdRef::Outer => scope
+                .outer
+                .map(|(_, alias)| format!("{alias}.id"))
+                .ok_or_else(|| query_error("outer row id outside a policy"))?,
+            RelationRowIdRef::Frontier => scope
+                .frontier
+                .clone()
+                .ok_or_else(|| query_error("frontier row id outside a gather step"))?,
+        })
+    }
+
+    fn rel_value(
+        &mut self,
+        value: &RelationValueRef,
+        rel: &Rel,
+        scope: &RelScope<'_>,
+    ) -> Result<Term, Error> {
+        match value {
+            RelationValueRef::Literal(json) => self.value_term(&json_value(json)?),
+            RelationValueRef::Param(name) => {
+                let value = self
+                    .binding
+                    .get(name)
+                    .ok_or_else(|| query_error(format!("parameter `{name}` is not bound")))?
+                    .clone();
+                self.value_term(&value)
+            }
+            RelationValueRef::SessionRef(path) => {
+                let value = scope.session.resolve(path);
+                self.present(value)
+            }
+            RelationValueRef::OuterColumn(column) => {
+                let (table, alias) = scope
+                    .outer
+                    .ok_or_else(|| query_error("outer column outside a policy"))?;
+                self.column_term(table, alias, &column.column)
+            }
+            RelationValueRef::FrontierColumn(_) => Err(unsupported("frontier columns")),
+            RelationValueRef::RowId(row) => Ok(Term::Sql(self.row_id(rel, *row, scope)?)),
+        }
+    }
+
+    fn rel_predicate(
+        &mut self,
+        predicate: &RelationPredicate,
+        rel: &Rel,
+        scope: &RelScope<'_>,
+    ) -> Result<String, Error> {
+        Ok(match predicate {
+            RelationPredicate::True => "1".to_owned(),
+            RelationPredicate::False => "0".to_owned(),
+            RelationPredicate::And(parts) => {
+                let parts = parts
+                    .iter()
+                    .map(|part| self.rel_predicate(part, rel, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                and(&parts)
+            }
+            RelationPredicate::Or(parts) => {
+                let parts = parts
+                    .iter()
+                    .map(|part| self.rel_predicate(part, rel, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                or(&parts)
+            }
+            RelationPredicate::Not(part) => format!(
+                "(NOT COALESCE({}, 0))",
+                self.rel_predicate(part, rel, scope)?
+            ),
+            RelationPredicate::Cmp { left, op, right } => {
+                let left = self.resolve_term(rel, left)?;
+                let right = self.rel_value(right, rel, scope)?;
+                let op = match op {
+                    RelationCmpOp::Eq => CmpOp::Eq,
+                    RelationCmpOp::Ne => CmpOp::Ne,
+                    RelationCmpOp::Lt => CmpOp::Lt,
+                    RelationCmpOp::Le => CmpOp::Le,
+                    RelationCmpOp::Gt => CmpOp::Gt,
+                    RelationCmpOp::Ge => CmpOp::Ge,
+                };
+                self.cmp(op, left, right)?
+            }
+            RelationPredicate::IsNull { column } => {
+                format!("({} IS NULL)", self.resolve(rel, column)?)
+            }
+            RelationPredicate::IsNotNull { column } => {
+                format!("({} IS NOT NULL)", self.resolve(rel, column)?)
+            }
+            RelationPredicate::In { left, values } => {
+                let left = self.resolve_term(rel, left)?;
+                let options = values
+                    .iter()
+                    .map(|value| self.rel_value(value, rel, scope))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.in_list(left, options)?
+            }
+            RelationPredicate::Contains { left, right } => {
+                let left = self.resolve_term(rel, left)?;
+                let right = self.rel_value(right, rel, scope)?;
+                self.contains(left, right)
+            }
+            RelationPredicate::EnumMatch { .. } => {
+                return Err(unsupported("enum payload relation predicates"));
+            }
+        })
+    }
+}
+
+struct RelScope<'s> {
+    outer: Option<(&'s Table, &'s str)>,
+    frontier: Option<String>,
+    session: &'s Session,
+}
+
+impl Clone for RelScope<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            outer: self.outer,
+            frontier: self.frontier.clone(),
+            session: self.session,
+        }
+    }
+}
+
+struct Src {
+    sql: String,
+    alias: String,
+    scope: String,
+    /// `None` for a gather CTE, whose only column is `id`.
+    table: Option<String>,
+}
+
+struct Rel {
+    ctes: Vec<String>,
+    from: Vec<Src>,
+    wheres: Vec<String>,
+    /// The projected `id`, when a projection named one.
+    id: Option<String>,
+}
+
+impl Rel {
+    fn sql_from_clause(&self) -> String {
+        self.from
+            .iter()
+            .map(|src| format!("{} AS {}", src.sql, src.alias))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn output_id(&self) -> String {
+        self.id
+            .clone()
+            .unwrap_or_else(|| format!("{}.id", self.from[0].alias))
+    }
+}
+
+fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<(String, ValueType)>, Error> {
+    match select {
+        None => Ok(table
+            .columns
+            .iter()
+            .map(|column| (column.name.clone(), column.ty.clone()))
+            .collect()),
+        Some(select) => select
+            .iter()
+            .filter(|name| name.as_str() != "id")
+            .map(|name| {
+                table
+                    .column(name)
+                    .map(|column| (column.name.clone(), column.ty.clone()))
+                    .ok_or_else(|| query_error(format!("unknown column `{}.{name}`", table.name)))
+            })
+            .collect(),
+    }
+}
+
+/// One source of a flat join.
+struct FlatSource<'a> {
+    /// Its effective name: alias or table.
+    name: String,
+    /// The schema table it reads (a history source's table).
+    base: &'a Table,
+    /// What it reads as: the table, or a history source's versions.
+    table: Table,
+    alias: String,
+    history: bool,
+    /// Its SQL source; a history source's waits for its bound.
+    sql: Option<String>,
+}
+
+/// The conjuncts of a filter: an `All` contributes each of its parts.
+fn flatten_all<'p>(predicate: &'p Predicate, out: &mut Vec<&'p Predicate>) {
+    match predicate {
+        Predicate::All(parts) => parts.iter().for_each(|part| flatten_all(part, out)),
+        predicate => out.push(predicate),
+    }
+}
+
+/// The row id an array element names: array cells hold uuids as their
+/// hyphenated text (see [`crate::values::to_sql`]).
+fn array_element_id(element: &str) -> String {
+    format!("unhex(replace({element}.value, '-', ''))")
+}
+
+/// What a value or column type is, for operand type checks: numbers of
+/// any width compare with each other, a UUID with its string spelling.
+#[derive(PartialEq, Debug)]
+enum Kind {
+    Number,
+    Text,
+    Bool,
+    Uuid,
+    Array,
+    Bytes,
+    Other,
+}
+
+fn type_kind(ty: &ValueType) -> Kind {
+    match ty {
+        ValueType::Nullable(inner) => type_kind(inner),
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::F64 => Kind::Number,
+        ValueType::String => Kind::Text,
+        ValueType::Bool => Kind::Bool,
+        ValueType::Uuid => Kind::Uuid,
+        ValueType::Array(_) => Kind::Array,
+        ValueType::Bytes => Kind::Bytes,
+        _ => Kind::Other,
+    }
+}
+
+fn value_kind(value: &Value) -> Option<Kind> {
+    Some(match value {
+        Value::Nullable(None) => return None,
+        Value::Nullable(Some(inner)) => return value_kind(inner),
+        Value::U8(_)
+        | Value::U16(_)
+        | Value::U32(_)
+        | Value::U64(_)
+        | Value::U48(_)
+        | Value::I32(_)
+        | Value::I64(_)
+        | Value::F64(_) => Kind::Number,
+        Value::String(_) => Kind::Text,
+        Value::Bool(_) => Kind::Bool,
+        Value::Uuid(_) => Kind::Uuid,
+        Value::Array(_) => Kind::Array,
+        Value::Bytes(_) => Kind::Bytes,
+        _ => Kind::Other,
+    })
+}
+
+fn value_type_name(value: &Value) -> String {
+    match value {
+        Value::Nullable(Some(inner)) => value_type_name(inner),
+        value => format!("{value:?}")
+            .split(['(', ' ', '{'])
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
+    }
+}
+
+/// An `in` literal must be a whole value of the column's type: a scalar
+/// is no candidate for an array column (that is `contains`).
+fn check_candidate(table: &Table, column: &str, option: &Operand) -> Result<(), Error> {
+    let (Operand::Literal(value), Some(declared)) = (option, table.column(column)) else {
+        return Ok(());
+    };
+    let (want, Some(got)) = (type_kind(&declared.ty), value_kind(value)) else {
+        return Ok(());
+    };
+    let compatible = want == got
+        || want == Kind::Other
+        || got == Kind::Other
+        || (want == Kind::Uuid && got == Kind::Text);
+    if compatible {
+        return Ok(());
+    }
+    Err(query_error(format!(
+        "in candidate for column {column} has type {}, but the column has type {:?}",
+        value_type_name(value),
+        declared.ty
+    )))
+}
+
+/// `contains` searches text, bytes or an array.
+fn check_haystack(table: &Table, column: &str) -> Result<(), Error> {
+    let Some(declared) = table.column(column) else {
+        return Ok(());
+    };
+    match type_kind(&declared.ty) {
+        Kind::Text | Kind::Bytes | Kind::Array | Kind::Other => Ok(()),
+        _ => Err(query_error(format!(
+            "operand type mismatch: contains on {column}, which has type {:?}",
+            declared.ty
+        ))),
+    }
+}
+
+/// Whether `column` is a UUID column (nullable or not).
+fn is_uuid(table: &Table, column: &str) -> bool {
+    table.column(column).is_some_and(|column| match &column.ty {
+        ValueType::Nullable(inner) => matches!(**inner, ValueType::Uuid),
+        ty => matches!(ty, ValueType::Uuid),
+    })
+}
+
+/// Whether `column` is an array column (nullable or not).
+/// A child row of `table` at `alias` correlates with `value` by `column`:
+/// equal to it, or for an array column (a reverse array relation),
+/// holding it.
+fn correlate(table: &Table, alias: &str, column: &str, value: &str) -> Result<String, Error> {
+    let sql = column_sql(table, alias, column)?;
+    if is_array(table, column) {
+        let e = format!("{alias}_e");
+        return Ok(format!(
+            "EXISTS (SELECT 1 FROM json_each({sql}) AS {e} WHERE {} = {value})",
+            array_element_id(&e)
+        ));
+    }
+    Ok(format!("{sql} = {value}"))
+}
+
+pub(crate) fn is_array(table: &Table, column: &str) -> bool {
+    let Some(column) = table.column(column) else {
+        return false;
+    };
+    let ty = match &column.ty {
+        ValueType::Nullable(inner) => inner.as_ref(),
+        ty => ty,
+    };
+    matches!(ty, ValueType::Array(_))
+}
+
+pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<String, Error> {
+    if column == "id" {
+        return Ok(format!("{alias}.id"));
+    }
+    if let Some((stored, whole)) = crate::values::author_record(column) {
+        // A JSON array of the record's fields, read back by
+        // `values::from_sql`.
+        let identity = "json_array(issuer, subject)";
+        let fields = if whole {
+            format!("json_array(lower(hex(account)), {identity})")
+        } else {
+            identity.to_owned()
+        };
+        let code = match stored {
+            "$deletedBy" => deletion_sql(table, alias, stored),
+            _ => stored_sql(alias, stored),
+        };
+        return Ok(format!(
+            "(SELECT {fields} FROM _jazz_authors WHERE n = {code})"
+        ));
+    }
+    if let Some((stored, part)) = crate::values::author_part(column) {
+        let code = match stored {
+            "$deletedBy" => deletion_sql(table, alias, stored),
+            _ => stored_sql(alias, stored),
+        };
+        return Ok(format!(
+            "(SELECT {part} FROM _jazz_authors WHERE n = {code})"
+        ));
+    }
+    if column == "$deletedAt" {
+        return Ok(deletion_sql(table, alias, column));
+    }
+    if crate::values::elided_as(column).is_some() {
+        return Ok(stored_sql(alias, column));
+    }
+    if table.column(column).is_none() {
+        return Err(query_error(format!(
+            "unknown column `{}.{column}`",
+            table.name
+        )));
+    }
+    Ok(format!("{alias}.{}", quote(table.stored_name(column))))
+}
+
+/// The first deletion column a query's root selects, filters or orders by.
+fn deletion_column(query: &Query) -> Option<String> {
+    let mut found = query
+        .select
+        .iter()
+        .flatten()
+        .chain(query.order_by.iter().map(|order| &order.column))
+        .find(|column| crate::values::is_deletion(column))
+        .cloned();
+    for filter in &query.filters {
+        if found.is_some() {
+            break;
+        }
+        filter.any_operand(&mut |operand| match operand {
+            Operand::Column(column) if crate::values::is_deletion(column) => {
+                found = Some(column.clone());
+                true
+            }
+            _ => false,
+        });
+    }
+    found
+}
+
+/// `$deletedAt` or the `$deletedBy` author code: the update stamp of a
+/// deleted current version, which the deletion wrote, else NULL. A source
+/// that carries them as columns (history versions, which take them from
+/// their current row) is read directly.
+fn deletion_sql(table: &Table, alias: &str, column: &str) -> String {
+    if table.stored_provenance.iter().any(|c| c.stored == column) {
+        return format!("{alias}.{}", quote(column));
+    }
+    let stamp = match column {
+        "$deletedAt" => "$updatedAt",
+        _ => "$updatedBy",
+    };
+    format!(
+        "CASE WHEN {alias}._del = 1 THEN {} END",
+        stored_sql(alias, stamp)
+    )
+}
+
+/// A stored provenance column; an update stamp left NULL reads as the
+/// create stamp it equals.
+fn stored_sql(alias: &str, stored: &str) -> String {
+    match crate::values::elided_as(stored) {
+        Some(created) => format!(
+            "COALESCE({alias}.{}, {alias}.{})",
+            quote(stored),
+            quote(created)
+        ),
+        None => format!("{alias}.{}", quote(stored)),
+    }
+}
+
+fn and(parts: &[String]) -> String {
+    if parts.is_empty() {
+        "1".to_owned()
+    } else {
+        chain(parts, " AND ")
+    }
+}
+
+fn or(parts: &[String]) -> String {
+    if parts.is_empty() {
+        "0".to_owned()
+    } else {
+        chain(parts, " OR ")
+    }
+}
+
+/// Terms flatter than this join as one chain. SQLite parses a chain of n
+/// terms n deep, and Durable Object SQLite caps expression depth at 100.
+const CHAIN_MAX: usize = 32;
+
+/// `EXISTS (SELECT 1 FROM {from} WHERE {conds})`, with any condition that
+/// is itself such an `EXISTS` joined in: `EXISTS (A WHERE c AND EXISTS (B
+/// WHERE d))` is `EXISTS (A, B WHERE c AND d)`. SQLite counts a nested
+/// subquery's depth on top of its enclosing expressions', so an inheritance
+/// chain nested level by level outgrows Durable Object SQLite's expression
+/// depth cap of 100 within a few levels; joined, it stays one level deep.
+fn semi_join(from: String, conds: Vec<String>) -> String {
+    let mut sources = vec![from];
+    let mut terms = Vec::with_capacity(conds.len());
+    for cond in conds {
+        match plain_exists(&cond) {
+            Some((source, term)) => {
+                sources.push(source.to_owned());
+                terms.push(term.to_owned());
+            }
+            None => terms.push(cond),
+        }
+    }
+    format!(
+        "EXISTS (SELECT 1 FROM {} WHERE {})",
+        sources.join(", "),
+        and(&terms)
+    )
+}
+
+/// The source list and condition of `sql` when it is exactly one
+/// `EXISTS (SELECT 1 FROM {from} WHERE {cond})`, as [`semi_join`] writes.
+fn plain_exists(sql: &str) -> Option<(&str, &str)> {
+    const HEAD: &str = "EXISTS (SELECT 1 FROM ";
+    let body = sql.strip_prefix(HEAD)?.strip_suffix(')')?;
+    // Scan the body at nesting depth zero, outside quotes: it must not
+    // close the EXISTS early, and its first top-level WHERE splits it.
+    let bytes = body.as_bytes();
+    let (mut depth, mut quote, mut split) = (0usize, None, None);
+    for (i, &b) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'\'' | b'"' => quote = Some(b),
+                b'(' => depth += 1,
+                b')' if depth == 0 => return None,
+                b')' => depth -= 1,
+                b' ' if depth == 0 && split.is_none() && body[i..].starts_with(" WHERE ") => {
+                    split = Some(i)
+                }
+                _ => {}
+            },
+        }
+    }
+    let split = split?;
+    let (from, cond) = (&body[..split], &body[split + " WHERE ".len()..]);
+    // Every source must be aliased: an unaliased one (`json_each(..)`)
+    // names its columns bare, which another joined source could shadow.
+    if !top_level(from)
+        .split(',')
+        .all(|source| source.contains(" AS "))
+    {
+        return None;
+    }
+    // Only a bare condition: no top-level clause after it.
+    let top = top_level(cond);
+    if [" GROUP BY ", " ORDER BY ", " LIMIT ", " HAVING "]
+        .iter()
+        .any(|clause| top.contains(clause))
+    {
+        return None;
+    }
+    Some((from, cond))
+}
+
+/// `sql` with every parenthesised or quoted span blanked out.
+fn top_level(sql: &str) -> String {
+    let (mut depth, mut quote) = (0usize, None);
+    sql.bytes()
+        .map(|b| {
+            let keep = match quote {
+                Some(q) => {
+                    if b == q {
+                        quote = None;
+                    }
+                    false
+                }
+                None => match b {
+                    b'\'' | b'"' => {
+                        quote = Some(b);
+                        false
+                    }
+                    b'(' => {
+                        depth += 1;
+                        false
+                    }
+                    b')' => {
+                        depth = depth.saturating_sub(1);
+                        false
+                    }
+                    _ => depth == 0,
+                },
+            };
+            if keep { b as char } else { ' ' }
+        })
+        .collect()
+}
+
+/// `parts` joined by `op`, nested in halves past [`CHAIN_MAX`] so the depth
+/// grows with the log of the count. SQLite splits nested AND and OR terms
+/// the same as a flat chain.
+fn chain(parts: &[String], op: &str) -> String {
+    if parts.len() <= CHAIN_MAX {
+        return format!("({})", parts.join(op));
+    }
+    let (left, right) = parts.split_at(parts.len() / 2);
+    format!("({}{op}{})", chain(left, op), chain(right, op))
+}
+
+/// Lists longer than this bind as one JSON array read by `json_each`, not
+/// a parameter per value: Durable Object SQLite caps a statement at 100
+/// bound parameters.
+pub(crate) const BOUND_LIST_MAX: usize = 16;
+
+/// A `SELECT` of `values` from the JSON array bound at `mark`, and that
+/// array; `None` when the values have no exact shared JSON form (reals, or
+/// blobs mixed with other types).
+pub(crate) fn json_list(values: &[&Sql], mark: &str) -> Option<(String, Sql)> {
+    let blobs = values.iter().any(|value| matches!(value, Sql::Blob(_)));
+    let mut items = Vec::with_capacity(values.len());
+    for value in values {
+        items.push(match value {
+            Sql::Null => serde_json::Value::Null,
+            Sql::Blob(bytes) => serde_json::Value::String(hex(bytes)),
+            _ if blobs => return None,
+            Sql::Integer(n) => serde_json::Value::from(*n),
+            Sql::Text(text) => serde_json::Value::String(String::from_utf8(text.clone()).ok()?),
+            Sql::Real(_) => return None,
+        });
+    }
+    let column = if blobs { "unhex(value)" } else { "value" };
+    Some((
+        format!("SELECT {column} FROM json_each({mark})"),
+        Sql::Text(serde_json::Value::Array(items).to_string().into_bytes()),
+    ))
+}
+
+/// Ids as a JSON array for [`json_list`]'s blob form.
+pub(crate) fn json_ids<'a>(ids: impl IntoIterator<Item = &'a [u8]>) -> Sql {
+    let items: Vec<serde_json::Value> = ids
+        .into_iter()
+        .map(|id| serde_json::Value::String(hex(id)))
+        .collect();
+    Sql::Text(serde_json::Value::Array(items).to_string().into_bytes())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    out
+}
+
+fn bool_sql(value: bool) -> String {
+    if value { "1" } else { "0" }.to_owned()
+}
+
+/// Jazz comparison semantics: equality treats null as a value (null = null),
+/// orderings are false against null, and everything is false against NaN.
+/// Orderings and `IN` stay bare so SQLite can use an index for them: their
+/// SQL null means false, which AND, OR and WHERE already treat as false;
+/// only NOT (and a condition read as a value) coalesces it.
+fn cmp_plain(op: &CmpOp, l: &str, r: &str) -> String {
+    match op {
+        CmpOp::Eq => format!("({l} IS {r})"),
+        CmpOp::Ne => format!("({l} IS NOT {r})"),
+        CmpOp::Lt => format!("({l} < {r})"),
+        CmpOp::Le => format!("({l} <= {r})"),
+        CmpOp::Gt => format!("({l} > {r})"),
+        CmpOp::Ge => format!("({l} >= {r})"),
+    }
+}
+
+/// `a op b` as `b flip(op) a`.
+fn flip(op: &CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Lt => CmpOp::Gt,
+        CmpOp::Le => CmpOp::Ge,
+        CmpOp::Gt => CmpOp::Lt,
+        CmpOp::Ge => CmpOp::Le,
+        op => op.clone(),
+    }
+}
+
+/// The logical bytes of an inline-form cell.
+fn logical_of(cell: &[u8]) -> &[u8] {
+    match cell.first() {
+        Some(&crate::large::BYTES) => &cell[1..],
+        _ => cell,
+    }
+}
+
+impl Ctx<'_> {
+    /// A column as an operand: a large-capable column compares by its key.
+    fn column_term(&self, table: &Table, alias: &str, column: &str) -> Result<Term, Error> {
+        let sql = column_sql(table, alias, column)?;
+        Ok(self.large_term(table, sql, column))
+    }
+
+    fn large_term(&self, table: &Table, sql: String, column: &str) -> Term {
+        match table.column(column) {
+            Some(col)
+                if column != "id"
+                    && crate::values::elided_as(column).is_none()
+                    && crate::values::author_part(column).is_none()
+                    && crate::values::author_record(column).is_none()
+                    && crate::large::large_capable(col) =>
+            {
+                Term::Large(LargeColumn {
+                    cell: sql,
+                    table: table.stored.clone(),
+                    column: col.stored.clone(),
+                    kind: crate::large::kind(col),
+                })
+            }
+            _ => Term::Sql(sql),
+        }
+    }
+
+    fn prep(&mut self, make: impl FnOnce(i64) -> Prep, question: String) -> i64 {
+        let prep = Prep::new(make, &question);
+        let slot = prep.slot();
+        if !self.preps.iter().any(|p| p.slot() == slot) {
+            self.preps.push(prep);
+        }
+        slot
+    }
+
+    /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
+    /// the session's user (or its identity): equal when every part is, with
+    /// an accountless session standing for the system account as
+    /// [`crate::values::author_key`] stores it.
+    fn author_cmp(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        column: &str,
+        op: &CmpOp,
+        path: &[String],
+        session: &Session,
+    ) -> Result<String, Error> {
+        let (_, whole) = crate::values::author_record(column).expect("author record");
+        let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        let parts: &[&str] = match (whole, path.as_slice()) {
+            (true, ["user"]) => &["account", "identity.issuer", "identity.subject"],
+            (false, ["user", "identity"]) => &["issuer", "subject"],
+            _ => {
+                return Err(query_error(format!(
+                    "comparing `{column}` with `session.{}`: compare an author record \
+                     with `session.user` and its identity with `session.user.identity`",
+                    path.join(".")
+                )));
+            }
+        };
+        let negate = match op {
+            CmpOp::Eq => false,
+            CmpOp::Ne => true,
+            op => {
+                return Err(unsupported(format!(
+                    "comparing the author record `{column}` with {op:?}"
+                )));
+            }
+        };
+        if session.system || session.subject.is_none() {
+            return Ok(bool_sql(negate));
+        }
+        let record = if whole {
+            column.to_owned()
+        } else {
+            column.trim_end_matches(".identity").to_owned()
+        };
+        let mut clauses = Vec::new();
+        for part in parts {
+            let part = part.trim_start_matches("identity.");
+            let field = match part {
+                "account" => format!("{record}.account"),
+                part => format!("{record}.identity.{part}"),
+            };
+            let left = self.column_term(table, alias, &field)?;
+            let value = match part {
+                "account" => {
+                    Some(Value::Uuid(session.account.unwrap_or(
+                        jazz_types::account_registry::SYSTEM_ACCOUNT_ID.0,
+                    )))
+                }
+                part => session.resolve(&["user".into(), "identity".into(), part.into()]),
+            };
+            let right = self.present(value)?;
+            clauses.push(self.cmp(CmpOp::Eq, left, right)?);
+        }
+        let all = and(&clauses);
+        Ok(if negate {
+            format!("(NOT COALESCE({all}, 0))")
+        } else {
+            all
+        })
+    }
+
+    fn cmp(&mut self, op: CmpOp, left: Term, right: Term) -> Result<String, Error> {
+        Ok(match (left, right) {
+            (Term::Missing | Term::NaN, _) | (_, Term::Missing | Term::NaN) => "0".to_owned(),
+            (Term::Large(column), Term::Bound(sql, value)) => {
+                self.cmp_large(&op, &column, &sql, &value)
+            }
+            (Term::Bound(sql, value), Term::Large(column)) => {
+                self.cmp_large(&flip(&op), &column, &sql, &value)
+            }
+            (Term::Large(a), Term::Large(b)) => self.cmp_large_pair(&op, &a, &b)?,
+            (left, right) => cmp_plain(
+                &op,
+                left.sql().expect("present"),
+                right.sql().expect("present"),
+            ),
+        })
+    }
+
+    /// A large-capable cell against a bound value.
+    fn cmp_large(&mut self, op: &CmpOp, column: &LargeColumn, p: &str, value: &Sql) -> String {
+        let c = &column.cell;
+        let Sql::Text(literal) = value else {
+            return cmp_plain(op, c, p);
+        };
+        let key = crate::large::key_sql(c);
+        let logical = logical_of(literal);
+        let chunked = format!("COALESCE({}, 0)", crate::large::chunked_sql(c));
+        match op {
+            // Every value up to the inline threshold has one inline cell, so
+            // a chunked cell never equals such a literal. The key term lets
+            // SQLite use an index on it.
+            CmpOp::Eq | CmpOp::Ne
+                if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
+            {
+                let eq = format!("({key} IS {p} AND {c} IS {p})");
+                if *op == CmpOp::Eq {
+                    eq
+                } else {
+                    format!("(NOT {eq})")
+                }
+            }
+            CmpOp::Eq | CmpOp::Ne => {
+                let slot = self.prep_match(column, MatchTest::Cmp(CmpOp::Eq, literal.clone()));
+                let prefix = crate::large::sort_prefix(column.kind, logical);
+                let k = self.bind(Sql::Text(prefix));
+                let eq = format!("({key} IS {k} AND {chunked} AND {})", scratch_has(slot, c));
+                if *op == CmpOp::Eq {
+                    eq
+                } else {
+                    format!("(NOT {eq})")
+                }
+            }
+            // A chunked value's key is a prefix of it at least as long as
+            // the literal: it orders against the literal as the value does,
+            // except that a key equal to the literal is the longer value.
+            _ if logical.len() <= crate::large::EXACT_RANGE_BYTES => match op {
+                CmpOp::Lt => format!("({key} < {p})"),
+                CmpOp::Ge => format!("({key} >= {p})"),
+                CmpOp::Le => format!("({key} < {p} OR {c} = {p})"),
+                CmpOp::Gt => format!("({key} >= {p} AND {c} IS NOT {p})"),
+                CmpOp::Eq | CmpOp::Ne => unreachable!("handled above"),
+            },
+            _ => {
+                let slot = self.prep_match(column, MatchTest::Cmp(op.clone(), literal.clone()));
+                format!(
+                    "(CASE WHEN {chunked} THEN {} ELSE {} END)",
+                    scratch_has(slot, c),
+                    cmp_plain(op, c, p)
+                )
+            }
+        }
+    }
+
+    fn prep_match(&mut self, column: &LargeColumn, test: MatchTest) -> i64 {
+        let question = format!(
+            "match {} {} {}",
+            column.table,
+            column.column,
+            test.question()
+        );
+        let (table, name) = (column.table.clone(), column.column.clone());
+        self.prep(
+            |slot| Prep::Match {
+                slot,
+                table,
+                column: name,
+                test,
+            },
+            question,
+        )
+    }
+
+    /// Two large-capable cells: equal when both inline and equal, or both
+    /// chunked with one content id.
+    fn cmp_large_pair(
+        &mut self,
+        op: &CmpOp,
+        a: &LargeColumn,
+        b: &LargeColumn,
+    ) -> Result<String, Error> {
+        if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
+            return Err(unsupported(format!(
+                "ordering comparisons between two string or bytes columns (`{}.{}`, `{}.{}`)",
+                a.table, a.column, b.table, b.column
+            )));
+        }
+        let mut columns = vec![
+            (a.table.clone(), a.column.clone()),
+            (b.table.clone(), b.column.clone()),
+        ];
+        columns.sort();
+        columns.dedup();
+        let question = format!("class {columns:?}");
+        let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
+        let eq = format!(
+            "(CASE WHEN COALESCE({} OR {}, 0) THEN {} IS {} ELSE {} IS {} END)",
+            crate::large::chunked_sql(&a.cell),
+            crate::large::chunked_sql(&b.cell),
+            scratch_value(slot, &a.cell),
+            scratch_value(slot, &b.cell),
+            a.cell,
+            b.cell
+        );
+        Ok(if *op == CmpOp::Eq {
+            eq
+        } else {
+            format!("(NOT {eq})")
+        })
+    }
+
+    fn in_list(&mut self, left: Term, options: Vec<Term>) -> Result<String, Error> {
+        let options: Vec<Term> = options
+            .into_iter()
+            .filter(|option| !matches!(option, Term::Missing | Term::NaN))
+            .collect();
+        if options.is_empty() || matches!(left, Term::Missing | Term::NaN) {
+            return Ok("0".to_owned());
+        }
+        let list = self.bound_list(&options);
+        if let Term::Large(column) = &left {
+            let small = |option: &Term| match option {
+                Term::Bound(_, Sql::Text(cell)) => {
+                    logical_of(cell).len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+                }
+                Term::Bound(_, _) => true,
+                _ => false,
+            };
+            if !options.iter().all(small) {
+                let parts = options
+                    .into_iter()
+                    .map(|option| self.cmp(CmpOp::Eq, Term::Large(column.clone()), option))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(or(&parts));
+            }
+            let list = list.unwrap_or_else(|| {
+                let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
+                list.join(", ")
+            });
+            return Ok(format!(
+                "({} IN ({list}) AND {} IN ({list}))",
+                crate::large::key_sql(&column.cell),
+                column.cell
+            ));
+        }
+        let list = list.unwrap_or_else(|| {
+            let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
+            list.join(", ")
+        });
+        Ok(format!("({} IN ({list}))", left.sql().expect("present")))
+    }
+
+    /// A long list of values bound last, rebound as one JSON array
+    /// ([`json_list`]): its `SELECT`, or `None` to keep one placeholder per
+    /// value.
+    fn bound_list(&mut self, options: &[Term]) -> Option<String> {
+        if options.len() <= BOUND_LIST_MAX || options.len() > self.params.len() {
+            return None;
+        }
+        let first = self.params.len() - options.len();
+        let mut values = Vec::with_capacity(options.len());
+        for (i, option) in options.iter().enumerate() {
+            match option {
+                Term::Bound(mark, value) if *mark == format!("?{}", first + i + 1) => {
+                    values.push(value)
+                }
+                _ => return None,
+            }
+        }
+        let (select, array) = json_list(&values, &format!("?{}", first + 1))?;
+        self.params.truncate(first);
+        self.params.push(array);
+        Some(select)
+    }
+
+    /// An array cell (JSON text, see [`crate::values::to_sql`]) holding an
+    /// element equal to `right`.
+    fn array_contains(&mut self, left: Term, right: Term) -> String {
+        let (Some(array), Term::Bound(placeholder, needle)) = (left.sql(), right) else {
+            return "0".to_owned();
+        };
+        // Rebind the needle in its own slot, as `json_each` reads elements.
+        let slot = placeholder[1..]
+            .parse::<usize>()
+            .expect("a numbered placeholder")
+            - 1;
+        self.params[slot] = crate::values::array_needle(needle);
+        let needle = placeholder;
+        format!("EXISTS (SELECT 1 FROM json_each({array}) WHERE value = {needle})")
+    }
+
+    fn contains(&mut self, left: Term, right: Term) -> String {
+        let (Some(l), Some(r)) = (left.sql(), right.sql()) else {
+            return "0".to_owned();
+        };
+        // Bytewise: TEXT `instr` steps by code point, and cells may hold
+        // tagged bytes.
+        let instr = |l: &str, r: &str| {
+            format!("COALESCE(instr(CAST({l} AS BLOB), CAST({r} AS BLOB)) > 0, 0)")
+        };
+        let (Term::Large(column), Term::Bound(_, Sql::Text(needle))) = (&left, &right) else {
+            return instr(l, r);
+        };
+        let inline = match column.kind {
+            jazz_types::large_values::LargeValueKind::Bytes => instr(
+                &format!("substr(CAST({l} AS BLOB), 2)"),
+                &format!("substr(CAST({r} AS BLOB), 2)"),
+            ),
+            _ => instr(l, r),
+        };
+        let slot = self.prep_match(column, MatchTest::Contains(needle.clone()));
+        format!(
+            "(CASE WHEN COALESCE({}, 0) THEN {} ELSE {inline} END)",
+            crate::large::chunked_sql(l),
+            scratch_has(slot, l)
+        )
+    }
+
+    /// `ORDER BY` keys, and the same keys with prefix-tie ranks (`None`
+    /// when no key is large-capable). Ties break by row id in the last
+    /// key's direction, so a declared index (which ends in `id`) supplies
+    /// the whole order in one scan, in either direction, with no sort step.
+    fn order_sql(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        order: &[crate::query::OrderBy],
+    ) -> Result<(String, Option<String>), Error> {
+        let mut keys = Vec::new();
+        let mut ranked = Vec::new();
+        let mut any_large = false;
+        for key in self.order_terms(table, alias, order)? {
+            let direction = key.direction;
+            keys.push(format!("{} {direction}", key.sql));
+            ranked.push(format!("{} {direction}", key.sql));
+            if let Some(rank) = key.rank {
+                any_large = true;
+                ranked.push(format!("{rank} {direction}"));
+            }
+        }
+        // Ties break by row id in the direction of the last key, so a declared
+        // index (which ends in `id`) supplies the whole order in one scan, in
+        // either direction, with no sort step.
+        let tie = match order.last().map(|key| key.direction) {
+            Some(OrderDirection::Desc) => "DESC",
+            _ => "ASC",
+        };
+        keys.push(format!("{alias}.id {tie}"));
+        ranked.push(format!("{alias}.id {tie}"));
+        Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
+    }
+
+    /// Each order key's SQL and direction; a large-capable column's key is
+    /// its sort prefix, with the rank of prefix ties (answered by a prep)
+    /// as its second part.
+    fn order_terms(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        order: &[crate::query::OrderBy],
+    ) -> Result<Vec<OrderTerm>, Error> {
+        let mut terms = Vec::with_capacity(order.len());
+        for key in order {
+            let direction = match key.direction {
+                OrderDirection::Asc => "ASC",
+                OrderDirection::Desc => "DESC",
+            };
+            if crate::values::author_record(&key.column).is_some() {
+                return Err(unsupported(format!(
+                    "ordering by the author record `{}` (order by its parts)",
+                    key.column
+                )));
+            }
+            terms.push(match self.column_term(table, alias, &key.column)? {
+                Term::Large(column) => {
+                    let question = format!("rank {} {}", column.table, column.column);
+                    let slot = self.prep(
+                        |slot| Prep::Rank {
+                            slot,
+                            table: column.table.clone(),
+                            column: column.column.clone(),
+                        },
+                        question,
+                    );
+                    OrderTerm {
+                        sql: crate::large::key_sql(&column.cell),
+                        rank: Some(scratch_value(slot, &column.cell)),
+                        direction,
+                    }
+                }
+                term => OrderTerm {
+                    sql: term.sql().expect("column").to_owned(),
+                    rank: None,
+                    direction,
+                },
+            });
+        }
+        Ok(terms)
+    }
+}
+
+/// One order key: its SQL, the rank breaking its prefix ties (a
+/// large-capable column), and its direction.
+struct OrderTerm {
+    sql: String,
+    rank: Option<String>,
+    direction: &'static str,
+}
+
+fn is_id(operand: &Operand) -> bool {
+    matches!(operand, Operand::Column(column) if column == "id")
+}
+
+/// A row-id predicate on an unbranched table, with the branch key every
+/// such row has (`''`): together they are the whole `UNIQUE (id, _b)` key,
+/// so SQLite seeks the ids instead of preferring a declared index that
+/// also covers the order or another filter.
+fn whole_key(table: &Table, alias: &str, sql: String) -> String {
+    if table.branch_by.is_empty() {
+        format!("({sql} AND {alias}._b = X'')")
+    } else {
+        sql
+    }
+}
+
+/// A public schema value (policy literals, defaults) as a storage value.
+pub(crate) fn public_value(value: &crate::tools::Value) -> Result<Value, Error> {
+    use crate::tools::Value as P;
+    Ok(match value {
+        P::Integer(v) => Value::I32(*v),
+        P::BigInt(v) => Value::I64(*v),
+        P::Double(v) => Value::F64(*v),
+        P::Boolean(v) => Value::Bool(*v),
+        P::Text(v) => Value::String(v.clone()),
+        P::Timestamp(v) => Value::U64(*v),
+        P::Uuid(v) => Value::Uuid(*v.uuid()),
+        P::Bytea(v) => Value::Bytes(v.clone()),
+        P::Null => Value::Nullable(None),
+        other => return Err(unsupported(format!("policy literal {other:?}"))),
+    })
+}
+
+/// A relation-IR literal: a bare JSON value or a typed public-value envelope.
+fn json_value(json: &serde_json::Value) -> Result<Value, Error> {
+    use serde_json::Value as J;
+    if let Ok(value) = serde_json::from_value::<crate::tools::Value>(json.clone()) {
+        return public_value(&value);
+    }
+    Ok(match json {
+        J::Null => Value::Nullable(None),
+        J::Bool(v) => Value::Bool(*v),
+        J::Number(n) if n.is_i64() => Value::I64(n.as_i64().unwrap_or_default()),
+        J::Number(n) => Value::F64(n.as_f64().unwrap_or(f64::NAN)),
+        J::String(s) => match uuid::Uuid::parse_str(s) {
+            Ok(uuid) if s.len() == 36 => Value::Uuid(uuid),
+            _ => Value::String(s.clone()),
+        },
+        other => return Err(unsupported(format!("relation literal {other}"))),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{plain_exists, semi_join};
+
+    #[test]
+    fn nested_exists_conditions_join_into_one_level() {
+        let inner = semi_join(
+            r#""b" AS b"#.to_owned(),
+            vec!["b.x = a.id".to_owned(), "b.s IS 'W) WHERE ('".to_owned()],
+        );
+        let outer = semi_join(
+            r#""a" AS a"#.to_owned(),
+            vec!["a._del = 0".to_owned(), inner],
+        );
+        assert_eq!(
+            outer,
+            r#"EXISTS (SELECT 1 FROM "a" AS a, "b" AS b WHERE (a._del = 0 AND (b.x = a.id AND b.s IS 'W) WHERE (')))"#
+        );
+        // A subquery source keeps its own WHERE.
+        let sourced =
+            r#"EXISTS (SELECT 1 FROM (SELECT * FROM "c" WHERE k = 1) AS c WHERE c.v = 2)"#;
+        assert_eq!(
+            plain_exists(sourced),
+            Some((r#"(SELECT * FROM "c" WHERE k = 1) AS c"#, "c.v = 2"))
+        );
+    }
+
+    #[test]
+    fn only_a_single_bare_exists_is_joined_in() {
+        for sql in [
+            "EXISTS (SELECT 1 FROM a WHERE x) OR EXISTS (SELECT 1 FROM b WHERE y)",
+            "NOT EXISTS (SELECT 1 FROM a WHERE x)",
+            "EXISTS (SELECT 1 FROM a WHERE x LIMIT 1)",
+            "EXISTS (SELECT 1 FROM json_each(?1) WHERE value = 3) AND 1",
+            "EXISTS (SELECT 1 FROM json_each(t.a) WHERE value = 3)",
+        ] {
+            assert_eq!(plain_exists(sql), None, "{sql}");
+        }
+    }
+}
+
+/// `target`'s `operation` policy split as a parent chain: when `table`
+/// inherits from its own rows through the scalar reference `via` and that
+/// policy is `base OR (guards AND INHERITS(operation, via))`, the other
+/// disjuncts, the guards a row meets to take the hop, and the hop's own
+/// depth bound. None when any of them inherits further: that case unrolls
+/// level by level.
+fn recursive_base<'p>(
+    table: &Table,
+    target: &'p Table,
+    operation: Operation,
+    via: &str,
+) -> Option<ParentChain<'p>> {
+    let array = |ty: &ValueType| match ty {
+        ValueType::Nullable(inner) => matches!(**inner, ValueType::Array(_)),
+        ty => matches!(ty, ValueType::Array(_)),
+    };
+    if target.stored != table.stored || target.column(via).is_none_or(|c| array(&c.ty)) {
+        return None;
+    }
+    let PolicyExpr::Or(parts) = target.policy(operation)? else {
+        return None;
+    };
+    let is_hop = |part: &PolicyExpr| {
+        matches!(part, PolicyExpr::Inherits { operation: op, via_column, .. }
+            if *op == operation && via_column == via)
+    };
+    let hop = |part: &'p PolicyExpr| -> Option<(Option<usize>, Vec<&'p PolicyExpr>)> {
+        let conds: Vec<&PolicyExpr> = match part {
+            PolicyExpr::And(conds) => conds.iter().collect(),
+            part => vec![part],
+        };
+        let mut hops = conds.iter().filter(|c| is_hop(c));
+        let Some(PolicyExpr::Inherits { max_depth, .. }) = hops.next() else {
+            return None;
+        };
+        if hops.next().is_some() {
+            return None;
+        }
+        let guards = conds.into_iter().filter(|c| !is_hop(c)).collect();
+        Some((*max_depth, guards))
+    };
+    let mut hops = parts.iter().filter_map(|part| hop(part).map(|h| (part, h)));
+    let (hop_part, (depth, guards)) = hops.next()?;
+    if hops.next().is_some() {
+        return None;
+    }
+    let base: Vec<&PolicyExpr> = parts
+        .iter()
+        .filter(|part| !std::ptr::eq(*part, hop_part))
+        .collect();
+    base.iter()
+        .chain(&guards)
+        .all(|part| !inherits(part))
+        .then_some(ParentChain {
+            base,
+            guards,
+            depth,
+        })
+}
+
+struct ParentChain<'p> {
+    base: Vec<&'p PolicyExpr>,
+    guards: Vec<&'p PolicyExpr>,
+    depth: Option<usize>,
+}
+
+fn inherits(policy: &PolicyExpr) -> bool {
+    match policy {
+        PolicyExpr::Inherits { .. } | PolicyExpr::InheritsReferencing { .. } => true,
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
+        PolicyExpr::Not(inner) => inherits(inner),
+        PolicyExpr::Exists { condition, .. } => inherits(condition),
+        _ => false,
+    }
+}

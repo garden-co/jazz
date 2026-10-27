@@ -27,6 +27,11 @@ import {
   createNapiRuntimeFixture,
 } from "./testing/napi-runtime-test-utils.js";
 import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
+import {
+  markTrustedReservedSession,
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  trustedReservedSessionToken,
+} from "./client-session.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
@@ -776,6 +781,53 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.delete("todos", inserted.id);
 
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+  });
+
+  it("writes with a client's own local-first session as the runtime itself", async () => {
+    const napi = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d0f1";
+    const token = napi.mintLocalFirstToken(Buffer.alloc(32, 7).toString("base64url"), appId, 600);
+    const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as {
+      iss: string;
+      sub: string;
+    };
+    const session = markTrustedReservedSession({
+      issuer: claims.iss,
+      user_id: claims.sub,
+      authMode: "local-first" as const,
+      claims: {},
+    });
+    const claimedAuthor = JSON.stringify([session.issuer, session.user_id]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: (schema, config) => napi.NapiDb.openMemory(schema, config) as never,
+        openMemoryWithSelfSignedProof: (schema, config, token, appId, author) =>
+          napi.NapiDb.openMemoryWithSelfSignedProof(schema, config, token, appId, author) as never,
+      },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-own-session:node"),
+      new TextEncoder().encode(claimedAuthor),
+      1,
+      true,
+      { selfSignedClientProof: { token, appId, claimedAuthor } },
+    );
+    runtimes.push(runtime);
+
+    const inserted = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "own session row" },
+        done: { type: "Boolean", value: false },
+      },
+      JSON.stringify({
+        ...session,
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(session),
+      }),
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toMatchObject([
+      { id: inserted.id },
+    ]);
   });
 
   it("streams a typed text column through NAPI before publishing the row", async () => {
@@ -1963,16 +2015,66 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRejection = await aliceDenied.catch((error) => error);
     expect(Object.getOwnPropertyDescriptor(aliceRejection, "message")).toMatchObject({
       enumerable: false,
-      value: expect.stringContaining("AuthorizationDenied"),
+      value: expect.stringContaining("authorization_denied"),
     });
-    await expect(aliceDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(aliceDenied).rejects.toThrow("authorization_denied");
     const bobDenied = runtime.waitForTransaction(await committedTxId(bobTodo), "global");
     await expect(bobDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
       reason: "Write rejected by server authorization",
     });
-    await expect(bobDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(bobDenied).rejects.toThrow("authorization_denied");
+  }, 15_000);
+
+  it("rejects a session write stamped too far ahead of the authority's clock with its own code", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d00a";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-clock-skew-backend",
+      adminSecret: "core-napi-clock-skew-admin",
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-clock-skew:node"),
+      testAuthorBytes("jazz-napi-native-runtime-clock-skew:author"),
+      13,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({ backend_secret: server.backendSecret }),
+    );
+
+    // An hour ahead: far beyond the authority's skew tolerance.
+    const future = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "from the future" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      JSON.stringify({
+        session: testExternalSession(ALICE_ID),
+        updated_at: Date.now() + 3_600_000,
+      }),
+    );
+    const refused = runtime.waitForTransaction(await committedTxId(future), "global");
+    await expect(refused).rejects.toMatchObject({
+      kind: "rejected",
+      code: "client_clock_too_far_ahead",
+      reason: "Client clock is too far ahead",
+    });
+    await expect(refused).rejects.toThrow("client_clock_too_far_ahead");
   }, 15_000);
 
   it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
@@ -2042,10 +2144,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
       await expect(
         runtime.waitForTransaction(await committedTxId(aliceTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
       await expect(
         runtime.waitForTransaction(await committedTxId(bobTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

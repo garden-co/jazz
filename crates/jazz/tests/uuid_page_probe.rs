@@ -5,12 +5,12 @@
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, block_on};
-use jazz::groove::{records::Value, storage::TestStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
+use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
-mod common;
+use crate::common;
 
 use common::{compile_schema, read_and_allow_all_writes, session_eq};
 
@@ -39,11 +39,8 @@ fn open_db() -> Db {
             )
             .build(),
     );
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x73; 16]),
             author: AuthorSubject::SYSTEM,
@@ -61,7 +58,7 @@ fn insert(db: &Db, id: u8, owner: AuthorSubject) {
             other => panic!("unexpected fixture value: {other:?}"),
         })
         .collect::<BTreeMap<_, _>>();
-    let written = block_on(db.insert(
+    block_on(db.insert(
         "documents",
         cells,
         InsertOptions {
@@ -70,8 +67,6 @@ fn insert(db: &Db, id: u8, owner: AuthorSubject) {
         },
     ))
     .expect("insert document");
-    db.finalize_local_mergeable_commit_for_test(written.mergeable_tx_id())
-        .expect("settle document on authority");
 }
 
 fn page(db: &Db, identity: AuthorSubject, limit: usize) -> Vec<RowUuid> {
@@ -109,10 +104,8 @@ fn global_uuid_page_skips_hidden_and_deleted_prefix_rows() {
     assert_eq!(page(&db, reader(), 3), [row(2), row(4), row(6)]);
     assert_eq!(page(&db, other_reader(), 3), [row(1), row(3), row(5)]);
 
-    let deleted = block_on(db.delete("documents", row(2), Default::default()))
+    block_on(db.delete("documents", row(2), Default::default()))
         .expect("delete first visible document");
-    db.finalize_local_mergeable_commit_for_test(deleted.mergeable_tx_id())
-        .expect("settle deletion on authority");
     assert_eq!(page(&db, reader(), 3), [row(4), row(6), row(8)]);
     assert_eq!(page(&db, reader(), 20).len(), 9);
 }

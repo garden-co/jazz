@@ -2,10 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::runtime::{AppStore, NodeRole, StorageConfig};
 use axum::Router;
-use jazz::groove::storage::StorageFactory;
 use jazz::schema::JazzSchema;
-use jazz::serving::{NodeRole, StorageConfig};
 use tracing::info;
 
 use crate::middleware::AuthConfig;
@@ -21,10 +20,17 @@ use jazz::tools::AppId;
 #[allow(deprecated)]
 use jazz::tools::public_schema::Schema;
 #[cfg(test)]
-use jazz::tools::sync::DurabilityTier;
+use jazz::tx::DurabilityTier;
 
-const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
-const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
+/// The one file an app's state lives in: rows, catalogue, account journal.
+const STORE_FILE: &str = "jazz.sqlite";
+/// Stores from before SQLite. A data directory that holds one and no SQLite
+/// store must be migrated first; the server never starts empty beside it.
+const PRE_SQLITE_STORES: [&str; 3] = [
+    "server-shell.rocksdb",
+    "catalogue.rocksdb",
+    "accounts.rocksdb",
+];
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
@@ -57,19 +63,12 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` requires a target-owned [`StorageFactory`] supplied at the
-/// native composition boundary. SQLite remains a client/native storage
-/// backend, but is not a supported server shell backend.
+/// `Persistent` keeps the runtime's rows, the catalogue and the account
+/// registry in one SQLite file, `jazz.sqlite`, in the data directory.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
-    Persistent {
-        path: PathBuf,
-    },
-    #[cfg(feature = "sqlite")]
-    Sqlite {
-        path: PathBuf,
-    },
+    Persistent { path: PathBuf },
 }
 
 pub struct ServerBuilder {
@@ -79,7 +78,6 @@ pub struct ServerBuilder {
     storage_backend: StorageBackend,
     core_server_shell_schema: Option<JazzSchema>,
     shutdown_timeout: Duration,
-    storage_factory: Option<Arc<dyn StorageFactory>>,
     heap_profiler: Option<HeapProfileDump>,
     max_websocket_connections: usize,
 }
@@ -98,7 +96,6 @@ impl ServerBuilder {
             },
             core_server_shell_schema: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
-            storage_factory: None,
             heap_profiler: None,
             max_websocket_connections: crate::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
         }
@@ -130,12 +127,6 @@ impl ServerBuilder {
         self
     }
 
-    /// Supply the target-owned durable storage adapter.
-    pub fn with_storage_factory(mut self, factory: Arc<dyn StorageFactory>) -> Self {
-        self.storage_factory = Some(factory);
-        self
-    }
-
     /// Serve the executable's heap profile at `/debug/pprof/heap` to admins.
     ///
     /// Without one, the route answers `501 Not Implemented`.
@@ -161,35 +152,21 @@ impl ServerBuilder {
         if self.max_websocket_connections == 0 {
             return Err("max websocket connections must be at least 1".to_owned());
         }
+        if let StorageBackend::Persistent { path } = &self.storage_backend {
+            refuse_pre_sqlite_data_dir(path)?;
+        }
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
 
-        let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
-        let core_server_shell_storage_config = self.build_core_server_shell_storage_config();
-        let core_server_shell = self.build_core_server_shell(
-            latest_catalogue_schema,
-            core_server_shell_storage_config.clone(),
-        )?;
-        let core_server_shell_storage_config = core_server_shell_storage_config.ok();
+        // One store per app: the catalogue and the account journal are host
+        // tables in the file the runtime's rows live in, all on its thread.
+        let store = AppStore::open(&self.build_core_server_shell_storage_config()?)?;
+        let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store(&store)?;
+        let core_server_shell = self.build_core_server_shell(latest_catalogue_schema, &store)?;
 
-        let accounts = {
-            let durable = match &self.storage_backend {
-                StorageBackend::InMemory => None,
-                StorageBackend::Persistent { path } => Some((
-                    self.storage_factory
-                        .clone()
-                        .ok_or("account registry requires storage factory")?,
-                    path.join("accounts.rocksdb"),
-                )),
-                #[cfg(feature = "sqlite")]
-                StorageBackend::Sqlite { .. } => {
-                    return Err("server account registry does not support sqlite".into());
-                }
-            };
-            Some(crate::server::accounts::AccountRegistryOwner::open(
-                durable,
-            )?)
-        };
+        let accounts = Some(crate::server::accounts::AccountRegistryOwner::open(
+            store.kv(crate::kv::ACCOUNTS)?,
+        )?);
 
         let state = Arc::new(ServerState {
             accounts,
@@ -203,8 +180,7 @@ impl ServerBuilder {
                 crate::server::routes::WebSocketAdmissionState::default(),
             ),
             max_websocket_connections: self.max_websocket_connections,
-            core_server_shell_storage_config,
-            storage_factory: self.storage_factory.clone(),
+            store: Some(store),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             runtime_catalogue_before_publication_hook: std::sync::Mutex::new(None),
@@ -227,8 +203,11 @@ impl ServerBuilder {
 
     /// Build the direct admin catalogue store used by HTTP catalogue routes.
     ///
-    fn build_catalogue_store(&self) -> Result<(StoredCatalogue, Option<Schema>), String> {
-        let storage = self.build_catalogue_storage()?;
+    fn build_catalogue_store(
+        &self,
+        store: &AppStore,
+    ) -> Result<(StoredCatalogue, Option<Schema>), String> {
+        let storage = self.build_catalogue_storage(store)?;
         let initial_schema = match &self.schema_mode {
             ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
             ServerSchemaMode::Dynamic => None,
@@ -261,19 +240,16 @@ impl ServerBuilder {
     fn build_core_server_shell(
         &self,
         latest_catalogue_schema: Option<Schema>,
-        storage_config: Result<StorageConfig, String>,
+        store: &AppStore,
     ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
         let role = NodeRole::Core;
         if let Some(schema) = &self.core_server_shell_schema {
-            let storage_config = storage_config?;
-            return Ok(Some(
-                crate::server::ServerRuntimeHandle::start_with_storage_config(
-                    schema.clone(),
-                    storage_config,
-                    self.storage_factory.clone(),
-                    role,
-                )?,
-            ));
+            return Ok(Some(store.start_runtime(
+                schema.clone(),
+                role,
+                false,
+                false,
+            )?));
         }
 
         let (schema, dynamic) = match &self.schema_mode {
@@ -283,24 +259,13 @@ impl ServerBuilder {
         let Some(schema) = schema else {
             return Ok(None);
         };
-        let storage_config = storage_config?;
         let schema = jazz::schema::JazzSchema::new(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         // The newest published schema may never have reached the shell store
         // (published without a lens, or its lens bridge failed). A dynamic
         // server then reopens with the store's own current schema; startup
         // re-applies the durable permissions head right after.
-        let start = if dynamic {
-            crate::server::ServerRuntimeHandle::start_with_catalogue_schema
-        } else {
-            crate::server::ServerRuntimeHandle::start_with_storage_config
-        };
-        Ok(Some(start(
-            schema,
-            storage_config,
-            self.storage_factory.clone(),
-            role,
-        )?))
+        Ok(Some(store.start_runtime(schema, role, dynamic, dynamic)?))
     }
 
     fn build_core_server_shell_storage_config(&self) -> Result<StorageConfig, String> {
@@ -309,49 +274,34 @@ impl ServerBuilder {
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-
-                Ok(StorageConfig::RocksDb {
-                    path: path.join(SERVER_SHELL_ROCKSDB_DIR),
-                })
-            }
-            #[cfg(feature = "sqlite")]
-            StorageBackend::Sqlite { .. } => {
-                Err("server shell storage does not support sqlite yet".to_owned())
+                Ok(StorageConfig::data_dir(path))
             }
         }
     }
 
-    fn build_catalogue_storage(&self) -> Result<DynCatalogueStorage, String> {
+    fn build_catalogue_storage(&self, store: &AppStore) -> Result<DynCatalogueStorage, String> {
         match &self.storage_backend {
-            StorageBackend::Persistent { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-
-                let factory = self.storage_factory.as_ref().ok_or_else(|| {
-                    "persistent catalogue storage requires a target-shell storage factory"
-                        .to_owned()
-                })?;
-                let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                let storage = CatalogueKvStorage::open(Arc::clone(factory), db_path.clone())
-                    .map_err(|error| {
-                        format!(
-                            "failed to open catalogue storage '{}': {error}",
-                            db_path.display()
-                        )
-                    })?;
-                Ok(Box::new(storage))
-            }
-            #[cfg(feature = "sqlite")]
-            StorageBackend::Sqlite { .. } => {
-                Err("server catalogue storage does not support sqlite".to_owned())
-            }
+            StorageBackend::Persistent { .. } => Ok(Box::new(CatalogueKvStorage::new(
+                store.kv(crate::kv::CATALOGUE)?,
+            ))),
             StorageBackend::InMemory => Ok(Box::new(CatalogueMemoryStorage::new())),
         }
     }
 
     #[cfg(test)]
     fn local_durability_tier(&self) -> DurabilityTier {
-        DurabilityTier::GlobalServer
+        DurabilityTier::Global
+    }
+}
+
+fn refuse_pre_sqlite_data_dir(path: &std::path::Path) -> Result<(), String> {
+    let started = path.join(STORE_FILE).exists();
+    match PRE_SQLITE_STORES.iter().find(|dir| path.join(dir).exists()) {
+        Some(old) if !started => Err(format!(
+            "data dir '{}' holds a store from before SQLite ({old}); migrate it before starting this server",
+            path.display()
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -505,8 +455,6 @@ mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
     use crate::server::catalogue_entry::CatalogueEntry;
-    use crate::server::catalogue_storage::catalogue_storage_codec_profile;
-    use jazz::groove::storage::OrderedKvStorage;
     use jazz::tools::AppId;
     use jazz::tools::metadata::{MetadataKey, ObjectType};
     use jazz::tools::public_schema::SchemaHash;
@@ -521,6 +469,7 @@ mod tests {
             .build()
     }
 
+    /// `catalogue_path` is the data dir whose store holds the catalogue.
     fn write_raw_catalogue_entry(catalogue_path: &std::path::Path, entry: &CatalogueEntry) {
         let storage = open_raw_catalogue_storage(catalogue_path);
         jazz::db::block_on(storage.set(
@@ -531,16 +480,24 @@ mod tests {
         .expect("write raw catalogue entry");
     }
 
-    fn open_raw_catalogue_storage(
-        catalogue_path: &std::path::Path,
-    ) -> jazz_storage_rocksdb::RocksDbStorage {
-        jazz_storage_rocksdb::RocksDbStorage::open_with_durability_and_codec_profile(
-            catalogue_path,
-            &["default"],
-            jazz_storage_rocksdb::Durability::WalNoSync,
-            &catalogue_storage_codec_profile().expect("settled catalogue profile"),
-        )
-        .expect("open raw catalogue storage")
+    /// The catalogue's host table as raw keys and values, for writing
+    /// entries the catalogue itself never would.
+    struct RawCatalogue(crate::kv::HostKv);
+
+    impl RawCatalogue {
+        async fn set(&self, _space: String, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
+            self.0.write_many(&[(key, value)])
+        }
+
+        async fn delete(&self, _space: String, key: Vec<u8>) -> Result<(), String> {
+            self.0.delete(&key)
+        }
+    }
+
+    fn open_raw_catalogue_storage(catalogue_path: &std::path::Path) -> RawCatalogue {
+        let store = AppStore::open(&StorageConfig::data_dir(catalogue_path))
+            .expect("open raw catalogue storage");
+        RawCatalogue(store.kv(crate::kv::CATALOGUE).expect("catalogue table"))
     }
 
     #[test]
@@ -650,14 +607,14 @@ mod tests {
 
         assert_eq!(
             tiers,
-            std::collections::HashSet::from([DurabilityTier::GlobalServer])
+            std::collections::HashSet::from([DurabilityTier::Global])
         );
     }
 
     #[tokio::test]
     async fn persistent_builder_fails_when_catalogue_scan_is_corrupt() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+        let catalogue_path = data_dir.path().to_path_buf();
         {
             let storage = open_raw_catalogue_storage(&catalogue_path);
             jazz::db::block_on(storage.set(
@@ -670,7 +627,6 @@ mod tests {
 
         let result = ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue"))
             .with_schema(dynamic_bootstrap_schema())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -693,7 +649,6 @@ mod tests {
         drop(storage);
         ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue"))
             .with_schema(dynamic_bootstrap_schema())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -717,7 +672,7 @@ mod tests {
             ),
         ] {
             let data_dir = tempfile::TempDir::new().expect("temp data dir");
-            let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+            let catalogue_path = data_dir.path().to_path_buf();
             let app_id = AppId::from_name(&format!("corrupt-{}", object_type.as_str()));
             let object_id = jazz::tools::ObjectId::new();
             let mut metadata = std::collections::HashMap::from([
@@ -737,7 +692,6 @@ mod tests {
             write_raw_catalogue_entry(&catalogue_path, &entry);
 
             let result = ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -767,7 +721,6 @@ mod tests {
             .expect("remove corrupt catalogue entry");
             drop(storage);
             ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -780,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn persistent_builder_rejects_nested_catalogue_codec_corruption_before_recovery() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+        let catalogue_path = data_dir.path().to_path_buf();
         let app_id = AppId::from_name("corrupt-nested-catalogue-codec");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
@@ -818,7 +771,6 @@ mod tests {
         );
 
         let error = ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -841,7 +793,6 @@ mod tests {
         .expect("remove corrupt nested catalogue entry");
         drop(storage);
         ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -888,7 +839,7 @@ mod tests {
             ),
         ] {
             let data_dir = tempfile::TempDir::new().expect("temp data dir");
-            let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+            let catalogue_path = data_dir.path().to_path_buf();
             let app_id = AppId::from_name(&format!("trailing-{}", object_type.as_str()));
             let object_id = jazz::tools::ObjectId::new();
             let mut metadata = std::collections::HashMap::from([
@@ -910,7 +861,6 @@ mod tests {
             );
 
             let result = ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -942,7 +892,6 @@ mod tests {
             .expect("remove corrupt catalogue entry");
             drop(storage);
             ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -958,7 +907,7 @@ mod tests {
         let schema_hash = SchemaHash::compute(&schema);
         for published_at in [None, Some("not-a-timestamp")] {
             let data_dir = tempfile::TempDir::new().expect("temp data dir");
-            let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+            let catalogue_path = data_dir.path().to_path_buf();
             let app_id = AppId::from_name("corrupt-schema-publish-time");
             let object_id = schema_hash.to_object_id();
             let mut metadata = std::collections::HashMap::from([
@@ -985,7 +934,6 @@ mod tests {
             );
 
             let error = ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -1006,7 +954,7 @@ mod tests {
     #[tokio::test]
     async fn persistent_builder_ignores_unknown_forward_compatible_catalogue_entries() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+        let catalogue_path = data_dir.path().to_path_buf();
         let app_id = AppId::from_name("unknown-durable-catalogue-entry");
         let entry = CatalogueEntry {
             object_id: jazz::tools::ObjectId::new(),
@@ -1022,7 +970,6 @@ mod tests {
         write_raw_catalogue_entry(&catalogue_path, &entry);
 
         ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1048,7 +995,6 @@ mod tests {
         {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
@@ -1069,7 +1015,6 @@ mod tests {
         }
 
         let rebuilt = ServerBuilder::new(app_id)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
@@ -1119,11 +1064,9 @@ mod tests {
             }]),
         );
         let builder = || {
-            ServerBuilder::new(app_id)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
-                .with_storage(StorageBackend::Persistent {
-                    path: dir.path().to_path_buf(),
-                })
+            ServerBuilder::new(app_id).with_storage(StorageBackend::Persistent {
+                path: dir.path().to_path_buf(),
+            })
         };
         let core = builder().with_schema(base).build().await.unwrap();
         core.state
@@ -1187,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn persistent_adapter_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("rocksdb-server-shell-restart");
+        let app_id = AppId::from_name("persistent-server-shell-restart");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
                 jazz::tools::public_schema::TableSchema::builder("todos")
@@ -1198,21 +1141,25 @@ mod tests {
         let retained_state = {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
                 .await
-                .expect("build RocksDB server with server shell");
+                .expect("build persistent server with server shell");
 
             assert!(built.state.runtime().is_some());
-            assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
-            assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
+            assert!(data_dir.path().join(STORE_FILE).exists());
+            let files: Vec<String> = std::fs::read_dir(data_dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+                .collect();
+            assert_eq!(files, vec![STORE_FILE.to_owned()], "one file per app");
             assert_eq!(
                 built.shutdown().await,
                 crate::server::ShutdownPhase::StorageClosed,
-                "the public builder lifecycle must join the shell before its RocksDB path is reopened"
+                "the public builder lifecycle must join the shell before its store is reopened"
             );
             Arc::clone(&built.state)
         };
@@ -1223,16 +1170,15 @@ mod tests {
 
         let rebuilt = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
             .await
-            .expect("rebuild RocksDB server with server shell");
+            .expect("rebuild persistent server with server shell");
 
         assert!(rebuilt.state.runtime().is_some());
-        assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
+        assert!(data_dir.path().join("jazz.sqlite").exists());
         rebuilt.shutdown().await;
 
         // Some direct builder consumers own only `BuiltServer` and use Rust
@@ -1242,25 +1188,23 @@ mod tests {
         {
             let dropped = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
                 .await
-                .expect("build RocksDB server for direct-drop lifecycle");
+                .expect("build persistent server for direct-drop lifecycle");
             assert!(dropped.state.runtime().is_some());
         }
 
         let reopened_after_drop = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
             .await
-            .expect("reopen RocksDB server after direct builder drop");
+            .expect("reopen persistent server after direct builder drop");
         assert!(reopened_after_drop.state.runtime().is_some());
         assert_eq!(
             reopened_after_drop.shutdown().await,
@@ -1270,21 +1214,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_adapter_reopens_after_first_shutdown_waiter_is_aborted() {
+    async fn a_data_dir_from_another_layout_is_refused_and_left_unchanged() {
+        let app_id = AppId::from_name("refused-data-dir");
+        for old in PRE_SQLITE_STORES.iter() {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            let old_path = data_dir.path().join(old);
+            if old.ends_with(".rocksdb") {
+                std::fs::create_dir(&old_path).unwrap();
+            } else {
+                std::fs::write(&old_path, b"state this build does not read").unwrap();
+            }
+            let Err(error) = ServerBuilder::new(app_id)
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+            else {
+                panic!("a data dir holding {old} must be refused");
+            };
+            assert!(error.contains(old), "{error}");
+            assert!(
+                !data_dir.path().join(STORE_FILE).exists(),
+                "a refused data dir gets no store beside {old}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dynamic_server_keeps_catalogue_accounts_and_rows_in_one_file() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
-        let schema = jazz::tools::public_schema::SchemaBuilder::new()
-            .table(jazz::tools::public_schema::TableSchema::builder("todos"))
-            .build();
-        let built = ServerBuilder::new(app_id)
-            .with_schema(schema.clone())
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+        let built = ServerBuilder::new(AppId::from_name("one-file-per-app"))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
             .await
-            .expect("build RocksDB server");
+            .expect("build dynamic persistent server");
+        assert!(built.state.runtime().is_none(), "no schema published yet");
+        let alice = jazz::account_registry::Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "alice".into(),
+        };
+        let accounts = built.state.accounts.as_ref().unwrap();
+        // The account journal is written before the runtime opens on the
+        // store...
+        let first = accounts.login_or_register(alice.clone()).await.unwrap();
+        built
+            .state
+            .start_core_server_shell(
+                jazz::schema::JazzSchema::new(&dynamic_bootstrap_schema()).unwrap(),
+            )
+            .expect("start the runtime on the store");
+        // ...and read through it afterwards.
+        assert_eq!(accounts.login(alice.clone()).await.unwrap(), first);
+        assert_eq!(
+            built.shutdown().await,
+            crate::server::ShutdownPhase::StorageClosed
+        );
+        let files: Vec<String> = std::fs::read_dir(data_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+            .collect();
+        assert_eq!(files, vec![STORE_FILE.to_owned()]);
+
+        let reopened = ServerBuilder::new(AppId::from_name("one-file-per-app"))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("reopen");
+        assert_eq!(
+            reopened
+                .state
+                .accounts
+                .as_ref()
+                .unwrap()
+                .login(alice)
+                .await
+                .unwrap(),
+            first
+        );
+        reopened.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn persistent_adapter_reopens_after_first_shutdown_waiter_is_aborted() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("persistent-server-shell-aborted-shutdown");
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
+            .table(jazz::tools::public_schema::TableSchema::builder("todos"))
+            .build();
+        let built = ServerBuilder::new(app_id)
+            .with_schema(schema.clone())
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build persistent server");
         let state = Arc::clone(&built.state);
         let request = state
             .shutdown
@@ -1311,13 +1341,12 @@ mod tests {
 
         let reopened = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
             .await
-            .expect("reopen RocksDB after aborted shutdown waiter");
+            .expect("reopen persistent server after aborted shutdown waiter");
         assert_eq!(
             reopened.shutdown().await,
             crate::server::ShutdownPhase::StorageClosed
@@ -1327,7 +1356,7 @@ mod tests {
     #[test]
     fn persistent_adapter_shutdown_survives_initiating_runtime_drop() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
+        let app_id = AppId::from_name("persistent-server-shell-foreign-shutdown");
         let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(jazz::tools::public_schema::TableSchema::builder("todos"))
             .build();
@@ -1340,13 +1369,12 @@ mod tests {
                 .block_on(
                     ServerBuilder::new(app_id)
                         .with_schema(schema.clone())
-                        .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                         .with_storage(StorageBackend::Persistent {
                             path: data_dir.path().to_path_buf(),
                         })
                         .build(),
                 )
-                .expect("build RocksDB server");
+                .expect("build persistent server");
             let state = Arc::clone(&built.state);
             let request = state
                 .shutdown
@@ -1386,13 +1414,12 @@ mod tests {
             assert!(state.runtime().is_none());
             ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
                 .await
-                .expect("reopen RocksDB after live shutdown")
+                .expect("reopen persistent server after live shutdown")
         });
         assert_eq!(
             second_runtime.block_on(reopened.shutdown()),

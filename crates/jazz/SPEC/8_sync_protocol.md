@@ -19,7 +19,7 @@ Invariant digest:
 - `INV-SYNC-11`: Complete supporting-set replacement and subscription detach MUST preserve per-peer payload dedup while peer state survives.
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
 - `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, or complete tx payload refs.
-- `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
+- `INV-SYNC-14`: When a reader loses read access to a row (through a write or a read-policy change), the server MUST evict it: the row leaves the reader's future settled results and the replica drops its local copy. Local copies are not a redaction boundary, so the eviction is about coherence, not secrecy. This includes rows the replica's own accepted commit wrote and cannot read (a write-only insert): the commit's fate reports its acceptance.
 - `INV-SYNC-15`: Serializable transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
 - `INV-SYNC-17`: A supporting set and its native payloads MUST include enough authorized deletion-register evidence to reconstruct the row’s visible presence or absence.
@@ -49,7 +49,7 @@ Invariant digest:
 
 - `INV-SYNC-37`: `ReadTier::LocalOnly` MUST remain on the calling node. Remote subscriptions have no propagation switch; every receiving node follows normal upstream routing.
 - `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
-- `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; access loss does not redact the local copy. Agreeing views settle without a probe. Reconciliation is reliable, not best-effort: settlement may stop waiting after a bounded interval and release on the authority answer alone, but the outstanding reconciliation is never dropped. The runtime keeps discovering and probing, deduplicated per row, independent of the stream that found the row and of whether the query runtime ever idles, retrying Unknown, dropped, timed-out, or disconnected probes with backoff (immediately on a new upstream link, never while none is admitted), until the authority answers each held row as deleted, readable, or unavailable, or the row's local version changes. A deletion answered after settlement is still applied locally and emits the ordinary local change.
+- `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; a row answered unavailable (access loss) is evicted (`INV-SYNC-14`). Agreeing views settle without a probe. Reconciliation is reliable, not best-effort: settlement may stop waiting after a bounded interval and release on the authority answer alone, but the outstanding reconciliation is never dropped. The runtime keeps discovering and probing, deduplicated per row, independent of the stream that found the row and of whether the query runtime ever idles, retrying Unknown, dropped, timed-out, or disconnected probes with backoff (immediately on a new upstream link, never while none is admitted), until the authority answers each held row as deleted, readable, or unavailable, or the row's local version changes. A deletion answered after settlement is still applied locally and emits the ordinary local change.
 - `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
 - `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
 - `INV-SYNC-41`: A partial client relay MUST NOT authorize query or exact-version repair bytes using cached policy inputs. Core authorizes disclosure for the admitted reader; delegated client scopes remain client-scoped across local relay links. SYSTEM reconciliation MUST NOT create access-loss markers for an ordinary reader.
@@ -629,11 +629,22 @@ transport:
   settled, is answered on arrival: a recovering relay acknowledges a write it
   restored from its own storage before the writer's resent copy reaches it.
   A terminal fate ends that standing. Messages on
-  other channels are never held. Held requests keep their buffer leases, so
-  the sender's request credit bounds what a receiver holds. When a turn's
+  other channels are never held. Held requests are meant to keep their buffer
+  leases, so the sender's request credit bounds what a receiver holds; the
+  server does not enforce that bound yet (#4291). When a turn's
   input runs out with requests held, the receiver sends the answers it has
   ready and serves the requests they release in that same turn, so the
   barrier costs no extra turn when the write is handled at once.
+- A receiver whose large-value ingress limit holds a commit back holds with
+  it every later message of the link that could observe it: a read that
+  depends on a table the held commits write (its query's tables and the
+  tables their read policies read), and anything whose effect on reads is
+  not known. Other reads, unsubscribes of reads not held, and permission
+  advice are served ahead; a read frozen at a snapshot never is, since the
+  snapshot may name the held commits. A read held this way waits until the
+  bytes queued ahead of it are admitted, i.e. for (bytes ahead) / (admitted
+  rate). (What a receiver holds is not yet bounded by the sender's credit:
+  #4291.)
 - "Answered" means stored or decided **at this node**. A Core answers with the
   terminal fate. A relay or local receiver answers with its local
   acknowledgement once the write is durable there, so its clients keep reading
@@ -812,8 +823,8 @@ survives view reset and detach while peer state survives (`INV-SYNC-11`).
 Sync never emits view material before applying the receiving peer's read policy.
 During view construction, the peer identity's policy is checked before any result
 entry, bundle, or ref is emitted (`INV-SYNC-13`, ch. 7).
-Revocation affects future delivery: it removes a row from future settled result
-sets but never redacts an already-delivered local copy (`INV-SYNC-14`).
+Lost access evicts: the row leaves future settled results and the replica drops
+its copy (`INV-SYNC-14`).
 
 ### 8.7 Partial vs atomic delivery
 
@@ -1185,8 +1196,7 @@ Global transaction and which the authority omitted are probed through the
 ordinary `CurrentRowsRequest` path, in `MAX_CURRENT_ROWS` batches, under the
 stream's admitted policy binding. Settlement is withheld until each receipt's
 carriers are ingested; a deleted image deletes the row locally. A
-`CurrentUnavailable` outcome is access loss, which the settled result already
-omits: it does not redact the local copy (`INV-SYNC-14`). Pending local writes
+`CurrentUnavailable` outcome is access loss: the row is evicted (`INV-SYNC-14`). Pending local writes
 are never candidates. Agreeing views settle in the same refresh without any
 round trip; the cost is one local evaluation of the query.
 

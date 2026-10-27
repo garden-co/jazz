@@ -32,11 +32,9 @@ fn builder(path: Option<&std::path::Path>) -> ServerBuilder {
         ..Default::default()
     });
     match path {
-        Some(path) => builder
-            .with_storage(StorageBackend::Persistent {
-                path: path.to_path_buf(),
-            })
-            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory)),
+        Some(path) => builder.with_storage(StorageBackend::Persistent {
+            path: path.to_path_buf(),
+        }),
         None => builder.with_storage(StorageBackend::InMemory),
     }
 }

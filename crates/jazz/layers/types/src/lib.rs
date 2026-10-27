@@ -18,8 +18,20 @@
 //! in Jazz. The `jazz` crate re-exports every module here under its old path,
 //! so `jazz::ids::RowUuid` and `crate::ids::RowUuid` inside Jazz keep working.
 
-/// Re-export of the underlying groove crate.
-pub use groove;
+/// Interned values, shared by schema and protocol types.
+pub use internment::Intern;
+
+/// Column and table descriptions over [`records::ValueType`].
+#[allow(missing_docs)]
+pub mod column_schema;
+/// Chunked large values: descriptors, immutable nodes, the edit tail and
+/// the stored-scalar envelope for variable-width cells.
+#[allow(missing_docs)]
+pub mod large_values;
+/// Logical values, value types and the record encoding Jazz schemas are
+/// described in.
+#[allow(missing_docs)]
+pub mod records;
 
 /// Shared, fail-closed state for authority-issued authorization-scope receipts.
 pub mod account_registry;

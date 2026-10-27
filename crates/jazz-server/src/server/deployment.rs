@@ -4,12 +4,13 @@ use super::{
     catalogue::DeploymentResponse,
     routes::http::{PublishMigrationRequest, lower_migration},
 };
+use crate::runtime::StorageConfig;
 use axum::http::StatusCode;
 use jazz::tools::{
     deployment::{self, DeploymentError},
     public_schema::{Schema, SchemaHash, TableName, TablePolicies},
 };
-use jazz::{protocol::CatalogueSnapshot, schema::JazzSchema, serving::StorageConfig};
+use jazz::{protocol::CatalogueSnapshot, schema::JazzSchema};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -144,7 +145,7 @@ pub(crate) async fn deploy(
     if state.shutdown.is_shutting_down() {
         return Err(DeployError::unavailable("server is shutting down"));
     }
-    if state.runtime().is_none() && state.core_server_shell_storage_config.is_none() {
+    if state.runtime().is_none() && state.store.is_none() {
         return Err(DeployError::unavailable(
             "server runtime storage is not configured",
         ));
@@ -234,7 +235,6 @@ pub(crate) async fn deploy(
         let probe = ServerRuntimeHandle::start_with_storage(
             initial_schema.clone(),
             StorageConfig::InMemory,
-            None,
         )
         .map_err(DeployError::internal)?;
         let result = probe.validate_deployment_snapshot(snapshot.clone()).await;
@@ -244,10 +244,14 @@ pub(crate) async fn deploy(
     // All graph, schema, permission, lens, physical mapping, and encoding
     // validation has completed. Cross-store write failure recovery is not
     // implemented here; this flow currently assumes writes succeed.
-    let response = state
-        .catalogue_store
-        .commit_deployment(staged)
-        .map_err(DeployError::internal)?;
+    // The write waits for the app's store thread (behind the runtime job or
+    // tick in progress): not on an async worker.
+    let committing = Arc::clone(&state);
+    let response =
+        tokio::task::spawn_blocking(move || committing.catalogue_store.commit_deployment(staged))
+            .await
+            .map_err(DeployError::internal)?
+            .map_err(DeployError::internal)?;
     let runtime = state
         .start_core_server_shell(initial_schema)
         .map_err(DeployError::internal)?;

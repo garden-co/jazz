@@ -1,49 +1,83 @@
-#![warn(missing_docs)]
-#![allow(
-    clippy::clone_on_copy,
-    clippy::collapsible_if,
-    clippy::enum_variant_names,
-    clippy::for_kv_map,
-    clippy::large_enum_variant,
-    clippy::manual_unwrap_or,
-    clippy::manual_unwrap_or_default,
-    clippy::needless_borrow,
-    clippy::too_many_arguments,
-    clippy::type_complexity,
-    async_fn_in_trait
-)]
+//! Jazz's database: the thread-affine `Db` facade over SQLite.
+//!
+//! Schema, query and policy types are Jazz's own (`jazz-model`); storage,
+//! query execution, policies and subscription invalidation are SQLite.
+//!
+//! Model (alpha.60 linear history): one current table per Jazz table plus a
+//! `__h` table of superseded images, a global commit `seq`, soft deletes.
+//! Queries and policies compile to SQL; `Exists` policies are correlated
+//! `EXISTS`, `Inherits` unrolls to its depth bound, relation `Gather` is
+//! `WITH RECURSIVE`. Subscriptions re-run on commits that touch one of their
+//! dependency tables and diff the result. The `jazz` crate re-exports this
+//! crate's modules (`jazz::db`, `jazz::result_tree`).
 
-//! Jazz's database layer: the thread-affine `Db` facade over the node, the
-//! structured result tree, and the binary row codec the bindings share. It
-//! sits directly above `jazz-node`. The `jazz` crate re-exports its modules
-//! under their old paths (`jazz::db`, `jazz::binding_codec`, ...).
+// Sync and fan-out bookkeeping keys maps by (table, row, branch) tuples;
+// naming each nesting would not make them clearer.
+#![allow(clippy::type_complexity)]
 
-/// Re-export of the underlying groove crate.
-pub use groove;
+// The layers below, under the paths this crate's code uses.
+use jazz_model::{query, schema, tx};
+use jazz_protocol::{protocol, wire};
+use jazz_types::{ids, local_executor, object, records};
 
-// The layers below, under the paths this crate's code already uses.
-#[cfg(test)]
-use jazz_model::row_input;
-use jazz_model::{model, query, schema, tx};
-use jazz_node::{node, peer};
-use jazz_protocol::{authorization_scope, protocol, protocol_limits, wire};
-#[cfg(test)]
-use jazz_types::account_registry;
-#[cfg(any(test, feature = "testing"))]
-use jazz_types::delivery_diagnostics;
-use jazz_types::{debug_env, ids, local_executor, object, time};
+/// The public schema and policy vocabulary.
+mod tools {
+    pub use jazz_model::model::public_schema::{
+        CmpOp, Operation, PolicyExpr, PolicyValue, TablePolicies, Value,
+    };
+    pub use jazz_model::model::transaction::OpenTransactionId;
+}
 
-/// Argument parsing shared by the NAPI and WASM bindings.
 pub mod binding_args;
-/// Shared binary row payload contract for the NAPI and WASM bindings.
 pub mod binding_codec;
-/// Disabled-by-default counters used by the native cold-settle attribution bench.
-#[cfg(feature = "cold-settle-attribution")]
-pub mod cold_settle_attribution;
-/// High-level thread-affine database facade.
+pub mod binding_host;
+pub mod compile;
 pub mod db;
-/// Host-facing exclusive lifecycle for foreground transaction-node identities.
-pub mod foreground_node_lease;
-pub(crate) mod positional_order;
-/// Canonical recursive structured query-result boundary types.
-pub mod result_tree;
+#[cfg(feature = "durable-object-limits")]
+mod durable_object_limits;
+pub mod format;
+pub mod host;
+pub(crate) mod large;
+pub(crate) mod merge;
+pub mod names;
+pub mod options;
+#[cfg(feature = "sql-trace")]
+mod sql_trace;
+pub mod values;
+
+#[cfg(feature = "testing")]
+pub use large::full_materializations_for_test;
+
+/// Structured read results.
+pub mod result_tree {
+    use std::collections::BTreeMap;
+
+    use crate::values::CurrentRow;
+
+    /// A structured read result.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct ResultTree {
+        /// Root rows in query order.
+        pub roots: Vec<ResultNode>,
+    }
+
+    /// One row and its named relation arrays.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct ResultNode {
+        /// Projected row.
+        pub row: CurrentRow,
+        /// Named relation outputs.
+        pub relations: BTreeMap<String, ResultRelation>,
+    }
+
+    /// One named relation output.
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum ResultRelation {
+        /// Ordered child rows.
+        Array(Vec<ResultNode>),
+        /// Explicit null.
+        Null,
+        /// Unresolvable target.
+        Hole,
+    }
+}

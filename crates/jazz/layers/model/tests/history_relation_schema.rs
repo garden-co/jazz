@@ -1,4 +1,3 @@
-use jazz_model::groove::schema::ColumnType as RuntimeType;
 use jazz_model::model::public_schema::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz_model::model::public_schema_convert::decode_public_schema_json;
 use jazz_model::query::{Query, QueryError};
@@ -6,6 +5,7 @@ use jazz_model::schema::JazzSchema;
 use jazz_model::schema::history::{
     ACCEPTED_AT_COLUMN, HistoryRelationSchema, TRANSACTION_ID_COLUMN,
 };
+use jazz_types::column_schema::ColumnType as RuntimeType;
 
 fn schema(tables: impl IntoIterator<Item = TableSchemaBuilder>) -> JazzSchema {
     let mut builder = SchemaBuilder::new();

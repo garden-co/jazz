@@ -16,14 +16,13 @@ Do not block useful performance work on a repository-wide receipt rewrite.
 Every new high-value lane should emit an attributable, correctness-checked
 receipt and state where that receipt is retained.
 
-| harness                                                   | output and retention                                                                                                                                   |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| deterministic benchmark checks                            | targeted local API compilation; CI compiles all maintained targets and runs scenario assertions                                                        |
-| CodSpeed                                                  | performance comparison for the example benchmark crates on benchmark-labeled PRs and every default-branch merge                                        |
-| realistic native/browser                                  | local-only scenario runners; their CI coverage moved to the example CodSpeed benches and the realistic CI harness was retired                          |
-| Groove scenario/micro                                     | JSON on stdout; preserve a deliberate investigation receipt with the change or external performance system, never an append-only in-repo timing ledger |
-| Criterion                                                 | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local         |
-| storage, `idb-tree`/IndexedDB page-store, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                 |
+| harness                        | output and retention                                                                                                                           |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| deterministic benchmark checks | targeted local API compilation; CI compiles all maintained targets and runs scenario assertions                                                |
+| CodSpeed                       | performance comparison for the example benchmark crates on benchmark-labeled PRs and every default-branch merge                                |
+| realistic native/browser       | local-only scenario runners; their CI coverage moved to the example CodSpeed benches and the realistic CI harness was retired                  |
+| Criterion                      | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local |
+| WASM probes                    | harness-native output; retain deliberately when a result is used to justify a decision                                                         |
 
 Timing medians are directional unless the harness controls the relevant cache,
 fixture, and host conditions. Prefer deterministic structural counters for hard
@@ -57,21 +56,13 @@ was retired on 2026-10-15; its port is tracked separately). S8
 currently measures the local branch-view mechanism;
 transport reconnect/conflict/payload-reuse phases remain to be added.
 
-### Groove
-
-`scenario` covers social-feed joins, recursive ACLs, and one-shot reads;
-`micro` isolates record encoding, planning, and subscribe/unsubscribe costs.
-Groove emits correctness-checked JSON. Performance baselines belong in CodSpeed
-or a deliberately retained investigation artifact, not an append-only ledger.
-
 ### Realistic `jazz-tools` and browser lanes
 
 The older Criterion cases are predominantly `MemoryStorage`; their “batch”
 insert/update cases are serial insert-and-wait calls, not atomic transactions.
 Do not use them as evidence about persisted reads or transaction batching.
 
-`realistic_phase1` includes the persisted RocksDB R3 lane. The stack beginning
-at #1174 adds reproducible phase receipts, controlled warm/best-effort-evicted
+The stack beginning at #1174 adds reproducible phase receipts, controlled warm/best-effort-evicted
 cache modes, startup attribution, and exact result validation. #1175, #1176,
 #1178, #1199, and #1203 then use those receipts to remove redundant or
 unbounded startup work. #1202 is a separate design arm: representative-row
@@ -82,13 +73,10 @@ Browser realistic scenarios cover writes, reads, fan-out, permissions, and
 history. CI-scale runs are shape/correctness checks rather than representative
 latency numbers. #1224 adds B7 for public relation-result hydration coverage.
 
-### Storage, `idb-tree`/IndexedDB page-store, and WASM
+### WASM
 
-- Native storage benchmarks compare raw SQLite, RocksDB, and redb KV behavior.
-- Browser persistence benchmarks exercise the `idb-tree` IndexedDB page store.
-- Jazz WASM probes primarily measure runtime characteristics such as
-  arithmetic, indirect calls, `RefCell`, and allocation—not full Jazz data
-  paths.
+Jazz WASM probes primarily measure runtime characteristics such as arithmetic,
+indirect calls, `RefCell`, and allocation—not full Jazz data paths.
 
 ## What has changed since the original inventory
 

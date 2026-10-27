@@ -59,6 +59,7 @@ test("denominators distinguish transaction count, batch rows, queries and load c
   assert.equal(getBenchmarkMetadata("stage_plan_add_task_1350")?.work.count, 1350);
   assert.equal(getBenchmarkMetadata("stage_plan_bulk_complete_1350")?.work.unit, "rows updated/s");
   assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")?.work.count, 27518);
+  assert.equal(getBenchmarkMetadata("first_sync_direct_27518_file")?.work.count, 27518);
   assert.match(
     getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")!.description,
     /Member identity \(not anonymous\)/,
@@ -105,8 +106,6 @@ test("former names moved to a nightly target are still measured there", async ()
   const nightly = [
     "examples/stage-plan/benchmarks/benches/nightly.rs",
     "examples/band-book/benchmarks/benches/nightly.rs",
-    "crates/groove/benches/pull_vs_snapshot.rs",
-    "crates/groove/benches/steady_state.rs",
   ].map((path) => readFileSync(new URL(path, root), "utf8"));
   for (const [former, fate] of formerBenchmarks) {
     if (fate.kind !== "nightly") continue;

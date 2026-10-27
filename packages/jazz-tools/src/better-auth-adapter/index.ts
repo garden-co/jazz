@@ -135,7 +135,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         if (querySupportedByJazz) {
           // Preserve ordering semantics: until sorting is lowered, pagination
           // must remain after the client-side sort. Predicate-only bounded reads
-          // (including mutation/uniqueness warmups) can be bounded in Groove.
+          // (including mutation/uniqueness warmups) can be bounded by the engine.
           const lowerPagination = storedSortBy === undefined;
           const qb = createQueryBuilder(table, wasmSchema, {
             conditions: (options.where ?? []).map((condition) =>
@@ -266,9 +266,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
       const isRetryableSerializationConflict = (error: unknown) =>
         error instanceof PersistedWriteRejectedError &&
-        (error.code === "cascade_rejected" ||
-          error.code === "serialization_conflict" ||
-          error.code === "transaction_conflict");
+        (error.code === "serialization_conflict" || error.code === "transaction_conflict");
 
       /** Re-runs `attempt` until it is not rejected by a concurrent serializable transaction. */
       const retryOnSerializationConflict = async <T>(attempt: () => Promise<T>): Promise<T> => {

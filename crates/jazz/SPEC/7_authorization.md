@@ -19,7 +19,7 @@ Invariant digest:
 - `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("user"), where claim("user") is bound from the authenticated AuthorSubject, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
-- `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
+- `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets, and the server MUST evict them so the receiving node drops its local copies (`INV-SYNC-14`). Eviction is coherence, not redaction: it makes no confidentiality promise about data a node already received.
 - `INV-RLS-7`: A deletion-register version by a non-system author MUST satisfy the table write policy against the current global content version for that row; if there is no current...
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
 - `INV-RLS-9`: Join-based policies MUST require at least one matching joined
@@ -460,11 +460,12 @@ unreadable target instead (`INV-RLS-5`), and `AuthorSubject::SYSTEM` bypasses th
 half and resolves on existence alone (`INV-RLS-2`, `INV-RLS-19`).
 
 The security boundary is _upstream emission_, not local storage. Read-policy
-revocation removes rows from **future** settled result sets but does **not**
-redact a copy already delivered to a receiving node (`INV-RLS-6`). A receiving
-node does not re-filter its own local reads or subscriptions by policy. The spec
-therefore makes no post-delivery confidentiality promise against a node that
-already received data: revocation is forward-looking sync narrowing.
+revocation removes rows from **future** settled result sets, and the server
+evicts them: an honest receiving node drops its copy (`INV-RLS-6`,
+`INV-SYNC-14`). A receiving node does not re-filter its own local reads or
+subscriptions by policy. Eviction keeps honest replicas coherent with what they
+may read; it is not redaction, and the spec makes no post-delivery
+confidentiality promise against a node that already received data.
 
 A client relay does not become an authority by retaining an authority-selected
 result. A scope-isolated relay may publish retained rows and repair payloads to

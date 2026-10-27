@@ -132,6 +132,13 @@ async function createRoom(element: HTMLDivElement, name: string) {
 }
 
 async function sendMessage(element: HTMLDivElement, text: string) {
+  // Both previews share one document, so a composer can mount while the other
+  // preview's modal dialog is open. Chromium then lays the empty editable out
+  // at 0px, and leaves it there after the dialog closes, until its style is
+  // recomputed. Hiding and showing the preview recomputes it.
+  element.style.display = "none";
+  void element.offsetHeight;
+  element.style.display = "";
   await preview(element).getByRole("textbox", { name: "Message input" }).fill(text);
   await preview(element).getByRole("button", { name: "Send", exact: true }).click();
   await waitFor(() => hasText(element, text), "sent message should render", 15_000);

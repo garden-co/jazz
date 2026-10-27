@@ -24,7 +24,7 @@ use jazz::tools::metadata::{MetadataKey, ObjectType};
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
 use jazz::tools::schema_lens::Lens;
 #[cfg(test)]
-use jazz::tools::sync::DurabilityTier;
+use jazz::tx::DurabilityTier;
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -649,9 +649,9 @@ impl CatalogueStore for StoredCatalogue {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         storage.upsert_catalogue_entry(&entry)?;
         let object_id = entry.object_id;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry)?;
         index.schema_published_at.insert(schema_hash, published_at);
         Ok(object_id)
@@ -752,8 +752,8 @@ impl CatalogueStore for StoredCatalogue {
         }
         let entry = lens_entry(self.app_id, lens);
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         storage.upsert_catalogue_entry(&entry)?;
+        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         index.apply_entry(&entry)?;
         Ok(entry.object_id)
     }
