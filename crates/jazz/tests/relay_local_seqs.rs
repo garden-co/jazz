@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LOCAL_BASE, NON_DURABLE_BASE, ReadOpts, RemoteLinkHint, Upstream,
-    block_on,
+    Db, DbConfig, DbIdentity, ErrorCode, Image, LOCAL_BASE, NON_DURABLE_BASE, ReadOpts,
+    RemoteLinkHint, SyncMessage, Upstream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -234,4 +234,35 @@ fn a_tabs_unsettled_insert_stays_its_own_once_its_worker_stored_it() {
         rows.iter().any(|r| r.row_uuid() == row),
         "the snapshot holds the tab's own unsettled insert"
     );
+}
+
+/// Only a durable store relays to non-durable clients: a version shipped
+/// in a tab's own range would come from a third tier, whose numbering
+/// could meet the tab's, so the tab refuses it rather than store it.
+#[test]
+fn a_tab_refuses_an_upstream_version_numbered_in_its_own_range() {
+    let tab = open(WORKER + 1, author(WORKER));
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (client_side, mut server_side) = duplex();
+    block_on(tab.connect_upstream(client_side));
+    server_side
+        .send(SyncMessage::Rows {
+            images: vec![Image {
+                table: "notes".to_owned(),
+                id: [7; 16],
+                key: Vec::new(),
+                seq: NON_DURABLE_BASE + 1,
+                deleted: false,
+                content: true,
+                cells: Vec::new(),
+            }],
+        })
+        .unwrap();
+    let error = block_on(tab.tick()).expect_err("the tab refuses the version");
+    assert_eq!(error.code, ErrorCode::Query, "{error}");
+    assert!(error.message.contains("is not supported yet"), "{error}");
+    let prepared = tab.prepare_query(&Query::from("notes")).unwrap();
+    let rows = block_on(tab.all(&prepared, ReadOpts::default())).unwrap();
+    assert!(rows.is_empty(), "nothing was stored");
 }

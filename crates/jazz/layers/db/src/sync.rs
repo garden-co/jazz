@@ -4702,6 +4702,17 @@ impl Inner {
     /// Apply one server image; returns whether a rebase is needed (the row
     /// is shadowed by a pending write).
     fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
+        // Two tiers number local seqs: relays from `LOCAL_BASE`, the
+        // non-durable foregrounds behind them from `NON_DURABLE_BASE`. An
+        // upstream version in a foreground's own range would come from a
+        // third tier (a foreground serving sessions), whose seqs could meet
+        // this replica's own.
+        if self.non_durable && image.seq >= NON_DURABLE_BASE {
+            return Err(unsupported(
+                "a non-durable client's upstream relaying versions numbered in that \
+                 client's own local range (only a durable store relays to it)",
+            ));
+        }
         let row = RowUuid::from_bytes(image.id);
         let client = self.client.as_mut().expect("client");
         let shadowed = (image.table.clone(), row, image.key.clone());
@@ -4759,6 +4770,12 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
     ) -> SubscriberId {
         let mut inner = self.inner.borrow_mut();
+        // A third tier of local seqs would meet a foreground's own (see
+        // `NON_DURABLE_BASE`); its sessions refuse what it relays.
+        debug_assert!(
+            !inner.non_durable,
+            "a non-durable client serves no sessions"
+        );
         inner.accepted += 1;
         let generation = inner.accepted;
         let mut session = Session::new(transport, identity);
