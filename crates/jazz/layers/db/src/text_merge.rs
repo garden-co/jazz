@@ -193,11 +193,13 @@ pub(crate) fn merge3(format: TextFormat, base: &str, held: &str, incoming: &str)
     let incoming_tokens = tokenize(format, incoming);
     let ours = diff(&base_tokens, &held_tokens);
     let mut theirs = diff(&base_tokens, &incoming_tokens);
-    // A change both made applies once.
+    // A change both made applies once. Hunks of one diff never share a base
+    // span (touching ones are coalesced), so each has at most one twin.
+    let mine: HashMap<(usize, usize), (usize, usize)> =
+        ours.iter().map(|hunk| (hunk.old, hunk.new)).collect();
     theirs.retain(|hunk| {
-        !ours.iter().any(|mine| {
-            mine.old == hunk.old
-                && held_tokens[mine.new.0..mine.new.1] == incoming_tokens[hunk.new.0..hunk.new.1]
+        mine.get(&hunk.old).is_none_or(|&(start, end)| {
+            held_tokens[start..end] != incoming_tokens[hunk.new.0..hunk.new.1]
         })
     });
     let side = |hunk: &Hunk, held: bool| Change {
@@ -498,7 +500,12 @@ const ENTITY_MAX_BYTES: usize = 32;
 /// The byte length of the token `rest` starts with (at least one char),
 /// with the marks, joiners and modifiers that complete its last character.
 fn token_len(format: TextFormat, rest: &str, line_start: bool) -> usize {
-    let len = base_token_len(format, rest, line_start);
+    let mut len = base_token_len(format, rest, line_start);
+    // Two regional indicators make one flag.
+    let regional = |c: Option<char>| c.is_some_and(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c));
+    if regional(rest.chars().next()) && regional(rest[len..].chars().next()) {
+        len += 4;
+    }
     len + grapheme_tail(&rest[len..])
 }
 
@@ -640,6 +647,34 @@ fn extends(c: char) -> bool {
     let c = c as u32;
     let marks: &[(u32, u32)] = &[
         (0x0300, 0x036F),
+        // Marks of the scripts whose letters are tokens of their own.
+        (0x0E31, 0x0E31),
+        (0x0E34, 0x0E3A),
+        (0x0E47, 0x0E4E),
+        (0x0EB1, 0x0EB1),
+        (0x0EB4, 0x0EBC),
+        (0x0EC8, 0x0ECE),
+        (0x0F18, 0x0F19),
+        (0x0F35, 0x0F35),
+        (0x0F37, 0x0F37),
+        (0x0F39, 0x0F39),
+        (0x0F3E, 0x0F3F),
+        (0x0F71, 0x0F84),
+        (0x0F86, 0x0F87),
+        (0x0F8D, 0x0FBC),
+        (0x0FC6, 0x0FC6),
+        (0x102B, 0x103E),
+        (0x1056, 0x1059),
+        (0x105E, 0x1060),
+        (0x1062, 0x1064),
+        (0x1067, 0x106D),
+        (0x1071, 0x1074),
+        (0x1082, 0x108D),
+        (0x108F, 0x108F),
+        (0x109A, 0x109D),
+        (0x17B4, 0x17D3),
+        (0x17DD, 0x17DD),
+        (0x3099, 0x309A),
         (0x1AB0, 0x1AFF),
         (0x1DC0, 0x1DFF),
         (0x20D0, 0x20FF),
@@ -785,6 +820,15 @@ mod tests {
             "cafe\u{301}"
         );
         assert_eq!(tokenize(TextFormat::Plain, "👍🏽!"), vec!["👍🏽", "!"]);
+        assert_eq!(tokenize(TextFormat::Plain, "🇩🇪🇫🇷"), vec!["🇩🇪", "🇫🇷"]);
+        assert_eq!(
+            tokenize(TextFormat::Plain, "กินข้าว"),
+            vec!["กิ", "น", "ข้", "า", "ว"]
+        );
+        assert_eq!(
+            tokenize(TextFormat::Plain, "か\u{3099}"),
+            vec!["か\u{3099}"]
+        );
         assert_eq!(
             tokenize(TextFormat::Plain, "👩\u{200d}💻 x")[0],
             "👩\u{200d}💻"
@@ -815,6 +859,28 @@ mod tests {
                 started.elapsed()
             );
         }
+    }
+
+    #[test]
+    fn dissimilar_large_values_merge_in_linear_time() {
+        // Every token differs: one hunk per token on each side.
+        let base: String = (0..120_000).map(|i| format!("b{i:06} ")).collect();
+        let held: String = (0..120_000).map(|i| format!("h{i:06} ")).collect();
+        let incoming: String = (0..120_000).map(|i| format!("i{i:06} ")).collect();
+        assert!(base.len() > 900_000, "{}", base.len());
+        let started = std::time::Instant::now();
+        let merged = merge(&base, &held, &incoming);
+        assert!(
+            merged.contains("i119999 "),
+            "{:?}",
+            &merged[merged.len() - 80..]
+        );
+        let limit = if cfg!(debug_assertions) { 60 } else { 5 };
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(limit),
+            "took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

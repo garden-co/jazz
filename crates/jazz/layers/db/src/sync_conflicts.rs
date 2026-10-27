@@ -540,7 +540,9 @@ impl Inner {
                     if version.is_none_or(|v| authors(v.cols.as_deref(), code)) {
                         break (Some(on), Some(on));
                     }
-                    // As in [`Knowledge::of`], a chain only runs back.
+                    // As in [`Knowledge::of`], a chain only runs back. A
+                    // link with no base (a blind write) saw nothing before
+                    // it: no base, so the write's value stands as sent.
                     match version.and_then(|v| v.built) {
                         Some(next @ (Built::Seq(seq) | Built::On(seq))) if seq < on => link = next,
                         _ => break (None, None),
