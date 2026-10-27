@@ -169,6 +169,14 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
         configured: true,
         explicitlyOffline: false,
         connected: true,
+        authRejected: null,
+      },
+      {
+        type: "nativeConnectionStatus",
+        configured: true,
+        explicitlyOffline: false,
+        connected: false,
+        authRejected: "bearer expired: λ",
       },
       {
         type: "nativeSessionMetadata",

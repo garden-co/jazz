@@ -711,15 +711,16 @@ impl Error {
     }
 }
 
-/// An update of a row this replica does not hold: a missing observation,
+/// A write over a row this replica does not hold: a missing observation,
 /// not a read-policy decision.
 fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error {
     Error::new(
         ErrorCode::NotObserved,
         format!(
             "{operation} on table {table} needs the current row, but row {} is not loaded \
-             locally; read or subscribe to the row before updating it",
-            row.0
+             locally; read or subscribe to the row before you {} it",
+            row.0,
+            operation.to_lowercase()
         ),
     )
 }
@@ -4004,6 +4005,11 @@ impl Inner {
             Located::Row {
                 key, deleted: true, ..
             } => key,
+            // As for an update: a replica must hold the row to restore it,
+            // and saying so discloses nothing.
+            Located::Absent { .. } if self.client.is_some() => {
+                return Err(update_target_not_loaded("RESTORE", table_name, row));
+            }
             Located::Absent { .. } => {
                 return Err(rejected(format!(
                     "RESTORE target {row:?} does not exist in `{table_name}`"

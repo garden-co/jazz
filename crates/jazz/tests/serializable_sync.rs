@@ -816,3 +816,159 @@ fn an_offline_remote_read_in_a_transaction_waits_for_the_authority() {
     assert!(net.drive(read).unwrap().is_empty());
     db.abandon_transaction_handle(open).unwrap();
 }
+
+/// What a serializable transaction on one replica does to an invite
+/// another replica wrote (#4257).
+#[derive(Clone, Copy, Debug)]
+enum CrossWrite {
+    Delete,
+    Restore,
+    Update,
+}
+
+impl Net {
+    /// Run `write` on `invite` in a serializable transaction on replica
+    /// `i`, after reading it (deleted rows included) when `pre_read`.
+    /// Staging errors and commit outcomes both come back as `Err`.
+    fn cross_write(
+        &self,
+        i: usize,
+        invite: RowUuid,
+        pre_read: bool,
+        write: CrossWrite,
+    ) -> Result<u64, jazz::db::Error> {
+        let db = self.db(i);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let tx = db.tx_ref(open);
+        if pre_read {
+            let one = Query::from("invites").filter(eq(col("id"), lit(Value::Uuid(invite.0))));
+            let prepared = db.prepare_query(&one).unwrap();
+            let read = self.drive(tx.all_prepared_with(&prepared, true)).unwrap();
+            assert_eq!(read.len(), 1, "the invite is read, deleted or not");
+        }
+        let staged = match write {
+            CrossWrite::Delete => self.drive(tx.delete("invites", invite, Default::default())),
+            CrossWrite::Restore => {
+                self.drive(tx.restore("invites", invite, Some(code("back")), Default::default()))
+            }
+            CrossWrite::Update => {
+                self.drive(tx.update("invites", invite, code("edited"), Default::default()))
+            }
+        };
+        if let Err(error) = staged {
+            db.abandon_transaction_handle(open).unwrap();
+            return Err(error);
+        }
+        let receipt = self.drive(db.commit_serializable_handle(open))?;
+        self.settle(i, receipt.0)
+    }
+
+    /// The invite as the authority holds it: deleted or not, and its code.
+    fn invite_state(&self, invite: RowUuid) -> Option<(bool, Option<Value>)> {
+        let one = Query::from("invites").filter(eq(col("id"), lit(Value::Uuid(invite.0))));
+        let prepared = self.core.prepare_query(&one).unwrap();
+        let deleted = ReadOpts {
+            read_view: jazz::protocol::ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        block_on(self.core.all(&prepared, deleted))
+            .unwrap()
+            .into_iter()
+            .next()
+            .map(|row| (row.is_deleted(), row.cell("code")))
+    }
+}
+
+/// #4257: a serializable delete, restore or update by bob of a row alice
+/// wrote, after bob read it, is accepted on the first try. Nothing changed
+/// the row between bob's read and his commit, so there is nothing to
+/// conflict with.
+///
+/// ```
+/// alice ──insert (and delete, for restore)──► core
+///                                              ▲
+/// bob ──serializable: read row, write row──────┘   accepted
+/// ```
+#[test]
+fn a_serializable_write_of_another_replicas_row_is_accepted_after_reading_it() {
+    for write in [CrossWrite::Delete, CrossWrite::Restore, CrossWrite::Update] {
+        let net = Net::new(2);
+        let invite = net.write_invite(OWNER, "theirs");
+        if let CrossWrite::Restore = write {
+            net.revoke(OWNER, invite);
+        }
+        net.cross_write(BACKEND, invite, true, write)
+            .unwrap_or_else(|error| panic!("{write:?}: {error}"));
+        let expected = match write {
+            CrossWrite::Delete => (true, Some(Value::String("theirs".into()))),
+            CrossWrite::Restore => (false, Some(Value::String("back".into()))),
+            CrossWrite::Update => (false, Some(Value::String("edited".into()))),
+        };
+        assert_eq!(net.invite_state(invite), Some(expected), "{write:?}");
+    }
+}
+
+/// #4257: after alice deleted and restored a row, bob's serializable
+/// delete over his read of it is accepted.
+#[test]
+fn a_serializable_delete_after_another_replicas_restore_is_accepted() {
+    let net = Net::new(2);
+    let invite = net.write_invite(OWNER, "theirs");
+    net.revoke(OWNER, invite);
+    let write =
+        block_on(
+            net.db(OWNER)
+                .restore("invites", invite, Some(code("again")), Default::default()),
+        )
+        .unwrap();
+    net.settle(OWNER, write.mergeable_tx_id()).unwrap();
+    net.cross_write(BACKEND, invite, true, CrossWrite::Delete)
+        .expect("a delete over a restore is accepted");
+    assert_eq!(
+        net.invite_state(invite).map(|(deleted, _)| deleted),
+        Some(true)
+    );
+}
+
+/// #4257: a blind serializable delete by bob, whose snapshot predates
+/// alice's insert, conflicts (the row changed after his snapshot), and the
+/// rejection brings bob the row, so a retry is accepted. It never fails
+/// for good.
+#[test]
+fn a_blind_serializable_delete_of_a_newer_row_conflicts_once_then_succeeds() {
+    let net = Net::new(2);
+    let invite = net.write_invite(OWNER, "theirs");
+    let first = net
+        .cross_write(BACKEND, invite, false, CrossWrite::Delete)
+        .expect_err("bob's snapshot predates the row");
+    common::assert_serialization_conflict(&first);
+    net.cross_write(BACKEND, invite, false, CrossWrite::Delete)
+        .expect("the retry runs at a snapshot that includes the row");
+    assert_eq!(
+        net.invite_state(invite).map(|(deleted, _)| deleted),
+        Some(true)
+    );
+}
+
+/// #4257: a replica cannot restore or update a row it has not loaded: both
+/// say so with `NotObserved` and a hint to read the row first, rather than
+/// claiming the row does not exist.
+#[test]
+fn restoring_or_updating_an_unloaded_row_asks_for_a_read_first() {
+    for write in [CrossWrite::Restore, CrossWrite::Update] {
+        let net = Net::new(2);
+        let invite = net.write_invite(OWNER, "theirs");
+        if let CrossWrite::Restore = write {
+            net.revoke(OWNER, invite);
+        }
+        let error = net
+            .cross_write(BACKEND, invite, false, write)
+            .expect_err("bob holds no copy of the row");
+        assert_eq!(error.code, ErrorCode::NotObserved, "{write:?}: {error}");
+        assert!(error.message.contains("read or subscribe"), "{error}");
+    }
+}
