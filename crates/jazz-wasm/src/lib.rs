@@ -405,6 +405,7 @@ fn not_supported(what: &str) -> JsValue {
 /// The browser's half of the hooks: callbacks and the durable store.
 #[derive(Default)]
 struct Host {
+    closed: std::cell::Cell<bool>,
     tick_scheduler: RefCell<Option<js_sys::Function>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
@@ -823,6 +824,7 @@ impl WasmDb {
         self.inner
             .borrow()
             .clone()
+            .filter(|inner| !inner.host.closed.get())
             .ok_or_else(|| JsValue::from_str("WasmDb is closed"))
     }
 
@@ -1113,7 +1115,7 @@ impl WasmDb {
     }
 
     /// Open the durable store a browser worker owns. `storage` selects the
-    /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string }`
+    /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string, requireExisting?: boolean }`
     /// (IndexedDB when omitted; see [`browser`]). The default file is named
     /// after `database`, the physical database name the worker admitted.
     #[cfg(target_arch = "wasm32")]
@@ -1618,12 +1620,21 @@ impl WasmDb {
             return js_sys::Promise::resolve(&JsValue::from_bool(false));
         };
         let owns_runtime = self.owns_runtime;
+        if owns_runtime {
+            inner.host.closed.set(true);
+            inner.binding.hooks.progress.wake_all();
+        }
         future_to_promise(async move {
             if owns_runtime {
-                inner.binding.close().await.map_err(host_error)?;
-                inner.host.flush().await?;
+                let closed = inner.binding.close().await;
+                let retired = inner.binding.db.retire_storage_owner();
+                inner.binding.hooks.progress.wake_all();
+                let flushed = inner.host.flush().await;
                 #[cfg(target_arch = "wasm32")]
                 inner.host.store.borrow_mut().take();
+                closed.map_err(host_error)?;
+                retired.map_err(|error| core_error_to_js(&error))?;
+                flushed?;
             }
             Ok(JsValue::TRUE)
         })

@@ -3927,10 +3927,14 @@ impl Db {
 
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
+        self.ensure_storage_owner_active()?;
         if !self.waits_upstream(tier) {
             return Ok(tx);
         }
         poll_fn(|_| {
+            if let Err(error) = self.ensure_storage_owner_active() {
+                return Poll::Ready(Err(error));
+            }
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             match client.fates.get(&tx) {
@@ -3958,6 +3962,7 @@ impl Db {
     /// ones included) reaches `tier`, failing with the first the server
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         if !self.waits_upstream(tier) {
             return Ok(());
         }
