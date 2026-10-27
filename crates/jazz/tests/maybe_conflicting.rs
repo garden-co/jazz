@@ -19,9 +19,9 @@ use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts,
-    RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream, WireBase, WireKind,
-    WireOp, WireTarget, WriteConflict, WriteTarget, block_on,
+    BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions, LOCAL_BASE,
+    ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream,
+    WireBase, WireKind, WireOp, WireTarget, WriteConflict, WriteTarget, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::BranchSelector;
@@ -309,6 +309,16 @@ impl Net {
             .unwrap_or_else(|| panic!("no accepted write by {writer:?}"))
     }
 
+    /// The accepted writes the worker uploaded for its tabs, in the order
+    /// it relayed them: the authority knows a relayed write by the
+    /// worker's commit.
+    fn relayed(&self, row: RowUuid) -> Vec<WriteConflict> {
+        self.conflicts(row)
+            .into_iter()
+            .filter(|conflict| conflict.writer.0 == [WORKER; 16])
+            .collect()
+    }
+
     fn title(&self, row: RowUuid) -> Option<Value> {
         let prepared = self.core.prepare_query(&Query::from("todos")).unwrap();
         block_on(self.core.all(&prepared, ReadOpts::default()))
@@ -462,13 +472,13 @@ fn offline_chain_over_several_rows_and_transactions_flags_each_row() {
 }
 
 #[test]
-fn chained_write_over_a_rejected_predecessor_resolves_to_the_chain_base() {
-    let mut net = Net::new(2);
+fn a_write_built_on_a_rejected_write_is_rejected_too() {
+    let mut net = Net::new(1);
     let row = net.seed(0);
     let far_ahead = web_time_now_ms() + 24 * 60 * 60 * 1000;
-    // Without an interruption: the predecessor is refused (its timestamp
-    // is a day ahead of the authority's clock), the write over it applies
-    // over the settled row and is not flagged.
+    // The predecessor is refused (its timestamp is a day ahead of the
+    // authority's clock); the write built on it carries its title, so it
+    // is refused too, and the row stays as seeded.
     net.offline(0);
     let refused = block_on(net.db(0).update(
         "todos",
@@ -482,37 +492,17 @@ fn chained_write_over_a_rejected_predecessor_resolves_to_the_chain_base() {
     .unwrap();
     let chained = net.edit(0, row, &[("note", "chained")]);
     net.online(0);
-    net.settle(0, chained.1);
-    assert!(
-        net.drive(
-            net.db(0)
-                .wait_for_transaction(refused.mergeable_tx_id(), DurabilityTier::Global)
-        )
-        .is_err()
-    );
-    let conflict = net.conflict(row, chained);
-    assert!(!conflict.maybe_conflicting, "only the seed lies before it");
-    assert_eq!(conflict.resolved_base, conflict.previous);
+    let fate = |tx| net.drive(net.db(0).wait_for_transaction(tx, DurabilityTier::Global));
+    assert!(fate(refused.mergeable_tx_id()).is_err());
+    let error = fate(chained.1).expect_err("built on a rejected write");
+    assert_eq!(error.reason, Some(Reason::PredecessorRejected), "{error:?}");
+    assert_eq!(net.title(row), Some(Value::String("seed".to_owned())));
+    assert_eq!(net.conflicts(row).len(), 1, "only the seed was accepted");
 
-    // With dave's write after the chain's base it is flagged.
-    net.offline(0);
-    block_on(net.db(0).update(
-        "todos",
-        row,
-        cells(&[("title", "from the future")]),
-        UpdateOptions {
-            updated_at_ms: Some(far_ahead),
-            ..Default::default()
-        },
-    ))
-    .unwrap();
-    let chained = net.edit(0, row, &[("title", "chained again")]);
-    let dave = net.edit_settled(1, row, &[("title", "dave")]);
-    net.online(0);
-    net.settle(0, chained.1);
-    let conflict = net.conflict(row, chained);
-    assert!(conflict.maybe_conflicting);
-    assert_eq!(writers(&conflict.overlapping), vec![dave]);
+    // A later write over the settled row applies.
+    net.pump();
+    let after = net.edit_settled(0, row, &[("note", "after")]);
+    assert!(!net.conflict(row, after).maybe_conflicting);
 }
 
 fn web_time_now_ms() -> u64 {
@@ -677,8 +667,10 @@ fn a_tabs_offline_chain_through_its_worker_is_its_own() {
     net.worker_online();
     net.settle(1, second.1);
 
-    for writer in [first, second] {
-        let conflict = net.conflict(row, writer);
+    let _ = first;
+    let relayed = net.relayed(row);
+    assert_eq!(relayed.len(), 2);
+    for conflict in relayed {
         assert!(
             !conflict.maybe_conflicting,
             "only the tab's own chain lies before it"
@@ -702,13 +694,12 @@ fn a_tabs_write_through_its_worker_is_flagged_over_a_write_it_never_saw() {
     net.settle(2, other.1);
 
     assert!(!net.conflict(row, direct).maybe_conflicting);
-    let tab_conflict = net.conflict(row, tab);
+    let [tab_conflict, other_conflict] = <[_; 2]>::try_from(net.relayed(row)).unwrap();
     assert!(
         tab_conflict.maybe_conflicting,
         "the tab never saw the direct write"
     );
     assert_eq!(writers(&tab_conflict.overlapping), vec![direct]);
-    let other_conflict = net.conflict(row, other);
     assert!(other_conflict.maybe_conflicting);
     assert!(
         other_conflict.overlapping.is_empty(),
@@ -717,9 +708,9 @@ fn a_tabs_write_through_its_worker_is_flagged_over_a_write_it_never_saw() {
 }
 
 #[test]
-fn a_session_shipped_a_relays_unsettled_version_saw_it_and_what_it_was_made_over() {
-    // A raw relay link: what a worker uploads for its tabs, with the bases
-    // a tab sends when its image is the worker's unsettled version.
+fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
+    // A raw relay link: what a worker uploads for its tabs, its bases
+    // renamed to the worker's own commits.
     let core = open(CORE, AuthorSubject::SYSTEM);
     let (mut relay, server_side) = duplex();
     core.accept_subscriber(server_side, AuthorSubject::SYSTEM);
@@ -740,13 +731,13 @@ fn a_session_shipped_a_relays_unsettled_version_saw_it_and_what_it_was_made_over
         Default::default(),
     ))
     .unwrap();
-    let commit = |tx: u64, origin: Writer, title: &str, seen: u64| SyncMessage::Commit {
+    let commit = |tx: u64, target: [u8; 16], title: &str, on: BuiltOn| SyncMessage::Commit {
         node: relay_node,
         tx,
         kind: WireKind::Mergeable,
         ops: vec![WireOp::Update {
             table: "todos".to_owned(),
-            row: *row.0.as_bytes(),
+            row: target,
             cells: cells(&[("title", title)]),
             target: WireTarget::Root,
             at: None,
@@ -757,57 +748,87 @@ fn a_session_shipped_a_relays_unsettled_version_saw_it_and_what_it_was_made_over
         bases: vec![WireBase {
             op: 0,
             key: Vec::new(),
-            seq: Some(seen),
-            pending: None,
+            on,
         }],
-        origin: Some(origin),
+        origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
     };
-    let first: Writer = ([0xa1; 16], LOCAL_BASE + 1);
-    let second: Writer = ([0xa2; 16], LOCAL_BASE + 1);
-    let unknown: Writer = ([0xa3; 16], LOCAL_BASE + 1);
+    let tx = |n: u64| LOCAL_BASE + n;
     relay
-        .send(commit(LOCAL_BASE + 1, first, "first", seed))
+        .send(commit(
+            tx(1),
+            *row.0.as_bytes(),
+            "first",
+            BuiltOn::Seq(seed),
+        ))
         .unwrap();
-    // The second session was shipped the relay's version of the first.
+    // Another session was shipped the relay's version of the first.
+    let shipped = BuiltOn::Commit {
+        node: relay_node,
+        tx: tx(1),
+    };
     relay
-        .send(commit(LOCAL_BASE + 2, second, "second", LOCAL_BASE + 1))
+        .send(commit(tx(2), *row.0.as_bytes(), "second", shipped))
         .unwrap();
-    // A version the relay never uploaded: nothing accepted was seen.
+    // A commit the relay never sent, and one the authority rejected (it
+    // updates a row that does not exist).
+    let never = BuiltOn::Commit {
+        node: relay_node,
+        tx: tx(99),
+    };
     relay
-        .send(commit(LOCAL_BASE + 3, unknown, "unknown", LOCAL_BASE + 99))
+        .send(commit(tx(3), *row.0.as_bytes(), "unknown", never))
+        .unwrap();
+    relay
+        .send(commit(tx(4), [0xee; 16], "missing", BuiltOn::Seq(seed)))
+        .unwrap();
+    let on_rejected = BuiltOn::Commit {
+        node: relay_node,
+        tx: tx(4),
+    };
+    relay
+        .send(commit(
+            tx(5),
+            *row.0.as_bytes(),
+            "over rejected",
+            on_rejected,
+        ))
         .unwrap();
     block_on(core.tick()).unwrap();
 
+    let mut fates = BTreeMap::new();
+    while let Some(message) = relay.try_recv() {
+        if let SyncMessage::Fate { tx, result, .. } = message {
+            fates.insert(tx, result);
+        }
+    }
+    assert!(fates[&tx(1)].is_ok() && fates[&tx(2)].is_ok());
+    assert!(fates[&tx(3)].is_err(), "a base on a commit never received");
+    assert!(fates[&tx(4)].is_err());
+    assert!(
+        format!("{:?}", fates[&tx(5)]).contains("predecessor_rejected"),
+        "{:?}",
+        fates[&tx(5)]
+    );
+
     let conflicts = core.write_conflicts("todos", row, None).unwrap();
-    let find = |writer: Writer| {
-        conflicts
-            .iter()
-            .find(|conflict| conflict.writer == writer)
-            .unwrap_or_else(|| panic!("no accepted write by {writer:?}"))
-    };
+    assert_eq!(conflicts.len(), 4, "seed, core, first, second");
     let core_write = conflicts[1].writer;
     assert_eq!(core_write.0, [CORE; 16]);
-    assert_eq!(writers(&find(first).overlapping), vec![core_write]);
-    let second_conflict = find(second);
-    assert!(second_conflict.maybe_conflicting);
+    assert_eq!(conflicts[2].writer, (relay_node, tx(1)));
+    assert_eq!(writers(&conflicts[2].overlapping), vec![core_write]);
+    let second = &conflicts[3];
+    assert_eq!(second.writer, (relay_node, tx(2)));
+    assert!(second.maybe_conflicting);
     assert_eq!(
-        writers(&second_conflict.overlapping),
+        writers(&second.overlapping),
         vec![core_write],
-        "the first session's write was in the version it was shipped; the core's was not"
+        "the first write was in the version it was shipped; the core's was not"
     );
-    assert_eq!(second_conflict.resolved_base, Some(seed));
-    let unknown_conflict = find(unknown);
-    assert!(unknown_conflict.maybe_conflicting);
-    assert_eq!(unknown_conflict.resolved_base, None);
-    assert_eq!(
-        unknown_conflict.overlapping.len(),
-        4,
-        "every earlier version counts against a write over no accepted version"
-    );
+    assert_eq!(second.resolved_base, Some(seed));
 }
 
 #[test]
-fn a_session_the_relay_may_not_write_as_is_not_its_writer_and_carries_no_base() {
+fn a_session_the_relay_may_not_write_as_is_not_its_writer_and_keeps_its_base() {
     // A direct client claims a node first; a tab behind the worker then
     // uses the same node, which the worker's identity may not write as.
     let mut net = Net::new(0);
@@ -847,8 +868,8 @@ fn a_session_the_relay_may_not_write_as_is_not_its_writer_and_carries_no_base() 
         .find(|conflict| conflict.writer.0 == [WORKER; 16])
         .expect("the worker wrote the tab's edit");
     assert!(
-        !worker.maybe_conflicting,
-        "the session's base is dropped with it: a write without one is never flagged"
+        worker.maybe_conflicting,
+        "the base is the worker's to name: the tab never saw the claimer's edit"
     );
 }
 
@@ -979,31 +1000,64 @@ fn a_reopened_authority_still_derives_what_it_recorded() {
 }
 
 #[test]
-fn an_upload_whose_record_is_gone_reads_as_maybe_conflicting_and_authoring_every_column() {
+fn a_tab_built_on_another_tabs_unsettled_write_saw_it() {
+    let mut net = Net::with_worker(1, 2);
+    let row = net.seed(0);
+    net.worker_offline();
+    net.edit(1, row, &[("title", "tab 1")]);
+    net.pump();
+    // The second tab holds the worker's unsettled version of the first
+    // tab's write, and edits the same column over it.
+    let direct = net.edit_settled(0, row, &[("title", "direct")]);
+    net.edit(2, row, &[("title", "tab 2")]);
+    net.worker_online();
+    net.pump();
+    net.pump();
+
+    let [first, second] = <[_; 2]>::try_from(net.relayed(row)).unwrap();
+    assert_eq!(writers(&first.overlapping), vec![direct]);
+    assert!(second.maybe_conflicting, "it never saw the direct write");
+    assert_eq!(
+        writers(&second.overlapping),
+        vec![direct],
+        "the first tab's write was in the version it was built on"
+    );
+    assert_eq!(net.title(row), Some(Value::String("tab 2".to_owned())));
+}
+
+#[test]
+fn a_merge_base_is_the_version_the_write_was_built_on_when_it_missed_the_column() {
     let mut net = Net::new(2);
     let row = net.seed(0);
+    let base = |net: &Net, writer: Writer, column: &str| {
+        let seq = net.conflict(row, writer).seq;
+        net.core.merge_base("todos", row, seq, column).unwrap()
+    };
+    let text = |value: &str| Some(Value::String(value.to_owned()));
+
+    // Nothing missed: the fast path, no base.
+    let alone = net.edit_settled(0, row, &[("title", "alone")]);
+    assert_eq!(base(&net, alone, "title"), None);
+
+    // Bob missed alice's title: his title merges over the version he
+    // held; his note missed nothing that wrote the note.
     net.offline(1);
     let alice = net.edit_settled(0, row, &[("title", "alice")]);
-    let bob = net.edit(1, row, &[("note", "bob")]);
+    let bob = net.edit(1, row, &[("title", "bob"), ("note", "bob")]);
     net.online(1);
     net.settle(1, bob.1);
-    let alice_seq = net.conflict(row, alice).seq;
-    assert!(!net.conflict(row, alice).maybe_conflicting);
-    assert!(net.conflict(row, bob).overlapping.is_empty());
+    let _ = alice;
+    assert_eq!(base(&net, bob, "title"), text("alone"));
+    assert_eq!(base(&net, bob, "note"), None);
 
-    // Retention drops alice's record (and the seed's), not bob's.
-    net.core.prune_recorded_writes(alice_seq).unwrap();
-    let alice_conflict = net.conflict(row, alice);
-    assert!(
-        alice_conflict.maybe_conflicting,
-        "nothing tells what alice had seen"
-    );
-    assert_eq!(alice_conflict.resolved_base, None);
-    let bob_conflict = net.conflict(row, bob);
-    assert!(bob_conflict.maybe_conflicting);
-    assert_eq!(
-        writers(&bob_conflict.overlapping),
-        vec![alice],
-        "an unrecorded write authors every column"
-    );
+    // A chain: the second write was built on the first as it was sent.
+    net.pump();
+    net.offline(1);
+    let first = net.edit(1, row, &[("title", "first")]);
+    let second = net.edit(1, row, &[("title", "second")]);
+    net.edit_settled(0, row, &[("title", "carol")]);
+    net.online(1);
+    net.settle(1, second.1);
+    assert_eq!(base(&net, first, "title"), text("bob"));
+    assert_eq!(base(&net, second, "title"), text("first"));
 }

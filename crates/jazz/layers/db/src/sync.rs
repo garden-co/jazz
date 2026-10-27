@@ -426,41 +426,31 @@ fn echo_digest(image: &Image) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
-/// What the writer of a row version had seen of the row (SPEC 4 §4.6,
-/// "Base of a write"): `seq`, the settled image it held (an upstream seq,
-/// or the unsettled version of the sender's own commit at that tx, which a
-/// relay shipped it); `pending`, the newest unsettled commit to the row
-/// whose writes its image included. Both none is an empty base, which is
-/// never sent. Nothing here says the predecessor is the writer's own: only
-/// the conflict walk assumes it (INV-REF-4).
+/// What the writer of a row version built it on (SPEC 4 §4.6, "Base of a
+/// write"): the version of the row its image was, in names the receiver
+/// knows. A write over no held image (an insert, a blind write) sends none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBase {
     /// The commit's first op that writes the row.
     pub op: u32,
     /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
-    pub seq: Option<u64>,
-    pub pending: Option<WirePending>,
+    pub on: BuiltOn,
 }
 
-/// A base's pending predecessor.
+/// The version a write was built on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WirePending {
-    /// A commit of the commit's writer (its origin, or else its sender),
-    /// `back` txs before the writer's own tx.
+pub enum BuiltOn {
+    /// An accepted version, by its upstream seq. From a relay's session it
+    /// may be the relay's own unsettled version (a seq from `LOCAL_BASE`
+    /// up), which the relay renames to the commit that wrote it.
+    Seq(u64),
+    /// The sender's own unsettled commit `back` txs before this one: the
+    /// writer saw that commit as it sent it, and what that was built on.
     Own { back: u64 },
-    /// Any node's commit, by its full id.
-    Of { node: [u8; 16], tx: u64 },
-}
-
-impl WirePending {
-    /// The predecessor's full (node, tx), for a commit written as `writer`.
-    pub(crate) fn resolve(self, writer: ([u8; 16], u64)) -> Option<([u8; 16], u64)> {
-        match self {
-            Self::Own { back } => writer.1.checked_sub(back).map(|tx| (writer.0, tx)),
-            Self::Of { node, tx } => Some((node, tx)),
-        }
-    }
+    /// An unsettled commit by its sender's (node, tx), as a relay names one
+    /// of its own commits.
+    Commit { node: [u8; 16], tx: u64 },
 }
 
 /// A row of a commit's `expect` the server did not ship (see
@@ -2467,6 +2457,9 @@ impl Inner {
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
                         "_del" => image.deleted = r.get::<_, i64>(i)? != 0,
                         "_c" => image.content = r.get::<_, i64>(i)? != 0,
+                        // The authority's record of what the version was
+                        // built on; never replicated.
+                        "_base" | "_on" | "_cols" => {}
                         _ => image
                             .cells
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
@@ -2765,7 +2758,9 @@ impl Inner {
     }
 
     /// The settled image a local write at `seq` superseded: the newest
-    /// server version in history (none if the row is new).
+    /// upstream version in history (none if the row is new). A
+    /// non-durable client's upstream versions include its relay's
+    /// unsettled ones, below its own local seqs.
     fn settled_before(
         &self,
         table: &str,
@@ -2773,7 +2768,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
-        let base = LOCAL_BASE as i64;
+        let base = self.local_base() as i64;
         Ok(self
             .images_where(
                 table,
@@ -3658,8 +3653,9 @@ impl Db {
             .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
         let rows = inner.written_rows(&ops, seq)?;
         let mut shadows = Vec::new();
-        // What this replica had seen of each row it wrote (SPEC 4 §4.6): the
-        // settled image under its pending writes, and the newest of those.
+        // What this replica built each row it wrote on (SPEC 4 §4.6): its
+        // newest pending commit to the row, else the settled image under
+        // its pending writes.
         let mut bases = Vec::new();
         for (table, row, key) in &rows {
             let row_key = (table.clone(), *row, key.clone());
@@ -3673,21 +3669,20 @@ impl Db {
                     seq
                 }
             };
-            // This replica is the commit's writer: its predecessor goes by
-            // how far back it is.
-            let pending = client
-                .pending
-                .newest(&row_key)
-                .map(|tx| WirePending::Own { back: seq - tx });
+            // This replica sends the commit: its predecessor goes by how
+            // far back it is.
+            let on = match client.pending.newest(&row_key) {
+                Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
+                None => settled.map(BuiltOn::Seq),
+            };
             if relayed.is_none()
-                && (settled.is_some() || pending.is_some())
+                && let Some(on) = on
                 && let Some(op) = inner.op_writing(&ops, table, *row)
             {
                 bases.push(WireBase {
                     op,
                     key: key.clone(),
-                    seq: settled,
-                    pending,
+                    on,
                 });
             }
         }
@@ -6457,21 +6452,18 @@ impl Db {
                     });
                     return Ok(());
                 }
-                // The writer whose chain the bases name: a relay's session,
-                // when the link may write as its node (a trusted link, or
-                // one whose identity writes as that node too). Otherwise the
-                // sender is the writer, and the session's bases, which name
-                // the session's chain, are dropped: the write then reads as
-                // made over no held image.
-                let (writer, bases) = match origin {
+                // The session commit a relay's carries, when the link may
+                // write as its node (a trusted link, or one whose identity
+                // writes as that node too); otherwise the sender's own. The
+                // bases are in the sender's terms either way.
+                let writer = match origin {
                     Some(origin)
                         if policy.is_none()
                             || self.inner.borrow().claim_node(origin.0, &identity)? =>
                     {
-                        (origin, bases)
+                        origin
                     }
-                    Some(_) => ((node, tx), Vec::new()),
-                    None => ((node, tx), bases),
+                    _ => (node, tx),
                 };
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
@@ -6753,6 +6745,25 @@ impl Db {
                 }
             }
         }
+        // What each row was built on (SPEC 4 §4.6), before anything is
+        // applied: a base on a rejected commit rejects the upload. A relay
+        // renames the bases for its upstream; the authority resolves them.
+        let (bases, built) = {
+            let inner = self.inner();
+            let resolved = if relay {
+                inner
+                    .relay_bases(origin, bases)
+                    .map(|bases| (bases, HashMap::new()))
+            } else {
+                inner
+                    .resolve_bases(origin, &ops, &bases)
+                    .map(|built| (Vec::new(), built))
+            };
+            match resolved {
+                Ok(resolved) => resolved,
+                Err(error) => return Err((error, mentioned(&inner))),
+            }
+        };
         let (seq, mark) = {
             let mut inner = self.inner();
             let seq = inner.seq + 1;
@@ -6788,8 +6799,8 @@ impl Db {
         // The relay's own upload record and the rows the sender hears about
         // are read before the commit is released, so a storage error
         // rejects it whole instead of leaving it applied but not relayed.
-        // The authority keeps what the conflict derivation needs of each
-        // version it wrote (INV-HIST-21); a relay passes it on instead.
+        // The authority keeps what each version was built on (INV-HIST-21);
+        // a relay passes the bases on instead.
         let finished = if relay {
             self.record_upload(
                 ops.clone(),
@@ -6797,7 +6808,7 @@ impl Db {
                 upload,
                 Some(Relayed {
                     origin: writer,
-                    bases: bases.clone(),
+                    bases,
                 }),
             )
         } else {
@@ -6805,24 +6816,17 @@ impl Db {
         }
         .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
         .and_then(|rows| {
-            let recorded = !relay
-                && self.inner.borrow().record_writes_if_able(
-                    &ops,
-                    &bases,
-                    (origin.0, writer),
-                    seq,
-                    &rows,
-                )?;
-            Ok((rows, recorded))
+            if !relay {
+                self.inner.borrow().record_bases(&ops, &built, seq, &rows)?;
+            }
+            Ok(rows)
         });
         let mut inner = self.inner();
         match finished {
-            Ok((rows, recorded)) => {
+            Ok(rows) => {
                 end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
-                // `_jazz_writes` exists once the savepoint that created it
-                // is released, not before.
-                if recorded {
-                    inner.writes_table.set(true);
+                if !relay {
+                    inner.note_columns_table().map_err(|e| (e, Vec::new()))?;
                 }
                 drop(inner);
                 self.notify();

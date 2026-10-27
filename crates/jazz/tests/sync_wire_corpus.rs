@@ -259,12 +259,11 @@ impl Transport for Recording {
         for frame in encode_frames(message).unwrap() {
             let decoded: SyncMessage = postcard::from_bytes(&frame).unwrap();
             // The pinned Commit is the first that relays a session's write
-            // over a held image and a pending predecessor (bases, origin),
-            // else the first.
+            // built on an unsettled commit (bases, origin), else the first.
             let relayed = matches!(
                 &decoded,
                 SyncMessage::Commit { bases, origin: Some(_), .. }
-                    if bases.iter().any(|base| base.seq.is_some() && base.pending.is_some())
+                    if bases.iter().any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
@@ -282,7 +281,7 @@ impl Transport for Recording {
             let pinned_relayed = matches!(
                 postcard::from_bytes(&pinned.1),
                 Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
-                    if bases.iter().any(|base: &jazz::db::WireBase| base.seq.is_some() && base.pending.is_some())
+                    if bases.iter().any(|base: &jazz::db::WireBase| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             if relayed && !pinned_relayed {
                 *pinned = (self.peer.to_owned(), frame.clone());

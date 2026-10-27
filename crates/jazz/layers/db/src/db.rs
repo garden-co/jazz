@@ -49,11 +49,11 @@ use crate::values::{
     in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE, NON_DURABLE_BASE,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, Upstream, WireBase, WireError, WireKind, WireOp, WirePending, WireTarget,
-    WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
-    validate_frame_batch_for_corpus,
+    BuiltOn, Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
+    NON_DURABLE_BASE, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
+    SyncMessage, Transport, TransportError, Upstream, WireBase, WireError, WireKind, WireOp,
+    WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
+    encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -445,9 +445,9 @@ struct Inner {
     upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
-    /// `_jazz_writes` exists: the authority creates it with the first
+    /// `_jazz_columns` exists: the authority creates it with the first
     /// upload it accepts, so other stores keep their file as it was.
-    writes_table: std::cell::Cell<bool>,
+    columns_table: std::cell::Cell<bool>,
     /// Sessions the server ended for what they sent, with why, until the
     /// host takes them ([`Db::take_closed_subscribers`]).
     closed: Vec<(sync::SubscriberId, Error)>,
@@ -614,7 +614,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
             .filter(|column| {
                 !matches!(
                     column.as_str(),
-                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c"
+                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c" | "_base" | "_on" | "_cols"
                 )
             })
             .collect();
@@ -1128,7 +1128,7 @@ impl Db {
                 authority: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
-                writes_table: std::cell::Cell::new(false),
+                columns_table: std::cell::Cell::new(false),
                 closed: Vec::new(),
                 accepted: 0,
                 since_tick: Vec::new(),
@@ -3513,8 +3513,8 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del, _c{columns}) SELECT id, _b, _seq, _del, _c{columns} \
-             FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _on, _cols{columns}) \
+             SELECT id, _b, _seq, _del, _c, _base, _on, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored)
         );
@@ -3589,8 +3589,11 @@ impl Inner {
     ) -> Result<(), Error> {
         // Right-hand sides read the row before this update: `_seq` is still
         // the previous version's.
+        // What a new version was built on is the authority's to write
+        // (SPEC 4 §4.6).
         let mut sets = vec![
             "_seq = ?1".to_owned(),
+            "_base = NULL, _on = NULL, _cols = NULL".to_owned(),
             format!(
                 "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
                 content = content as u8

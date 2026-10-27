@@ -913,16 +913,19 @@ impl Table {
         // Rows are unique per (id, branch); branch views select by `_b`
         // first, so every index leads with it. `_c` is 1 when the version's
         // commit wrote content (not only a delete or a restore): history
-        // reads list those versions.
+        // reads list those versions. `_base`, `_on` and `_cols` are what the
+        // authority keeps of the version an accepted upload wrote: what it
+        // was built on and the columns it authored (SPEC 4 §4.6); NULL
+        // everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1{columns}, \
-             UNIQUE (id, _b));\n\
+             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1, \
+             _base INTEGER, _on INTEGER, _cols BLOB{columns}, UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1{columns}, \
-             PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1, _base INTEGER, _on INTEGER, \
+             _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
