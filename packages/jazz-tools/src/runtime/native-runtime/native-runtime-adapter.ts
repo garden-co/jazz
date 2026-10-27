@@ -4149,10 +4149,9 @@ export class NativeRuntimeAdapter implements Runtime {
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
     if (tier !== "global" && tier !== "remote") return null;
-    if (
-      this.serverTransportWorkEpoch !== observedEpoch ||
-      this.pendingInboundServerFrames.length > 0
-    ) {
+    // Queued frames are not new work while an earlier route is suspended.
+    // The pump owns those frames and publishes completion edges.
+    if (this.serverTransportWorkEpoch !== observedEpoch) {
       return { promise: Promise.resolve(), cancel: () => {} };
     }
     const waiter: ServerTransportWorkWaiter = {
