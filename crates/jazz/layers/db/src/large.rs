@@ -38,7 +38,7 @@ use jazz_types::large_values::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::options::{Error, ErrorCode};
+use crate::options::{Error, ErrorCode, Reason};
 use crate::values::{Column, Table, quote, storage};
 
 /// First byte of an inline bytes cell.
@@ -344,12 +344,12 @@ const MISSING: &str = "large-value chunks are not available locally yet; they we
      from upstream, so retry after the next sync tick";
 
 pub(crate) fn missing() -> Error {
-    Error::new(ErrorCode::NotObserved, MISSING)
+    Error::with_reason(ErrorCode::NotObserved, Reason::MissingChunks, MISSING)
 }
 
 /// Whether `error` is a statement that needed chunks this store lacks.
 pub(crate) fn is_missing(error: &Error) -> bool {
-    error.code == ErrorCode::NotObserved && error.message == MISSING
+    error.reason == Some(Reason::MissingChunks)
 }
 
 /// Verified chunks this process has read or written, and the way to read
