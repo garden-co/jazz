@@ -199,6 +199,13 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       { type: "permissionAdvice", advice: "unknown" },
       { type: "pending", operation: 256 },
       { type: "operationError", reason: "codec boundary: λ" },
+      { type: "operationError", code: "query", reason: "Query: unknown table λ" },
+      {
+        type: "operationError",
+        code: "write_rejected",
+        reasonName: "authorization_denied",
+        reason: "WriteRejected: authorization_denied: λ",
+      },
       { type: "transactionSettled", txId },
       {
         type: "nativeConnectionStatus",

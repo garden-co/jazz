@@ -720,7 +720,12 @@ pub enum WireKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireError {
     Conflict(String),
-    Rejected(String),
+    /// `reason`: the [`Reason`] by its stable name. A name this build does
+    /// not know arrives as a rejection without a reason, its message intact.
+    Rejected {
+        reason: Option<String>,
+        message: String,
+    },
     Other(String),
 }
 
@@ -1433,6 +1438,10 @@ pub(crate) struct Client {
     /// commit, but it never becomes `Global`.
     local_fates: HashSet<UploadId>,
     shadow: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
+    /// Shadow rows changed since `_jazz_shadow` was last written: it is
+    /// written by row, so a commit's cost does not grow with the pending
+    /// rows ahead of it.
+    shadow_dirty: HashSet<(String, RowUuid, Vec<u8>)>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
     /// The `known` cut last written to `_jazz_meta`.
@@ -2213,7 +2222,10 @@ impl SubscriberId {
 fn wire_error(error: &Error) -> WireError {
     match error.code {
         ErrorCode::TransactionConflict => WireError::Conflict(error.message.clone()),
-        ErrorCode::WriteRejected => WireError::Rejected(error.message.clone()),
+        ErrorCode::WriteRejected => WireError::Rejected {
+            reason: error.reason.map(|reason| reason.as_str().to_owned()),
+            message: error.message.clone(),
+        },
         _ => WireError::Other(error.to_string()),
     }
 }
@@ -2221,7 +2233,11 @@ fn wire_error(error: &Error) -> WireError {
 fn from_wire_error(error: WireError) -> Error {
     match error {
         WireError::Conflict(m) => Error::new(ErrorCode::TransactionConflict, m),
-        WireError::Rejected(m) => Error::new(ErrorCode::WriteRejected, m),
+        WireError::Rejected { reason, message } => Error {
+            code: ErrorCode::WriteRejected,
+            reason: reason.as_deref().and_then(Reason::from_name),
+            message,
+        },
         WireError::Other(m) => Error::new(ErrorCode::Protocol, m),
     }
 }
@@ -3446,7 +3462,9 @@ impl Inner {
             if let Some(mut image) = image {
                 image.seq = through;
                 let client = self.client.as_mut().expect("client");
-                client.shadow.insert((table, row, key), Some(image));
+                let coordinate = (table, row, key);
+                client.shadow_dirty.insert(coordinate.clone());
+                client.shadow.insert(coordinate, Some(image));
             }
         }
         Ok(())
@@ -3467,12 +3485,11 @@ impl Inner {
 
     fn receive_eviction(&mut self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let client = self.client.as_mut().expect("client");
-        match client
-            .shadow
-            .get_mut(&(table.to_owned(), row, key.to_vec()))
-        {
+        let shadowed = (table.to_owned(), row, key.to_vec());
+        match client.shadow.get_mut(&shadowed) {
             Some(shadow) => {
                 *shadow = None;
+                client.shadow_dirty.insert(shadowed);
                 Ok(true)
             }
             None => {
@@ -3883,25 +3900,28 @@ impl Inner {
         self.release_upload_roots(id)
     }
 
-    fn persist_shadow(&self) -> Result<(), Error> {
+    /// Write the shadow rows changed since the last write.
+    fn persist_shadow(&mut self) -> Result<(), Error> {
         let Some(client) = &self.client else {
             return Ok(());
         };
-        // SQLite's unqualified DELETE can dirty even an empty table. Reopening
-        // an owner with no overlay must leave its durable file unchanged.
-        self.exec("DELETE FROM _jazz_shadow WHERE true", [])
+        for shadowed in &client.shadow_dirty {
+            let (table, row, key) = shadowed;
+            let id = row.0.as_bytes().to_vec();
+            match client.shadow.get(shadowed) {
+                Some(image) => self.exec(
+                    "INSERT OR REPLACE INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![table, id, key, image.as_ref().map(encode)],
+                ),
+                None => self.exec(
+                    "DELETE FROM _jazz_shadow WHERE t = ?1 AND id = ?2 AND k = ?3",
+                    rusqlite::params![table, id, key],
+                ),
+            }
             .map_err(storage)?;
-        for ((table, row, key), image) in &client.shadow {
-            self.exec(
-                "INSERT INTO _jazz_shadow (t, id, k, image) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    table,
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    image.as_ref().map(encode)
-                ],
-            )
-            .map_err(storage)?;
+        }
+        if let Some(client) = self.client.as_mut() {
+            client.shadow_dirty.clear();
         }
         Ok(())
     }
@@ -4002,10 +4022,12 @@ impl Inner {
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
         ) {
+            // An unreadable fate is a damaged store, not an unseen commit:
+            // treating it as unseen would authorize a resend afresh.
             Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(|error| {
                 Error::new(
                     ErrorCode::Storage,
-                    format!("invalid stored write fate: {error}"),
+                    format!("undecodable recorded fate of commit {tx}: {error}"),
                 )
             }),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -4515,6 +4537,7 @@ impl Client {
             owner_inbound: VecDeque::new(),
             local_fates: HashSet::new(),
             shadow: HashMap::new(),
+            shadow_dirty: HashSet::new(),
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
@@ -5187,7 +5210,7 @@ fn schema_admission_error() -> Error {
 }
 
 struct FetchRequest {
-    inner: Rc<RefCell<Inner>>,
+    inner: Rc<Store>,
     id: u64,
 }
 
@@ -6585,7 +6608,7 @@ impl Db {
         if rebase {
             self.rebase()?;
         } else if shadow_changed {
-            self.inner.borrow().persist_shadow()?;
+            self.inner.borrow_mut().persist_shadow()?;
         }
         // A settled answer lists its result's rows: cached rows the
         // replica's view of that result holds and the server's lacks lost
@@ -6879,6 +6902,7 @@ impl Inner {
             self.conn
                 .execute_batch("SAVEPOINT replay")
                 .map_err(storage)?;
+            self.merging = true;
             let replayed = ops.iter().try_for_each(|op| {
                 if self.non_durable {
                     let who = op.author().map_or(Who::Local, Who::Attributed);
@@ -6887,6 +6911,7 @@ impl Inner {
                     self.apply(op, tx).map(drop)
                 }
             });
+            self.merging = false;
             match replayed {
                 Ok(()) => self.conn.execute_batch("RELEASE replay").map_err(storage)?,
                 Err(error) => {
@@ -6902,10 +6927,10 @@ impl Inner {
             }
         }
         let client = self.client.as_mut().expect("client");
-        client.shadow = shadow
-            .into_iter()
-            .filter(|(row, _)| keep.contains(row))
-            .collect();
+        let (kept, dropped): (HashMap<_, _>, HashMap<_, _>) =
+            shadow.into_iter().partition(|(row, _)| keep.contains(row));
+        client.shadow = kept;
+        client.shadow_dirty.extend(dropped.into_keys());
         self.persist_shadow()
     }
 
@@ -7106,10 +7131,9 @@ impl Inner {
     fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
         let row = RowUuid::from_bytes(image.id);
         let client = self.client.as_mut().expect("client");
-        if let Some(shadow) = client
-            .shadow
-            .get_mut(&(image.table.clone(), row, image.key.clone()))
-        {
+        let shadowed = (image.table.clone(), row, image.key.clone());
+        if let Some(shadow) = client.shadow.get_mut(&shadowed) {
+            client.shadow_dirty.insert(shadowed);
             match shadow {
                 Some(old) if old.seq >= image.seq && old.seq < LOCAL_BASE => {
                     self.put_image(&image, true)?;
@@ -7317,10 +7341,10 @@ impl Db {
         // A client that sent what this server cannot decode is
         // disconnected; nothing it sent is served.
         if failed {
-            return Err(Error {
-                code: ErrorCode::Protocol,
-                message: "sync message the server cannot decode".to_owned(),
-            });
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "sync message the server cannot decode",
+            ));
         }
         let mut inbound: VecDeque<SyncMessage> = inbound.into();
         self.serve_due_first_loads(index)?;
@@ -9857,9 +9881,11 @@ impl Db {
                             node,
                             tx,
                             through,
-                            result: Err(WireError::Rejected(
-                                "commit names a node another identity writes as".to_owned(),
-                            )),
+                            result: Err(WireError::Rejected {
+                                reason: None,
+                                message: "commit names a node another identity writes as"
+                                    .to_owned(),
+                            }),
                             held: Vec::new(),
                             global,
                         });
@@ -10285,12 +10311,14 @@ impl Db {
                     | WireKind::SerializableObservedV1 { .. }
                     | WireKind::SerializableUnionObservedV1 { .. }
             );
+            inner.merging = true;
             let applied = inner
                 .candidate_unit(&unit, seq, serializable, false, |inner| {
                     ops.iter()
                         .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
                 })
                 .and_then(|()| inner.record_writer_order(origin.0, origin.1, mark));
+            inner.merging = false;
             if let Err(error) = applied {
                 inner.changed.borrow_mut().truncate(mark);
                 inner

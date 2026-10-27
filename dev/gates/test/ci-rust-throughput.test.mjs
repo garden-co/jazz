@@ -1493,15 +1493,14 @@ test("the jazz-tools launcher reports Windows as unsupported instead of a missin
   assert.doesNotMatch(probe.stderr, /Bundled binary missing/);
 });
 
-test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {
-  const windowsNapiSetup =
-    /name: Install libclang for Windows bindgen[\s\S]*if: matrix\.platform == 'win32-x64-msvc'[\s\S]*choco install llvm --version=21\.1\.8 --yes --no-progress --limit-output[\s\S]*Test-Path \(Join-Path \$libclangPath "libclang\.dll"\)[\s\S]*LIBCLANG_PATH=\$libclangPath[\s\S]*\$env:GITHUB_PATH/;
-  assert.match(packageBuild, windowsNapiSetup);
-  assert.throws(
-    () =>
-      assert.match(packageBuild.replace('"LIBCLANG_PATH=$libclangPath" | ', ""), windowsNapiSetup),
-    /LIBCLANG_PATH/,
-  );
+test("native release builds need no libclang because no Rust dependency uses bindgen", () => {
+  // RocksDB's sys crates pulled in bindgen, which needed libclang on every
+  // build host. If bindgen returns, provision libclang where it is needed
+  // (Windows MSVC runners, the Bullseye NAPI image, Vercel) before updating this.
+  const lockfile = fs.readFileSync(path.join(root, "Cargo.lock"), "utf8");
+  for (const crate of ["bindgen", "clang-sys", "rust-librocksdb-sys"])
+    assert.doesNotMatch(lockfile, new RegExp(`^name = "${crate}"$`, "m"), crate);
+  assert.doesNotMatch(packageBuild, /libclang|LIBCLANG_PATH/);
 });
 
 test("pkg.pr.new previews omit Windows while release package builds retain it", () => {

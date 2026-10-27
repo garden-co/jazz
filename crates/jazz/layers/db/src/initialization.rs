@@ -57,7 +57,7 @@ impl ReservedTxId {
 /// by its old open id. Dropping or cancelling a seal publishes nothing and drops
 /// its staged upload leases. Its durable allocator reservation is never reused.
 pub struct InitializationSeal {
-    pub(super) owner: Weak<RefCell<Inner>>,
+    pub(super) owner: Weak<Store>,
     pub(super) reservation: ReservedTxId,
     pub(super) batch: Batch,
     pub(super) owner_nonce: Option<[u8; 16]>,

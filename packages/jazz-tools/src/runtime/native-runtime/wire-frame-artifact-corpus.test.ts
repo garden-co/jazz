@@ -18,6 +18,7 @@ type SyncWireCorpus = {
   format: string;
   messages: Array<{ variant: string; reader: Reader; frame_hex: string }>;
   examples: Array<{ name: string; variant: string; reader: Reader; frame_hex: string }>;
+  fates?: Array<{ name: string; reason: string | null; reader: Reader; frame_hex: string }>;
   frames: Batch[];
   rejections: Batch[];
 };
@@ -65,6 +66,11 @@ describe("wire frame artifact corpus", () => {
           name: message.variant,
           reader: message.reader,
           batch: encodeWebSocketFrameBatch([hexToBytes(message.frame_hex)]),
+        })),
+        ...(corpus.fates ?? []).map((fate) => ({
+          name: fate.name,
+          reader: fate.reader,
+          batch: encodeWebSocketFrameBatch([hexToBytes(fate.frame_hex)]),
         })),
         ...corpus.frames.map((frame) => ({
           name: frame.name,

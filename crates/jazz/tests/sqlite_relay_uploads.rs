@@ -498,7 +498,13 @@ fn relay_journal_and_fates_have_frozen_versioned_bytes() {
     for (name, result) in [
         ("accepted", Ok(())),
         ("conflict", Err(WireError::Conflict("stale".into()))),
-        ("rejected", Err(WireError::Rejected("denied".into()))),
+        (
+            "rejected",
+            Err(WireError::Rejected {
+                reason: None,
+                message: "denied".into(),
+            }),
+        ),
         ("other", Err(WireError::Other("oops".into()))),
     ] {
         let message = SyncMessage::OriginFateV2 {

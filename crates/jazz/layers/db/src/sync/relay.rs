@@ -526,7 +526,7 @@ impl Db {
 /// Complete relayed and private-owner uploads captured before a storage flush.
 /// Confirming it after the flush cannot acknowledge later arrivals or another owner.
 pub struct OwnerDurabilityBarrier {
-    owner: std::rc::Weak<std::cell::RefCell<Inner>>,
+    owner: std::rc::Weak<Store>,
     uploads: Vec<UploadId>,
     own_uploads: Vec<UploadId>,
     reservations: Vec<(usize, u64, owner_init::OwnerReservation)>,

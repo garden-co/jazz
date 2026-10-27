@@ -16,12 +16,20 @@ fixture="$(realpath "$fixture")"
 # Inspect the exact installed payload, not a workspace generation pointer.
 node dev/artifacts/linux-napi/verify-elf.mjs \
   "$fixture/node_modules/@garden-co/jazz-napi-$platform/jazz-napi.$platform.node" "$platform"
+# Run where it was built (Bullseye), on Vercel's build userspace (AL2023), and
+# in the Lambda Node runtime.
 baseline="$(sha256sum dev/artifacts/linux-napi/Dockerfile | cut -d ' ' -f1)"
-image="jazz-napi-al2023:${baseline}-${arch}"
+image="jazz-napi-bullseye:${baseline}-${arch}"
 docker build --platform "linux/$arch" --tag "$image" dev/artifacts/linux-napi
-for environment in baseline lambda; do
-  if [[ "$environment" == baseline ]]; then selected="$image"; entry=node
-  else selected="$runtime"; entry=/var/lang/bin/node; fi
+al2023_recipe="$(sha256sum dev/artifacts/linux-napi/al2023/Dockerfile | cut -d ' ' -f1)"
+al2023="jazz-napi-al2023-runtime:${al2023_recipe}-${arch}"
+docker build --platform "linux/$arch" --tag "$al2023" dev/artifacts/linux-napi/al2023
+for environment in baseline al2023 lambda; do
+  case "$environment" in
+    baseline) selected="$image"; entry=node ;;
+    al2023) selected="$al2023"; entry=node ;;
+    lambda) selected="$runtime"; entry=/var/lang/bin/node ;;
+  esac
   echo "Packed NAPI smoke: $platform / $environment / host $(uname -m)"
   docker run --rm --platform "linux/$arch" --entrypoint "$entry" \
     --volume "$fixture:$fixture:ro" --workdir "$fixture" \

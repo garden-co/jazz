@@ -21,7 +21,7 @@ pub(super) struct OwnerReservation {
     pub(super) durable: bool,
 }
 struct ReservationWait {
-    inner: Weak<RefCell<Inner>>,
+    inner: Weak<Store>,
     id: u64,
 }
 impl Drop for ReservationWait {

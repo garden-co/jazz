@@ -14,9 +14,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SyncMessage,
-    Transport, UpdateOptions, block_on, decode_message, encode_frames, encode_message,
-    validate_frame_batch_for_corpus,
+    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, Reason, SyncMessage,
+    Transport, UpdateOptions, WireError as SyncWireError, block_on, decode_message, encode_frames,
+    encode_message, validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
@@ -119,6 +119,10 @@ struct Corpus {
     messages: Vec<Message>,
     #[serde(default)]
     examples: Vec<Message>,
+    /// Recorded `Fate` frames of rejected commits, one per shape of
+    /// rejection: with a reason name and without one.
+    #[serde(default)]
+    fates: Vec<Fate>,
     /// Complete batches a reader accepts that are not sync messages.
     frames: Vec<Batch>,
     /// Batches a reader must reject.
@@ -128,6 +132,15 @@ struct Corpus {
 #[derive(Debug, Serialize, Deserialize)]
 struct Message {
     variant: String,
+    reader: String,
+    frame_hex: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Fate {
+    name: String,
+    /// The rejection's reason name, or `None` for a rejection without one.
+    reason: Option<String>,
     reader: String,
     frame_hex: String,
 }
@@ -200,6 +213,44 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
     }
 }
 
+/// The rejected-fate layout (a reason name beside the message) is pinned by
+/// real frames: each still decodes to a rejection with its reason name and
+/// re-encodes to the same bytes.
+#[test]
+fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
+    let corpus = corpus_named("sqlite_sync_wire_v2.json");
+    let reasons: Vec<Option<&str>> = corpus.fates.iter().map(|f| f.reason.as_deref()).collect();
+    assert_eq!(
+        reasons,
+        [Some(Reason::ClientClockTooFarAhead.as_str()), None],
+        "a rejection with a reason name and one without"
+    );
+    for fate in &corpus.fates {
+        let bytes = unhex(&fate.frame_hex);
+        let decoded: SyncMessage = postcard::from_bytes(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "{}: the pinned frame no longer decodes ({error}); the fate layout changed",
+                fate.name
+            )
+        });
+        let SyncMessage::Fate {
+            result: Err(SyncWireError::Rejected { reason, message }),
+            ..
+        } = &decoded
+        else {
+            panic!("{}: not a rejected fate: {decoded:?}", fate.name);
+        };
+        assert_eq!(reason, &fate.reason, "{}", fate.name);
+        assert!(!message.is_empty(), "{}", fate.name);
+        assert_eq!(
+            postcard::to_allocvec(&decoded).unwrap(),
+            bytes,
+            "{}: re-encoding changed the bytes; the fate layout changed",
+            fate.name
+        );
+    }
+}
+
 #[test]
 fn the_corpus_validator_accepts_every_frame_and_rejects_every_rejection() {
     let corpus = corpus_named("sqlite_sync_wire_v2.json");
@@ -208,6 +259,11 @@ fn the_corpus_validator_accepts_every_frame_and_rejects_every_rejection() {
         let batch = encode_websocket_frame_batch(&[unhex(&message.frame_hex)]).unwrap();
         validate_frame_batch_for_corpus(&batch, reader(&message.reader), features)
             .unwrap_or_else(|error| panic!("{}: {error}", message.variant));
+    }
+    for fate in &corpus.fates {
+        let batch = encode_websocket_frame_batch(&[unhex(&fate.frame_hex)]).unwrap();
+        validate_frame_batch_for_corpus(&batch, reader(&fate.reader), features)
+            .unwrap_or_else(|error| panic!("{}: {error}", fate.name));
     }
     for frame in &corpus.frames {
         validate_frame_batch_for_corpus(&unhex(&frame.batch_hex), reader(&frame.reader), features)
@@ -264,8 +320,17 @@ impl Transport for Recording {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message).unwrap() {
             let decoded: SyncMessage = postcard::from_bytes(&frame).unwrap();
-            self.recorded
-                .borrow_mut()
+            let mut recorded = self.recorded.borrow_mut();
+            if let SyncMessage::Fate {
+                result: Err(SyncWireError::Rejected { reason, .. }),
+                ..
+            } = &decoded
+            {
+                recorded
+                    .entry(rejected_fate_key(reason.as_deref()))
+                    .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
+            }
+            recorded
                 .entry(variant(&decoded))
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             self.outbound.borrow_mut().push_back(decoded);
@@ -276,6 +341,11 @@ impl Transport for Recording {
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
     }
+}
+
+/// The recording key of the first rejected fate with `reason`.
+fn rejected_fate_key(reason: Option<&str>) -> String {
+    format!("rejected Fate ({})", reason.unwrap_or("no reason"))
 }
 
 fn connect(client: &Db, server: &Db, author: AuthorSubject, recorded: &Recorded) {
@@ -488,6 +558,29 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default())).unwrap();
     pump(&[&tab, &worker, &server, &worker, &tab]);
 
+    // Fate rejected with a reason: alice stamps a write further ahead of
+    // the server's clock than the skew tolerance allows.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    block_on(alice.insert(
+        "notes",
+        note(1, vec![6]),
+        InsertOptions {
+            updated_at_ms: Some(now + jazz::db::SKEW_TOLERANCE_MS as u64 + 60_000),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // Fate rejected without a reason: another author claims alice's node.
+    let mallory = open(0x51, user(2), false);
+    connect(&mallory, &server, user(2), &recorded);
+    block_on(mallory.insert("notes", note(2, vec![7]), InsertOptions::default())).unwrap();
+    pump(&[&mallory, &server, &mallory]);
+
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
     // does, on the schema version alice announced.
@@ -541,6 +634,21 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         .filter(|v| !recorded.contains_key(*v))
         .collect();
     assert!(missing.is_empty(), "the scenario never sent {missing:?}");
+    let fates: Vec<Fate> = [Some(Reason::ClientClockTooFarAhead.as_str()), None]
+        .into_iter()
+        .map(|reason| {
+            let name = rejected_fate_key(reason);
+            let (reader, frame) = recorded
+                .remove(&name)
+                .unwrap_or_else(|| panic!("the scenario never sent a {name}"));
+            Fate {
+                name,
+                reason: reason.map(str::to_owned),
+                reader,
+                frame_hex: hex(&frame),
+            }
+        })
+        .collect();
     let messages: Vec<Message> = VARIANTS
         .iter()
         .map(|v| {
@@ -598,6 +706,7 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         format: FORMAT.to_owned(),
         messages,
         examples: Vec::new(),
+        fates,
         frames: vec![
             entry(
                 "client hello",

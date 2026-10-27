@@ -1118,7 +1118,7 @@ type Stage = Box<dyn FnMut(lv::StagedChunk) -> Result<(), lv::Error>>;
 /// the lease that holds its stored nodes.
 pub struct StreamingValueUpload {
     id: [u8; 32],
-    owner: std::rc::Weak<RefCell<Inner>>,
+    owner: std::rc::Weak<Store>,
     schema: SchemaViewId,
     table: String,
     column: String,
@@ -1132,7 +1132,7 @@ pub struct StreamingValueUpload {
 /// An opaque capability for one completed upload. It cannot expose or change
 /// its descriptor, mutation target or identity after staging.
 pub struct StagedStreamingValue {
-    owner: std::rc::Weak<RefCell<Inner>>,
+    owner: std::rc::Weak<Store>,
     schema: SchemaViewId,
     pending: Option<StagedStreamingMutation>,
 }

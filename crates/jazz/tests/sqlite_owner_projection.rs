@@ -526,7 +526,10 @@ fn a_rejection_without_an_eviction_removes_only_the_original_pending_insert() {
             node: [1; 16],
             tx,
             through: 0,
-            result: Err(jazz::db::WireError::Rejected("permission denied".into())),
+            result: Err(jazz::db::WireError::Rejected {
+                reason: None,
+                message: "permission denied".into(),
+            }),
         })
         .unwrap();
     turns(&[&owner, &tab]);
@@ -616,7 +619,10 @@ fn rejected_copy_on_write_removes_new_head_without_touching_pending_base() {
             node: [1; 16],
             tx: draft,
             through: 0,
-            result: Err(jazz::db::WireError::Rejected("draft denied".into())),
+            result: Err(jazz::db::WireError::Rejected {
+                reason: None,
+                message: "draft denied".into(),
+            }),
         })
         .unwrap();
     turns(&[&owner, &tab]);

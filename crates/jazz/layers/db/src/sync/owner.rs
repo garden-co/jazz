@@ -582,6 +582,9 @@ impl Inner {
             }
         }
         let client = self.client.as_mut().expect("owner replica");
+        client
+            .shadow_dirty
+            .extend(shadow.iter().map(|(key, _)| key.clone()));
         client.shadow.extend(shadow);
         client.pending.push(Pending {
             expected: Vec::new(),
@@ -1532,6 +1535,9 @@ impl Inner {
                 shadows.push((coordinate.clone(), current));
             }
             let client = self.client.as_mut().expect("foreground");
+            client
+                .shadow_dirty
+                .extend(shadows.iter().map(|(key, _)| key.clone()));
             client.shadow.extend(shadows);
             if let Some(index) = existing {
                 client.pending[index].seq = position;

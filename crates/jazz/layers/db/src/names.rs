@@ -268,6 +268,11 @@ impl Names {
         Ok(())
     }
 
+    /// Whether any lens recorded cells to fill.
+    pub(crate) fn has_lens_cells(&self) -> bool {
+        !self.lens_cells.is_empty()
+    }
+
     /// The lens cells a row admitted `version` inserts into `table` fills:
     /// (column, stored copy) for copies later versions' lenses made of its
     /// columns, and (stored column, backwards default) for columns earlier

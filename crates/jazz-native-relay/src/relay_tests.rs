@@ -9178,6 +9178,7 @@ fn foreground_transaction_commands_delegate_to_core_and_retire_with_their_owner(
     assert_eq!(
         rejected_insert,
         ForegroundDbCommandResponse::CodedOperationError {
+            reason_name: None,
             code: "query".to_owned(),
             reason: "Query: unknown table missing_table".to_owned(),
         }
@@ -9530,6 +9531,7 @@ fn foreground_coded_operation_error_v1_byte_contract() {
     // Response 25 is appended to V1: a core error's stable code, then the
     // unchanged reason. Uncoded failures keep response 8.
     let coded = ForegroundDbCommandResponse::CodedOperationError {
+        reason_name: None,
         code: "not_observed".into(),
         reason: "NotObserved: oops".into(),
     };

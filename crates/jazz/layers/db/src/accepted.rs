@@ -380,7 +380,7 @@ impl Drop for ReadGuard {
 /// Exactly as a served request, a batch's frozen claims apply only while its
 /// synchronous commit is evaluated and encoded; ambient claims are restored.
 pub(super) struct ClaimsScope {
-    inner: Rc<RefCell<Inner>>,
+    inner: Rc<Store>,
     previous: Option<(AuthorSubject, Option<BTreeMap<String, Value>>)>,
 }
 impl ClaimsScope {

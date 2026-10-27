@@ -29,7 +29,7 @@ fn polled(response: ForegroundDbCommandResponse) -> ForegroundOperationPoll {
         R::OperationError { reason } => {
             return ForegroundOperationPoll::Error { code: None, reason };
         }
-        R::CodedOperationError { code, reason } => {
+        R::CodedOperationError { code, reason, .. } => {
             return ForegroundOperationPoll::Error {
                 code: Some(code),
                 reason,
@@ -50,7 +50,7 @@ fn required(
         ForegroundDbCommandResponse::OperationError { reason } => {
             Err(RelayError::ForegroundCommand(reason))
         }
-        ForegroundDbCommandResponse::CodedOperationError { code, reason } => {
+        ForegroundDbCommandResponse::CodedOperationError { code, reason, .. } => {
             Err(RelayError::ForegroundCommand(format!("{code}: {reason}")))
         }
         response => Ok(response),

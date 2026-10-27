@@ -65,7 +65,7 @@ async fn permissions_gate_rejects_each_original_writer_explicitly() {
             for frame in frames {
                 if let SyncMessage::OriginFateV2 {node,tx,through,result,..}=jazz::sync_codec::decode_sync_message(&frame).unwrap() {
                     assert_eq!(tx,127);assert_eq!(through,0);
-                    assert!(matches!(result,Err(WireError::Rejected(ref m)) if m.contains("permissions_head_missing")));
+                    assert!(matches!(result,Err(WireError::Rejected { ref message, .. }) if message.contains("permissions_head_missing")));
                     nodes.push(node);
                 }
             }

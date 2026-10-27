@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use crate::kv::SqliteKv;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LensEffects, SubscriberId, SyncMessage, Transport,
-    TransportError, WireError, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
+    Transport, TransportError, WireError, block_on,
 };
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::{
@@ -1034,10 +1034,11 @@ impl Owner {
                             node,
                             tx,
                             through: self.db.seq_high_water(),
-                            result: Err(WireError::Rejected(
-                                "permissions_head_missing: no published permissions head"
+                            result: Err(WireError::Rejected {
+                                reason: Some(Reason::PermissionsHeadMissing.as_str().to_owned()),
+                                message: "permissions_head_missing: no published permissions head"
                                     .to_owned(),
-                            )),
+                            }),
                             held: Vec::new(),
                             global: true,
                         },

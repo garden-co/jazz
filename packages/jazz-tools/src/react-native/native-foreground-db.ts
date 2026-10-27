@@ -966,9 +966,15 @@ class NativeForegroundSubscription {
  * The error a failed foreground operation throws: the unchanged reason text as
  * the message, plus the stable core `code` when a core error caused it.
  */
-function foregroundOperationError(response: { reason: string; code?: string }): Error {
+function foregroundOperationError(response: {
+  reason: string;
+  code?: string;
+  reasonName?: string;
+}): Error {
   const error = new Error(response.reason);
-  return response.code === undefined ? error : Object.assign(error, { code: response.code });
+  if (response.code !== undefined) Object.assign(error, { code: response.code });
+  if (response.reasonName !== undefined) Object.assign(error, { reason: response.reasonName });
+  return error;
 }
 
 function unsupported(operation: string): never {

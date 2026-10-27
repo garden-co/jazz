@@ -1,7 +1,9 @@
 //! Session write checks: WITH CHECK compares the new row with
 //! the other rows as they were before the write, and a trusted link's
 //! session write is staged on the replica and checked as that session, with
-//! the claims the link vouches for, at the authority.
+//! the claims the link vouches for, at the authority. Before any policy,
+//! the authority refuses every write by an anonymous identity and a write
+//! timestamped too far ahead of its clock.
 
 use crate::common;
 
@@ -22,7 +24,7 @@ use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 
-use common::{compile_schema, exists, outer_eq, session_eq};
+use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
 const SUB: [&str; 2] = ["claims", "sub"];
 
@@ -72,6 +74,11 @@ fn schema() -> JazzSchema {
                                 PolicyExpr::True,
                             ),
                     ),
+            )
+            .table(
+                TableSchemaBuilder::new("board")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
             )
             .table(
                 // Only reads are declared: every write is denied.
@@ -223,6 +230,116 @@ fn an_operation_without_a_policy_denies_session_writes() {
     ))
     .expect("the database writes without a policy");
     assert_eq!(cell(&db, "drafts", "body"), text("edited"));
+}
+
+/// SPEC 7, INV-RLS-15: an anonymous identity is read-only. Its inserts,
+/// updates and deletes are denied before policies run, even where every
+/// policy allows them.
+#[test]
+fn an_anonymous_session_cannot_write_where_policies_allow_it() {
+    let db = open(0);
+    seed(&db, "board", id(5, 1), &[("body", text("first"))]);
+    let anonymous = AuthorSubject::reserved(AuthorSubject::ANONYMOUS_ISSUER, "visitor").unwrap();
+    let session = WriteIdentity::Session(anonymous);
+    let insert = block_on(db.insert(
+        "board",
+        BTreeMap::from([("body".to_owned(), text("second"))]),
+        InsertOptions {
+            identity: session,
+            ..Default::default()
+        },
+    ))
+    .err()
+    .expect("anonymous insert");
+    assert!(insert.is_authorization_denied(), "{}", insert.message);
+    let update = block_on(db.update(
+        "board",
+        id(5, 1),
+        BTreeMap::from([("body".to_owned(), text("edited"))]),
+        as_session(anonymous),
+    ))
+    .err()
+    .expect("anonymous update");
+    assert!(update.is_authorization_denied(), "{}", update.message);
+    let delete = block_on(db.delete(
+        "board",
+        id(5, 1),
+        DeleteOptions {
+            identity: session,
+            ..Default::default()
+        },
+    ))
+    .err()
+    .expect("anonymous delete");
+    assert!(delete.is_authorization_denied(), "{}", delete.message);
+    assert_eq!(cell(&db, "board", "body"), text("first"));
+
+    let alice = user(&db, 1, "alice");
+    block_on(db.update(
+        "board",
+        id(5, 1),
+        BTreeMap::from([("body".to_owned(), text("edited"))]),
+        as_session(alice),
+    ))
+    .expect("the policy allows a signed-in session");
+    assert_eq!(cell(&db, "board", "body"), text("edited"));
+}
+
+/// SPEC 3, INV-TX-7: a session's explicit write timestamp only stamps
+/// provenance, and the authority refuses one more than the skew tolerance
+/// ahead of its own clock rather than stamp history in the future.
+#[test]
+fn a_session_write_timestamped_too_far_ahead_is_rejected() {
+    let db = open(0);
+    seed(&db, "board", id(5, 1), &[("body", text("first"))]);
+    let alice = user(&db, 1, "alice");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let at = |ms: u64| UpdateOptions {
+        updated_at_ms: Some(ms),
+        ..as_session(alice)
+    };
+    let ahead = now + jazz::db::SKEW_TOLERANCE_MS as u64 + 60_000;
+    let refused = block_on(db.update(
+        "board",
+        id(5, 1),
+        BTreeMap::from([("body".to_owned(), text("future"))]),
+        at(ahead),
+    ))
+    .err()
+    .expect("too far ahead");
+    assert_eq!(
+        refused.reason,
+        Some(jazz::db::Reason::ClientClockTooFarAhead),
+        "{}",
+        refused.message
+    );
+    assert!(
+        refused
+            .message
+            .starts_with(jazz::db::CLIENT_CLOCK_TOO_FAR_AHEAD),
+        "{}",
+        refused.message
+    );
+    assert_eq!(cell(&db, "board", "body"), text("first"));
+
+    block_on(db.update(
+        "board",
+        id(5, 1),
+        BTreeMap::from([("body".to_owned(), text("backfilled"))]),
+        at(now - 3_600_000),
+    ))
+    .expect("an earlier timestamp is a backfill");
+    block_on(db.update(
+        "board",
+        id(5, 1),
+        BTreeMap::from([("body".to_owned(), text("slightly ahead"))]),
+        at(now + 5_000),
+    ))
+    .expect("within the tolerance");
+    assert_eq!(cell(&db, "board", "body"), text("slightly ahead"));
 }
 
 #[test]

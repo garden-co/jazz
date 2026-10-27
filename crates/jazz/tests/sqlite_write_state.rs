@@ -338,7 +338,13 @@ fn write_fate_v1_keeps_the_existing_postcard_encoding() {
     let cases = [
         ("accepted", Ok(())),
         ("conflict", Err(WireError::Conflict("no".into()))),
-        ("rejected", Err(WireError::Rejected("no".into()))),
+        (
+            "rejected",
+            Err(WireError::Rejected {
+                reason: None,
+                message: "no".into(),
+            }),
+        ),
         ("other", Err(WireError::Other("no".into()))),
     ];
     for (name, fate) in cases {
