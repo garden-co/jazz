@@ -64,6 +64,9 @@ patchedDependencies:
   playwright-core@1.58.2:
     hash: adbc48d03b687177ce951efff00094250ea2f00d339de5031db6bbbb122cc5a5
     path: patches/playwright-core@1.58.2.patch
+  yjs@13.6.33:
+    hash: a0c77e23f96fba2397093c9e924ad67f0089c6fde6f5fc6890ce36de7103ded9
+    path: patches/yjs@13.6.33.patch
 
 importers:
 
@@ -1573,10 +1576,10 @@ importers:
         version: 19.2.4(react@19.2.4)
       y-codemirror.next:
         specifier: ^0.3.5
-        version: 0.3.6(@codemirror/state@6.7.6)(@codemirror/view@6.43.13)(yjs@13.6.33)
+        version: 0.3.6(@codemirror/state@6.7.6)(@codemirror/view@6.43.13)(yjs@13.6.33(patch_hash=a0c77e23f96fba2397093c9e924ad67f0089c6fde6f5fc6890ce36de7103ded9))
       yjs:
         specifier: ^13.6.27
-        version: 13.6.33
+        version: 13.6.33(patch_hash=a0c77e23f96fba2397093c9e924ad67f0089c6fde6f5fc6890ce36de7103ded9)
     devDependencies:
       '@codspeed/vitest-plugin':
         specifier: ^5.7.1
@@ -27663,12 +27666,12 @@ snapshots:
 
   xmlchars@2.2.0: {}
 
-  y-codemirror.next@0.3.6(@codemirror/state@6.7.6)(@codemirror/view@6.43.13)(yjs@13.6.33):
+  y-codemirror.next@0.3.6(@codemirror/state@6.7.6)(@codemirror/view@6.43.13)(yjs@13.6.33(patch_hash=a0c77e23f96fba2397093c9e924ad67f0089c6fde6f5fc6890ce36de7103ded9)):
     dependencies:
       '@codemirror/state': 6.7.6
       '@codemirror/view': 6.43.13
       lib0: 0.2.119
-      yjs: 13.6.33
+      yjs: 13.6.33(patch_hash=a0c77e23f96fba2397093c9e924ad67f0089c6fde6f5fc6890ce36de7103ded9)
 
   y18n@4.0.3: {}
 
@@ -27713,7 +27716,7 @@ snapshots:
       y18n: 5.0.8
       yargs-parser: 21.1.1
 
-  yjs@13.6.33:
+  yjs@13.6.33(patch_hash=a0c77e23f96fba2397093c9e924ad67f0089c6fde6f5fc6890ce36de7103ded9):
     dependencies:
       lib0: 0.2.119
 

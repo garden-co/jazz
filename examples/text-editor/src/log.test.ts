@@ -66,4 +66,37 @@ describe("Yjs update log", () => {
     source.destroy();
     loaded.destroy();
   });
+
+  it("merges a batched replay's structs as the writer and an update-by-update replay do", () => {
+    // patches/yjs@13.6.33.patch compacts the struct store in one pass after a
+    // transaction with many deletions; its result must not change.
+    const layout = (doc: Y.Doc) =>
+      [...doc.store.clients.values()]
+        .map((structs) => structs.map((s) => `${s.id.clock}+${s.length}${s.deleted ? "d" : ""}`))
+        .join("|");
+    let seed = 7;
+    const random = (n: number) => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed % n;
+    };
+    const source = new Y.Doc();
+    source.clientID = 1;
+    const records: Uint8Array[] = [];
+    source.on("update", (update: Uint8Array) => records.push(update));
+    const text = source.getText("text");
+    for (let i = 0; i < 3000; i++) {
+      if (text.length && random(3) === 0) {
+        const at = random(text.length);
+        text.delete(at, 1 + random(Math.min(5, text.length - at)));
+      } else text.insert(random(text.length + 1), "xy".slice(0, 1 + random(2)));
+    }
+    const batched = new Y.Doc();
+    batched.transact(() => applyUpdates(batched, new Uint8Array(records.flatMap((r) => [...r]))));
+    const each = new Y.Doc();
+    for (const record of records) applyUpdates(each, record);
+    expect(batched.getText("text").toString()).toBe(text.toString());
+    expect(layout(batched)).toBe(layout(source));
+    expect(layout(each)).toBe(layout(source));
+    for (const doc of [source, batched, each]) doc.destroy();
+  });
 });

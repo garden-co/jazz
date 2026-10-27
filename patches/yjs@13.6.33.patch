@@ -1,0 +1,186 @@
+diff --git a/dist/yjs.cjs b/dist/yjs.cjs
+index a29f8ef1834d884d6650fde67c5541643f8a9d55..b4c246c00f1c0e03f2aa0349baf5fb84c3d0cef9 100644
+--- a/dist/yjs.cjs
++++ b/dist/yjs.cjs
+@@ -3247,21 +3247,48 @@ const tryGcDeleteSet = (ds, store, gcFilter) => {
+  */
+ const tryMergeDeleteSet = (ds, store) => {
+   // try to merge deleted / gc'd items
+-  // merge from right to left for better efficiency and so we don't miss any merge targets
++  // Each client's structs are compacted in one left-to-right pass: a struct
++  // inside a deleted range (or right after one) is merged into its lefts as
++  // far as they merge. Splicing the array once per merge would move its whole
++  // tail every time, which is quadratic in the number of deletions.
++  // `ds` is sorted and merged (see cleanupTransactions).
+   ds.clients.forEach((deleteItems, client) => {
+     const structs = /** @type {Array<GC|Item>} */ (store.clients.get(client));
+-    for (let di = deleteItems.length - 1; di >= 0; di--) {
++    if (deleteItems.length === 0) {
++      return;
++    }
++    // clock range of the structs to merge with their lefts, per delete item
++    const starts = [];
++    const ends = [];
++    for (let di = 0; di < deleteItems.length; di++) {
+       const deleteItem = deleteItems[di];
+-      // start with merging the item next to the last deleted item
++      // up to the item next to the last deleted item
+       const mostRightIndexToCheck = math__namespace.min(structs.length - 1, 1 + findIndexSS(structs, deleteItem.clock + deleteItem.len - 1));
+-      for (
+-        let si = mostRightIndexToCheck, struct = structs[si];
+-        si > 0 && struct.id.clock >= deleteItem.clock;
+-        struct = structs[si]
+-      ) {
+-        si -= 1 + tryToMergeWithLefts(structs, si);
++      starts.push(deleteItem.clock);
++      ends.push(structs[mostRightIndexToCheck].id.clock);
++    }
++    let w = 0;
++    for (let r = 1, k = 0; r < structs.length; r++) {
++      const struct = structs[r];
++      structs[++w] = struct;
++      const clock = struct.id.clock;
++      while (k < ends.length && ends[k] < clock) {
++        k++;
++      }
++      if (k < ends.length && starts[k] <= clock) {
++        for (; w > 0; w--) {
++          const left = structs[w - 1];
++          const right = structs[w];
++          if (left.deleted !== right.deleted || left.constructor !== right.constructor || !left.mergeWith(right)) {
++            break;
++          }
++          if (right instanceof Item && right.parentSub !== null && /** @type {AbstractType<any>} */ (right.parent)._map.get(right.parentSub) === right) {
++            /** @type {AbstractType<any>} */ (right.parent)._map.set(right.parentSub, /** @type {Item} */ (left));
++          }
++        }
+       }
+     }
++    structs.length = w + 1;
+   });
+ };
+ 
+diff --git a/dist/yjs.mjs b/dist/yjs.mjs
+index bd77560daff905e0c1785080a1b2ca4c52425e2b..c1eabf888395989d8775b3036d87f1b8cef8fcd1 100644
+--- a/dist/yjs.mjs
++++ b/dist/yjs.mjs
+@@ -3210,21 +3210,48 @@ const tryGcDeleteSet = (ds, store, gcFilter) => {
+  */
+ const tryMergeDeleteSet = (ds, store) => {
+   // try to merge deleted / gc'd items
+-  // merge from right to left for better efficiency and so we don't miss any merge targets
++  // Each client's structs are compacted in one left-to-right pass: a struct
++  // inside a deleted range (or right after one) is merged into its lefts as
++  // far as they merge. Splicing the array once per merge would move its whole
++  // tail every time, which is quadratic in the number of deletions.
++  // `ds` is sorted and merged (see cleanupTransactions).
+   ds.clients.forEach((deleteItems, client) => {
+     const structs = /** @type {Array<GC|Item>} */ (store.clients.get(client));
+-    for (let di = deleteItems.length - 1; di >= 0; di--) {
++    if (deleteItems.length === 0) {
++      return;
++    }
++    // clock range of the structs to merge with their lefts, per delete item
++    const starts = [];
++    const ends = [];
++    for (let di = 0; di < deleteItems.length; di++) {
+       const deleteItem = deleteItems[di];
+-      // start with merging the item next to the last deleted item
++      // up to the item next to the last deleted item
+       const mostRightIndexToCheck = math.min(structs.length - 1, 1 + findIndexSS(structs, deleteItem.clock + deleteItem.len - 1));
+-      for (
+-        let si = mostRightIndexToCheck, struct = structs[si];
+-        si > 0 && struct.id.clock >= deleteItem.clock;
+-        struct = structs[si]
+-      ) {
+-        si -= 1 + tryToMergeWithLefts(structs, si);
++      starts.push(deleteItem.clock);
++      ends.push(structs[mostRightIndexToCheck].id.clock);
++    }
++    let w = 0;
++    for (let r = 1, k = 0; r < structs.length; r++) {
++      const struct = structs[r];
++      structs[++w] = struct;
++      const clock = struct.id.clock;
++      while (k < ends.length && ends[k] < clock) {
++        k++;
++      }
++      if (k < ends.length && starts[k] <= clock) {
++        for (; w > 0; w--) {
++          const left = structs[w - 1];
++          const right = structs[w];
++          if (left.deleted !== right.deleted || left.constructor !== right.constructor || !left.mergeWith(right)) {
++            break;
++          }
++          if (right instanceof Item && right.parentSub !== null && /** @type {AbstractType<any>} */ (right.parent)._map.get(right.parentSub) === right) {
++            /** @type {AbstractType<any>} */ (right.parent)._map.set(right.parentSub, /** @type {Item} */ (left));
++          }
++        }
+       }
+     }
++    structs.length = w + 1;
+   });
+ };
+ 
+diff --git a/src/utils/Transaction.js b/src/utils/Transaction.js
+index d7c6ff12f06e1184667fe493d09c78fc1f52a65d..78127c4e2403f02be333d4a69b01e2493892b592 100644
+--- a/src/utils/Transaction.js
++++ b/src/utils/Transaction.js
+@@ -225,21 +225,48 @@ const tryGcDeleteSet = (ds, store, gcFilter) => {
+  */
+ const tryMergeDeleteSet = (ds, store) => {
+   // try to merge deleted / gc'd items
+-  // merge from right to left for better efficiency and so we don't miss any merge targets
++  // Each client's structs are compacted in one left-to-right pass: a struct
++  // inside a deleted range (or right after one) is merged into its lefts as
++  // far as they merge. Splicing the array once per merge would move its whole
++  // tail every time, which is quadratic in the number of deletions.
++  // `ds` is sorted and merged (see cleanupTransactions).
+   ds.clients.forEach((deleteItems, client) => {
+     const structs = /** @type {Array<GC|Item>} */ (store.clients.get(client))
+-    for (let di = deleteItems.length - 1; di >= 0; di--) {
++    if (deleteItems.length === 0) {
++      return
++    }
++    // clock range of the structs to merge with their lefts, per delete item
++    const starts = []
++    const ends = []
++    for (let di = 0; di < deleteItems.length; di++) {
+       const deleteItem = deleteItems[di]
+-      // start with merging the item next to the last deleted item
++      // up to the item next to the last deleted item
+       const mostRightIndexToCheck = math.min(structs.length - 1, 1 + findIndexSS(structs, deleteItem.clock + deleteItem.len - 1))
+-      for (
+-        let si = mostRightIndexToCheck, struct = structs[si];
+-        si > 0 && struct.id.clock >= deleteItem.clock;
+-        struct = structs[si]
+-      ) {
+-        si -= 1 + tryToMergeWithLefts(structs, si)
++      starts.push(deleteItem.clock)
++      ends.push(structs[mostRightIndexToCheck].id.clock)
++    }
++    let w = 0
++    for (let r = 1, k = 0; r < structs.length; r++) {
++      const struct = structs[r]
++      structs[++w] = struct
++      const clock = struct.id.clock
++      while (k < ends.length && ends[k] < clock) {
++        k++
++      }
++      if (k < ends.length && starts[k] <= clock) {
++        for (; w > 0; w--) {
++          const left = structs[w - 1]
++          const right = structs[w]
++          if (left.deleted !== right.deleted || left.constructor !== right.constructor || !left.mergeWith(right)) {
++            break
++          }
++          if (right instanceof Item && right.parentSub !== null && /** @type {AbstractType<any>} */ (right.parent)._map.get(right.parentSub) === right) {
++            /** @type {AbstractType<any>} */ (right.parent)._map.set(right.parentSub, /** @type {Item} */ (left))
++          }
++        }
+       }
+     }
++    structs.length = w + 1
+   })
+ }
+ 

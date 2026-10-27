@@ -22,6 +22,15 @@ new seeded document so trials don't accumulate edits or session logs. The exampl
 uses default Yjs garbage collection and retains all individually encoded updates
 in Jazz. There is no log consolidation.
 
+The repository patches Yjs 13.6.33 (`patches/yjs@13.6.33.patch`): after a
+transaction with deletions, Yjs merged the structs around each deleted range by
+splicing its struct array once per merge, which moves the array's tail every
+time. Replaying the 259,778-edit log in one transaction did about 3,500 such
+splices over 261 million slots, and their cost swung with V8's GC timing
+(whether the moved structs were still young), so a reload took either about
+0.3 s or 0.9 s of Yjs work locally. The patch compacts the array in one pass
+with the same merges.
+
 ## Run
 
 With current release WASM/NAPI artifacts and the compiled Jazz Tools runtime:
