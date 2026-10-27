@@ -164,6 +164,8 @@ export type NativeForegroundCommand =
   | { type: "nativeSessionMetadata" }
   | { type: "writeState"; txId: Uint8Array }
   | { type: "drainMutationErrors" }
+  /** Mutation errors and the current credential refusal, drained after a tick. */
+  | { type: "drainTickEvents" }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -228,6 +230,15 @@ export type NativeForegroundResponse =
   | { type: "transactionSettled"; txId: Uint8Array }
   | { type: "writeState"; stateJson: string }
   | { type: "mutationErrors"; eventsJson: string }
+  | {
+      type: "tickEvents";
+      eventsJson: string;
+      /**
+       * The upstream's current refusal of the scope's credential. Each refusal
+       * has a new `sequence`, even when its reason repeats.
+       */
+      authRejection: { sequence: number; reason: string } | null;
+    }
   | { type: "streamingMutationOpened"; upload: number }
   | { type: "streamingMutationPushed" }
   | { type: "streamingMutationAborted"; aborted: boolean }
@@ -378,6 +389,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "nativeSessionMetadata") return Uint8Array.of(22);
   if (command.type === "drainMutationErrors") return Uint8Array.of(24);
   if (command.type === "captureSnapshot") return Uint8Array.of(34);
+  if (command.type === "drainTickEvents") return Uint8Array.of(35);
   if (command.type === "waitForPendingWrites") {
     return concatForegroundBytes(Uint8Array.of(33), encodeForegroundString(command.tier));
   }
@@ -708,6 +720,24 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     return reasonName === undefined
       ? { type: "operationError", code, reason }
       : { type: "operationError", code, reasonName, reason };
+  }
+  if (tag === 26) {
+    // TickEvents: postcard events string, then `Option<NativeAuthRejection>`:
+    // 0, or 1, the sequence varint and the reason string.
+    const [eventsJson, afterEvents] = decodeForegroundPrefixedString(bytes, 1, "tick events");
+    const option = bytes[afterEvents];
+    if (option === 0 && afterEvents + 1 === bytes.length)
+      return { type: "tickEvents", eventsJson, authRejection: null };
+    if (option !== 1) throw new Error("Malformed native operation auth rejection");
+    let sequenceEnd = afterEvents + 1;
+    while (sequenceEnd < bytes.length && (bytes[sequenceEnd]! & 0x80) !== 0) sequenceEnd++;
+    const sequence = decodeForegroundU64(
+      bytes.subarray(afterEvents + 1, sequenceEnd + 1),
+      "auth rejection sequence",
+    );
+    const [reason, end] = decodeForegroundPrefixedString(bytes, sequenceEnd + 1, "auth rejection");
+    if (end !== bytes.length) throw new Error("Malformed native operation tick events");
+    return { type: "tickEvents", eventsJson, authRejection: { sequence, reason } };
   }
   if (
     tag === 16 &&

@@ -784,9 +784,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.received).toEqual([]);
   });
 
-  // #4248: a React Native foreground whose upstream refuses its expired bearer
-  // fails every tick. That reaches the app as an auth failure it renews from,
-  // never as an exception rethrown from a microtask (fatal in release builds).
+  // #4248, #4296: a React Native foreground whose upstream refuses its bearer
+  // reports that as auth state, as the web socket path does. Ticks keep
+  // running, the app renews from the auth failure, and any other tick failure
+  // still surfaces.
   it("reports a native upstream's refused credential as an auth failure, not a crash", async () => {
     const thrown: unknown[] = [];
     const queue = globalThis.queueMicrotask;
@@ -800,52 +801,54 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     );
     try {
-      for (const authRejected of ["websocket rejected: AuthFailed: token expired", null]) {
-        let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
-        const runtime = new NativeRuntimeAdapter(
-          {
-            openMemory: () =>
-              fakeDb({
-                setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
-                  schedule = callback;
-                },
-                tick: () => {
-                  throw new Error("Jazz native foreground lifecycle failure");
-                },
-                nativeConnectionStatus: () => ({
-                  configured: true,
-                  explicitlyOffline: false,
-                  connected: false,
-                  authRejected,
-                }),
-                isNativeForegroundClosed: () => false,
+      let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let reportAuthRejected: ((reason: string) => void) | undefined;
+      let tickFailure: Error | undefined;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+                schedule = callback;
+              },
+              tick: () => {
+                if (tickFailure) throw tickFailure;
+              },
+              onAuthRejected: (callback: (reason: string) => void) => {
+                reportAuthRejected = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected: false,
+                authRejected: "websocket rejected: AuthFailed: token expired",
               }),
-            openBrowser: async () => {
-              throw new Error("not used");
-            },
-          } as never,
-          testSchema,
-          new Uint8Array(16),
-          TEST_RUNTIME_AUTHOR,
-          1,
-          true,
-        );
-        const authFailures: string[] = [];
-        runtime.onAuthFailure((reason) => authFailures.push(reason));
-        thrown.length = 0;
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const authFailures: string[] = [];
+      runtime.onAuthFailure((reason) => authFailures.push(reason));
 
-        schedule!("immediate");
-        for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      reportAuthRejected!("websocket rejected: AuthFailed: token expired");
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(authFailures).toEqual(["websocket rejected: AuthFailed: token expired"]);
+      expect(thrown).toEqual([]);
 
-        if (authRejected) {
-          expect(authFailures).toEqual([authRejected]);
-          expect(thrown).toEqual([]);
-        } else {
-          // Any other tick failure still surfaces.
-          expect(authFailures).toEqual([]);
-          expect(thrown).toEqual([new Error("Jazz native foreground lifecycle failure")]);
-        }
-      }
+      tickFailure = new Error("Jazz native foreground lifecycle failure");
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(authFailures).toHaveLength(1);
+      expect(thrown).toEqual([tickFailure]);
     } finally {
       spy.mockRestore();
     }

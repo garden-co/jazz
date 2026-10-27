@@ -1737,7 +1737,8 @@ fn foreground_command(
         | Request::DisconnectNativeUpstream
         | Request::ReconnectNativeUpstream
         | Request::NativeConnectionStatus
-        | Request::NativeSessionMetadata => {
+        | Request::NativeSessionMetadata
+        | Request::DrainTickEvents => {
             return Err("host command reached the relay owner".into());
         }
     })

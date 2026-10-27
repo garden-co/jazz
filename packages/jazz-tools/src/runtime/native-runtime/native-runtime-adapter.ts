@@ -382,6 +382,8 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  /** A native host's upstream refused the credential; ticks keep running. */
+  onAuthRejected?(callback: (reason: string) => void): void;
   setNonDurableClient?(): void;
   /** Exact wire features compiled into the native artifact backing this DB. */
   wireFeatures?(): number;
@@ -1306,6 +1308,8 @@ export class NativeRuntimeAdapter implements Runtime {
     if (nativeStatus) {
       if (!nativeStatus.configured) return "none";
       if (nativeStatus.explicitlyOffline) return "unavailable";
+      // A refused credential stops the socket until the app renews it.
+      if (nativeStatus.authRejected) return "unavailable";
       if (nativeStatus.connected) {
         this.nativeLinkEverConnected = true;
         return "connected";
@@ -2667,6 +2671,9 @@ export class NativeRuntimeAdapter implements Runtime {
   onAuthFailure(callback: (reason: string) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthFailure(callback);
     this.authFailureCallback = callback;
+    // A native host's socket reports a refused credential as auth state, as
+    // the web socket path does, so the app renews from it (#4248, #4296).
+    this.db.onAuthRejected?.((reason) => this.authFailureCallback?.(reason));
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -3393,7 +3400,6 @@ export class NativeRuntimeAdapter implements Runtime {
         // from a still-live scope with an actual transport/core failure.
         try {
           if (this.db.isNativeForegroundClosed?.()) return;
-          if (this.reportNativeAuthRejection()) return;
         } catch (livenessError) {
           reportAsyncRuntimeError(livenessError);
           return;
@@ -3401,22 +3407,6 @@ export class NativeRuntimeAdapter implements Runtime {
         reportAsyncRuntimeError(error);
       });
     });
-  }
-
-  /**
-   * A native tick fails while the upstream refuses the scope's credential,
-   * for example a bearer that expired while the app was in the background
-   * (#4248). That is an auth failure the app renews from, as on the web
-   * socket path, not a runtime crash: report it through `onAuthFailure`
-   * (the auth state deduplicates repeats) and let renewal replace the
-   * upstream. Returns whether the failure was reported that way.
-   */
-  private reportNativeAuthRejection(): boolean {
-    const rejected = this.db?.nativeConnectionStatus?.().authRejected;
-    const callback = this.ownerRuntime.authFailureCallback;
-    if (!rejected || !callback) return false;
-    callback(rejected);
-    return true;
   }
 
   private runCoreTick(): Promise<void> {
