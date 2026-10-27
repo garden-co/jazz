@@ -2,6 +2,7 @@ import * as idb from "fake-indexeddb";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import {
   encodeCellsForRow,
   encodeSchema,
@@ -64,7 +65,7 @@ describe.skipIf(!hasJazzWasmBuild())("SQLite browser durability", () => {
     "a tab's Local wait observes worker persistence (upstream=$upstream, fail=$fail)",
     async ({ upstream: connected, fail }) => {
       const wasm = await loadWasmModuleForTest();
-      const schema = { notes: { ...app.wasmSchema.notes!, policies: allowAll(app).notes } };
+      const schema = mergePermissionsIntoWasmSchema(app.wasmSchema, allowAll(app));
       const author = testAuthorBytes(`alice-worker-durability-${connected}-${fail}`);
       const workerNode = new Uint8Array(16).fill(81);
       const tabNode = new Uint8Array(16).fill(82);
