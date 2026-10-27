@@ -1248,6 +1248,56 @@ it.each([
   },
 );
 
+// The SQLite engine leads a rejection's message with its reason's stable name.
+it.each([
+  [
+    "WriteRejected: client_clock_too_far_ahead: the write's timestamp is 90000ms ahead of the authority's clock",
+    "client_clock_too_far_ahead",
+    "Client clock is too far ahead",
+  ],
+  [
+    "WriteRejected: authorization_denied: INSERT policy denied the new row",
+    "permission_denied",
+    "Write rejected by server authorization",
+  ],
+])("maps the engine rejection %s to its code", async (diagnostic, code, reason) => {
+  const txId = "00000000000070008000000000000045" as TxId;
+  const write = {
+    txId,
+    payload: new Uint8Array(),
+    wait: async () => {
+      throw Object.assign(new Error(diagnostic), { code: "write_rejected" });
+    },
+    writeState: () => ({}),
+  };
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          insert: () => write,
+          onMutationError: () => undefined,
+        }),
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "rejected" } },
+    null,
+    "00000000-0000-0000-0000-000000000045",
+  );
+  const rejection = await runtime
+    .waitForTransaction(txId, "global")
+    .catch((error: unknown) => error);
+
+  expect(rejection).toMatchObject({ kind: "rejected", transactionId: txId, code, reason });
+});
+
 it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
   const updatedAt = 1_704_067_200_123;
   const expectedUpdatedAtMs = updatedAt;

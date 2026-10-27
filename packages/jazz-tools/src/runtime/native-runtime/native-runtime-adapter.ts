@@ -5085,9 +5085,11 @@ function contextualError(context: string, error: unknown): Error {
 function rejectionCode(message: string): string {
   if (message.includes("AuthorizationDenied")) return "permission_denied";
   if (message.includes("SerializationConflict")) return "serialization_conflict";
-  // The engine's stable prefix for a policy denial.
+  // The engine's stable prefixes for a policy denial and a clock-skew refusal.
   if (/^(?:WriteRejected:\s*)?authorization_denied(?::|$)/.test(message))
     return "permission_denied";
+  if (/^(?:WriteRejected:\s*)?client_clock_too_far_ahead(?::|$)/.test(message))
+    return "client_clock_too_far_ahead";
   if (message.includes("CausalityViolation")) return "causality_violation";
   if (message.includes("ClientClockTooFarAhead")) return "client_clock_too_far_ahead";
   if (message.includes("Cascade")) return "cascade_rejected";
