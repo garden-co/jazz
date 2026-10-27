@@ -73,6 +73,10 @@ prepare_a59() {
 prepare_a60() {
   local dir="${A60_DIR:-$here/.a60}"
   [[ -n "${A60_DIR:-}" ]] || checkout "$dir" "$a60_ref"
+  hook "$here/import/hooks/runtime_migrate_import.rs" "$dir/crates/jazz-server/src/runtime/migrate_import.rs" \
+    "$dir/crates/jazz-server/src/runtime/mod.rs" "pub mod auth_admission;"
+  hook "$here/import/hooks/server_migrate_import.rs" "$dir/crates/jazz-server/src/server/migrate_import.rs" \
+    "$dir/crates/jazz-server/src/server/mod.rs" "pub mod routes;"
   install_tool "$dir" import
   echo "SQLite importer ready in $dir: cargo build --release -p migrate-alpha59-import"
 }

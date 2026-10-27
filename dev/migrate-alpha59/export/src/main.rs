@@ -122,29 +122,32 @@ fn run(args: &Args) -> Result<dump::Footer, String> {
     )
     .map_err(err)?;
 
-    jazz::db::block_on(export_shell(
-        &args.work.join("server-shell.rocksdb"),
-        args.catalogue_only,
-        &mut writer,
-    ))?;
+    // Every catalogue and account record comes before the first row
+    // version, so the importer can stream rows.
     let catalogue = args.work.join("catalogue.rocksdb");
-    if catalogue.is_dir() {
-        export_admin_catalogue(catalogue, &mut writer)?;
-    }
     let accounts = args.work.join("accounts.rocksdb");
-    if accounts.is_dir() {
-        jazz::db::block_on(export_accounts(&accounts, &mut writer))?;
-    }
+    jazz::db::block_on(async {
+        let mut node = open_shell(&args.work.join("server-shell.rocksdb")).await?;
+        export_runtime_catalogue(&node, &mut writer)?;
+        if catalogue.is_dir() {
+            export_admin_catalogue(catalogue, &mut writer)?;
+        }
+        if accounts.is_dir() {
+            export_accounts(&accounts, &mut writer).await?;
+        }
+        if !args.catalogue_only {
+            export_versions(&mut node, &mut writer).await?;
+        }
+        Ok::<_, String>(())
+    })?;
 
     let (_, footer) = writer.finish().map_err(err)?;
     Ok(footer)
 }
 
-async fn export_shell<W: std::io::Write>(
-    path: &Path,
-    catalogue_only: bool,
-    writer: &mut dump::Writer<W>,
-) -> Result<(), String> {
+type Node = NodeState<jazz::groove::storage::BoxedStorage>;
+
+async fn open_shell(path: &Path) -> Result<Node, String> {
     let requested = JazzSchema::empty();
     let storage = jazz_storage_rocksdb::RocksDbStorageFactory
         .open(
@@ -157,11 +160,15 @@ async fn export_shell<W: std::io::Write>(
     let (storage, schema) = NodeState::select_durable_reopen_schema(storage, requested)
         .await
         .map_err(err)?;
-    let mut node =
-        NodeState::new_history_complete(NodeUuid::from_bytes(SERVER_NODE), schema, storage)
-            .await
-            .map_err(err)?;
+    NodeState::new_history_complete(NodeUuid::from_bytes(SERVER_NODE), schema, storage)
+        .await
+        .map_err(err)
+}
 
+fn export_runtime_catalogue<W: std::io::Write>(
+    node: &Node,
+    writer: &mut dump::Writer<W>,
+) -> Result<(), String> {
     let catalogue = node.migrate_export_catalogue();
     for schema in &catalogue.schemas {
         writer
@@ -200,10 +207,13 @@ async fn export_shell<W: std::io::Write>(
             schema: *catalogue.active_schema.0.as_bytes(),
         })
         .map_err(err)?;
+    Ok(())
+}
 
-    if catalogue_only {
-        return Ok(());
-    }
+async fn export_versions<W: std::io::Write>(
+    node: &mut Node,
+    writer: &mut dump::Writer<W>,
+) -> Result<(), String> {
     let mut versions = node.migrate_export_versions().await.map_err(err)?;
     // Commit order: the authority's global order, then the HLC for anything
     // it never ordered (which `fate` reports).
