@@ -102,6 +102,20 @@
       "frame_hex": "148180808080808008"
     }
   ],
+  "fates": [
+    {
+      "name": "rejected Fate (client_clock_too_far_ahead)",
+      "reason": "client_clock_too_far_ahead",
+      "reader": "client",
+      "frame_hex": "0d8280808080808008070101011a636c69656e745f636c6f636b5f746f6f5f6661725f61686561645b636c69656e745f636c6f636b5f746f6f5f6661725f61686561643a2074686520777269746527732074696d657374616d702069732038393939396d73206168656164206f662074686520617574686f72697479277320636c6f636b0001"
+    },
+    {
+      "name": "rejected Fate (no reason)",
+      "reason": null,
+      "reader": "client",
+      "frame_hex": "0d8180808080808008070101002e636f6d6d6974206e616d65732061206e6f646520616e6f74686572206964656e74697479207772697465732061730001"
+    }
+  ],
   "frames": [
     {
       "name": "client hello",

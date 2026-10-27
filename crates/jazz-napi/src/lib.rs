@@ -132,6 +132,16 @@ fn corpus_reader(name: &str) -> std::result::Result<jazz::db::CorpusReader, Stri
     }
 }
 
+/// Test-only: every core `Reason` name, so the TypeScript reason list is
+/// checked against the engine's rather than copied from it.
+#[napi(js_name = "__testCoreErrorReasonNames", skip_typescript)]
+pub fn test_core_error_reason_names() -> Vec<String> {
+    jazz::db::Reason::ALL
+        .into_iter()
+        .map(|reason| reason.as_str().to_owned())
+        .collect()
+}
+
 /// Test-only feature inventory paired with [`test_validate_wire_frame_batch_corpus`].
 #[napi(js_name = "__testWireFrameCorpusFeatures", skip_typescript)]
 pub fn test_wire_frame_corpus_features() -> String {
@@ -318,22 +328,41 @@ fn json_or_null(value: Option<JsonValue>) -> serde_json::Value {
 
 // ---- errors --------------------------------------------------------------------------
 
-/// Prefix of the private `cause` that carries a core error code from where the
-/// core error is converted to the exported method that throws it. It never
-/// reaches JavaScript: [`BindingError`] strips it.
+/// Prefix of the private `cause` that carries a core error code, and after
+/// [`CORE_ERROR_REASON_SEPARATOR`] its reason name, from where the core error
+/// is converted to the exported method that throws it or the promise it
+/// rejects. It never reaches JavaScript: [`BindingError`] strips it.
 const CORE_ERROR_CODE_CARRIER: &str = "\u{0}jazz-core-error-code:";
+const CORE_ERROR_REASON_SEPARATOR: char = '\u{0}';
 
 /// Convert a core error into a `napi::Error` with its unchanged `Display`
-/// text, recording its stable [`jazz::db::ErrorCode::as_str`] code. The code
-/// rides inside the `napi::Error` until an exported method returns it as a
-/// [`BindingError`], which throws it as the JavaScript `error.code`.
+/// text, recording its stable [`jazz::db::ErrorCode::as_str`] code and
+/// `Reason::as_str` name. They ride inside the `napi::Error` until an
+/// exported method returns it as a [`BindingError`], which throws the code as
+/// the JavaScript `error.code`, or a promise rejects with it, which also sets
+/// `error.reason` (see [`js_error_value`]).
 fn napi_core_error(error: &CoreError) -> napi::Error {
     let mut napi_error = napi::Error::from_reason(error.to_string());
-    napi_error.set_cause(napi::Error::from_reason(format!(
-        "{CORE_ERROR_CODE_CARRIER}{}",
-        error.code.as_str()
-    )));
+    let mut carrier = format!("{CORE_ERROR_CODE_CARRIER}{}", error.code.as_str());
+    if let Some(reason) = error.reason {
+        carrier.push(CORE_ERROR_REASON_SEPARATOR);
+        carrier.push_str(reason.as_str());
+    }
+    napi_error.set_cause(napi::Error::from_reason(carrier));
     napi_error
+}
+
+/// The core code and reason name `error` carries, if it is a core error.
+fn carried_core(error: &napi::Error) -> Option<(&str, Option<&str>)> {
+    let carried = error
+        .cause
+        .as_ref()?
+        .reason
+        .strip_prefix(CORE_ERROR_CODE_CARRIER)?;
+    Some(match carried.split_once(CORE_ERROR_REASON_SEPARATOR) {
+        Some((code, reason)) => (code, Some(reason)),
+        None => (carried, None),
+    })
 }
 
 /// The error a shared-layer failure throws: an engine error keeps its stable
@@ -368,12 +397,9 @@ pub struct BindingError(napi::Error<JsErrorCode>);
 
 impl From<napi::Error> for BindingError {
     fn from(mut error: napi::Error) -> Self {
-        let carried = error.cause.as_ref().and_then(|cause| {
-            cause
-                .reason
-                .strip_prefix(CORE_ERROR_CODE_CARRIER)
-                .map(str::to_owned)
-        });
+        // A thrown error carries only the code: napi-rs creates it from a
+        // code and a message, with no way to add properties.
+        let carried = carried_core(&error).map(|(code, _)| code.to_owned());
         let (code, cause) = match carried {
             Some(code) => (code, None),
             None => (error.status.as_ref().to_owned(), error.cause.take()),
@@ -478,14 +504,11 @@ impl PendingPromise {
     }
 }
 
-/// A JavaScript `Error` with `error`'s message and code (see
-/// [`BindingError`]).
+/// A JavaScript `Error` with `error`'s message, code and, for a core error
+/// that has one, its reason name as `error.reason` (see [`BindingError`]).
 fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
-    let code = error
-        .cause
-        .as_ref()
-        .and_then(|cause| cause.reason.strip_prefix(CORE_ERROR_CODE_CARRIER))
-        .unwrap_or_else(|| error.status.as_ref());
+    let carried = carried_core(error);
+    let code = carried.map_or_else(|| error.status.as_ref(), |(code, _)| code);
     let string = |text: &str| {
         let mut value = std::ptr::null_mut();
         unsafe {
@@ -497,11 +520,14 @@ fn js_error_value(env: sys::napi_env, error: &napi::Error) -> sys::napi_value {
     let mut js_error = std::ptr::null_mut();
     // `napi_create_error` sets the JavaScript `error.code` from its code.
     let status = unsafe { sys::napi_create_error(env, string(code), message, &mut js_error) };
-    if status == sys::Status::napi_ok {
-        js_error
-    } else {
-        message
+    if status != sys::Status::napi_ok {
+        return message;
     }
+    if let Some((_, Some(reason))) = carried {
+        // Setting a data property on a fresh error object cannot fail.
+        unsafe { sys::napi_set_named_property(env, js_error, c"reason".as_ptr(), string(reason)) };
+    }
+    js_error
 }
 
 /// Settle every promise whose wait completed. Waits complete only when a

@@ -1928,9 +1928,9 @@ fn call_controller_method(
 /// Convert a Rust error into the value a binding rejects or throws with.
 ///
 /// A core [`Error`] becomes a real JavaScript `Error` whose `message` is the
-/// unchanged `Display` text and whose `code` is the stable
-/// [`ErrorCode::as_str`] string, so callers classify it without matching the
-/// message. Every other error keeps its historical bare-string form.
+/// unchanged `Display` text, whose `code` is the stable [`ErrorCode::as_str`]
+/// string and, when it has one, whose `reason` is the stable `Reason::as_str`
+/// name, so callers classify it without matching the message. Every other error keeps its historical bare-string form.
 fn to_js_error(error: impl std::fmt::Display + 'static) -> JsValue {
     let any = &error as &dyn std::any::Any;
     if let Some(core) = any.downcast_ref::<Error>() {
@@ -1947,6 +1947,13 @@ fn core_error_to_js(error: &Error) -> JsValue {
         &JsValue::from_str("code"),
         &JsValue::from_str(error.code.as_str()),
     );
+    if let Some(reason) = error.reason {
+        let _ = js_sys::Reflect::set(
+            &js_error,
+            &JsValue::from_str("reason"),
+            &JsValue::from_str(reason.as_str()),
+        );
+    }
     js_error.into()
 }
 

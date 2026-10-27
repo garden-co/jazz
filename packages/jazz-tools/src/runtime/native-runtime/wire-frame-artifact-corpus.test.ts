@@ -16,6 +16,7 @@ type Reader = "server-opening" | "server" | "client";
 type SyncWireCorpus = {
   format: string;
   messages: Array<{ variant: string; reader: Reader; frame_hex: string }>;
+  fates: Array<{ name: string; reason: string | null; reader: Reader; frame_hex: string }>;
   frames: Batch[];
   rejections: Batch[];
 };
@@ -35,7 +36,8 @@ type WasmArtifactFrameValidator = ArtifactFrameValidator & {
 
 // `crates/jazz/fixtures/sqlite_sync_wire_v1.json` freezes one real Rust-encoded
 // frame of every SQLite sync message variant (see
-// crates/jazz/tests/sync_wire_corpus.rs), plus Hello and Error frames and
+// crates/jazz/tests/sync_wire_corpus.rs), rejected Fate frames with and
+// without a reason name, Hello and Error frames, and
 // batches a reader must reject. Every one runs through both freshly generated
 // artifacts, not a JavaScript mirror of the Rust decoders.
 describe("wire frame artifact corpus", () => {
@@ -57,11 +59,17 @@ describe("wire frame artifact corpus", () => {
       const corpus = syncWireCorpus();
       expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v1");
       expect(corpus.messages.map((message) => message.variant)).toHaveLength(20);
+      expect(corpus.fates.map((fate) => fate.reason)).toEqual(["client_clock_too_far_ahead", null]);
       const accepted = [
         ...corpus.messages.map((message) => ({
           name: message.variant,
           reader: message.reader,
           batch: encodeWebSocketFrameBatch([hexToBytes(message.frame_hex)]),
+        })),
+        ...corpus.fates.map((fate) => ({
+          name: fate.name,
+          reader: fate.reader,
+          batch: encodeWebSocketFrameBatch([hexToBytes(fate.frame_hex)]),
         })),
         ...corpus.frames.map((frame) => ({
           name: frame.name,

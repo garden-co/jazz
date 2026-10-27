@@ -265,11 +265,7 @@ async function currentStatus(db: Db, orderId: string): Promise<OrderStatus> {
   return order.status;
 }
 
-const RETRYABLE_CONFLICTS = new Set([
-  "serialization_conflict",
-  "transaction_conflict",
-  "cascade_rejected",
-]);
+const RETRYABLE_CONFLICTS = new Set(["serialization_conflict", "transaction_conflict"]);
 const MAX_ATTEMPTS = 8;
 
 /**
@@ -291,8 +287,8 @@ async function retryConflicts<T>(run: () => Promise<T>): Promise<T> {
 
 /**
  * A conflict that re-running the transaction can resolve: a local
- * `transaction_conflict` (another write in this runtime got there first), an
- * authority `serialization_conflict`, or a `cascade_rejected` follow-on.
+ * `transaction_conflict` (another write in this runtime got there first) or an
+ * authority `serialization_conflict`.
  */
 export function isRetryableConflict(error: unknown): boolean {
   // The backend client is loaded outside the Next bundle (see backend.ts), so
