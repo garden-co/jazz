@@ -7,11 +7,7 @@ description = "Jazz's database: the thread-affine Db facade over SQLite."
 [features]
 default = []
 # Test helpers shared with the crates above this one.
-testing = [
-  "jazz-types/testing",
-  "jazz-model/testing",
-  "jazz-protocol/testing",
-]
+testing = ["jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing"]
 # Log every statement to the file named by JAZZ_SQL_TRACE, for checking the
 # SQL against restricted SQLite hosts (Durable Objects).
 sql-trace = []

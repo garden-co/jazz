@@ -1,6 +1,8 @@
 import type { Db, QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
+import { groupQueryDependencies, type DependencyWatch } from "./group-query-dependencies.js";
+import type { SpaceGrant } from "./spaces.js";
 import { encryptedSchemas } from "./encrypted-schema.js";
 import { e2eeAccountForDb, withSpaceKeys } from "./lifecycle.js";
 
@@ -20,8 +22,19 @@ export function queryKeyDependencies(
   const common: Array<() => void> = [];
   let started = false;
   let stopped = false;
-  const watch = (query: QueryBuilder<{ id: string }>) =>
-    db.subscribe(query, { onUpdate: onChange, onError }, options);
+  const watch: DependencyWatch = (query, onRows) =>
+    db.subscribe(
+      query,
+      {
+        onUpdate: (rows) => {
+          onRows?.(rows);
+          onChange();
+        },
+        onError,
+      },
+      options,
+    );
+  const groups = groupQueryDependencies(schema, watch);
   return {
     async update(required: QuerySpace[]) {
       if (stopped) return;
@@ -40,17 +53,6 @@ export function queryKeyDependencies(
               __e2ee_public_device_approvalsViaAccount: true,
             }),
         ];
-        // ponytail: observe the readable group graph; narrow to the accepted
-        // dependency closure if group-graph scale makes this too expensive.
-        if (encryptedSchemas.get(schema)?.logical.__e2ee_groups)
-          queries.push(
-            new TypedTableQueryBuilder("__e2ee_groups", schema).include({
-              __e2ee_group_membershipViaGroup: true,
-              __e2ee_group_successorsViaGroup: true,
-              __e2ee_group_deliveriesViaGroup: true,
-              __e2ee_group_repairsViaGroup: true,
-            }),
-          );
         for (const query of queries) {
           if (stopped) return;
           const stop = watch(query);
@@ -65,6 +67,7 @@ export function queryKeyDependencies(
         if (!wanted.has(key)) {
           spaces.delete(key);
           space.stop();
+          groups.remove(key);
         }
       }
       for (const [key, space] of wanted) {
@@ -82,6 +85,19 @@ export function queryKeyDependencies(
               __e2ee_space_grantsViaSpace: true,
               __e2ee_space_deliveriesViaSpace: true,
             }),
+          (rows) => {
+            if (stopped || spaces.get(key) !== entry) return;
+            if (!encryptedSchemas.get(schema)?.logical.__e2ee_groups) return;
+            const grants = (
+              rows as { id: string; __e2ee_space_grantsViaSpace?: SpaceGrant[] }[]
+            ).flatMap((row) => row.__e2ee_space_grantsViaSpace ?? []);
+            groups.update(
+              key,
+              grants
+                .filter((grant) => grant.recipientKind === "group")
+                .map((grant) => grant.recipientId),
+            );
+          },
         );
         if (stopped || spaces.get(key) !== entry) stop();
         else entry.stop = stop;
@@ -104,6 +120,7 @@ export function queryKeyDependencies(
     },
     stop() {
       stopped = true;
+      groups.stop();
       for (const stop of common) stop();
       for (const space of spaces.values()) space.stop();
       common.length = 0;
