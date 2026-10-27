@@ -445,9 +445,9 @@ struct Inner {
     upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
-    /// `_jazz_columns` exists: the authority creates it with the first
-    /// upload it accepts, so other stores keep their file as it was.
-    columns_table: std::cell::Cell<bool>,
+    /// Each stored table's column positions, the codes authored-column
+    /// bitmasks use (SPEC 4 §4.6), read on first use.
+    column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
     /// Sessions the server ended for what they sent, with why, until the
     /// host takes them ([`Db::take_closed_subscribers`]).
     closed: Vec<(sync::SubscriberId, Error)>,
@@ -612,10 +612,8 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         let columns = columns
             .into_iter()
             .filter(|column| {
-                !matches!(
-                    column.as_str(),
-                    "rid" | "id" | "_b" | "_seq" | "_del" | "_c" | "_base" | "_on" | "_cols"
-                )
+                !jazz_model::model::public_schema_convert::RESERVED_ROW_COLUMNS
+                    .contains(&column.as_str())
             })
             .collect();
         tables.insert(name.clone(), Table::stored_only(name, columns));
@@ -1128,7 +1126,7 @@ impl Db {
                 authority: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
-                columns_table: std::cell::Cell::new(false),
+                column_codes: RefCell::default(),
                 closed: Vec::new(),
                 accepted: 0,
                 since_tick: Vec::new(),
@@ -3513,8 +3511,8 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _on, _cols{columns}) \
-             SELECT id, _b, _seq, _del, _c, _base, _on, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _cols{columns}) \
+             SELECT id, _b, _seq, _del, _c, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored)
         );
@@ -3593,7 +3591,7 @@ impl Inner {
         // (SPEC 4 §4.6).
         let mut sets = vec![
             "_seq = ?1".to_owned(),
-            "_base = NULL, _on = NULL, _cols = NULL".to_owned(),
+            "_base = NULL, _cols = NULL".to_owned(),
             format!(
                 "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
                 content = content as u8

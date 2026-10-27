@@ -793,6 +793,14 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             on_rejected,
         ))
         .unwrap();
+    // Another node's commit: a base names only its sender's own.
+    let foreign = BuiltOn::Commit {
+        node: [0x99; 16],
+        tx: tx(1),
+    };
+    relay
+        .send(commit(tx(6), *row.0.as_bytes(), "foreign", foreign))
+        .unwrap();
     block_on(core.tick()).unwrap();
 
     let mut fates = BTreeMap::new();
@@ -802,12 +810,16 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
         }
     }
     assert!(fates[&tx(1)].is_ok() && fates[&tx(2)].is_ok());
-    assert!(fates[&tx(3)].is_err(), "a base on a commit never received");
     assert!(fates[&tx(4)].is_err());
+    // A commit never received counts as rejected: its successor goes too.
+    for over in [tx(3), tx(5)] {
+        let fate = format!("{:?}", fates[&over]);
+        assert!(fate.contains("predecessor_rejected"), "{fate}");
+    }
+    let fate = format!("{:?}", fates[&tx(6)]);
     assert!(
-        format!("{:?}", fates[&tx(5)]).contains("predecessor_rejected"),
-        "{:?}",
-        fates[&tx(5)]
+        fates[&tx(6)].is_err() && !fate.contains("predecessor_rejected"),
+        "{fate}"
     );
 
     let conflicts = core.write_conflicts("todos", row, None).unwrap();
@@ -1072,4 +1084,171 @@ fn a_merge_base_is_the_version_the_write_was_built_on_when_it_missed_the_column(
     net.online(1);
     net.settle(1, eve.1);
     assert_eq!(base(&net, eve, "title"), text(&large));
+}
+
+#[test]
+fn a_rejection_cascades_through_a_worker_down_a_three_deep_chain() {
+    let mut net = Net::with_worker(1, 2);
+    let row = net.seed(0);
+    let far_ahead = web_time_now_ms() + 24 * 60 * 60 * 1000;
+    // Tab 1 is refused; its chained write, and tab 2's write over that
+    // (seen through the worker), carry its title, so all three go.
+    net.worker_offline();
+    let refused = block_on(net.db(1).update(
+        "todos",
+        row,
+        cells(&[("title", "from the future")]),
+        UpdateOptions {
+            updated_at_ms: Some(far_ahead),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let chained = net.edit(1, row, &[("note", "chained")]);
+    net.pump();
+    let over = net.edit(2, row, &[("note", "over the chain")]);
+    net.worker_online();
+    let fate = |i: usize, tx| net.drive(net.db(i).wait_for_transaction(tx, DurabilityTier::Global));
+    assert!(fate(1, refused.mergeable_tx_id()).is_err());
+    for (i, tx) in [(1, chained.1), (2, over.1)] {
+        let error = fate(i, tx).expect_err("built on a rejected write");
+        assert_eq!(error.reason, Some(Reason::PredecessorRejected), "{error:?}");
+    }
+    assert_eq!(net.title(row), Some(Value::String("seed".to_owned())));
+    assert_eq!(net.conflicts(row).len(), 1, "only the seed was accepted");
+}
+
+#[test]
+fn a_resent_write_keeps_the_base_it_was_accepted_with() {
+    let mut net = Net::new(2);
+    let row = net.seed(0);
+    net.offline(0);
+    let first = net.edit(0, row, &[("title", "first")]);
+    let second = net.edit(0, row, &[("title", "second")]);
+    let foreign = net.edit_settled(1, row, &[("title", "foreign")]);
+    // The authority accepts the chain, but its fates never reach the
+    // writer: it resends both, and hears the recorded fates.
+    net.connect(0);
+    block_on(net.db(0).tick()).unwrap();
+    block_on(net.core.tick()).unwrap();
+    let accepted = net.conflicts(row).len();
+    assert_eq!(accepted, 4, "seed, foreign, first, second");
+    net.offline(0);
+    net.online(0);
+    net.settle(0, second.1);
+
+    assert_eq!(
+        net.conflicts(row).len(),
+        accepted,
+        "a resend applies nothing twice"
+    );
+    assert_eq!(
+        writers(&net.conflict(row, first).overlapping),
+        vec![foreign]
+    );
+    let second = net.conflict(row, second);
+    assert!(second.maybe_conflicting);
+    assert_eq!(writers(&second.overlapping), vec![foreign]);
+}
+
+#[test]
+fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservatively() {
+    // core <- upper (durable) <- lower (durable) <- tab (non-durable). The
+    // lower relay holds the upper's unsettled version at a seq in its own
+    // local range, which is no commit of its own: it cannot name it
+    // upstream, so the tab's write counts as built on what it holds
+    // accepted. It is kept, flagged over the upper's write.
+    const UPPER: u8 = 0xa1;
+    const LOWER: u8 = 0xa2;
+    const TAB: u8 = 0xa3;
+    let core = open(CORE, AuthorSubject::SYSTEM);
+    let upper = open(UPPER, author(UPPER));
+    let lower = open(LOWER, author(LOWER));
+    let tab = open(TAB, author(LOWER));
+    tab.set_non_durable_client();
+    let link = |client: &Db, server: &Db, as_: u8| {
+        let (client_side, server_side) = duplex();
+        client.set_remote_link_hint(RemoteLinkHint::Live);
+        let up = block_on(client.connect_upstream(client_side));
+        server.accept_subscriber(server_side, author(as_));
+        up
+    };
+    let upper_up = link(&upper, &core, UPPER);
+    let _lower_up = link(&lower, &upper, LOWER);
+    let _tab_up = link(&tab, &lower, LOWER);
+    let stores = [&tab, &lower, &upper, &core];
+    let pump = || {
+        for _ in 0..4 {
+            for db in stores.iter().chain(stores.iter().rev()) {
+                block_on(db.tick()).unwrap();
+            }
+        }
+    };
+    let todos = Query::from("todos");
+    let _held: Vec<_> = [&upper, &lower, &tab]
+        .map(|db| {
+            let prepared = db.prepare_query(&todos).unwrap();
+            let mut stream = pin!(db.subscribe(&prepared, ReadOpts::default()));
+            let mut context = Context::from_waker(Waker::noop());
+            loop {
+                if let Poll::Ready(stream) = stream.as_mut().poll(&mut context) {
+                    break stream.unwrap();
+                }
+                pump();
+            }
+        })
+        .into_iter()
+        .collect();
+    let row = block_on(core.insert(
+        "todos",
+        cells(&[("title", "seed"), ("note", "seed")]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    pump();
+
+    assert!(upper.detach_connection(&upper_up));
+    upper.set_remote_link_hint(RemoteLinkHint::Failed);
+    block_on(upper.update(
+        "todos",
+        row,
+        cells(&[("title", "upper")]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump();
+    let write =
+        block_on(tab.update("todos", row, cells(&[("title", "tab")]), Default::default())).unwrap();
+    pump();
+    let _upper_up = link(&upper, &core, UPPER);
+    pump();
+    let mut turn = pin!(tab.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global));
+    let mut context = Context::from_waker(Waker::noop());
+    let fate = loop {
+        if let Poll::Ready(fate) = turn.as_mut().poll(&mut context) {
+            break fate;
+        }
+        pump();
+    };
+    fate.expect("the tab's write is kept");
+
+    let conflicts = core.write_conflicts("todos", row, None).unwrap();
+    let [_seed, upper_write, tab_write] = <[_; 3]>::try_from(conflicts).unwrap();
+    assert!(tab_write.maybe_conflicting);
+    assert_eq!(writers(&tab_write.overlapping), vec![upper_write.writer]);
+}
+
+#[test]
+fn an_app_column_cannot_take_a_stored_row_columns_name() {
+    for column in ["_base", "_cols", "_del", "_b"] {
+        let source = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").column(column, ColumnType::Text))
+            .build();
+        let error = JazzSchema::new(&source).unwrap_err().to_string();
+        assert!(
+            error.contains("reserved for the store's own row columns"),
+            "{error}"
+        );
+    }
 }

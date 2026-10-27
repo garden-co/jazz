@@ -2459,7 +2459,7 @@ impl Inner {
                         "_c" => image.content = r.get::<_, i64>(i)? != 0,
                         // The authority's record of what the version was
                         // built on; never replicated.
-                        "_base" | "_on" | "_cols" => {}
+                        "_base" | "_cols" => {}
                         _ => image
                             .cells
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
@@ -3657,6 +3657,7 @@ impl Db {
         // newest pending commit to the row, else the settled image under
         // its pending writes.
         let mut bases = Vec::new();
+        let by_row = inner.row_ops(&ops);
         for (table, row, key) in &rows {
             let row_key = (table.clone(), *row, key.clone());
             let client = inner.client.as_ref().expect("client");
@@ -3677,10 +3678,12 @@ impl Db {
             };
             if relayed.is_none()
                 && let Some(on) = on
-                && let Some(op) = inner.op_writing(&ops, table, *row)
+                && let Some(&op) = by_row
+                    .get(&(table.clone(), *row))
+                    .and_then(|ops| ops.first())
             {
                 bases.push(WireBase {
-                    op,
+                    op: op as u32,
                     key: key.clone(),
                     on,
                 });
@@ -6748,11 +6751,12 @@ impl Db {
         // What each row was built on (SPEC 4 §4.6), before anything is
         // applied: a base on a rejected commit rejects the upload. A relay
         // renames the bases for its upstream; the authority resolves them.
+        let by_row = self.inner().row_ops(&ops);
         let (bases, built) = {
             let inner = self.inner();
             let resolved = if relay {
                 inner
-                    .relay_bases(origin, bases)
+                    .relay_bases(origin, &ops, bases)
                     .map(|bases| (bases, HashMap::new()))
             } else {
                 inner
@@ -6817,7 +6821,9 @@ impl Db {
         .and_then(|()| self.inner.borrow().written_rows(&ops, seq))
         .and_then(|rows| {
             if !relay {
-                self.inner.borrow().record_bases(&ops, &built, seq, &rows)?;
+                self.inner
+                    .borrow()
+                    .record_bases(&ops, &by_row, &built, seq, &rows)?;
             }
             Ok(rows)
         });
@@ -6825,9 +6831,6 @@ impl Db {
         match finished {
             Ok(rows) => {
                 end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
-                if !relay {
-                    inner.note_columns_table().map_err(|e| (e, Vec::new()))?;
-                }
                 drop(inner);
                 self.notify();
                 Ok(rows)
