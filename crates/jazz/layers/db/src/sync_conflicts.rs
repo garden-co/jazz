@@ -471,7 +471,7 @@ impl Inner {
         built: Built,
         before: u64,
         column: &str,
-    ) -> Result<Option<rusqlite::types::Value>, Error> {
+    ) -> Result<Option<Sql>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let knew = Knowledge::of(built, &history);
         let code = self.column_code(table, column)?;
@@ -500,7 +500,7 @@ impl Inner {
             .cached_row(
                 &sql,
                 rusqlite::params![row.0.as_bytes().to_vec(), key, at as i64],
-                |r| r.get::<_, rusqlite::types::Value>(0),
+                |r| r.get::<_, Sql>(0),
             )
             .optional()
             .map_err(storage)
@@ -556,6 +556,6 @@ impl Db {
             .column(column)
             .ok_or_else(|| unknown_base("a column"))?
             .ty;
-        crate::values::from_sql(ty, (&cell).into(), &inner.chunks)
+        crate::values::from_sql(ty, cell.as_ref(), &inner.chunks)
     }
 }

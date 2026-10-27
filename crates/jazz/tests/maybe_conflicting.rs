@@ -1060,4 +1060,16 @@ fn a_merge_base_is_the_version_the_write_was_built_on_when_it_missed_the_column(
     net.settle(1, second.1);
     assert_eq!(base(&net, first, "title"), text("bob"));
     assert_eq!(base(&net, second, "title"), text("first"));
+
+    // A base over the inline threshold is stored chunked and read back whole.
+    let large = "large ".repeat(20_000);
+    net.pump();
+    net.edit_settled(0, row, &[("title", large.as_str())]);
+    net.pump();
+    net.offline(1);
+    net.edit_settled(0, row, &[("title", "dave")]);
+    let eve = net.edit(1, row, &[("title", "eve")]);
+    net.online(1);
+    net.settle(1, eve.1);
+    assert_eq!(base(&net, eve, "title"), text(&large));
 }
