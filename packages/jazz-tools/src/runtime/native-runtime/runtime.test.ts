@@ -851,6 +851,71 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  // #4296: a renewal can promote a fresh bearer between a tick failing on the
+  // refused one and the adapter reading the connection status. The failure is
+  // then stale: the next tick runs on the new bearer instead of the stale
+  // failure being rethrown (fatal in release builds).
+  it("retries a tick whose failure cleared before it was read, instead of crashing", async () => {
+    const thrown: unknown[] = [];
+    const queue = globalThis.queueMicrotask;
+    const spy = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) =>
+      queue(() => {
+        try {
+          callback();
+        } catch (error) {
+          thrown.push(error);
+        }
+      }),
+    );
+    try {
+      let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let ticks = 0;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+                schedule = callback;
+              },
+              tick: () => {
+                ticks += 1;
+                // The first tick still ran on the refused bearer.
+                if (ticks === 1) throw new Error("Jazz native foreground lifecycle failure");
+              },
+              // By the time the failure is looked at, the renewed bearer's
+              // worker has replaced the refused one.
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected: true,
+                authRejected: null,
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const authFailures: string[] = [];
+      runtime.onAuthFailure((reason) => authFailures.push(reason));
+
+      schedule!("immediate");
+      for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+
+      expect(thrown).toEqual([]);
+      expect(ticks).toBe(2);
+      expect(authFailures).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
     const sockets: FakeWebSocket[] = [];
     let allowServerHello = false;
