@@ -25,6 +25,7 @@ import {
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
 import { AuthRenewalBackoff, authRetryDelay } from "../runtime/auth-renewal-backoff.js";
+import { isRenewableAuthFailure } from "../runtime/auth-state.js";
 
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
@@ -202,7 +203,7 @@ export async function createAccountDbWithRuntimeSource(
       // rotated signing key reads as "invalid" until a new token is issued.
       // A new token cannot fix an auth mode the app has turned off or a
       // revoked account identity.
-      if (state.error && state.error !== "disabled" && state.error !== "revoked") renew();
+      if (state.error && isRenewableAuthFailure(state.error)) renew();
     });
     stopBound = onAccountCredentialBound(account, () => {
       renewals.reset();

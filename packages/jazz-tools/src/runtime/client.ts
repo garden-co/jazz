@@ -809,6 +809,59 @@ export class PersistedWriteRejectedError extends Error {
   }
 }
 
+/**
+ * Error returned when waiting for a write reaches the `timeoutMs` its caller
+ * set. The write itself is not rejected: it stays queued and may still be
+ * persisted, so retrying it can duplicate it.
+ */
+export class WriteWaitTimeoutError extends Error {
+  readonly name = "WriteWaitTimeoutError";
+  readonly code = "timeout";
+
+  constructor(
+    readonly tier: DurabilityTier,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `Waiting for the write to reach the ${tier} tier timed out after ${timeoutMs} ms; ` +
+        "it is still queued and may yet be persisted",
+    );
+  }
+}
+
+/** Options for waiting on a write. */
+export interface WriteWaitOptions {
+  tier: DurabilityTier;
+  /**
+   * Stop waiting after this many milliseconds with a
+   * {@link WriteWaitTimeoutError}. Without it, a wait lasts until the write
+   * is persisted or rejected, through any network outage and reconnect.
+   */
+  timeoutMs?: number;
+}
+
+/** Bound a write wait by the caller's `timeoutMs`, if any. */
+async function withWriteWaitTimeout<T>(
+  startWait: () => Promise<T>,
+  tier: DurabilityTier,
+  timeoutMs: number | undefined,
+): Promise<T> {
+  if (timeoutMs === undefined) return await startWait();
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new TypeError("wait timeoutMs must be a finite, non-negative number of milliseconds");
+  }
+  const wait = startWait();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new WriteWaitTimeoutError(tier, timeoutMs)), timeoutMs);
+  });
+  try {
+    return await Promise.race([wait, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Internal wait controls; not part of the public WriteHandle.wait options. */
 export interface RuntimeWriteWaitOptions {
   ready?: Promise<void>;
@@ -868,12 +921,18 @@ export class WriteHandle<T = void, WaitResult = void> {
   /**
    * Wait for the write to be persisted at a given durability tier.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
+   * `timeoutMs`, a Global wait lasts through network outages and reconnects.
    */
-  async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
+  async wait(options: WriteWaitOptions): Promise<WaitResult> {
     const tier = resolveWriteWaitTier(options.tier);
     const ready = writeWaitReadiness.get(this)?.(tier);
-    return this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>;
+    return await withWriteWaitTimeout(
+      () => this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>,
+      tier,
+      options.timeoutMs,
+    );
   }
 
   protected client(): JazzClient {
@@ -894,10 +953,11 @@ export class WriteResult<T> extends WriteHandle<T, T> {
   /**
    * Wait for the write to be persisted at a given durability tier.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the inserted row.
    */
-  override async wait(options: { tier: DurabilityTier }): Promise<T> {
+  override async wait(options: WriteWaitOptions): Promise<T> {
     await super.wait(options);
     return this.value;
   }
@@ -920,10 +980,16 @@ export class SerializableWriteHandle extends WriteHandle<void> {
   /**
    * Wait for the serializable transaction to be accepted or rejected by the authority.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
+   * `timeoutMs`, the wait lasts through network outages and reconnects.
    */
-  override async wait(): Promise<void> {
-    await this.client().waitForSerializableTransaction(await this.txId);
+  override async wait(options: { timeoutMs?: number } = {}): Promise<void> {
+    await withWriteWaitTimeout(
+      () => this.client().waitForSerializableTransaction(this.txId),
+      "global",
+      options.timeoutMs,
+    );
   }
 }
 
@@ -934,11 +1000,16 @@ export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
    * Wait for the serializable transaction to be accepted or rejected by the authority.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the callback result.
    */
-  override async wait(): Promise<T> {
-    await this.client().waitForSerializableTransaction(await this.txId);
+  override async wait(options: { timeoutMs?: number } = {}): Promise<T> {
+    await withWriteWaitTimeout(
+      () => this.client().waitForSerializableTransaction(this.txId),
+      "global",
+      options.timeoutMs,
+    );
     return this.value;
   }
 
@@ -2078,7 +2149,8 @@ export class JazzClient {
   }
 
   /** @internal */
-  async waitForSerializableTransaction(txId: TxId): Promise<void> {
+  async waitForSerializableTransaction(txId: TxId | Promise<TxId>): Promise<void> {
+    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
     await this.waitForTransaction(txId, hasAuthority ? "global" : "local");
