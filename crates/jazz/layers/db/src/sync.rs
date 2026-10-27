@@ -3804,8 +3804,10 @@ impl Inner {
                 let mut held = std::mem::take(&mut self.sessions[index].held);
                 for row in group.rows.iter().filter(|row| *row.table == *table) {
                     let rid = row.id.0.as_bytes().to_vec();
-                    let seq = row.seq as i64;
-                    for image in self.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])? {
+                    // A failed refresh leaves the result's sequence behind
+                    // the current row, which the session's watch may already
+                    // have shipped. Track its current versions by identity.
+                    for image in self.images_where(&table, false, "id = ?1", &[&rid])? {
                         held.entry(table.clone())
                             .or_default()
                             .entry((row.id, image.key))

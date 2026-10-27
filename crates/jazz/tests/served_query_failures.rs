@@ -266,7 +266,22 @@ fn prepared_membership_failure_reaches_idle_browser() {
     prepared_membership_failure(true);
 }
 
-fn retained_rows_are_revoked(reject: bool, revoke_before_drain: bool) {
+enum Retirement {
+    Unsubscribe,
+    UnsubscribeAfterUpdate,
+    RejectAfterInsert,
+    RejectAfterUpdate,
+}
+
+fn retained_rows_are_revoked(retirement: Retirement, revoke_before_drain: bool) {
+    let reject = matches!(
+        retirement,
+        Retirement::RejectAfterInsert | Retirement::RejectAfterUpdate
+    );
+    let update = matches!(
+        retirement,
+        Retirement::UnsubscribeAfterUpdate | Retirement::RejectAfterUpdate
+    );
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(
@@ -353,17 +368,29 @@ fn retained_rows_are_revoked(reject: bool, revoke_before_drain: bool) {
             "posts",
             Error::new(ErrorCode::Protocol, "injected membership failure"),
         ));
+    }
+    if update {
+        block_on(core.update(
+            "posts",
+            id(1),
+            cells(&[("title", Value::String("updated protected post".into()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    } else if reject {
         block_on(core.insert(
             "posts",
             cells(&[("title", Value::String("trigger".into()))]),
             Default::default(),
         ))
         .unwrap();
-        if revoke_before_drain {
-            // Queue the removal behind the rejection before Core drains either.
-            block_on(core.delete("grants", id(3), Default::default())).unwrap();
-        }
-        pump();
+    }
+    if revoke_before_drain {
+        // Queue the removal behind the rejection before Core drains either.
+        block_on(core.delete("grants", id(3), Default::default())).unwrap();
+    }
+    pump();
+    if reject {
         assert_eq!(
             stream.try_next_event(),
             Some(SubscriptionEvent::Rejected {
@@ -390,19 +417,41 @@ fn retained_rows_are_revoked(reject: bool, revoke_before_drain: bool) {
 /// Alice's cached post remains subject to Core's policy after normal unsubscribe.
 #[test]
 fn unsubscribe_retains_policy_tracking() {
-    retained_rows_are_revoked(false, false);
+    retained_rows_are_revoked(Retirement::Unsubscribe, false);
 }
 
 /// Alice's cached post remains subject to Core's policy after a failed query:
 /// Core rejects --> Alice ends subscription --> Core revokes grant --> post leaves.
 #[test]
 fn rejection_retains_policy_tracking() {
-    retained_rows_are_revoked(true, false);
+    retained_rows_are_revoked(Retirement::RejectAfterInsert, false);
 }
 
 /// Alice loses her cached post even when Core revokes access before sending
 /// the query failure: reject --> revoke grant --> drain --> Alice loses post.
 #[test]
 fn rejection_preserves_queued_permission_revocations() {
-    retained_rows_are_revoked(true, true);
+    retained_rows_are_revoked(Retirement::RejectAfterInsert, true);
+}
+
+/// Alice's updated post stays subject to Core's policy after a healthy query
+/// ends: update --> unsubscribe --> revoke grant --> cached post leaves.
+#[test]
+fn unsubscribe_retains_updated_row_policy_tracking() {
+    retained_rows_are_revoked(Retirement::UnsubscribeAfterUpdate, false);
+}
+
+/// Alice loses an updated post after the update triggers a query failure:
+/// update --> reject --> revoke grant --> cached post leaves. The old result
+/// sequence must not prevent tracking the current version's permissions.
+#[test]
+fn rejection_retains_updated_row_policy_tracking() {
+    retained_rows_are_revoked(Retirement::RejectAfterUpdate, false);
+}
+
+/// Alice loses the updated post when its grant is revoked before the failure
+/// is delivered: update --> reject --> revoke grant --> drain --> post leaves.
+#[test]
+fn rejection_preserves_updated_row_queued_permission_revocations() {
+    retained_rows_are_revoked(Retirement::RejectAfterUpdate, true);
 }
