@@ -266,3 +266,66 @@ fn a_tab_refuses_an_upstream_version_numbered_in_its_own_range() {
     let rows = block_on(tab.all(&prepared, ReadOpts::default())).unwrap();
     assert!(rows.is_empty(), "nothing was stored");
 }
+
+/// A worker with no server settles a tab's commit at a seq of its own. A
+/// serializable transaction the tab began while that commit was unsettled
+/// still counts it as its own, wherever it landed.
+#[test]
+fn a_tabs_transaction_over_its_own_commit_settled_by_a_worker_without_a_server_commits() {
+    let worker = open(WORKER, author(WORKER));
+    worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let tab = open(WORKER + 1, author(WORKER));
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (client_side, server_side) = duplex();
+    block_on(tab.connect_upstream(client_side));
+    worker.accept_subscriber(server_side, author(WORKER));
+    let pump = || {
+        for _ in 0..4 {
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+        }
+    };
+    // The worker's own commit first, so it settles the tab's at another seq.
+    block_on(worker.insert("notes", body("worker"), Default::default())).unwrap();
+    let row = block_on(tab.insert("notes", body("tab"), Default::default()))
+        .unwrap()
+        .row_uuid();
+    let open = jazz::tools::OpenTransactionId::new();
+    block_on(tab.begin_serializable(open)).unwrap();
+    pump();
+    let tx = tab.tx_ref(open);
+    drive(&pump, tx.delete("notes", row, Default::default())).unwrap();
+    drive(&pump, tab.commit_serializable_handle(open))
+        .expect("the tab's own settled insert is no conflict");
+}
+
+fn drive<T>(pump: &impl Fn(), future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..50 {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        pump();
+    }
+    panic!("did not complete");
+}
+
+/// Moving a tab's numbering to its own base hands out no seq: a session
+/// that writes nothing leaves its node's high water where it found it, and
+/// its first write lands above the base.
+#[test]
+fn a_tabs_high_water_moves_only_when_it_writes() {
+    let floor = LOCAL_BASE + 2;
+    let tab = open(WORKER + 1, author(WORKER));
+    tab.seed_seq_floor(floor);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    assert_eq!(tab.seq_high_water(), floor);
+    let tx = block_on(tab.insert("notes", body("first"), Default::default()))
+        .unwrap()
+        .mergeable_tx_id();
+    assert_eq!(tx, NON_DURABLE_BASE + 1);
+    assert_eq!(tab.seq_high_water(), tx);
+}

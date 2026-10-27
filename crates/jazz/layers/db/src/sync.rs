@@ -2907,6 +2907,20 @@ impl Inner {
         }
     }
 
+    /// Where each of `own` (this replica's commits unsettled at a
+    /// serializable snapshot) has since landed at a seq: a relay with no
+    /// server settles its sessions' commits at its own local seqs.
+    pub(crate) fn own_landings(&self, own: &[u64]) -> Result<HashMap<u64, u64>, Error> {
+        let me = *self.identity.node.as_bytes();
+        let mut landed = HashMap::new();
+        for &tx in own {
+            if let Some(Some(seq)) = self.settled(me, tx)? {
+                landed.insert(tx, seq);
+            }
+        }
+        Ok(landed)
+    }
+
     /// A serializable transaction's snapshot on this store: the authority's
     /// state through `snapshot` plus this replica's own commits that were
     /// unsettled at begin (`own`), wherever each is now: settled at a seq,
@@ -3421,7 +3435,7 @@ impl Db {
         if inner.client.is_some() {
             return;
         }
-        inner.seq = inner.seq.max(inner.local_base());
+        inner.raise_to_local_base();
         let node = *inner.identity.node.as_bytes();
         inner.client = Some(Client::new(node));
         inner
@@ -4541,6 +4555,20 @@ impl Inner {
             NON_DURABLE_BASE
         } else {
             LOCAL_BASE
+        }
+    }
+
+    /// Hand out local seqs from this replica's base on. The jump hands out
+    /// no seq, so the high water stays where it was until a commit.
+    pub(crate) fn raise_to_local_base(&mut self) {
+        let base = self.local_base();
+        if self.seq < base {
+            let from = match self.base_jump {
+                Some((from, to)) if self.seq == to => from,
+                _ => self.seq,
+            };
+            self.base_jump = Some((from, base));
+            self.seq = base;
         }
     }
 
@@ -6679,7 +6707,7 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         inner.non_durable = true;
         if inner.client.is_some() {
-            inner.seq = inner.seq.max(inner.local_base());
+            inner.raise_to_local_base();
         }
     }
 }
